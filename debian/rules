@@ -63,6 +63,9 @@ install: build
 
 	scons --prefix=$(CURDIR)/debian/mongodb/usr install
 
+	mkdir -p $(CURDIR)/debian/mongodb/usr/share/lintian/overrides/
+	install -m 644 $(CURDIR)/debian/lintian-overrides \
+		$(CURDIR)/debian/mongodb/usr/share/lintian/overrides/mongodb
 
 # Build architecture-independent files here.
 binary-indep: build install
