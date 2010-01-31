@@ -49,7 +49,7 @@
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 DAEMON=/usr/bin/mongod
 DATA=/var/lib/mongodb
-NAME=MongoDB
+NAME=mongodb
 DESC=database
 
 if test ! -x $DAEMON; then
@@ -65,6 +65,7 @@ fi
 
 LOGDIR=/var/log/mongodb
 PIDFILE=/var/run/$NAME.pid
+STARTTIME=1
 DIETIME=10                   # Time to wait for the server to die, in seconds
                             # If this value is set too low you might not
                             # let some servers to die gracefully and
