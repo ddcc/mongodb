@@ -1,6 +1,6 @@
-mongodb (1.3.1) unstable; urgency=low
+mongodb (1.3.1-1) unstable; urgency=low
 
-  * Initial release
+  * Initial release (Closes: #523937)
 
- -- Kristina Chodorow <kristina@10gen.com>  Tue, 07 Apr 2009 10:18:58 -0400
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Fri, 29 Jan 2010 19:48:45 +0100
 
