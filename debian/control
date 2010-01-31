@@ -7,8 +7,8 @@ Standards-Version: 3.8.3
 Homepage: http://www.mongodb.org
 
 Package: mongodb
+Architecture: i386 amd64
 Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, xulrunner-dev
-Architecture: any
 Description: An object/document-oriented database
  MongoDB is a high-performance, open source, schema-free 
  document-oriented  data store that's easy to deploy, manage
