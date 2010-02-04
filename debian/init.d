@@ -48,9 +48,19 @@
 
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 DAEMON=/usr/bin/mongod
-DATA=/var/lib/mongodb
-NAME=mongodb
 DESC=database
+
+# Default defaults.  Can be overridden by the /etc/default/$NAME
+NAME=mongodb
+DATA=/var/lib/mongodb
+LOGDIR=/var/log/mongodb
+PIDFILE=/var/run/$NAME.pid
+LOGFILE=$LOGDIR/$NAME.log  # Server logfile
+
+# Include mongodb defaults if available
+if [ -f /etc/default/$NAME ] ; then
+	. /etc/default/$NAME
+fi
 
 if test ! -x $DAEMON; then
     echo "Could not find $DAEMON"
@@ -63,36 +73,14 @@ fi
 
 . /lib/lsb/init-functions
 
-LOGDIR=/var/log/mongodb
-PIDFILE=/var/run/$NAME.pid
 STARTTIME=1
 DIETIME=10                   # Time to wait for the server to die, in seconds
                             # If this value is set too low you might not
                             # let some servers to die gracefully and
                             # 'restart' will not work
 
-LOGFILE=$LOGDIR/$NAME.log  # Server logfile
-DAEMON_OPTS="--dbpath $DATA --logpath $LOGFILE run"
-
-
-# Include mongodb defaults if available
-if [ -f /etc/default/$NAME ] ; then
-	. /etc/default/$NAME
-fi
-
-DAEMONUSER=mongodb
-# Check that the user exists (if we set a user)
-# Does the user exist?
-if [ -n "$DAEMONUSER" ] ; then
-    if getent passwd | grep -q "^$DAEMONUSER:"; then
-        # Obtain the uid and gid
-        DAEMONUID=`getent passwd |grep "^$DAEMONUSER:" | awk -F : '{print $3}'`
-        DAEMONGID=`getent passwd |grep "^$DAEMONUSER:" | awk -F : '{print $4}'`
-    else
-        log_failure_msg "The user $DAEMONUSER, required to run $NAME does not exist."
-        exit 1
-    fi
-fi
+DAEMONUSER=${DAEMONUSER:-mongodb}
+DAEMON_OPTS=${DAEMON_OPTS:-"--dbpath $DATA --logpath $LOGFILE run"}
 
 set -e
 
@@ -122,43 +110,20 @@ running() {
 
 start_server() {
 # Start the process using the wrapper
-        if [ -z "$DAEMONUSER" ] ; then
-            start-stop-daemon --background --start --quiet --pidfile $PIDFILE \
-                        --make-pidfile --exec $DAEMON -- $DAEMON_OPTS
-            errcode=$?
-        else
-# if we are using a daemonuser then change the user id
             start-stop-daemon --background --start --quiet --pidfile $PIDFILE \
                         --make-pidfile --chuid $DAEMONUSER \
                         --exec $DAEMON -- $DAEMON_OPTS
             errcode=$?
-        fi
 	return $errcode
 }
 
 stop_server() {
 # Stop the process using the wrapper
-        if [ -z "$DAEMONUSER" ] ; then
-            start-stop-daemon --stop --quiet --pidfile $PIDFILE
-            rm $PIDFILE
-            errcode=$?
-        else
-# if we are using a daemonuser then look for process that match
             start-stop-daemon --stop --quiet --pidfile $PIDFILE \
                         --user $DAEMONUSER \
                         --exec $DAEMON
             errcode=$?
-        fi
-
 	return $errcode
-}
-
-reload_server() {
-    [ ! -f "$PIDFILE" ] && return 1
-    pid=pidofproc $PIDFILE # This is the daemon's pid
-    # Send a SIGHUP
-    kill -USR1 $pid
-    return $?
 }
 
 force_stop() {
@@ -183,7 +148,7 @@ force_stop() {
 
 case "$1" in
   start)
-	log_daemon_msg "Starting $DESC $NAME"
+	log_daemon_msg "Starting $DESC" "$NAME"
         # Check if it's running first
         if running ;  then
             log_progress_msg "apparently already running"
@@ -255,35 +220,11 @@ case "$1" in
             exit 1
         fi
         ;;
-  # Use this if the daemon cannot reload
+  # MongoDB can't reload its configuration.
   reload)
         log_warning_msg "Reloading $NAME daemon: not implemented, as the daemon"
         log_warning_msg "cannot re-read the config file (use restart)."
         ;;
-  # And this if it cann
-  #reload)
-          #
-          # If the daemon can reload its config files on the fly
-          # for example by sending it SIGHUP, do it here.
-          #
-          # If the daemon responds to changes in its config file
-          # directly anyway, make this a do-nothing entry.
-          #
-          # log_daemon_msg "Reloading $DESC configuration files" "$NAME"
-          # if running ; then
-          #    reload_server
-          #    if ! running ;  then
-          # Process died after we tried to reload
-          #       log_progress_msg "died on reload"
-          #       log_end_msg 1
-          #       exit 1
-          #    fi
-          # else
-          #    log_progress_msg "server is not running"
-          #    log_end_msg 1
-          #    exit 1
-          # fi
-                                                                                    #;;
 
   *)
 	N=/etc/init.d/$NAME
