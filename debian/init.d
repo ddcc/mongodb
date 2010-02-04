@@ -21,8 +21,8 @@
 #
 ### BEGIN INIT INFO
 # Provides:          mongodb
-# Required-Start:    $network $local_fs
-# Required-Stop:
+# Required-Start:    $network $local_fs $remote_fs
+# Required-Stop:     $network $local_fs $remote_fs
 # Should-Start:      $named
 # Should-Stop:
 # Default-Start:     2 3 4 5
