@@ -13,6 +13,8 @@ mongodb (1.3.1-1) unstable; urgency=low
   * [ba8697c] removed unnecessary jars dir with its content
   * [91fe1cf] cover licensing terms of used components
   * [d59c02f] init.d cleanup
+  * [78d712b] cover licensing terms of utils/md5.[ch]
+  * [a696359] removed lib/ from upstream
 
  -- Antonin Kral <A.Kral@sh.cvut.cz>  Fri, 29 Jan 2010 19:48:45 +0100
 
