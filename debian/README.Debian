@@ -1,0 +1,10 @@
+MongoDB for Debian
+------------------
+
+Binds only to localhost
+  
+  As mongo needs some tuning to become secure, it binds to localhost by
+  default. You can change this behavior in /etc/mongodb.conf by
+  editing/removing/commenting out bind_ip line.
+
+-- Antonin Kral <A.Kral@sh.cvut.cz>, Fri, 12 Feb 2010 09:19, +0100
