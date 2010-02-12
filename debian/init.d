@@ -52,6 +52,7 @@ DESC=database
 
 # Default defaults.  Can be overridden by the /etc/default/$NAME
 NAME=mongodb
+CONF=/etc/mongodb.conf
 DATA=/var/lib/mongodb
 LOGDIR=/var/log/mongodb
 PIDFILE=/var/run/$NAME.pid
@@ -80,7 +81,7 @@ DIETIME=10                   # Time to wait for the server to die, in seconds
                             # 'restart' will not work
 
 DAEMONUSER=${DAEMONUSER:-mongodb}
-DAEMON_OPTS=${DAEMON_OPTS:-"--dbpath $DATA --logpath $LOGFILE run"}
+DAEMON_OPTS=${DAEMON_OPTS:-"--dbpath $DATA --logpath $LOGFILE --config $CONF run"}
 
 set -e
 
