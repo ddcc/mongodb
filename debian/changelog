@@ -1,3 +1,13 @@
+mongodb (1.3.1-2) unstable; urgency=low
+
+  * [efabc21] change order of build deps of xul-runner to fix sbuild
+    (Closes: #569417)
+  * [55e3c9b] added support for mongod config file
+  * [88a7135] added README.Debian with note about bind_ip set to
+    localhost
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Fri, 12 Feb 2010 09:37:23 +0100
+
 mongodb (1.3.1-1) unstable; urgency=low
 
   * Initial release (Closes: #523937)
