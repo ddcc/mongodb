@@ -13,10 +13,10 @@
 # build system in current mongodb revision
 DEB_SCONS_FLAGS :=
 ifneq (,$(findstring debug,$(DEB_BUILD_OPTIONS)))
-    DEB_SCONS_FLAGS := --d=DEBUGBUILD
+	DEB_SCONS_FLAGS := --d=DEBUGBUILD
 endif
-ifeq (,$(findstring nostrip,$(DEB_BUILD_OPTIONS)))
-    DEB_SCONS_FLAGS := --d=DEBUGBUILD
+ifneq (,$(findstring nostrip,$(DEB_BUILD_OPTIONS)))
+	DEB_SCONS_FLAGS := --d=DEBUGBUILD
 endif
 
 configure: configure-stamp
