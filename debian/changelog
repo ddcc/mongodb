@@ -1,3 +1,14 @@
+mongodb (1.3.1-3) unstable; urgency=low
+
+  * [ff792f5] Reordered Build-Depends to enable automated with buildd
+    (Closes: #570072)
+  * [4d5a2c1] Added support of nostrip and debug DEB_BUILD_OPTIONS
+    (Closes: #570077)
+  * [cbc4e8b] Describe why is mongodb available for some architectures
+    only (Closes: #570076)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Tue, 16 Feb 2010 21:59:56 +0100
+
 mongodb (1.3.1-2) unstable; urgency=low
 
   * [efabc21] change order of build deps of xul-runner to fix sbuild
