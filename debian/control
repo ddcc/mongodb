@@ -8,6 +8,8 @@ Homepage: http://www.mongodb.org
 
 Package: mongodb
 Architecture: i386 amd64
+Replaces: mongodb-1.2
+Conflicts: mongodb-1.2
 Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, xulrunner-dev
 Description: An object/document-oriented database
  MongoDB is a high-performance, open source, schema-free 
