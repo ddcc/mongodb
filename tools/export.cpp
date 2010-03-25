@@ -54,7 +54,7 @@ public:
                 string dir = outfile.substr( 0 , idx + 1 );
                 create_directories( dir );
             }
-            ofstream * s = new ofstream( outfile.c_str() , ios_base::out | ios_base::binary );
+            ofstream * s = new ofstream( outfile.c_str() , ios_base::out );
             fileStream.reset( s );
             outPtr = s;
             if ( ! s->good() ){
@@ -120,7 +120,7 @@ public:
         }
 
         
-        cout << "exported " << num << " records" << endl;
+        cerr << "exported " << num << " records" << endl;
 
         return 0;
     }

@@ -49,7 +49,7 @@ namespace mongo {
 
     unsigned mapped = 0;
 
-    void* MemoryMappedFile::map(const char *_filename, long &length) {
+    void* MemoryMappedFile::map(const char *_filename, long &length, int options) {
         /* big hack here: Babble uses db names with colons.  doesn't seem to work on windows.  temporary perhaps. */
         char filename[256];
         strncpy(filename, _filename, 255);
@@ -69,9 +69,13 @@ namespace mongo {
         updateLength( filename, length );
         std::wstring filenamew = toWideString(filename);
 
+        DWORD createOptions = FILE_ATTRIBUTE_NORMAL;
+        if ( options & SEQUENTIAL )
+            createOptions |= FILE_FLAG_SEQUENTIAL_SCAN;
+
         fd = CreateFile(
                  filenamew.c_str(), GENERIC_WRITE | GENERIC_READ, FILE_SHARE_READ,
-                 NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                 NULL, OPEN_ALWAYS, createOptions , NULL);
         if ( fd == INVALID_HANDLE_VALUE ) {
             out() << "Create/OpenFile failed " << filename << ' ' << GetLastError() << endl;
             return 0;
@@ -95,7 +99,21 @@ namespace mongo {
         return view;
     }
 
-    void MemoryMappedFile::flush(bool) {
-    }
+    void MemoryMappedFile::flush(bool sync) {
+        uassert(13056, "Async flushing not supported on windows", sync);
 
+        if (!view || !fd) return;
+
+        bool success = FlushViewOfFile(view, 0); // 0 means whole mapping
+        if (!success){
+            int err = GetLastError();
+            out() << "FlushViewOfFile failed " << err << endl;
+        }
+
+        success = FlushFileBuffers(fd);
+        if (!success){
+            int err = GetLastError();
+            out() << "FlushFileBuffers failed " << err << endl;
+        }
+    }
 } 

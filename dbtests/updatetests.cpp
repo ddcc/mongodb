@@ -525,8 +525,7 @@ namespace UpdateTests {
         public:
             void run(){
                 BSONObj b = BSON( "$inc" << BSON( "x" << 1 << "a.b" << 1 ) );
-                ModSet m;
-                m.getMods( b );
+                ModSet m(b);
 
                 ASSERT( m.haveModForField( "x" ) );
                 ASSERT( m.haveModForField( "a.b" ) );
@@ -551,10 +550,9 @@ namespace UpdateTests {
             
             void test( BSONObj morig , BSONObj in , BSONObj wanted ){
                 BSONObj m = morig.copy();
-                ModSet set;
-                set.getMods( m );
+                ModSet set(m);
 
-                BSONObj out = set.createNewFromMods( in );
+                BSONObj out = set.prepare(in)->createNewFromMods();
                 ASSERT_EQUALS( wanted , out );
             }
         };
@@ -663,6 +661,22 @@ namespace UpdateTests {
             }
 
         };
+
+        class inc2 : public SingleTest {
+            virtual BSONObj initial(){
+                return BSON( "_id" << 1 << "x" << 1 );
+            }
+            virtual BSONObj mod(){
+                return BSON( "$inc" << BSON( "x" << 2.5 ) );
+            }
+            virtual BSONObj after(){
+                return BSON( "_id" << 1 << "x" << 3.5 );
+            }
+            virtual const char * ns(){
+                return "unittests.inc2";
+            }
+
+        };
             
         class bit1 : public Base {
             const char * ns(){
@@ -760,6 +774,7 @@ namespace UpdateTests {
             add< ModSetTests::push1 >();
             
             add< basic::inc1 >();
+            add< basic::inc2 >();
             add< basic::bit1 >();
             add< basic::unset >();
             add< basic::setswitchint >();

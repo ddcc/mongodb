@@ -31,15 +31,36 @@
 #include "btree.h"
 #include "curop.h"
 #include "../util/background.h"
+#include "../scripting/engine.h"
 
 namespace mongo {
+
+    class FeaturesCmd : public Command {
+    public:
+        FeaturesCmd() : Command( "features" ){}
+
+        virtual bool slaveOk(){ return true; }
+        virtual bool readOnly(){ return true; }
+        virtual LockType locktype(){ return READ; } 
+        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl){
+            result.append( "readlock" , readLockSupported() );
+            if ( globalScriptEngine ){
+                BSONObjBuilder bb( result.subobjStart( "js" ) );
+                result.append( "utf8" , globalScriptEngine->utf8Ok() );
+                bb.done();
+            }
+            return true;
+        }
+        
+    } featuresCmd;
 
     class CleanCmd : public Command {
     public:
         CleanCmd() : Command( "clean" ){}
 
         virtual bool slaveOk(){ return true; }
-
+        virtual LockType locktype(){ return WRITE; } 
+        
         bool run(const char *nsRaw, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
             string dropns = cc().database()->name + "." + cmdObj.firstElement().valuestrsafe();
             
@@ -70,6 +91,7 @@ namespace mongo {
             return true;
         }
         
+        virtual LockType locktype(){ return WRITE; } 
         //{ validate: "collectionnamewithoutthedbpart" [, scandata: <bool>] } */
         
         bool run(const char *nsRaw, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
@@ -159,7 +181,7 @@ namespace mongo {
                         nlen += r->netLength();
                         c->advance();
                     }
-                    if ( d->capped ) {
+                    if ( d->capped && !d->capLooped() ) {
                         ss << "  capped outOfOrder:" << outOfOrder;
                         if ( outOfOrder > 1 ) {
                             valid = false;
@@ -252,7 +274,7 @@ namespace mongo {
 
     extern bool unlockRequested;
     extern unsigned lockedForWriting;
-    extern boost::mutex lockedForWritingMutex;
+    extern mongo::mutex lockedForWritingMutex;
 
 /*
     class UnlockCommand : public Command { 
@@ -283,8 +305,10 @@ namespace mongo {
         class LockDBJob : public BackgroundJob { 
         protected:
             void run() { 
+                Client::initThread("fsyncjob");
+                Client& c = cc();
                 {
-                    boostlock lk(lockedForWritingMutex);
+                    scoped_lock lk(lockedForWritingMutex);
                     lockedForWriting++;
                 }
                 readlock lk("");
@@ -299,9 +323,10 @@ namespace mongo {
                     sleepmillis(20);
                 }
                 {
-                    boostlock lk(lockedForWritingMutex);
+                    scoped_lock lk(lockedForWritingMutex);
                     lockedForWriting--;
                 }
+                c.shutdown();
             }
         public:
             bool& _ready;
@@ -312,7 +337,7 @@ namespace mongo {
         };
     public:
         FSyncCommand() : Command( "fsync" ){}
-
+        virtual LockType locktype(){ return WRITE; } 
         virtual bool slaveOk(){ return true; }
         virtual bool adminOnly(){ return true; }
         /*virtual bool localHostOnlyIfNoAuth(const BSONObj& cmdObj) { 
@@ -351,6 +376,18 @@ namespace mongo {
         }
         
     } fsyncCmd;
-    
+
+    class LogRotateCmd : public Command {
+    public:
+        LogRotateCmd() : Command( "logRotate" ){}
+        virtual LockType locktype(){ return NONE; } 
+        virtual bool slaveOk(){ return true; }
+        virtual bool adminOnly(){ return true; }
+        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+            rotateLogs();
+            return 1;
+        }        
+        
+    } logRotateCmd;
 }
 

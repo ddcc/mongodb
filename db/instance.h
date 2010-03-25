@@ -38,12 +38,14 @@ namespace mongo {
            7 = log a few reads, and all writes.
         */
         int level;
+        mongo::mutex mutex;
+
         DiagLog() : f(0) , level(0) { }
         void init() {
             if ( ! f && level ){
                 log() << "diagLogging = " << level << endl;
                 stringstream ss;
-                ss << "diaglog." << hex << time(0);
+                ss << dbpath << "/diaglog." << hex << time(0);
                 string name = ss.str();
                 f = new ofstream(name.c_str(), ios::out | ios::binary);
                 if ( ! f->good() ) {
@@ -62,17 +64,26 @@ namespace mongo {
             return old;
         }
         void flush() {
-            if ( level ) f->flush();
+            if ( level ){
+                scoped_lock lk(mutex);
+                f->flush();
+            }
         }
         void write(char *data,int len) {
-            if ( level & 1 ) f->write(data,len);
+            if ( level & 1 ){
+                scoped_lock lk(mutex);
+                f->write(data,len);
+            }
         }
         void readop(char *data, int len) {
             if ( level & 2 ) {
                 bool log = (level & 4) == 0;
                 OCCASIONALLY log = true;
-                if ( log )
+                if ( log ){
+                    scoped_lock lk(mutex);
+                    assert( f );
                     f->write(data,len);
+                }
             }
         }
     };
@@ -124,53 +135,6 @@ namespace mongo {
             // don't need to piggy back when connected locally
             return say( toSend );
         }
-        class AlwaysAuthorized : public AuthenticationInfo {
-            virtual bool isAuthorized( const char *dbname ) {
-                return true;   
-            }
-        };
-
-        /* TODO: this looks bad that auth is set to always.  is that really always safe? */
-        class SavedContext {
-        public:
-            SavedContext() {
-                _save = dbMutex.atLeastReadLocked();
-
-                Client *c = currentClient.get();
-                oldAuth = c->ai;
-                // careful, don't want to free this:
-                c->ai = &always;
-
-                /* it only makes sense to manipulate a pointer - c->database() - if locked. 
-                   thus the _saved flag.
-                */
-                if( _save ) {
-                    if ( c->database() ) {
-                        dbMutex.assertAtLeastReadLocked();
-                        _oldName = c->database()->name;
-                    }
-                }
-            }
-            ~SavedContext() {
-                Client *c = currentClient.get();
-                c->ai = oldAuth;
-                if( _save ) {
-                    if ( !_oldName.empty() ) {
-                        dbMutex.assertAtLeastReadLocked();
-                        setClient( _oldName.c_str() );
-                    }
-                }
-                else {
-                    // defensive
-                    cc().clearns();
-                }
-            }
-        private:
-            bool _save;
-            static AlwaysAuthorized always;
-            AuthenticationInfo *oldAuth;
-            string _oldName;
-        };
     };
 
     extern int lockFile;

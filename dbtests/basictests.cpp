@@ -21,6 +21,7 @@
 
 #include "dbtests.h"
 #include "../util/base64.h"
+#include "../util/array.h"
 
 namespace BasicTests {
 
@@ -227,6 +228,91 @@ namespace BasicTests {
             ASSERT_EQUALS( 1 , x );
         }
     };
+
+    namespace ArrayTests {
+        class basic1 {
+        public:
+            void run(){
+                FastArray<int> a(100);
+                a.push_back( 5 );
+                a.push_back( 6 );
+                
+                ASSERT_EQUALS( 2 , a.size() );
+                
+                FastArray<int>::iterator i = a.begin();
+                ASSERT( i != a.end() );
+                ASSERT_EQUALS( 5 , *i );
+                ++i;
+                ASSERT( i != a.end() );
+                ASSERT_EQUALS( 6 , *i );
+                ++i;
+                ASSERT( i == a.end() );
+            }
+        };
+    };
+    
+    class ThreadSafeStringTest {
+    public:
+        void run(){
+            ThreadSafeString s;
+            s = "eliot";
+            ASSERT_EQUALS( s , "eliot" );
+            ASSERT( s != "eliot2" );
+
+            ThreadSafeString s2 = s;
+            ASSERT_EQUALS( s2 , "eliot" );
+            
+            
+            {
+                string foo;
+                {
+                    ThreadSafeString bar;
+                    bar = "eliot2";
+                    foo = bar;
+                }
+                ASSERT_EQUALS( "eliot2" , foo );
+            }
+        }
+    };
+    
+    class LexNumCmp {
+    public:
+        void run() {
+            ASSERT_EQUALS( 0, lexNumCmp( "a", "a" ) );
+            ASSERT_EQUALS( -1, lexNumCmp( "a", "aa" ) );
+            ASSERT_EQUALS( 1, lexNumCmp( "aa", "a" ) );
+            ASSERT_EQUALS( -1, lexNumCmp( "a", "b" ) );
+            ASSERT_EQUALS( 1, lexNumCmp( "100", "50" ) );
+            ASSERT_EQUALS( -1, lexNumCmp( "50", "100" ) );
+            ASSERT_EQUALS( 1, lexNumCmp( "b", "a" ) );
+            ASSERT_EQUALS( 0, lexNumCmp( "aa", "aa" ) );
+            ASSERT_EQUALS( -1, lexNumCmp( "aa", "ab" ) );
+            ASSERT_EQUALS( 1, lexNumCmp( "ab", "aa" ) );
+            ASSERT_EQUALS( 1, lexNumCmp( "0", "a" ) );
+            ASSERT_EQUALS( 1, lexNumCmp( "a0", "aa" ) );
+            ASSERT_EQUALS( -1, lexNumCmp( "a", "0" ) );
+            ASSERT_EQUALS( -1, lexNumCmp( "aa", "a0" ) );
+            ASSERT_EQUALS( 0, lexNumCmp( "0", "0" ) );
+            ASSERT_EQUALS( 0, lexNumCmp( "10", "10" ) );
+            ASSERT_EQUALS( -1, lexNumCmp( "1", "10" ) );
+            ASSERT_EQUALS( 1, lexNumCmp( "10", "1" ) );
+            ASSERT_EQUALS( 1, lexNumCmp( "11", "10" ) );
+            ASSERT_EQUALS( -1, lexNumCmp( "10", "11" ) );
+            ASSERT_EQUALS( 1, lexNumCmp( "f11f", "f10f" ) );
+            ASSERT_EQUALS( -1, lexNumCmp( "f10f", "f11f" ) );
+            ASSERT_EQUALS( -1, lexNumCmp( "f11f", "f111" ) );
+            ASSERT_EQUALS( 1, lexNumCmp( "f111", "f11f" ) );
+            ASSERT_EQUALS( -1, lexNumCmp( "f12f", "f12g" ) );
+            ASSERT_EQUALS( 1, lexNumCmp( "f12g", "f12f" ) );
+            ASSERT_EQUALS( 1, lexNumCmp( "aa{", "aab" ) );
+            ASSERT_EQUALS( 1, lexNumCmp( "aa{", "aa1" ) );
+            ASSERT_EQUALS( 1, lexNumCmp( "a1{", "a11" ) );
+            ASSERT_EQUALS( 1, lexNumCmp( "a1{a", "a1{" ) );
+            ASSERT_EQUALS( -1, lexNumCmp( "a1{", "a1{a" ) );
+            ASSERT_EQUALS( 1, lexNumCmp("21", "11") );
+            ASSERT_EQUALS( -1, lexNumCmp("11", "21") );
+        }
+    };
     
     class All : public Suite {
     public:
@@ -244,6 +330,9 @@ namespace BasicTests {
 
             add< sleeptest >();
             add< AssertTests >();
+            
+            add< ArrayTests::basic1 >();
+            add< LexNumCmp >();
         }
     } myall;
     

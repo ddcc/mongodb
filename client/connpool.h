@@ -51,7 +51,7 @@ namespace mongo {
         }
     */
     class DBConnectionPool {
-        boost::mutex poolMutex;
+        mongo::mutex poolMutex;
         map<string,PoolForHost*> pools; // servername -> pool
         list<DBConnectionHook*> _hooks;
         
@@ -63,7 +63,7 @@ namespace mongo {
         void release(const string& host, DBClientBase *c) {
             if ( c->isFailed() )
                 return;
-            boostlock L(poolMutex);
+            scoped_lock L(poolMutex);
             pools[host]->pool.push(c);
         }
         void addHook( DBConnectionHook * hook );
@@ -122,14 +122,9 @@ namespace mongo {
                 pool.release(host, _conn);
             _conn = 0;
         }
+        
+        ~ScopedDbConnection();
 
-        ~ScopedDbConnection() {
-            if ( _conn && ! _conn->isFailed() ) {
-                /* see done() comments above for why we log this line */
-                log() << "~ScopedDBConnection: _conn != null" << endl;
-                kill();
-            }
-        }
     };
 
 } // namespace mongo

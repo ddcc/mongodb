@@ -17,6 +17,7 @@
 
 #include "stdafx.h"
 #include "miniwebserver.h"
+#include "hex.h"
 
 #include <pcrecpp.h>
 
@@ -81,12 +82,13 @@ namespace mongo {
         return string( urlStart , (int)(end-urlStart) );
     }
 
-    void MiniWebServer::parseParams( map<string,string> & params , string query ) {
+    void MiniWebServer::parseParams( BSONObj & params , string query ) {
         if ( query.size() == 0 )
             return;
-
+        
+        BSONObjBuilder b;
         while ( query.size() ) {
-
+            
             string::size_type amp = query.find( "&" );
 
             string cur;
@@ -103,9 +105,10 @@ namespace mongo {
             if ( eq == string::npos )
                 continue;
 
-            params[cur.substr(0,eq)] = cur.substr(eq+1);
+            b.append( urlDecode(cur.substr(0,eq)).c_str() , urlDecode(cur.substr(eq+1) ) );
         }
-        return;
+        
+        params = b.obj();
     }
 
     string MiniWebServer::parseMethod( const char * headers ) {
@@ -203,7 +206,7 @@ namespace mongo {
     
     void MiniWebServer::run() {
         SockAddr from;
-        while ( 1 ) {
+        while ( ! inShutdown() ) {
             int s = accept(sock, (sockaddr *) &from.sa, &from.addressSize);
             if ( s < 0 ) {
                 if ( errno == ECONNABORTED ) {
@@ -219,6 +222,22 @@ namespace mongo {
             accepted( s, from );
             closesocket(s);
         }
+    }
+
+    string MiniWebServer::urlDecode(const char* s){
+        stringstream out;
+        while(*s){
+            if (*s == '+'){
+                out << ' ';
+            }else if (*s == '%'){
+                out << fromHex(s+1);
+                s+=2;
+            }else{
+                out << *s;
+            }
+            s++;
+        }
+        return out.str();
     }
 
 } // namespace mongo

@@ -24,96 +24,118 @@
 #include "../util/unittest.h"
 
 namespace mongo {
-    namespace {
-        /** returns a string that when used as a matcher, would match a super set of regex()
-            returns "" for complex regular expressions
-            used to optimize queries in some simple regex cases that start with '^'
-        */
-        inline string simpleRegexHelper(const char* regex, const char* flags){
-            string r = "";
+    /** returns a string that when used as a matcher, would match a super set of regex()
+        returns "" for complex regular expressions
+        used to optimize queries in some simple regex cases that start with '^'
 
-            bool extended = false;
-            while (*flags){
-                switch (*(flags++)){
-                    case 'm': // multiline
-                        continue;
-                    case 'x': // extended
-                        extended = true;
-                        break;
-                    default:
-                        return r; // cant use index
-                }
-            }
+        if purePrefix != NULL, sets it to whether the regex can be converted to a range query
+    */
+    string simpleRegex(const char* regex, const char* flags, bool* purePrefix){
+        string r = "";
 
-            if ( *(regex++) != '^' )
-                return r;
+        if (purePrefix) *purePrefix = false;
 
-            stringstream ss;
-
-            while(*regex){
-                char c = *(regex++);
-                if ( c == '*' || c == '?' ){
-                    // These are the only two symbols that make the last char optional
-                    r = ss.str();
-                    r = r.substr( 0 , r.size() - 1 );
-                    return r; //breaking here fails with /^a?/
-                } else if (c == '\\'){
-                    // slash followed by non-alphanumeric represents the following char
-                    c = *(regex++);
-                    if ((c >= 'A' && c <= 'Z') ||
-                        (c >= 'a' && c <= 'z') ||
-                        (c >= '0' && c <= '0') ||
-                        (c == '\0'))
-                    {
-                        r = ss.str();
-                        break;
-                    } else {
-                        ss << c;
-                    }
-                } else if (strchr("^$.[|()+{", c)){
-                    // list of "metacharacters" from man pcrepattern
-                    r = ss.str();
-                    break;
-                } else if (extended && c == '#'){
-                    // comment
-                    r = ss.str();
-                    break;
-                } else if (extended && isspace(c)){
+        bool extended = false;
+        while (*flags){
+            switch (*(flags++)){
+                case 'm': // multiline
                     continue;
+                case 'x': // extended
+                    extended = true;
+                    break;
+                default:
+                    return r; // cant use index
+            }
+        }
+
+        if ( *(regex++) != '^' )
+            return r;
+
+        stringstream ss;
+
+        while(*regex){
+            char c = *(regex++);
+            if ( c == '*' || c == '?' ){
+                // These are the only two symbols that make the last char optional
+                r = ss.str();
+                r = r.substr( 0 , r.size() - 1 );
+                return r; //breaking here fails with /^a?/
+            } else if (c == '\\'){
+                // slash followed by non-alphanumeric represents the following char
+                c = *(regex++);
+                if ((c >= 'A' && c <= 'Z') ||
+                    (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '0') ||
+                    (c == '\0'))
+                {
+                    r = ss.str();
+                    break;
                 } else {
-                    // self-matching char
                     ss << c;
                 }
-            }
-
-            if ( r.size() == 0 && *regex == 0 )
+            } else if (strchr("^$.[|()+{", c)){
+                // list of "metacharacters" from man pcrepattern
                 r = ss.str();
-
-            return r;
-        }
-        inline string simpleRegex(const BSONElement& e){
-            switch(e.type()){
-                case RegEx:
-                    return simpleRegexHelper(e.regex(), e.regexFlags());
-                case Object:{
-                    BSONObj o = e.embeddedObject();
-                    return simpleRegexHelper(o["$regex"].valuestrsafe(), o["$options"].valuestrsafe());
-                }
-                default: assert(false); return ""; //return squashes compiler warning
+                break;
+            } else if (extended && c == '#'){
+                // comment
+                r = ss.str();
+                break;
+            } else if (extended && isspace(c)){
+                continue;
+            } else {
+                // self-matching char
+                ss << c;
             }
+        }
+
+        if ( r.empty() && *regex == 0 ){
+            r = ss.str();
+            if (purePrefix) *purePrefix = !r.empty();
+        }
+
+        return r;
+    }
+    inline string simpleRegex(const BSONElement& e){
+        switch(e.type()){
+            case RegEx:
+                return simpleRegex(e.regex(), e.regexFlags());
+            case Object:{
+                BSONObj o = e.embeddedObject();
+                return simpleRegex(o["$regex"].valuestrsafe(), o["$options"].valuestrsafe());
+            }
+            default: assert(false); return ""; //return squashes compiler warning
         }
     }
+
+    string simpleRegexEnd( string regex ) {
+        ++regex[ regex.length() - 1 ];
+        return regex;
+    }    
     
-    FieldRange::FieldRange( const BSONElement &e, bool optimize ) {
-        if ( !e.eoo() && e.type() != RegEx && e.getGtLtOp() == BSONObj::opIN ) {
+    
+    FieldRange::FieldRange( const BSONElement &e, bool isNot, bool optimize ) {
+        // NOTE with $not, we could potentially form a complementary set of intervals.
+        if ( !isNot && !e.eoo() && e.type() != RegEx && e.getGtLtOp() == BSONObj::opIN ) {
             set< BSONElement, element_lt > vals;
+            vector< FieldRange > regexes;
+            uassert( 12580 , "invalid query" , e.isABSONObj() );
             BSONObjIterator i( e.embeddedObject() );
-            while( i.more() )
-                vals.insert( i.next() );
+            while( i.more() ) {
+                BSONElement ie = i.next();
+                if ( ie.type() == RegEx ) {
+                    regexes.push_back( FieldRange( ie, false, optimize ) );
+                } else {
+                    vals.insert( ie );
+                }
+            }
 
             for( set< BSONElement, element_lt >::const_iterator i = vals.begin(); i != vals.end(); ++i )
                 intervals_.push_back( FieldInterval(*i) );
 
+            for( vector< FieldRange >::const_iterator i = regexes.begin(); i != regexes.end(); ++i )
+                *this |= *i;
+            
             return;
         }
         
@@ -149,15 +171,66 @@ namespace mongo {
              || (e.type() == Object && !e.embeddedObject()["$regex"].eoo())
            )
         {
-            const string r = simpleRegex(e);
-            if ( r.size() ) {
-                lower = addObj( BSON( "" << r ) ).firstElement();
-                upper = addObj( BSON( "" << simpleRegexEnd( r ) ) ).firstElement();
-                upperInclusive = false;
-            }            
+            if ( !isNot ) { // no optimization for negated regex - we could consider creating 2 intervals comprising all nonmatching prefixes
+                const string r = simpleRegex(e);
+                if ( r.size() ) {
+                    lower = addObj( BSON( "" << r ) ).firstElement();
+                    upper = addObj( BSON( "" << simpleRegexEnd( r ) ) ).firstElement();
+                    upperInclusive = false;
+                } else {
+                    BSONObjBuilder b1(32), b2(32);
+                    b1.appendMinForType( "" , String );
+                    lower = addObj( b1.obj() ).firstElement();
+
+                    b2.appendMaxForType( "" , String );
+                    upper = addObj( b2.obj() ).firstElement();
+                    upperInclusive = false; //MaxForType String is an empty Object
+                }
+
+                // regex matches self - regex type > string type
+                if (e.type() == RegEx){
+                    BSONElement re = addObj( BSON( "" << e ) ).firstElement();
+                    intervals_.push_back( FieldInterval(re) );
+                } else {
+                    BSONObj orig = e.embeddedObject();
+                    BSONObjBuilder b;
+                    b.appendRegex("", orig["$regex"].valuestrsafe(), orig["$options"].valuestrsafe());
+                    BSONElement re = addObj( b.obj() ).firstElement();
+                    intervals_.push_back( FieldInterval(re) );
+                }
+
+            }
             return;
         }
-        switch( e.getGtLtOp() ) {
+        int op = e.getGtLtOp();
+        if ( isNot ) {
+            switch( op ) {
+                case BSONObj::Equality:
+                case BSONObj::opALL:
+                case BSONObj::opMOD: // NOTE for mod and type, we could consider having 1-2 intervals comprising the complementary types (multiple intervals already possible with $in)
+                case BSONObj::opTYPE:
+                    op = BSONObj::NE; // no bound calculation
+                    break;
+                case BSONObj::NE:
+                    op = BSONObj::Equality;
+                    break;
+                case BSONObj::LT:
+                    op = BSONObj::GTE;
+                    break;
+                case BSONObj::LTE:
+                    op = BSONObj::GT;
+                    break;
+                case BSONObj::GT:
+                    op = BSONObj::LTE;
+                    break;
+                case BSONObj::GTE:
+                    op = BSONObj::LT;
+                    break;
+                default: // otherwise doesn't matter
+                    break;
+            }
+        }
+        switch( op ) {
         case BSONObj::Equality:
             lower = upper = e;
             break;
@@ -174,8 +247,32 @@ namespace mongo {
         case BSONObj::opALL: {
             massert( 10370 ,  "$all requires array", e.type() == Array );
             BSONObjIterator i( e.embeddedObject() );
-            if ( i.more() )
-                lower = upper = i.next();
+            bool bound = false;
+            while ( i.more() ){
+                BSONElement x = i.next();
+                if ( x.type() == Object && x.embeddedObject().firstElement().getGtLtOp() == BSONObj::opELEM_MATCH ){
+                    // taken care of elsewhere
+                }
+                else if ( x.type() != RegEx ) {
+                    lower = upper = x;
+                    bound = true;
+                    break;
+                }
+            }
+            if ( !bound ) { // if no good non regex bound found, try regex bounds
+                BSONObjIterator i( e.embeddedObject() );
+                while( i.more() ) {
+                    BSONElement x = i.next();
+                    if ( x.type() != RegEx )
+                        continue;
+                    string simple = simpleRegex( x.regex(), x.regexFlags() );
+                    if ( !simple.empty() ) {
+                        lower = addObj( BSON( "" << simple ) ).firstElement();
+                        upper = addObj( BSON( "" << simpleRegexEnd( simple ) ) ).firstElement();
+                        break;
+                    }
+                }
+            }
             break;
         }
         case BSONObj::opMOD: {
@@ -206,10 +303,18 @@ namespace mongo {
             
             break;
         }
+        case BSONObj::opREGEX:
+        case BSONObj::opOPTIONS:
+            // do nothing
+            break;
         case BSONObj::opELEM_MATCH: {
             log() << "warning: shouldn't get here?" << endl;
             break;
         }
+        case BSONObj::opNEAR:
+        case BSONObj::opWITHIN:
+            _special = "2d";
+            break;
         default:
             break;
         }
@@ -269,17 +374,116 @@ namespace mongo {
         intervals_ = newIntervals;
         for( vector< BSONObj >::const_iterator i = other.objData_.begin(); i != other.objData_.end(); ++i )
             objData_.push_back( *i );
+        if ( _special.size() == 0 && other._special.size() )
+            _special = other._special;
         return *this;
     }
     
-    string FieldRange::simpleRegexEnd( string regex ) {
-        ++regex[ regex.length() - 1 ];
-        return regex;
-    }    
+    void handleInterval( const FieldInterval &lower, FieldBound &low, FieldBound &high, vector< FieldInterval > &newIntervals ) {
+        if ( low.bound_.eoo() ) {
+            low = lower.lower_; high = lower.upper_;
+        } else {
+            if ( high.bound_.woCompare( lower.lower_.bound_, false ) < 0 ) { // when equal but neither inclusive, just assume they overlap, since current btree scanning code just as efficient either way
+                FieldInterval tmp;
+                tmp.lower_ = low;
+                tmp.upper_ = high;
+                newIntervals.push_back( tmp );
+                low = lower.lower_; high = lower.upper_;                    
+            } else {
+                high = lower.upper_;
+            }
+        }        
+    }
+    
+    const FieldRange &FieldRange::operator|=( const FieldRange &other ) {
+        vector< FieldInterval > newIntervals;
+        FieldBound low;
+        FieldBound high;
+        vector< FieldInterval >::const_iterator i = intervals_.begin();
+        vector< FieldInterval >::const_iterator j = other.intervals_.begin();
+        while( i != intervals_.end() && j != other.intervals_.end() ) {
+            int cmp = i->lower_.bound_.woCompare( j->lower_.bound_, false );
+            if ( ( cmp == 0 && i->lower_.inclusive_ ) || cmp < 0 ) {
+                handleInterval( *i, low, high, newIntervals );
+                ++i;
+            } else {
+                handleInterval( *j, low, high, newIntervals );
+                ++j;
+            } 
+        }
+        while( i != intervals_.end() ) {
+            handleInterval( *i, low, high, newIntervals );
+            ++i;            
+        }
+        while( j != other.intervals_.end() ) {
+            handleInterval( *j, low, high, newIntervals );
+            ++j;            
+        }
+        FieldInterval tmp;
+        tmp.lower_ = low;
+        tmp.upper_ = high;
+        newIntervals.push_back( tmp );        
+        intervals_ = newIntervals;
+        for( vector< BSONObj >::const_iterator i = other.objData_.begin(); i != other.objData_.end(); ++i )
+            objData_.push_back( *i );
+        if ( _special.size() == 0 && other._special.size() )
+            _special = other._special;
+        return *this;        
+    }
     
     BSONObj FieldRange::addObj( const BSONObj &o ) {
         objData_.push_back( o );
         return o;
+    }
+    
+    string FieldRangeSet::getSpecial() const {
+        string s = "";
+        for ( map<string,FieldRange>::iterator i=ranges_.begin(); i!=ranges_.end(); i++ ){
+            if ( i->second.getSpecial().size() == 0 )
+                continue;
+            uassert( 13033 , "can't have 2 special fields" , s.size() == 0 );
+            s = i->second.getSpecial();
+        }
+        return s;
+    }
+
+    void FieldRangeSet::processOpElement( const char *fieldName, const BSONElement &f, bool isNot, bool optimize ) {
+        BSONElement g = f;
+        int op2 = g.getGtLtOp();
+        if ( op2 == BSONObj::opALL ) {
+            BSONElement h = g;
+            massert( 13050 ,  "$all requires array", h.type() == Array );
+            BSONObjIterator i( h.embeddedObject() );
+            if( i.more() ) {
+                BSONElement x = i.next();
+                if ( x.type() == Object && x.embeddedObject().firstElement().getGtLtOp() == BSONObj::opELEM_MATCH ) {
+                    g = x.embeddedObject().firstElement();
+                    op2 = g.getGtLtOp();
+                }
+            }
+        }
+        if ( op2 == BSONObj::opELEM_MATCH ) {
+            BSONObjIterator k( g.embeddedObjectUserCheck() );
+            while ( k.more() ){
+                BSONElement h = k.next();
+                StringBuilder buf(32);
+                buf << fieldName << "." << h.fieldName();
+                string fullname = buf.str();
+                
+                int op3 = getGtLtOp( h );
+                if ( op3 == BSONObj::Equality ){
+                    ranges_[ fullname ] &= FieldRange( h , isNot , optimize );
+                }
+                else {
+                    BSONObjIterator l( h.embeddedObject() );
+                    while ( l.more() ){
+                        ranges_[ fullname ] &= FieldRange( l.next() , isNot , optimize );
+                    }
+                }
+            }                        
+        } else {
+            ranges_[ fieldName ] &= FieldRange( f , isNot , optimize );
+        }        
     }
     
     FieldRangeSet::FieldRangeSet( const char *ns, const BSONObj &query , bool optimize )
@@ -293,36 +497,38 @@ namespace mongo {
             if ( strcmp( e.fieldName(), "$where" ) == 0 )
                 continue;
 
-            int op = getGtLtOp( e );
+            bool equality = ( getGtLtOp( e ) == BSONObj::Equality );
+            if ( equality && e.type() == Object ) {
+                equality = ( strcmp( e.embeddedObject().firstElement().fieldName(), "$not" ) != 0 );
+            }
             
-            if ( op == BSONObj::Equality || op == BSONObj::opREGEX || op == BSONObj::opOPTIONS ) {
-                ranges_[ e.fieldName() ] &= FieldRange( e , optimize );
+            if ( equality || ( e.type() == Object && !e.embeddedObject()[ "$regex" ].eoo() ) ) {
+                ranges_[ e.fieldName() ] &= FieldRange( e , false , optimize );
             }
-            else if ( op == BSONObj::opELEM_MATCH ){
-                BSONObjIterator i( e.embeddedObjectUserCheck().firstElement().embeddedObjectUserCheck() );
-                while ( i.more() ){
-                    BSONElement f = i.next();
-                    StringBuilder buf(32);
-                    buf << e.fieldName() << "." << f.fieldName();
-                    string fullname = buf.str();
-
-                    int op2 = getGtLtOp( f );
-                    if ( op2 == BSONObj::Equality ){
-                        ranges_[ fullname ] &= FieldRange( f , optimize );
-                    }
-                    else {
-                        BSONObjIterator j( f.embeddedObject() );
-                        while ( j.more() ){
-                            ranges_[ fullname ] &= FieldRange( j.next() , optimize );
+            if ( !equality ) {
+                BSONObjIterator j( e.embeddedObject() );
+                while( j.more() ) {
+                    BSONElement f = j.next();
+                    if ( strcmp( f.fieldName(), "$not" ) == 0 ) {
+                        switch( f.type() ) {
+                            case Object: {
+                                BSONObjIterator k( f.embeddedObject() );
+                                while( k.more() ) {
+                                    BSONElement g = k.next();
+                                    uassert( 13034, "invalid use of $not", g.getGtLtOp() != BSONObj::Equality );
+                                    processOpElement( e.fieldName(), g, true, optimize );
+                                }
+                                break;
+                            }
+                            case RegEx:
+                                processOpElement( e.fieldName(), f, true, optimize );
+                                break;
+                            default:
+                                uassert( 13041, "invalid use of $not", false );
                         }
+                    } else {
+                        processOpElement( e.fieldName(), f, false, optimize );
                     }
-                }
-            }
-            else {
-                BSONObjIterator i( e.embeddedObject() );
-                while( i.more() ) {
-                    BSONElement f = i.next();
-                    ranges_[ e.fieldName() ] &= FieldRange( f , optimize );
                 }                
             }
         }
@@ -445,8 +651,8 @@ namespace mongo {
     ///////////////////
     
     void FieldMatcher::add( const BSONObj& o ){
-        massert( 10371 , "can only add to FieldMatcher once", source_.isEmpty());
-        source_ = o;
+        massert( 10371 , "can only add to FieldMatcher once", _source.isEmpty());
+        _source = o;
 
         BSONObjIterator i( o );
         int true_false = -1;
@@ -457,23 +663,24 @@ namespace mongo {
             // validate input
             if (true_false == -1){
                 true_false = e.trueValue();
-                include_ = !e.trueValue();
-            }else{
-                if((bool) true_false != e.trueValue())
-                    errmsg = "You cannot currently mix including and excluding fields. Contact us if this is an issue.";
+                _include = !e.trueValue();
+            }
+            else{
+                uassert( 10053 , "You cannot currently mix including and excluding fields. Contact us if this is an issue." , 
+                         (bool)true_false == e.trueValue() );
             }
         }
     }
 
     void FieldMatcher::add(const string& field, bool include){
         if (field.empty()){ // this is the field the user referred to
-            include_ = include;
+            _include = include;
         } else {
             const size_t dot = field.find('.');
             const string subfield = field.substr(0,dot);
             const string rest = (dot == string::npos ? "" : field.substr(dot+1,string::npos)); 
 
-            boost::shared_ptr<FieldMatcher>& fm = fields_[subfield];
+            boost::shared_ptr<FieldMatcher>& fm = _fields[subfield];
             if (!fm)
                 fm.reset(new FieldMatcher(!include));
 
@@ -482,7 +689,7 @@ namespace mongo {
     }
 
     BSONObj FieldMatcher::getSpec() const{
-        return source_;
+        return _source;
     }
 
     //b will be the value part of an array-typed BSONElement
@@ -509,7 +716,7 @@ namespace mongo {
                     break;
                 }
                 default:
-                    if (include_)
+                    if (_include)
                         b.appendAs(e, b.numStr(i++).c_str());
             }
             
@@ -518,18 +725,20 @@ namespace mongo {
     }
 
     void FieldMatcher::append( BSONObjBuilder& b , const BSONElement& e ) const {
-        FieldMap::const_iterator field = fields_.find( e.fieldName() );
+        FieldMap::const_iterator field = _fields.find( e.fieldName() );
         
-        if (field == fields_.end()){
-            if (include_)
+        if (field == _fields.end()){
+            if (_include)
                 b.append(e);
-        } else {
+        } 
+        else {
             FieldMatcher& subfm = *field->second;
-
-            if (subfm.fields_.empty() || !(e.type()==Object || e.type()==Array) ){
-                if (subfm.include_)
+            
+            if (subfm._fields.empty() || !(e.type()==Object || e.type()==Array) ){
+                if (subfm._include)
                     b.append(e);
-            } else if (e.type() == Object){ 
+            }
+            else if (e.type() == Object){ 
                 BSONObjBuilder subb;
                 BSONObjIterator it(e.embeddedObject());
                 while (it.more()){
@@ -537,7 +746,8 @@ namespace mongo {
                 }
                 b.append(e.fieldName(), subb.obj());
 
-            } else { //Array
+            } 
+            else { //Array
                 BSONObjBuilder subb;
                 subfm.appendArray(subb, e.embeddedObject());
                 b.appendArray(e.fieldName(), subb.obj());

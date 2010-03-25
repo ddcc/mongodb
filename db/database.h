@@ -36,7 +36,7 @@ namespace mongo {
             : name(nm), path(_path), namespaceIndex( path, name ) {
             
             { // check db name is valid
-                int L = strlen(nm);
+                size_t L = strlen(nm);
                 uassert( 10028 ,  "db name is empty", L > 0 );
                 uassert( 10029 ,  "bad db name [1]", *nm != '.' );
                 uassert( 10030 ,  "bad db name [2]", nm[L-1] != '.' );
@@ -63,8 +63,8 @@ namespace mongo {
         ~Database() {
             magic = 0;
             btreeStore->closeFiles(name, path);
-            int n = files.size();
-            for ( int i = 0; i < n; i++ )
+            size_t n = files.size();
+            for ( size_t i = 0; i < n; i++ )
                 delete files[i];
         }
         
@@ -79,12 +79,19 @@ namespace mongo {
             return ! namespaceIndex.allocated();
         }
 
-        bool exists(int n) { 
+        boost::filesystem::path fileName( int n ) {
             stringstream ss;
             ss << name << '.' << n;
             boost::filesystem::path fullName;
-            fullName = boost::filesystem::path(path) / ss.str();
-            return boost::filesystem::exists(fullName);
+            fullName = boost::filesystem::path(path);
+            if ( directoryperdb )
+                fullName /= name;
+            fullName /= ss.str();
+            return fullName;
+        }
+        
+        bool exists(int n) { 
+            return boost::filesystem::exists( fileName( n ) );
         }
 
         void openAllFiles() { 
@@ -124,10 +131,7 @@ namespace mongo {
                 p = files[n];
             }
             if ( p == 0 ) {
-                stringstream ss;
-                ss << name << '.' << n;
-                boost::filesystem::path fullName;
-                fullName = boost::filesystem::path(path) / ss.str();
+                boost::filesystem::path fullName = fileName( n );
                 string fullNameString = fullName.string();
                 p = new MongoDataFile(n);
                 int minSize = 0;

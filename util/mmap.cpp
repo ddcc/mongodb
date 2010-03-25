@@ -17,20 +17,21 @@
 
 #include "stdafx.h"
 #include "mmap.h"
+#include "processinfo.h"
 
 namespace mongo {
 
     set<MemoryMappedFile*> mmfiles;
-    boost::mutex mmmutex;
+    mongo::mutex mmmutex;
 
     MemoryMappedFile::~MemoryMappedFile() {
         close();
-        boostlock lk( mmmutex );
+        scoped_lock lk( mmmutex );
         mmfiles.erase(this);
     }
 
     void MemoryMappedFile::created(){
-        boostlock lk( mmmutex );
+        scoped_lock lk( mmmutex );
         mmfiles.insert(this);
     }
 
@@ -54,7 +55,7 @@ namespace mongo {
     long long MemoryMappedFile::totalMappedLength(){
         unsigned long long total = 0;
         
-        boostlock lk( mmmutex );
+        scoped_lock lk( mmmutex );
         for ( set<MemoryMappedFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ )
             total += (*i)->length();
 
@@ -64,7 +65,7 @@ namespace mongo {
     int MemoryMappedFile::flushAll( bool sync ){
         int num = 0;
 
-        boostlock lk( mmmutex );
+        scoped_lock lk( mmmutex );
         for ( set<MemoryMappedFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
             num++;
             MemoryMappedFile * mmf = *i;
@@ -91,5 +92,19 @@ namespace mongo {
         long i = (long)l;
         return map( filename , i );
     }
+
+    void printMemInfo( const char * where ){
+        cout << "mem info: ";
+        if ( where ) 
+            cout << where << " "; 
+        ProcessInfo pi;
+        if ( ! pi.supported() ){
+            cout << " not supported" << endl;
+            return;
+        }
+        
+        cout << "vsize: " << pi.getVirtualMemorySize() << " resident: " << pi.getResidentSize() << " mapped: " << ( MemoryMappedFile::totalMappedLength() / ( 1024 * 1024 ) ) << endl;
+    }
+
 
 } // namespace mongo

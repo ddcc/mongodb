@@ -27,7 +27,6 @@ namespace mongo {
        has finished. Thus one pattern of use is to embed a backgroundjob
        in your object and reuse it (or same thing with inheritance).
     */
-
     class BackgroundJob {
     protected:
         /* define this to do your work! */
@@ -65,7 +64,7 @@ namespace mongo {
 
     private:
         static BackgroundJob *grab;
-        static boost::mutex &mutex;
+        static mongo::mutex mutex;
         static void thr();
         volatile State state;
     };

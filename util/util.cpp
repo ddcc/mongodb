@@ -18,7 +18,6 @@
 #include "stdafx.h"
 #include "goodies.h"
 #include "unittest.h"
-#include "top.h"
 #include "file_allocator.h"
 #include "optime.h"
 
@@ -35,7 +34,7 @@ namespace mongo {
     const char * (*getcurns)() = default_getcurns;
 
     int logLevel = 0;
-    boost::mutex &Logstream::mutex = *( new boost::mutex );
+    mongo::mutex Logstream::mutex;
     int Logstream::doneSetup = Logstream::magicNumber();
     
     bool goingAway = false;
@@ -113,9 +112,9 @@ namespace mongo {
 #if defined(_WIN32)
         (std::cout << now << " " << s).flush();
 #else
-        assert( write( STDOUT_FILENO, now, 20 ) > 0 );
-        assert( write( STDOUT_FILENO, " ", 1 ) > 0 );
-        assert( write( STDOUT_FILENO, s.c_str(), s.length() ) > 0 );
+        write( STDOUT_FILENO, now, 20 );
+		write( STDOUT_FILENO, " ", 1 );
+        write( STDOUT_FILENO, s.c_str(), s.length() );
         fsync( STDOUT_FILENO );        
 #endif
     }
@@ -133,5 +132,12 @@ namespace mongo {
         ss << "db version v" << versionString << ", pdfile version " << VERSION << "." << VERSION_MINOR;
         return ss.str();
     }
-        
+
+    ostream& operator<<( ostream &s, const ThreadSafeString &o ){
+        s << (string)o;
+        return s;
+    }
+
+    bool __destroyingStatics = false;
+    
 } // namespace mongo

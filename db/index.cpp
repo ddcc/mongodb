@@ -21,22 +21,80 @@
 #include "index.h"
 #include "btree.h"
 #include "query.h"
+#include "background.h"
 
 namespace mongo {
+
+    map<string,IndexPlugin*> * IndexPlugin::_plugins;
+
+    IndexType::IndexType( const IndexPlugin * plugin , const IndexSpec * spec )
+        : _plugin( plugin ) , _spec( spec ){
+        
+    }
+
+    IndexType::~IndexType(){
+    }
+    
+    const BSONObj& IndexType::keyPattern() const { 
+        return _spec->keyPattern; 
+    }
+
+    IndexPlugin::IndexPlugin( const string& name )
+        : _name( name ){
+        if ( ! _plugins )
+            _plugins = new map<string,IndexPlugin*>();
+        (*_plugins)[name] = this;
+    }
+    
+    int IndexType::compare( const BSONObj& l , const BSONObj& r ) const {
+        return l.woCompare( r , _spec->keyPattern );
+    }
+
+
+    int removeFromSysIndexes(const char *ns, const char *idxName) { 
+        string system_indexes = cc().database()->name + ".system.indexes";
+        BSONObjBuilder b;
+        b.append("ns", ns);
+        b.append("name", idxName); // e.g.: { name: "ts_1", ns: "foo.coll" }
+        BSONObj cond = b.done();
+        return (int) deleteObjects(system_indexes.c_str(), cond, false, false, true);
+    }
+
+    /* this is just an attempt to clean up old orphaned stuff on a delete all indexes 
+       call. repair database is the clean solution, but this gives one a lighter weight 
+       partial option.  see dropIndexes()
+    */
+    void assureSysIndexesEmptied(const char *ns, IndexDetails *idIndex) { 
+        string system_indexes = cc().database()->name + ".system.indexes";
+        BSONObjBuilder b;
+        b.append("ns", ns);
+        if( idIndex ) { 
+            b.append("name", BSON( "$ne" << idIndex->indexName().c_str() ));
+        }
+        BSONObj cond = b.done();
+        int n = (int) deleteObjects(system_indexes.c_str(), cond, false, false, true);
+        if( n ) { 
+            log() << "info: assureSysIndexesEmptied cleaned up " << n << " entries" << endl;
+        }
+    }
+
+    const IndexSpec& IndexDetails::getSpec() const {
+        scoped_lock lk(NamespaceDetailsTransient::_qcMutex);
+        return NamespaceDetailsTransient::get_inlock( info.obj()["ns"].valuestr() ).getIndexSpec( this );
+    }
 
     /* delete this index.  does NOT clean up the system catalog
        (system.indexes or system.namespaces) -- only NamespaceIndex.
     */
     void IndexDetails::kill_idx() {
         string ns = indexNamespace(); // e.g. foo.coll.$ts_1
+
+        string pns = parentNS(); // note we need a copy, as parentNS() won't work after the drop() below 
         
         // clean up parent namespace index cache
-        NamespaceDetailsTransient::get_w( parentNS().c_str() ).deletedIndex();
+        NamespaceDetailsTransient::get_w( pns.c_str() ).deletedIndex();
 
-        BSONObjBuilder b;
-        b.append("name", indexName().c_str());
-        b.append("ns", parentNS().c_str());
-        BSONObj cond = b.done(); // e.g.: { name: "ts_1", ns: "foo.coll" }
+        string name = indexName();
 
         /* important to catch exception here so we can finish cleanup below. */
         try { 
@@ -48,22 +106,44 @@ namespace mongo {
         head.setInvalid();
         info.setInvalid();
 
-        // clean up in system.indexes.  we do this last on purpose.  note we have 
-        // to make the cond object before the drop() above though.
-        string system_indexes = cc().database()->name + ".system.indexes";
-        int n = deleteObjects(system_indexes.c_str(), cond, false, false, true);
+        // clean up in system.indexes.  we do this last on purpose.
+        int n = removeFromSysIndexes(pns.c_str(), name.c_str());
         wassert( n == 1 );
     }
+    
+    void IndexSpec::reset( const IndexDetails * details ){
+        _details = details;
+        reset( details->info );
+    }
+
+    void IndexSpec::reset( const DiskLoc& loc ){
+        info = loc.obj();
+        keyPattern = info["key"].embeddedObjectUserCheck();
+        if ( keyPattern.objsize() == 0 ) {
+            out() << info.toString() << endl;
+            assert(false);
+        }
+        _init();
+    }
+
 
     void IndexSpec::_init(){
-        assert( keys.objsize() );
+        assert( keyPattern.objsize() );
         
-        BSONObjIterator i( keys );
+        string pluginName = "";
+
+        BSONObjIterator i( keyPattern );
         BSONObjBuilder nullKeyB;
         while( i.more() ) {
-            _fieldNames.push_back( i.next().fieldName() );
+            BSONElement e = i.next();
+            _fieldNames.push_back( e.fieldName() );
             _fixed.push_back( BSONElement() );
             nullKeyB.appendNull( "" );
+            if ( e.type() == String ){
+                uassert( 13007 , "can only have 1 index plugin / bad index key pattern" , pluginName.size() == 0 );
+                pluginName = e.valuestr();
+            }
+                
         }
         
         _nullKey = nullKeyB.obj();
@@ -72,10 +152,25 @@ namespace mongo {
         b.appendNull( "" );
         _nullObj = b.obj();
         _nullElt = _nullObj.firstElement();
+        
+        if ( pluginName.size() ){
+            IndexPlugin * plugin = IndexPlugin::get( pluginName );
+            if ( ! plugin ){
+                log() << "warning: can't find plugin [" << pluginName << "]" << endl;
+            }
+            else {
+                _indexType.reset( plugin->generate( this ) );
+            }
+        }
+        _finishedInit = true;
     }
 
-
+    
     void IndexSpec::getKeys( const BSONObj &obj, BSONObjSetDefaultOrder &keys ) const {
+        if ( _indexType.get() ){
+            _indexType->getKeys( obj , keys );
+            return;
+        }
         vector<const char*> fieldNames( _fieldNames );
         vector<BSONElement> fixed( _fixed );
         _getKeys( fieldNames , fixed , obj, keys );
@@ -115,7 +210,7 @@ namespace mongo {
         if ( allFound ) {
             if ( arrElt.eoo() ) {
                 // no terminal array element to expand
-                BSONObjBuilder b;
+                BSONObjBuilder b(_sizeTracker);
                 for( vector< BSONElement >::iterator i = fixed.begin(); i != fixed.end(); ++i )
                     b.appendAs( *i, "" );
                 keys.insert( b.obj() );
@@ -125,7 +220,7 @@ namespace mongo {
                 BSONObjIterator i( arrElt.embeddedObject() );
                 if ( i.more() ){
                     while( i.more() ) {
-                        BSONObjBuilder b;
+                        BSONObjBuilder b(_sizeTracker);
                         for( unsigned j = 0; j < fixed.size(); ++j ) {
                             if ( j == arrIdx )
                                 b.appendAs( i.next(), "" );
@@ -137,7 +232,7 @@ namespace mongo {
                 }
                 else if ( fixed.size() > 1 ){
                     // x : [] - need to insert undefined
-                    BSONObjBuilder b;
+                    BSONObjBuilder b(_sizeTracker);
                     for( unsigned j = 0; j < fixed.size(); ++j ) {
                         if ( j == arrIdx )
                             b.appendUndefined( "" );
@@ -165,7 +260,7 @@ namespace mongo {
        Keys will be left empty if key not found in the object.
     */
     void IndexDetails::getKeysFromObject( const BSONObj& obj, BSONObjSetDefaultOrder& keys) const {
-        NamespaceDetailsTransient::get_w( info.obj()["ns"].valuestr() ).getIndexSpec( this ).getKeys( obj, keys );
+        getSpec().getKeys( obj, keys );
     }
 
     void setDifference(BSONObjSetDefaultOrder &l, BSONObjSetDefaultOrder &r, vector<BSONObj*> &diff) {
@@ -185,27 +280,27 @@ namespace mongo {
     }
 
     void getIndexChanges(vector<IndexChanges>& v, NamespaceDetails& d, BSONObj newObj, BSONObj oldObj) { 
-        v.resize(d.nIndexes);
+        int z = d.nIndexesBeingBuilt();
+        v.resize(z);
         NamespaceDetails::IndexIterator i = d.ii();
-        while( i.more() ) {
-            int j = i.pos();
-            IndexDetails& idx = i.next();
+        for( int i = 0; i < z; i++ ) {
+            IndexDetails& idx = d.idx(i);
             BSONObj idxKey = idx.info.obj().getObjectField("key"); // eg { ts : 1 }
-            IndexChanges& ch = v[j];
+            IndexChanges& ch = v[i];
             idx.getKeysFromObject(oldObj, ch.oldkeys);
             idx.getKeysFromObject(newObj, ch.newkeys);
             if( ch.newkeys.size() > 1 ) 
-                d.setIndexIsMultikey(j);
+                d.setIndexIsMultikey(i);
             setDifference(ch.oldkeys, ch.newkeys, ch.removed);
             setDifference(ch.newkeys, ch.oldkeys, ch.added);
         }
     }
 
-    void dupCheck(vector<IndexChanges>& v, NamespaceDetails& d) {
-        NamespaceDetails::IndexIterator i = d.ii();
-        while( i.more() ) {
-            int j = i.pos();
-            v[j].dupCheck(i.next());
+    void dupCheck(vector<IndexChanges>& v, NamespaceDetails& d, DiskLoc curObjLoc) {
+        int z = d.nIndexesBeingBuilt();
+        for( int i = 0; i < z; i++ ) {
+            IndexDetails& idx = d.idx(i);
+            v[i].dupCheck(idx, curObjLoc);
         }
     }
 
@@ -247,6 +342,12 @@ namespace mongo {
         uassert(10096, "invalid ns to index", sourceNS.find( '.' ) != string::npos);
         uassert(10097, "bad table to index name on add index attempt", 
             cc().database()->name == nsToDatabase(sourceNS.c_str()));
+
+        /* we can't build a new index for the ns if a build is already in progress in the background - 
+           EVEN IF this is a foreground build.
+           */
+        uassert(12588, "cannot add index with a background operation in progress", 
+            !BackgroundOperation::inProgForNs(sourceNS.c_str()));
 
         BSONObj key = io.getObjectField("key");
         uassert(12524, "index key pattern too large", key.objsize() <= 2048);
@@ -301,6 +402,42 @@ namespace mongo {
         }
 
         return true;
+    }
+
+    bool anyElementNamesMatch( const BSONObj& a , const BSONObj& b ){
+        BSONObjIterator x(a);
+        while ( x.more() ){
+            BSONElement e = x.next();
+            BSONObjIterator y(b);
+            while ( y.more() ){
+                BSONElement f = y.next();
+                FieldCompareResult res = compareDottedFieldNames( e.fieldName() , f.fieldName() );
+                if ( res == SAME || res == LEFT_SUBFIELD || res == RIGHT_SUBFIELD )
+                    return true;
+            }
+        }
+        return false;
+    }
+    
+    IndexSuitability IndexSpec::suitability( const BSONObj& query , const BSONObj& order ) const {
+        if ( _indexType.get() )
+            return _indexType->suitability( query , order );
+        return _suitability( query , order );
+    }
+    
+    IndexSuitability IndexSpec::_suitability( const BSONObj& query , const BSONObj& order ) const {
+        // TODO: optimize
+        if ( anyElementNamesMatch( keyPattern , query ) == 0 && anyElementNamesMatch( keyPattern , order ) == 0 )
+            return USELESS;
+        return HELPFUL;
+    }
+
+    IndexSuitability IndexType::suitability( const BSONObj& query , const BSONObj& order ) const {
+        return _spec->_suitability( query , order );
+    }
+
+    bool IndexType::scanAndOrderRequired( const BSONObj& query , const BSONObj& order ) const {
+        return ! order.isEmpty();
     }
 
 }

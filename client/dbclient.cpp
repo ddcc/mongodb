@@ -105,7 +105,7 @@ namespace mongo {
 
     /* --- dbclientcommands --- */
 
-    inline bool DBClientWithCommands::isOk(const BSONObj& o) {
+    bool DBClientWithCommands::isOk(const BSONObj& o) {
         return o.getIntField("ok") == 1;
     }
 
@@ -233,11 +233,11 @@ namespace mongo {
         BSONObj o;
         if ( info == 0 )	info = &o;
         BSONObjBuilder b;
-        b.append("create", ns);
+        string db = nsToDatabase(ns.c_str());
+        b.append("create", ns.c_str() + db.length() + 1);
         if ( size ) b.append("size", size);
         if ( capped ) b.append("capped", true);
         if ( max ) b.append("max", max);
-        string db = nsToDatabase(ns.c_str());
         return runCommand(db.c_str(), b.done(), *info);
     }
 
@@ -448,7 +448,13 @@ namespace mongo {
             port = CmdLine::DefaultDBPort;
             ip = hostbyname( serverAddress.c_str() );
         }
-        massert( 10277 ,  "Unable to parse hostname", !ip.empty() );
+        if( ip.empty() ) {
+            stringstream ss;
+            ss << "client connect: couldn't parse/resolve hostname: " << _serverAddress;
+            errmsg = ss.str();
+            failed = true;
+            return false;
+        }
 
         // we keep around SockAddr for connection life -- maybe MessagingPort
         // requires that?
@@ -494,10 +500,10 @@ namespace mongo {
     }
 
     auto_ptr<DBClientCursor> DBClientBase::query(const string &ns, Query query, int nToReturn,
-            int nToSkip, const BSONObj *fieldsToReturn, int queryOptions) {
+                                                 int nToSkip, const BSONObj *fieldsToReturn, int queryOptions , int batchSize ) {
         auto_ptr<DBClientCursor> c( new DBClientCursor( this,
-                                    ns, query.obj, nToReturn, nToSkip,
-                                    fieldsToReturn, queryOptions ) );
+                                                        ns, query.obj, nToReturn, nToSkip,
+                                                        fieldsToReturn, queryOptions , batchSize ) );
         if ( c->init() )
             return c;
         return auto_ptr< DBClientCursor >( 0 );
@@ -562,7 +568,7 @@ namespace mongo {
     void DBClientBase::update( const string & ns , Query query , BSONObj obj , bool upsert , bool multi ) {
 
         BufBuilder b;
-        b.append( (int)0 ); // reserverd
+        b.append( (int)0 ); // reserved
         b.append( ns );
 
         int flags = 0;
@@ -740,10 +746,19 @@ namespace mongo {
         }
     }
 
+    int DBClientCursor::nextBatchSize(){
+        if ( nToReturn == 0 )
+            return batchSize;
+        if ( batchSize == 0 )
+            return nToReturn;
+        
+        return batchSize < nToReturn ? batchSize : nToReturn;
+    }
+
     bool DBClientCursor::init() {
         Message toSend;
         if ( !cursorId ) {
-            assembleRequest( ns, query, nToReturn, nToSkip, fieldsToReturn, opts, toSend );
+            assembleRequest( ns, query, nextBatchSize() , nToSkip, fieldsToReturn, opts, toSend );
         } else {
             BufBuilder b;
             b.append( opts );
@@ -761,10 +776,14 @@ namespace mongo {
     void DBClientCursor::requestMore() {
         assert( cursorId && pos == nReturned );
 
+        if (haveLimit){
+            nToReturn -= nReturned;
+            assert(nToReturn > 0);
+        }
         BufBuilder b;
         b.append(opts);
         b.append(ns.c_str());
-        b.append(nToReturn);
+        b.append(nextBatchSize());
         b.append(cursorId);
 
         Message toSend;
@@ -802,6 +821,12 @@ namespace mongo {
 
     /** If true, safe to call next().  Requests more from server if necessary. */
     bool DBClientCursor::more() {
+        if ( !_putBack.empty() )
+            return true;
+        
+        if (haveLimit && pos >= nToReturn)
+            return false;
+
         if ( pos < nReturned )
             return true;
 
@@ -814,6 +839,11 @@ namespace mongo {
 
     BSONObj DBClientCursor::next() {
         assert( more() );
+        if ( !_putBack.empty() ) {
+            BSONObj ret = _putBack.top();
+            _putBack.pop();
+            return ret;
+        }
         pos++;
         BSONObj o(data);
         data += o.objsize();
@@ -821,18 +851,19 @@ namespace mongo {
     }
 
     DBClientCursor::~DBClientCursor() {
-        if ( cursorId && _ownCursor ) {
-            BufBuilder b;
-            b.append( (int)0 ); // reserved
-            b.append( (int)1 ); // number
-            b.append( cursorId );
+        DESTRUCTOR_GUARD (
+            if ( cursorId && _ownCursor ) {
+                BufBuilder b;
+                b.append( (int)0 ); // reserved
+                b.append( (int)1 ); // number
+                b.append( cursorId );
 
-            Message m;
-            m.setData( dbKillCursors , b.buf() , b.len() );
+                Message m;
+                m.setData( dbKillCursors , b.buf() , b.len() );
 
-            connector->sayPiggyBack( m );
-        }
-
+                connector->sayPiggyBack( m );
+            }
+        );
     }
 
     /* --- class dbclientpaired --- */
@@ -945,9 +976,9 @@ namespace mongo {
 	}
 
     auto_ptr<DBClientCursor> DBClientPaired::query(const string &a, Query b, int c, int d,
-            const BSONObj *e, int f)
+                                                   const BSONObj *e, int f, int g)
     {
-        return checkMaster().query(a,b,c,d,e,f);
+        return checkMaster().query(a,b,c,d,e,f,g);
     }
 
     BSONObj DBClientPaired::findOne(const string &a, Query b, const BSONObj *c, int d) {

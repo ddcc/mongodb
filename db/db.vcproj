@@ -144,7 +144,7 @@
 			/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="ws2_32.lib"
+				AdditionalDependencies="ws2_32.lib psapi.lib"
 				LinkIncremental="1"
 				AdditionalLibraryDirectories="&quot;c:\program files\boost\boost_1_35_0\lib&quot;"
 				GenerateDebugInformation="true"
@@ -350,48 +350,8 @@
 				>
 			</File>
 			<File
-				RelativePath="..\..\js\js\Debug\js.lib"
+				RelativePath="..\..\js\src\js.lib"
 				>
-				<FileConfiguration
-					Name="Release|Win32"
-					ExcludedFromBuild="true"
-					>
-					<Tool
-						Name="VCCustomBuildTool"
-					/>
-				</FileConfiguration>
-			</File>
-			<File
-				RelativePath="..\..\js\js\Release\js.lib"
-				>
-				<FileConfiguration
-					Name="Debug|Win32"
-					ExcludedFromBuild="true"
-					>
-					<Tool
-						Name="VCCustomBuildTool"
-					/>
-				</FileConfiguration>
-				<FileConfiguration
-					Name="Debug Recstore|Win32"
-					ExcludedFromBuild="true"
-					>
-					<Tool
-						Name="VCCustomBuildTool"
-					/>
-				</FileConfiguration>
-			</File>
-			<File
-				RelativePath="C:\Program Files\Java\jdk\lib\jvm.lib"
-				>
-				<FileConfiguration
-					Name="release_nojni|Win32"
-					ExcludedFromBuild="true"
-					>
-					<Tool
-						Name="VCCustomBuildTool"
-					/>
-				</FileConfiguration>
 			</File>
 			<File
 				RelativePath="..\pcre-7.4\pcrecpp.cc"
@@ -1342,35 +1302,27 @@
 				>
 			</File>
 			<File
-				RelativePath="..\client\quorum.cpp"
+				RelativePath="..\client\syncclusterconnection.cpp"
 				>
 			</File>
-			<Filter
-				Name="btree related"
-				>
-				<File
-					RelativePath=".\btree.cpp"
-					>
-				</File>
-				<File
-					RelativePath=".\btree.h"
-					>
-				</File>
-				<File
-					RelativePath=".\btreecursor.cpp"
-					>
-				</File>
-			</Filter>
 		</Filter>
 		<Filter
 			Name="db"
 			>
+			<File
+				RelativePath=".\background.h"
+				>
+			</File>
 			<File
 				RelativePath=".\client.h"
 				>
 			</File>
 			<File
 				RelativePath=".\clientcursor.h"
+				>
+			</File>
+			<File
+				RelativePath=".\cmdline.cpp"
 				>
 			</File>
 			<File
@@ -1411,6 +1363,14 @@
 			</File>
 			<File
 				RelativePath=".\dbmessage.h"
+				>
+			</File>
+			<File
+				RelativePath=".\diskloc.h"
+				>
+			</File>
+			<File
+				RelativePath=".\index.h"
 				>
 			</File>
 			<File
@@ -1485,6 +1445,10 @@
 				RelativePath="..\stdafx.h"
 				>
 			</File>
+			<File
+				RelativePath=".\update.h"
+				>
+			</File>
 			<Filter
 				Name="cpp"
 				Filter="cpp;c;cc;cxx;def;odl;idl;hpj;bat;asm;asmx"
@@ -1504,6 +1468,10 @@
 				</File>
 				<File
 					RelativePath=".\commands.cpp"
+					>
+				</File>
+				<File
+					RelativePath=".\common.cpp"
 					>
 				</File>
 				<File
@@ -1539,10 +1507,6 @@
 					>
 				</File>
 				<File
-					RelativePath=".\dbstats.cpp"
-					>
-				</File>
-				<File
 					RelativePath=".\dbwebserver.cpp"
 					>
 				</File>
@@ -1552,6 +1516,10 @@
 				</File>
 				<File
 					RelativePath=".\index.cpp"
+					>
+				</File>
+				<File
+					RelativePath=".\index_geo2d.cpp"
 					>
 				</File>
 				<File
@@ -1668,10 +1636,6 @@
 				</File>
 				<File
 					RelativePath=".\tests.cpp"
-					>
-				</File>
-				<File
-					RelativePath="..\util\top.cpp"
 					>
 				</File>
 				<File
@@ -1883,6 +1847,42 @@
 						UsePrecompiledHeader="0"
 					/>
 				</FileConfiguration>
+			</File>
+			<File
+				RelativePath="..\scripting\utils.cpp"
+				>
+			</File>
+		</Filter>
+		<Filter
+			Name="stats"
+			>
+			<File
+				RelativePath=".\stats\counters.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\stats\snapshots.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\stats\top.cpp"
+				>
+			</File>
+		</Filter>
+		<Filter
+			Name="btree related"
+			>
+			<File
+				RelativePath=".\btree.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\btree.h"
+				>
+			</File>
+			<File
+				RelativePath=".\btreecursor.cpp"
+				>
 			</File>
 		</Filter>
 	</Files>

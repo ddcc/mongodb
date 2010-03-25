@@ -31,7 +31,15 @@ namespace po = boost::program_options;
 
 class Restore : public Tool {
 public:
-    Restore() : Tool( "restore" , "" , "" ){
+    
+    bool _drop;
+    bool _objcheck;
+    
+    Restore() : Tool( "restore" , true , "" , "" ) , _drop(false),_objcheck(false){
+        add_options()
+            ("drop" , "drop each collection before import" )
+            ("objcheck" , "validate object before inserting" )
+            ;
         add_hidden_options()
             ("dir", po::value<string>()->default_value("dump"), "directory to restore from")
             ;
@@ -45,6 +53,8 @@ public:
     int run(){
         auth();
         path root = getParam("dir");
+        _drop = hasParam( "drop" );
+        _objcheck = hasParam( "objcheck" );
 
         /* If _db is not "" then the user specified a db name to restore as.
          *
@@ -56,6 +66,7 @@ public:
          * .bson file, or a single .bson file itself (a collection).
          */
         drillDown(root, _db != "", _coll != "");
+        conn().getLastError();
         return EXIT_CLEAN;
     }
 
@@ -128,6 +139,11 @@ public:
 
         out() << "\t going into namespace [" << ns << "]" << endl;
 
+        if ( _drop ){
+            out() << "\t dropping" << endl;
+            conn().dropCollection( ns );
+        }
+
         string fileString = root.string();
         ifstream file( fileString.c_str() , ios_base::in | ios_base::binary);
         if ( ! file.is_open() ){
@@ -141,7 +157,8 @@ public:
         long long num = 0;
 
         const int BUF_SIZE = 1024 * 1024 * 5;
-        char * buf = (char*)malloc( BUF_SIZE );
+        boost::scoped_array<char> buf_holder(new char[BUF_SIZE]);
+        char * buf = buf_holder.get();
 
         ProgressMeter m( fileLength );
 
@@ -156,6 +173,22 @@ public:
             file.read( buf + 4 , size - 4 );
 
             BSONObj o( buf );
+            if ( _objcheck && ! o.valid() ){
+                cerr << "INVALID OBJECT - going try and pring out " << endl;
+                cerr << "size: " << size << endl;
+                BSONObjIterator i(o);
+                while ( i.more() ){
+                    BSONElement e = i.next();
+                    try {
+                        e.validate();
+                    }
+                    catch ( ... ){
+                        cerr << "\t\t NEXT ONE IS INVALID" << endl;
+                    }
+                    cerr << "\t name : " << e.fieldName() << " " << e.type() << endl;
+                    cerr << "\t " << e << endl;
+                }
+            }
             conn().insert( ns.c_str() , o );
 
             read += o.objsize();
@@ -163,8 +196,6 @@ public:
 
             m.hit( o.objsize() );
         }
-
-        free( buf );
 
         uassert( 10265 ,  "counts don't match" , m.done() == fileLength );
         out() << "\t "  << m.hits() << " objects" << endl;

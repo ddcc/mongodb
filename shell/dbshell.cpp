@@ -1,4 +1,20 @@
 // dbshell.cpp
+/*
+ *    Copyright 2010 10gen Inc.
+ *
+ *    Licensed under the Apache License, Version 2.0 (the "License");
+ *    you may not use this file except in compliance with the License.
+ *    You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *    Unless required by applicable law or agreed to in writing, software
+ *    distributed under the License is distributed on an "AS IS" BASIS,
+ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *    See the License for the specific language governing permissions and
+ *    limitations under the License.
+ */
+
 
 #include <stdio.h>
 
@@ -51,7 +67,8 @@ void shellHistoryAdd( const char * line ){
     if ( strlen(line) == 0 )
         return;
 #ifdef USE_READLINE
-    add_history( line );
+    if ((strstr(line, ".auth")) == NULL)
+        add_history( line );
 #endif
 }
 
@@ -62,6 +79,21 @@ void intr( int sig ){
 }
 
 #if !defined(_WIN32)
+void killOps() {
+    if ( mongo::shellUtils::_nokillop || mongo::shellUtils::_allMyUris.size() == 0 )
+        return;
+    vector< string > uris;
+    for( map< const void*, string >::iterator i = mongo::shellUtils::_allMyUris.begin(); i != mongo::shellUtils::_allMyUris.end(); ++i )
+        uris.push_back( i->second );
+    mongo::BSONObj spec = BSON( "" << uris );
+    try {
+        auto_ptr< mongo::Scope > scope( mongo::globalScriptEngine->newScope() );        
+        scope->invoke( "function( x ) { killWithUris( x ); }", spec );
+    } catch ( ... ) {
+        mongo::rawOut( "exception while cleaning up any db ops started by this shell\n" );
+    }
+}
+
 void quitNicely( int sig ){
     if ( sig == SIGINT && inMultiLine ){
         gotInterrupted = 1;
@@ -69,6 +101,7 @@ void quitNicely( int sig ){
     }
     if ( sig == SIGPIPE )
         mongo::rawOut( "mongo got signal SIGPIPE\n" );
+    killOps();
     shellHistoryDone();
     exit(0);
 }
@@ -93,7 +126,7 @@ char * shellReadline( const char * prompt , int handlesigint = 0 ){
     signal( SIGINT , quitNicely );
     return ret;
 #else
-    printf( prompt );
+    printf("%s", prompt);
     char * buf = new char[1024];
     char * l = fgets( buf , 1024 , stdin );
     int len = strlen( buf );
@@ -289,6 +322,7 @@ int _main(int argc, char* argv[]) {
     hidden_options.add_options()
         ("dbaddress", po::value<string>(), "dbaddress")
         ("files", po::value< vector<string> >(), "files")
+        ("nokillop", "nokillop") // for testing, kill op will also be disabled automatically if the tests starts a mongo program
         ;
 
     positional_options.add("dbaddress", 1);
@@ -336,7 +370,10 @@ int _main(int argc, char* argv[]) {
     if (params.count("quiet")) {
         mongo::cmdLine.quiet = true;
     }
-
+    if (params.count("nokillop")) {
+        mongo::shellUtils::_nokillop = true;
+    }
+    
     /* This is a bit confusing, here are the rules:
      *
      * if nodb is set then all positional parameters are files
@@ -382,6 +419,7 @@ int _main(int argc, char* argv[]) {
 
     }
 
+    mongo::ScriptEngine::setConnectCallback( mongo::shellUtils::onConnect );
     mongo::ScriptEngine::setup();
     mongo::globalScriptEngine->setScopeInitCallback( mongo::shellUtils::initScope );
     auto_ptr< mongo::Scope > scope( mongo::globalScriptEngine->newScope() );    
@@ -433,7 +471,7 @@ int _main(int argc, char* argv[]) {
             }
 
             string code = line;
-            if ( code == "exit" ){
+            if ( code == "exit" || code == "exit;" ){
                 break;
             }
             if ( code.size() == 0 )
@@ -455,9 +493,15 @@ int _main(int argc, char* argv[]) {
                     cmd = cmd.substr( 0 , cmd.find( " " ) );
 
                 if ( cmd.find( "\"" ) == string::npos ){
-                    scope->exec( (string)"__iscmd__ = shellHelper[\"" + cmd + "\"];" , "(shellhelp1)" , false , true , true );
-                    if ( scope->getBoolean( "__iscmd__" )  ){
-                        scope->exec( (string)"shellHelper( \"" + cmd + "\" , \"" + code.substr( cmd.size() ) + "\");" , "(shellhelp2)" , false , true , false );
+                    try {
+                        scope->exec( (string)"__iscmd__ = shellHelper[\"" + cmd + "\"];" , "(shellhelp1)" , false , true , true );
+                        if ( scope->getBoolean( "__iscmd__" )  ){
+                            scope->exec( (string)"shellHelper( \"" + cmd + "\" , \"" + code.substr( cmd.size() ) + "\");" , "(shellhelp2)" , false , true , false );
+                            wascmd = true;
+                        }
+                    }
+                    catch ( std::exception& e ){
+                        cout << "error2:" << e.what() << endl;    
                         wascmd = true;
                     }
                 }
@@ -485,6 +529,7 @@ int _main(int argc, char* argv[]) {
 }
 
 int main(int argc, char* argv[]) {
+    static mongo::StaticObserver staticObserver;
     try {
         return _main( argc , argv );
     }
@@ -494,10 +539,4 @@ int main(int argc, char* argv[]) {
     }
 }
 
-namespace mongo {
-    DBClientBase * createDirectClient(){
-        uassert( 10256 ,  "no createDirectClient in shell" , 0 );
-        return 0;
-    }
-}
 

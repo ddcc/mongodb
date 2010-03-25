@@ -30,7 +30,8 @@
 namespace mongo {
     extern BSONObj id_obj;
     auto_ptr< QueryResult > runQuery(Message& m, QueryMessage& q ){
-        CurOp op;
+        CurOp op( &(cc()) );
+        op.ensureStarted();
         return runQuery( m , q , op );
     }
 } // namespace mongo
@@ -54,7 +55,6 @@ namespace QueryOptimizerTests {
             virtual bool lowerInclusive() { return true; }
             virtual BSONElement upper() { return maxKey.firstElement(); }
             virtual bool upperInclusive() { return true; }
-        private:
             static void checkElt( BSONElement expected, BSONElement actual ) {
                 if ( expected.woCompare( actual, false ) ) {
                     stringstream ss;
@@ -143,7 +143,17 @@ namespace QueryOptimizerTests {
             }
         };        
 
-        class Regex : public Base {
+        struct RegexBase : Base {
+            void run() { //need to only look at first interval
+                FieldRangeSet s( "ns", query() );
+                checkElt( lower(), s.range( "a" ).intervals()[0].lower_.bound_ );
+                checkElt( upper(), s.range( "a" ).intervals()[0].upper_.bound_ );
+                ASSERT_EQUALS( lowerInclusive(), s.range( "a" ).intervals()[0].lower_.inclusive_ );
+                ASSERT_EQUALS( upperInclusive(), s.range( "a" ).intervals()[0].upper_.inclusive_ );
+            }
+        };
+
+        class Regex : public RegexBase {
         public:
             Regex() : o1_( BSON( "" << "abc" ) ), o2_( BSON( "" << "abd" ) ) {}
             virtual BSONObj query() {
@@ -157,7 +167,7 @@ namespace QueryOptimizerTests {
             BSONObj o1_, o2_;
         };        
 
-        class RegexObj : public Base {
+        class RegexObj : public RegexBase {
         public:
             RegexObj() : o1_( BSON( "" << "abc" ) ), o2_( BSON( "" << "abd" ) ) {}
             virtual BSONObj query() { return BSON("a" << BSON("$regex" << "^abc")); }
@@ -167,12 +177,24 @@ namespace QueryOptimizerTests {
             BSONObj o1_, o2_;
         };
         
-        class UnhelpfulRegex : public Base {
+        class UnhelpfulRegex : public RegexBase {
+        public:
+            UnhelpfulRegex() {
+                BSONObjBuilder b;
+                b.appendMinForType("lower", String);
+                b.appendMaxForType("upper", String);
+                limits = b.obj();
+            }
+
             virtual BSONObj query() {
                 BSONObjBuilder b;
                 b.appendRegex( "a", "abc" );
                 return b.obj();
             }            
+            virtual BSONElement lower() { return limits["lower"]; }
+            virtual BSONElement upper() { return limits["upper"]; }
+            virtual bool upperInclusive() { return false; }
+            BSONObj limits;
         };
         
         class In : public Base {
@@ -316,8 +338,7 @@ namespace QueryOptimizerTests {
     namespace QueryPlanTests {
         class Base {
         public:
-            Base() : indexNum_( 0 ) {
-                setClient( ns() );
+            Base() : _ctx( ns() ) , indexNum_( 0 ) {
                 string err;
                 userCreateNS( ns(), BSONObj(), err, false );
             }
@@ -357,6 +378,7 @@ namespace QueryOptimizerTests {
             }
         private:
             dblock lk_;
+            Client::Context _ctx;
             int indexNum_;
             static DBDirectClient client_;
         };
@@ -595,8 +617,7 @@ namespace QueryOptimizerTests {
     namespace QueryPlanSetTests {
         class Base {
         public:
-            Base() {
-                setClient( ns() );
+            Base() : _context( ns() ){
                 string err;
                 userCreateNS( ns(), BSONObj(), err, false );
             }
@@ -625,6 +646,7 @@ namespace QueryOptimizerTests {
             static NamespaceDetails *nsd() { return nsdetails( ns() ); }
         private:
             dblock lk_;
+            Client::Context _context;
         };
         
         class NoIndexes : public Base {

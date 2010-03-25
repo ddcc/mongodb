@@ -1,3 +1,19 @@
+/*
+ *    Copyright (C) 2010 10gen Inc.
+ *
+ *    This program is free software: you can redistribute it and/or  modify
+ *    it under the terms of the GNU Affero General Public License, version 3,
+ *    as published by the Free Software Foundation.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU Affero General Public License for more details.
+ *
+ *    You should have received a copy of the GNU Affero General Public License
+ *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
 // stragegy.cpp
 
 #include "stdafx.h"
@@ -25,14 +41,12 @@ namespace mongo {
     void Strategy::doQuery( Request& r , string server ){
         try{
             ScopedDbConnection dbcon( server );
-            DBClientBase &_c = dbcon.conn();
+            DBClientBase &c = dbcon.conn();
             
-            checkShardVersion( _c , r.getns() );
+            checkShardVersion( c , r.getns() );
             
-            // TODO: This will not work with Paired connections.  Fix. 
-            DBClientConnection&c = dynamic_cast<DBClientConnection&>(_c);
             Message response;
-            bool ok = c.port().call( r.m(), response);
+            bool ok = c.call( r.m(), response);
 
             {
                 QueryResult *qr = (QueryResult *) response.data;

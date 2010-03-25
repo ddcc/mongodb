@@ -49,13 +49,13 @@ namespace mongo {
         };
 
         int state;
-        string info; // commentary about our current state
+        ThreadSafeString info; // commentary about our current state
         string arbHost;  // "-" for no arbiter.  "host[:port]"
         int remotePort;
         string remoteHost;
         string remote; // host:port if port specified.
 //    int date; // -1 not yet set; 0=slave; 1=master
-
+        
         string getInfo() {
             stringstream ss;
             ss << "  state:   ";
@@ -111,7 +111,7 @@ namespace mongo {
        If 'client' is not specified, the current client is used.
     */
     inline bool isMaster( const char *client = 0 ) {
-		if( !slave ) 
+		if( ! replSettings.slave ) 
 			return true;
 
         if ( !client ) {
@@ -128,7 +128,7 @@ namespace mongo {
 				return true;
 		}
         else { 
-            if( master ) {
+            if( replSettings.master ) {
                 // if running with --master --slave, allow.  note that master is also true 
                 // for repl pairs so the check for replPair above is important.
                 return true;

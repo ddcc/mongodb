@@ -54,6 +54,9 @@ namespace mongo {
             virtual bool adminOnly() {
                 return true;
             }
+
+            // all grid commands are designed not to lock
+            virtual LockType locktype(){ return NONE; } 
         };
 
         // --------------- misc commands ----------------------
@@ -506,8 +509,7 @@ namespace mongo {
                 
                 if ( host == "localhost" || host.find( "localhost:" ) == 0 ||
                      host == "127.0.0.1" || host.find( "127.0.0.1:" ) == 0 ){
-                    if ( cmdObj["allowLocal"].type() != Bool || 
-                         ! cmdObj["allowLocal"].boolean() ){
+                    if ( ! cmdObj["allowLocal"].trueValue() ){
                         errmsg = 
                             "can't use localhost as a shard since all shards need to communicate.  "
                             "allowLocal to override for testing";
@@ -586,6 +588,7 @@ namespace mongo {
 
         class IsDbGridCmd : public Command {
         public:
+            virtual LockType locktype(){ return NONE; } 
             virtual bool slaveOk() {
                 return true;
             }
@@ -599,6 +602,7 @@ namespace mongo {
 
         class CmdIsMaster : public Command {
         public:
+            virtual LockType locktype(){ return NONE; } 
             virtual bool requiresAuth() { return false; }
             virtual bool slaveOk() {
                 return true;
@@ -616,6 +620,7 @@ namespace mongo {
 
         class CmdShardingGetPrevError : public Command {
         public:
+            virtual LockType locktype(){ return NONE; } 
             virtual bool requiresAuth() { return false; }
             virtual bool slaveOk() {
                 return true;
@@ -632,6 +637,7 @@ namespace mongo {
 
         class CmdShardingGetLastError : public Command {
         public:
+            virtual LockType locktype(){ return NONE; } 
             virtual bool requiresAuth() { return false; }
             virtual bool slaveOk() {
                 return true;

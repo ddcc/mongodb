@@ -19,7 +19,7 @@
 #include "../stdafx.h"
 
 #include "jsobj.h"
-#include "storage.h"
+#include "diskloc.h"
 
 namespace mongo {
     
@@ -76,6 +76,8 @@ namespace mongo {
 
         /* called before query getmore block is iterated */
         virtual void checkLocation() { }
+        
+        virtual bool supportGetMore() = 0;
 
         virtual string toString() {
             return "abstract?";
@@ -91,10 +93,10 @@ namespace mongo {
         */
         virtual bool getsetdup(DiskLoc loc) = 0;
 
-        virtual BSONObj prettyStartKey() const { return BSONObj(); }
-        virtual BSONObj prettyEndKey() const { return BSONObj(); }
+        virtual BSONObj prettyIndexBounds() const { return BSONObj(); }
 
         virtual bool capped() const { return false; }
+
     };
 
     // strategy object implementing direction of traversal.
@@ -157,6 +159,8 @@ namespace mongo {
             return tailable_;
         }
         virtual bool getsetdup(DiskLoc loc) { return false; }
+
+        virtual bool supportGetMore() { return true; }
     };
 
     /* used for order { $natural: -1 } */

@@ -25,9 +25,10 @@
 #pragma once
 
 #include "../stdafx.h"
+#include "security.h"
 #include "namespace.h"
 #include "lasterror.h"
-#include "../util/top.h"
+#include "stats/top.h"
 
 namespace mongo { 
 
@@ -39,12 +40,9 @@ namespace mongo {
 
     extern boost::thread_specific_ptr<Client> currentClient;
 
-    bool setClient(const char *ns, const string& path=dbpath, mongolock *lock = 0);
-
-
     class Client : boost::noncopyable { 
     public:
-        static boost::mutex clientsMutex;
+        static mongo::mutex clientsMutex;
         static set<Client*> clients; // always be in clientsMutex when manipulating this
 
         class GodScope {
@@ -57,71 +55,125 @@ namespace mongo {
         /* Set database we want to use, then, restores when we finish (are out of scope)
            Note this is also helpful if an exception happens as the state if fixed up.
         */
-        class Context {
+        class Context : boost::noncopyable{
             Client * _client;
-            Database * _olddb;
-            string _oldns;
+            Context * _oldContext;
+            
+            string _path;
+            mongolock * _lock;
+            bool _justCreated;
+
+            string _ns;
+            Database * _db;
+
+            /**
+             * at this point _client, _oldContext and _ns have to be set
+             * _db should not have been touched
+             * this will set _db and create if needed
+             * will also set _client->_context to this
+             */
+            void _finishInit( bool doauth=true);
+            
+            void _auth( int lockState = dbMutex.getState() );
         public:
-            Context(const char *ns) 
-                : _client( currentClient.get() ) {
-                _olddb = _client->_database;
-                _oldns = _client->_ns;
-                setClient(ns);
-            }
-            Context(string ns) 
-                : _client( currentClient.get() ){
-                _olddb = _client->_database;
-                _oldns = _client->_ns;
-                setClient(ns.c_str());
+            Context(const string& ns, string path=dbpath, mongolock * lock = 0 , bool doauth=true ) 
+                : _client( currentClient.get() ) , _oldContext( _client->_context ) , 
+                  _path( path ) , _lock( lock ) ,
+                  _ns( ns ){
+                _finishInit( doauth );
             }
             
             /* this version saves the context but doesn't yet set the new one: */
-            Context() 
-                : _client( currentClient.get() ) {
-                _olddb = _client->database();
-                _oldns = _client->ns();        
 
+            Context() 
+                : _client( currentClient.get() ) , _oldContext( _client->_context ), 
+                  _path( dbpath ) , _lock(0) , _justCreated(false){
+                _client->_context = this;
+                clear();
             }
             
             /**
              * if you are doing this after allowing a write there could be a race condition
              * if someone closes that db.  this checks that the DB is still valid
              */
-            Context( string ns , Database * db );
-
-            ~Context() {
-                DEV assert( _client == currentClient.get() );
-                _client->setns( _oldns.c_str(), _olddb );
+            Context( string ns , Database * db, bool doauth=true );
+            
+            ~Context();
+            
+            Client* getClient() const { return _client; }
+            
+            Database* db() const {
+                return _db;
             }
 
-        };
+            const char * ns() const {
+                return _ns.c_str();
+            }
+            
+            bool justCreated() const {
+                return _justCreated;
+            }
 
+            bool equals( const string& ns , const string& path=dbpath ) const {
+                return _ns == ns && _path == path;
+            }
+
+            bool inDB( const string& db , const string& path=dbpath ) const {
+                if ( _path != path )
+                    return false;
+                
+                if ( db == _ns )
+                    return true;
+
+                string::size_type idx = _ns.find( db );
+                if ( idx != 0 )
+                    return false;
+                
+                return  _ns[db.size()] == '.';
+            }
+
+            void clear(){
+                _ns = "";
+                _db = 0;
+            }
+
+            /**
+             * call before unlocking, so clear any non-thread safe state
+             */
+            void unlocked(){
+                _db = 0;
+            }
+
+            /**
+             * call after going back into the lock, will re-establish non-thread safe stuff
+             */
+            void relocked(){
+                _finishInit();
+            }
+
+            friend class CurOp;
+        };
+        
     private:
-        CurOp * const _curOp;
-        Database *_database;
-        Namespace _ns;
-        //NamespaceString _nsstr;
+        CurOp * _curOp;
+        Context * _context;
         bool _shutdown;
         list<string> _tempCollections;
         const char *_desc;
         bool _god;
+        AuthenticationInfo _ai;
+
     public:
-        AuthenticationInfo *ai;
-        Top top;
+        
+        AuthenticationInfo * getAuthenticationInfo(){ return &_ai; }
+        bool isAdmin() { return _ai.isAuthorized( "admin" ); }
 
         CurOp* curop() { return _curOp; }
-        Database* database() { 
-            return _database; 
-        }
-        const char *ns() { return _ns.buf; }
-
-        void setns(const char *ns, Database *db) { 
-            _database = db;
-            _ns = ns;
-            //_nsstr = ns;
-        }
-        void clearns() { setns("", 0); }
-
+        
+        Context* getContext(){ return _context; }
+        Database* database() {  return _context ? _context->db() : 0; }
+        const char *ns() { return _context->ns(); }
+        
         Client(const char *desc);
         ~Client();
 
@@ -143,6 +195,10 @@ namespace mongo {
         bool shutdown();
 
         bool isGod() const { return _god; }
+
+        friend class CurOp;
+
+        string toString() const;
     };
     
     inline Client& cc() { 
@@ -182,12 +238,15 @@ namespace mongo {
             dbMutex.unlock_shared();
             dbMutex.lock();
 
-            /* this is defensive; as we were unlocked for a moment above, 
-               the Database object we reference could have been deleted:
-            */
-            cc().clearns();
+            if ( cc().getContext() )
+                cc().getContext()->unlocked();
         }
     }
-    
+
+    string sayClientState();
+  
+    inline bool haveClient(){ 
+        return currentClient.get() > 0;
+    }
 };
 

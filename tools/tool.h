@@ -1,3 +1,19 @@
+/*
+ *    Copyright (C) 2010 10gen Inc.
+ *
+ *    This program is free software: you can redistribute it and/or  modify
+ *    it under the terms of the GNU Affero General Public License, version 3,
+ *    as published by the Free Software Foundation.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU Affero General Public License for more details.
+ *
+ *    You should have received a copy of the GNU Affero General Public License
+ *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
 // Tool.h
 
 #pragma once
@@ -19,7 +35,7 @@ namespace mongo {
 
     class Tool {
     public:
-        Tool( string name , string defaultDB="test" , string defaultCollection="");
+        Tool( string name , bool localDBAllowed=true, string defaultDB="test" , string defaultCollection="");
         virtual ~Tool();
 
         int main( int argc , char ** argv );
@@ -37,6 +53,11 @@ namespace mongo {
         string getParam( string name , string def="" ){
             if ( _params.count( name ) )
                 return _params[name.c_str()].as<string>();
+            return def;
+        }
+        int getParam( string name , int def ){
+            if ( _params.count( name ) )
+                return _params[name.c_str()].as<int>();
             return def;
         }
         bool hasParam( string name ){

@@ -19,7 +19,8 @@
 #include "v8_utils.h"
 #include "v8_db.h"
 #include "engine.h"
-
+#include "util/base64.h"
+#include "../client/syncclusterconnection.h"
 #include <iostream>
 
 using namespace std;
@@ -49,6 +50,26 @@ namespace mongo {
         return mongo;
     }
 
+    v8::Handle<v8::FunctionTemplate> getNumberLongFunctionTemplate() {
+        v8::Local<v8::FunctionTemplate> numberLong = FunctionTemplate::New( numberLongInit );
+        v8::Local<v8::Template> proto = numberLong->PrototypeTemplate();
+        
+        proto->Set( v8::String::New( "valueOf" ) , FunctionTemplate::New( numberLongValueOf ) );        
+        proto->Set( v8::String::New( "toNumber" ) , FunctionTemplate::New( numberLongToNumber ) );        
+        proto->Set( v8::String::New( "toString" ) , FunctionTemplate::New( numberLongToString ) );
+        
+        return numberLong;
+    }
+
+    v8::Handle<v8::FunctionTemplate> getBinDataFunctionTemplate() {
+        v8::Local<v8::FunctionTemplate> binData = FunctionTemplate::New( binDataInit );
+        v8::Local<v8::Template> proto = binData->PrototypeTemplate();
+        
+        proto->Set( v8::String::New( "toString" ) , FunctionTemplate::New( binDataToString ) );        
+        
+        return binData;
+    }    
+    
     void installDBTypes( Handle<ObjectTemplate>& global ){
         v8::Local<v8::FunctionTemplate> db = FunctionTemplate::New( dbInit );
         db->InstanceTemplate()->SetNamedPropertyHandler( collectionFallback );
@@ -69,7 +90,9 @@ namespace mongo {
 
         global->Set( v8::String::New("DBPointer") , FunctionTemplate::New( dbPointerInit ) );
 
-        global->Set( v8::String::New("BinData") , FunctionTemplate::New( binDataInit ) );
+        global->Set( v8::String::New("BinData") , getBinDataFunctionTemplate() );
+
+        global->Set( v8::String::New("NumberLong") , getNumberLongFunctionTemplate() );
 
     }
 
@@ -93,7 +116,9 @@ namespace mongo {
         
         global->Set( v8::String::New("DBPointer") , FunctionTemplate::New( dbPointerInit )->GetFunction() );
 
-        global->Set( v8::String::New("BinData") , FunctionTemplate::New( binDataInit )->GetFunction() );
+        global->Set( v8::String::New("BinData") , getBinDataFunctionTemplate()->GetFunction() );
+
+        global->Set( v8::String::New("NumberLong") , getNumberLongFunctionTemplate()->GetFunction() );
 
         BSONObjBuilder b;
         b.appendMaxKey( "" );
@@ -107,7 +132,8 @@ namespace mongo {
     }
 
     void destroyConnection( Persistent<Value> object, void* parameter){
-        cout << "Yo ho ho" << endl;
+        // TODO
+        cout << "warning: destroyConnection not implemented" << endl;
     }
 
     Handle<Value> mongoConsExternal(const Arguments& args){
@@ -122,16 +148,45 @@ namespace mongo {
             strcpy( host , "127.0.0.1" );
         }
 
-        DBClientConnection * conn = new DBClientConnection( true );
-
+        DBClientWithCommands * conn = 0;
+        int commas = 0;
+        for ( int i=0; i<255; i++ ){
+            if ( host[i] == ',' )
+                commas++;
+            else if ( host[i] == 0 )
+                break;
+        }
+        
+        if ( commas == 0 ){
+            DBClientConnection * c = new DBClientConnection( true );
+            string errmsg;
+            if ( ! c->connect( host , errmsg ) ){
+                delete c;
+                string x = "couldn't connect: ";
+                x += errmsg;
+                return v8::ThrowException( v8::String::New( x.c_str() ) );
+            }
+            conn = c;
+        }
+        else if ( commas == 1 ){
+            DBClientPaired * c = new DBClientPaired();
+            if ( ! c->connect( host ) ){
+                delete c;
+                return v8::ThrowException( v8::String::New( "couldn't connect to pair" ) );
+            }
+            conn = c;
+        }
+        else if ( commas == 2 ){
+            conn = new SyncClusterConnection( host );
+        }
+        else {
+            return v8::ThrowException( v8::String::New( "too many commas" ) );
+        }
+                
         Persistent<v8::Object> self = Persistent<v8::Object>::New( args.This() );
         self.MakeWeak( conn , destroyConnection );
 
-        string errmsg;
-        if ( ! conn->connect( host , errmsg ) ){
-            return v8::ThrowException( v8::String::New( "couldn't connect" ) );
-        }
-
+        ScriptEngine::runConnectCallback( *conn );
         // NOTE I don't believe the conn object will ever be freed.
         args.This()->Set( CONN_STRING , External::New( conn ) );
         args.This()->Set( v8::String::New( "slaveOk" ) , Boolean::New( false ) );
@@ -184,7 +239,7 @@ namespace mongo {
        4 - skip
     */
     Handle<Value> mongoFind(const Arguments& args){
-        jsassert( args.Length() == 5 , "find needs 5 args" );
+        jsassert( args.Length() == 6 , "find needs 6 args" );
         jsassert( args[1]->IsObject() , "needs to be an object" );
         DBClientBase * conn = getConnection( args );
         GETNS;
@@ -201,14 +256,15 @@ namespace mongo {
         Local<v8::Value> slaveOkVal = mongo->Get( v8::String::New( "slaveOk" ) );
         jsassert( slaveOkVal->IsBoolean(), "slaveOk member invalid" );
         bool slaveOk = slaveOkVal->BooleanValue();
-    
+        
         try {
             auto_ptr<mongo::DBClientCursor> cursor;
             int nToReturn = (int)(args[3]->ToNumber()->Value());
             int nToSkip = (int)(args[4]->ToNumber()->Value());
+            int batchSize = (int)(args[5]->ToNumber()->Value());
             {
                 v8::Unlocker u;
-                cursor = conn->query( ns, q ,  nToReturn , nToSkip , haveFields ? &fields : 0, slaveOk ? QueryOption_SlaveOk : 0 );
+                cursor = conn->query( ns, q ,  nToReturn , nToSkip , haveFields ? &fields : 0, slaveOk ? QueryOption_SlaveOk : 0 , batchSize );
             }
             v8::Function * cons = (v8::Function*)( *( mongo->Get( v8::String::New( "internalCursor" ) ) ) );
             assert( cons );
@@ -399,6 +455,11 @@ namespace mongo {
             t->Set( v8::String::New( "_skip" ) , args[7] );
         else 
             t->Set( v8::String::New( "_skip" ) , Number::New( 0 ) );
+
+        if ( args.Length() > 8 && args[8]->IsNumber() )
+            t->Set( v8::String::New( "_batchSize" ) , args[7] );
+        else 
+            t->Set( v8::String::New( "_batchSize" ) , Number::New( 0 ) );
     
         t->Set( v8::String::New( "_cursor" ) , v8::Null() );
         t->Set( v8::String::New( "_numReturned" ) , v8::Number::New(0) );
@@ -473,7 +534,7 @@ namespace mongo {
 
     v8::Handle<v8::Value> dbRefInit( const v8::Arguments& args ) {
 
-        if (args.Length() != 2) {
+        if (args.Length() != 2 && args.Length() != 0) {
             return v8::ThrowException( v8::String::New( "DBRef needs 2 arguments" ) );
         }
 
@@ -484,8 +545,10 @@ namespace mongo {
             it = f->NewInstance();
         }
 
-        it->Set( v8::String::New( "$ref" ) , args[0] );
-        it->Set( v8::String::New( "$id" ) , args[1] );
+        if ( args.Length() == 2 ) {
+            it->Set( v8::String::New( "$ref" ) , args[0] );
+            it->Set( v8::String::New( "$id" ) , args[1] );
+        }
 
         return it;
     }
@@ -511,24 +574,125 @@ namespace mongo {
     }
 
     v8::Handle<v8::Value> binDataInit( const v8::Arguments& args ) {
+        v8::Handle<v8::Object> it = args.This();
         
-        if (args.Length() != 3) {
+        // 3 args: len, type, data
+        if (args.Length() == 3) {
+        
+            if ( it->IsUndefined() || it == v8::Context::GetCurrent()->Global() ){
+                v8::Function* f = getNamedCons( "BinData" );
+                it = f->NewInstance();
+            }
+        
+            it->Set( v8::String::New( "len" ) , args[0] );
+            it->Set( v8::String::New( "type" ) , args[1] );
+            it->Set( v8::String::New( "data" ), args[2] );
+            it->SetHiddenValue( v8::String::New( "__BinData" ), v8::Number::New( 1 ) );
+
+        // 2 args: type, base64 string
+        } else if ( args.Length() == 2 ) {
+            
+            if ( it->IsUndefined() || it == v8::Context::GetCurrent()->Global() ){
+                v8::Function* f = getNamedCons( "BinData" );
+                it = f->NewInstance();
+            }
+            
+            v8::String::Utf8Value data( args[ 1 ] );
+            string decoded = base64::decode( *data );
+            it->Set( v8::String::New( "len" ) , v8::Number::New( decoded.length() ) );
+            it->Set( v8::String::New( "type" ) , args[ 0 ] );
+            it->Set( v8::String::New( "data" ), v8::String::New( decoded.data(), decoded.length() ) );
+            it->SetHiddenValue( v8::String::New( "__BinData" ), v8::Number::New( 1 ) );            
+            
+        } else {
             return v8::ThrowException( v8::String::New( "BinData needs 3 arguments" ) );
+        }
+
+        return it;
+    }
+    
+    v8::Handle<v8::Value> binDataToString( const v8::Arguments& args ) {
+        
+        if (args.Length() != 0) {
+            return v8::ThrowException( v8::String::New( "toString needs 0 arguments" ) );
+        }
+        
+        v8::Handle<v8::Object> it = args.This();
+        int len = it->Get( v8::String::New( "len" ) )->ToInt32()->Value();
+        int type = it->Get( v8::String::New( "type" ) )->ToInt32()->Value();
+        v8::String::Utf8Value data( it->Get( v8::String::New( "data" ) ) );
+        
+        stringstream ss;
+        ss << "BinData( type: " << type << ", base64: \"";
+        base64::encode( ss, *data, len );
+        ss << "\" )";
+        string ret = ss.str();
+        return v8::String::New( ret.c_str() );
+    }
+
+    v8::Handle<v8::Value> numberLongInit( const v8::Arguments& args ) {
+        
+        if (args.Length() != 1 && args.Length() != 3) {
+            return v8::ThrowException( v8::String::New( "NumberLong needs 1 or 3 arguments" ) );
         }
         
         v8::Handle<v8::Object> it = args.This();
         
         if ( it->IsUndefined() || it == v8::Context::GetCurrent()->Global() ){
-            v8::Function* f = getNamedCons( "BinData" );
+            v8::Function* f = getNamedCons( "NumberLong" );
             it = f->NewInstance();
         }
         
-        it->Set( v8::String::New( "len" ) , args[0] );
-        it->Set( v8::String::New( "type" ) , args[1] );
-        it->Set( v8::String::New( "data" ), args[2] );
-        it->SetHiddenValue( v8::String::New( "__BinData" ), v8::Number::New( 1 ) );
+        it->Set( v8::String::New( "floatApprox" ) , args[0] );
+        if ( args.Length() == 3 ) {
+            it->Set( v8::String::New( "top" ) , args[1] );
+            it->Set( v8::String::New( "bottom" ) , args[2] );
+        }
+        it->SetHiddenValue( v8::String::New( "__NumberLong" ), v8::Number::New( 1 ) );
         
         return it;
+    }
+
+    long long numberLongVal( const v8::Handle< v8::Object > &it ) {
+        if ( !it->Has( v8::String::New( "top" ) ) )
+            return (long long)( it->Get( v8::String::New( "floatApprox" ) )->NumberValue() );
+        return
+        (long long)
+        ( (unsigned long long)( it->Get( v8::String::New( "top" ) )->ToInt32()->Value() ) << 32 ) +
+        (unsigned)( it->Get( v8::String::New( "bottom" ) )->ToInt32()->Value() );        
+    }
+    
+    v8::Handle<v8::Value> numberLongValueOf( const v8::Arguments& args ) {
+        
+        if (args.Length() != 0) {
+            return v8::ThrowException( v8::String::New( "toNumber needs 0 arguments" ) );
+        }
+        
+        v8::Handle<v8::Object> it = args.This();
+        
+        long long val = numberLongVal( it );
+        
+        return v8::Number::New( double( val ) );
+    }
+
+    v8::Handle<v8::Value> numberLongToNumber( const v8::Arguments& args ) {
+        return numberLongValueOf( args );
+    }
+
+    v8::Handle<v8::Value> numberLongToString( const v8::Arguments& args ) {
+        
+        if (args.Length() != 0) {
+            return v8::ThrowException( v8::String::New( "toString needs 0 arguments" ) );
+        }
+        
+        v8::Handle<v8::Object> it = args.This();
+        
+        long long val = numberLongVal( it );
+        
+        stringstream ss;
+        ss << val;
+        string ret = ss.str();
+        return v8::String::New( ret.c_str() );
     }
     
     v8::Handle<v8::Value> bsonsize( const v8::Arguments& args ) {

@@ -25,6 +25,7 @@
 #include "client.h"
 #include "dbhelpers.h"
 #include "curop.h"
+#include "stats/counters.h"
 
 namespace mongo {
 
@@ -40,6 +41,11 @@ namespace mongo {
     extern int otherTraceLevel;
     const int split_debug = 0;
     const int insert_debug = 0;
+
+    static void alreadyInIndex() { 
+        // we don't use massert() here as that does logging and this is 'benign' - see catches in _indexRecord()
+        throw MsgAssertionException(10287, "btree: key+recloc already in index");
+    }
 
     /* BucketBasics --------------------------------------------------- */
 
@@ -356,9 +362,36 @@ namespace mongo {
         return false;
     }
 
+    /* @param self - don't complain about ourself already being in the index case.
+       @return true = there is a duplicate.
+    */
+    bool BtreeBucket::wouldCreateDup(
+        const IndexDetails& idx, DiskLoc thisLoc, 
+        const BSONObj& key, BSONObj order,
+        DiskLoc self) 
+    { 
+        int pos;
+        bool found;
+        DiskLoc b = locate(idx, thisLoc, key, order, pos, found, minDiskLoc);
+
+        while ( !b.isNull() ) {
+            // we skip unused keys
+            BtreeBucket *bucket = b.btree();
+            _KeyNode& kn = bucket->k(pos);
+            if ( kn.isUsed() ) {
+                if( bucket->keyAt(pos).woEqual(key) )
+                    return kn.recordLoc != self;
+                break;
+            }
+            b = bucket->advance(b, pos, 1, "BtreeBucket::dupCheck");
+        }
+
+        return false;
+    }
+
     string BtreeBucket::dupKeyError( const IndexDetails& idx , const BSONObj& key ){
         stringstream ss;
-        ss << "E11000 duplicate key error";
+        ss << "E11000 duplicate key error ";
         ss << "index: " << idx.indexNamespace() << "  ";
         ss << "dup key: " << key;
         return ss.str();
@@ -391,6 +424,9 @@ namespace mongo {
 			}
 		}
 #endif
+        
+        globalIndexCounters.btree( (char*)this );
+        
         /* binary search for this key */
         bool dupsChecked = false;
         int l=0;
@@ -407,12 +443,19 @@ namespace mongo {
                         // coding effort in here to make this particularly fast
                         if( !dupsChecked ) { 
                             dupsChecked = true;
-                            if( idx.head.btree()->exists(idx, idx.head, key, order) )
-                                uasserted( ASSERT_ID_DUPKEY , dupKeyError( idx , key ) );
+                            if( idx.head.btree()->exists(idx, idx.head, key, order) ) {
+                                if( idx.head.btree()->wouldCreateDup(idx, idx.head, key, order, recordLoc) )
+                                    uasserted( ASSERT_ID_DUPKEY , dupKeyError( idx , key ) );
+                                else
+                                    alreadyInIndex();
+                            }
                         }
                     }
-                    else
+                    else {
+                        if( M.recordLoc == recordLoc ) 
+                            alreadyInIndex();
                         uasserted( ASSERT_ID_DUPKEY , dupKeyError( idx , key ) );
+                    }
                 }
 
                 // dup keys allowed.  use recordLoc as if it is part of the key
@@ -444,7 +487,7 @@ namespace mongo {
     }
 
     void BtreeBucket::delBucket(const DiskLoc& thisLoc, IndexDetails& id) {
-        ClientCursor::informAboutToDeleteBucket(thisLoc);
+        ClientCursor::informAboutToDeleteBucket(thisLoc); // slow...
         assert( !isHead() );
 
         BtreeBucket *p = parent.btreemod();
@@ -466,6 +509,10 @@ namespace mongo {
             assert(false);
         }
 found:
+        deallocBucket( thisLoc );
+    }
+    
+    void BtreeBucket::deallocBucket(const DiskLoc &thisLoc) {
 #if 1
         /* as a temporary defensive measure, we zap the whole bucket, AND don't truly delete
            it (meaning it is ineligible for reuse).
@@ -807,13 +854,15 @@ found:
                 return 0;
             }
 
-            out() << "_insert(): key already exists in index\n";
-            out() << "  " << idx.indexNamespace().c_str() << " thisLoc:" << thisLoc.toString() << '\n';
-            out() << "  " << key.toString() << '\n';
-            out() << "  " << "recordLoc:" << recordLoc.toString() << " pos:" << pos << endl;
-            out() << "  old l r: " << childForPos(pos).toString() << ' ' << childForPos(pos+1).toString() << endl;
-            out() << "  new l r: " << lChild.toString() << ' ' << rChild.toString() << endl;
-            massert( 10287 , "btree: key+recloc already in index", false);
+            DEV { 
+                out() << "_insert(): key already exists in index (ok for background:true)\n";
+                out() << "  " << idx.indexNamespace().c_str() << " thisLoc:" << thisLoc.toString() << '\n';
+                out() << "  " << key.toString() << '\n';
+                out() << "  " << "recordLoc:" << recordLoc.toString() << " pos:" << pos << endl;
+                out() << "  old l r: " << childForPos(pos).toString() << ' ' << childForPos(pos+1).toString() << endl;
+                out() << "  new l r: " << lChild.toString() << ' ' << rChild.toString() << endl;
+            }
+            alreadyInIndex();
         }
 
         DEBUGGING out() << "TEMP: key: " << key.toString() << endl;
@@ -926,12 +975,11 @@ namespace mongo {
         b->k(1).setUnused();
 
         b->dumpTree(id.head, order);
-        cout << "---\n";
 
         b->bt_insert(id.head, A, key, order, false, id);
 
         b->dumpTree(id.head, order);
-        cout << "---\n";*/
+        */
 
         // this should assert.  does it? (it might "accidentally" though, not asserting proves a problem, asserting proves nothing)
         b->bt_insert(id.head, C, key, order, false, id);
@@ -1004,20 +1052,27 @@ namespace mongo {
                 BSONObj k; 
                 DiskLoc r;
                 x->popBack(r,k);
-                if( x->n == 0 )
-                    log() << "warning: empty bucket on BtreeBuild " << k.toString() << endl;
+                bool keepX = ( x->n != 0 );
+                DiskLoc keepLoc = keepX ? xloc : x->nextChild;
 
-                if ( ! up->_pushBack(r, k, order, xloc) ){
+                if ( ! up->_pushBack(r, k, order, keepLoc) ){
                     // current bucket full
                     DiskLoc n = BtreeBucket::addBucket(idx);
                     up->tempNext() = n;
                     upLoc = n; 
                     up = upLoc.btreemod();
-                    up->pushBack(r, k, order, xloc);
+                    up->pushBack(r, k, order, keepLoc);
                 }
 
-                xloc = x->tempNext(); /* get next in chain at current level */
-                x->parent = upLoc;
+                DiskLoc nextLoc = x->tempNext(); /* get next in chain at current level */
+                if ( keepX ) {
+                    x->parent = upLoc;                
+                } else {
+                    if ( !x->nextChild.isNull() )
+                        x->nextChild.btreemod()->parent = upLoc;
+                    x->deallocBucket( xloc );
+                }
+                xloc = nextLoc;
             }
             
             loc = upStart;

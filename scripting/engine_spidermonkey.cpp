@@ -32,6 +32,11 @@
     return JS_FALSE; \
   }
 
+#define CHECKNEWOBJECT(xx,ctx,w)                                   \
+    if ( ! xx ){                                                   \
+        massert(13072,(string)"JS_NewObject failed: " + w ,xx);    \
+    }
+
 namespace mongo {
 
     string trim( string s ){
@@ -45,8 +50,8 @@ namespace mongo {
     }
 
     boost::thread_specific_ptr<SMScope> currentScope( dontDeleteScope );
-    boost::recursive_mutex smmutex;
-#define smlock recursive_boostlock ___lk( smmutex );
+    boost::recursive_mutex &smmutex = *( new boost::recursive_mutex );
+#define smlock recursive_scoped_lock ___lk( smmutex );
 
 #define GETHOLDER(x,o) ((BSONHolder*)JS_GetPrivate( x , o ))
 
@@ -158,6 +163,19 @@ namespace mongo {
             return toString( JS_ValueToString( _context , v ) );
         }
 
+        // NOTE No validation of passed in object
+        long long toNumberLongUnsafe( JSObject *o ) {
+            boost::uint64_t val;
+            if ( hasProperty( o, "top" ) ) {
+                val =
+                ( (boost::uint64_t)(boost::uint32_t)getNumber( o , "top" ) << 32 ) +
+                ( boost::uint32_t)( getNumber( o , "bottom" ) );
+            } else {
+                val = (boost::uint64_t) getNumber( o, "floatApprox" );
+            }
+            return val;
+        }
+        
         double toNumber( jsval v ){
             double d;
             uassert( 10214 ,  "not a number" , JS_ValueToNumber( _context , v , &d ) );
@@ -180,7 +198,7 @@ namespace mongo {
             return oid;
         }
 
-        BSONObj toObject( JSObject * o ){
+        BSONObj toObject( JSObject * o , int depth = 0){
             if ( ! o )
                 return BSONObj();
 
@@ -204,9 +222,11 @@ namespace mongo {
 
             if ( ! appendSpecialDBObject( this , b , "value" , OBJECT_TO_JSVAL( o ) , o ) ){
 
-                jsval theid = getProperty( o , "_id" );
-                if ( ! JSVAL_IS_VOID( theid ) ){
-                    append( b , "_id" , theid );
+                if ( depth == 0 ){
+                    jsval theid = getProperty( o , "_id" );
+                    if ( ! JSVAL_IS_VOID( theid ) ){
+                        append( b , "_id" , theid , EOO , depth + 1 );
+                    }
                 }
                 
                 JSIdArray * properties = JS_Enumerate( _context , o );
@@ -217,10 +237,10 @@ namespace mongo {
                     jsval nameval;
                     assert( JS_IdToValue( _context ,id , &nameval ) );
                     string name = toString( nameval );
-                    if ( name == "_id" )
+                    if ( depth == 0 && name == "_id" )
                         continue;
                     
-                    append( b , name , getProperty( o , name.c_str() ) , orig[name].type() );
+                    append( b , name , getProperty( o , name.c_str() ) , orig[name].type() , depth + 1 );
                 }
 
                 JS_DestroyIdArray( _context , properties );
@@ -254,7 +274,7 @@ namespace mongo {
             b.appendRegex( name.c_str() , s.substr( 0 , end ).c_str() , s.substr( end + 1 ).c_str() );
         }
 
-        void append( BSONObjBuilder& b , string name , jsval val , BSONType oldType = EOO  ){
+        void append( BSONObjBuilder& b , string name , jsval val , BSONType oldType = EOO , int depth=0 ){
             //cout << "name: " << name << "\t" << typeString( val ) << " oldType: " << oldType << endl;
             switch ( JS_TypeOfValue( _context , val ) ){
 
@@ -278,7 +298,7 @@ namespace mongo {
                     b.appendNull( name.c_str() );
                 }
                 else if ( ! appendSpecialDBObject( this , b , name , val , o ) ){
-                    BSONObj sub = toObject( o );
+                    BSONObj sub = toObject( o , depth );
                     if ( JS_IsArrayObject( _context , o ) ){
                         b.appendArray( name.c_str() , sub );
                     }
@@ -389,12 +409,12 @@ namespace mongo {
                 paramString = trim( paramString );
             }
             
-            const char ** paramArray = new const char*[params.size()];
+            boost::scoped_array<const char *> paramArray (new const char*[params.size()]);
             for ( size_t i=0; i<params.size(); i++ )
                 paramArray[i] = params[i].c_str();
             
-            JSFunction * func = JS_CompileFunction( _context , assoc , fname.str().c_str() , params.size() , paramArray , code.c_str() , strlen( code.c_str() ) , "nofile_b" , 0 );
-            delete paramArray;
+            JSFunction * func = JS_CompileFunction( _context , assoc , fname.str().c_str() , params.size() , paramArray.get() , code.c_str() , strlen( code.c_str() ) , "nofile_b" , 0 );
+
             if ( ! func ){
                 cout << "compile failed for: " << raw << endl;
                 return 0;
@@ -444,13 +464,12 @@ namespace mongo {
             static string ref = "$ref";
             if ( ref == obj->firstElement().fieldName() ){
                 JSObject * o = JS_NewObject( _context , &dbref_class , NULL, NULL);
-                assert( o );
-                setProperty( o , "$ref" , toval( obj->firstElement() ) );
-                setProperty( o , "$id" , toval( (*obj)["$id"] ) );
+                CHECKNEWOBJECT(o,_context,"toJSObject1");
+                assert( JS_SetPrivate( _context , o , (void*)(new BSONHolder( obj->getOwned() ) ) ) );
                 return o;
             }
             JSObject * o = JS_NewObject( _context , readOnly ? &bson_ro_class : &bson_class , NULL, NULL);
-            assert( o );
+            CHECKNEWOBJECT(o,_context,"toJSObject2");
             assert( JS_SetPrivate( _context , o , (void*)(new BSONHolder( obj->getOwned() ) ) ) );
             return o;
         }
@@ -469,7 +488,6 @@ namespace mongo {
                 return JSVAL_NULL;
             case NumberDouble:
             case NumberInt:
-            case NumberLong:
                 return toval( e.number() );
             case Symbol: // TODO: should we make a special class for this
             case String:
@@ -505,6 +523,7 @@ namespace mongo {
             case jstOID:{
                 OID oid = e.__oid();
                 JSObject * o = JS_NewObject( _context , &object_id_class , 0 , 0 );
+                CHECKNEWOBJECT(o,_context,"jstOID");
                 setProperty( o , "str" , toval( oid.str().c_str() ) );
                 return OBJECT_TO_JSVAL( o );
             }
@@ -553,16 +572,31 @@ namespace mongo {
 
             case Timestamp: {
                 JSObject * o = JS_NewObject( _context , &timestamp_class , 0 , 0 );
+                CHECKNEWOBJECT(o,_context,"Timestamp1");
                 setProperty( o , "t" , toval( (double)(e.timestampTime()) ) );
                 setProperty( o , "i" , toval( (double)(e.timestampInc()) ) );
                 return OBJECT_TO_JSVAL( o );
             }
-
+            case NumberLong: {
+                boost::uint64_t val = (boost::uint64_t)e.numberLong();
+                JSObject * o = JS_NewObject( _context , &numberlong_class , 0 , 0 );
+                CHECKNEWOBJECT(o,_context,"NumberLong1");
+                setProperty( o , "floatApprox" , toval( (double)(boost::int64_t)( val ) ) );                    
+                if ( (boost::int64_t)val != (boost::int64_t)(double)(boost::int64_t)( val ) ) {
+                    // using 2 doubles here instead of a single double because certain double
+                    // bit patterns represent undefined values and sm might trash them
+                    setProperty( o , "top" , toval( (double)(boost::uint32_t)( val >> 32 ) ) );
+                    setProperty( o , "bottom" , toval( (double)(boost::uint32_t)( val & 0x00000000ffffffff ) ) );
+                }
+                return OBJECT_TO_JSVAL( o );                
+            }
             case DBRef: {
                 JSObject * o = JS_NewObject( _context , &dbpointer_class , 0 , 0 );
+                CHECKNEWOBJECT(o,_context,"DBRef1");
                 setProperty( o , "ns" , toval( e.dbrefNS() ) );
 
                 JSObject * oid = JS_NewObject( _context , &object_id_class , 0 , 0 );
+                CHECKNEWOBJECT(oid,_context,"DBRef2");
                 setProperty( oid , "str" , toval( e.dbrefOID().str().c_str() ) );
 
                 setProperty( o , "id" , OBJECT_TO_JSVAL( oid ) );
@@ -570,9 +604,10 @@ namespace mongo {
             }
             case BinData:{
                 JSObject * o = JS_NewObject( _context , &bindata_class , 0 , 0 );
+                CHECKNEWOBJECT(o,_context,"Bindata_BinData1");
                 int len;
-                void * data = (void*)e.binData( len );
-                assert( JS_SetPrivate( _context , o , data ) );
+                const char * data = e.binData( len );
+                assert( JS_SetPrivate( _context , o , new BinDataHolder( data ) ) );
 
                 setProperty( o , "len" , toval( len ) );
                 setProperty( o , "type" , toval( (int)e.binDataType() ) );
@@ -753,6 +788,8 @@ namespace mongo {
     JSBool mark_modified( JSContext *cx, JSObject *obj, jsval idval, jsval *vp){
         Convertor c(cx);
         BSONHolder * holder = GETHOLDER( cx , obj );
+        if ( !holder ) // needed when we're messing with DBRef.prototype
+            return JS_TRUE;
         if ( holder->_inResolve )
             return JS_TRUE;
         holder->_modified = true;
@@ -812,7 +849,15 @@ namespace mongo {
             
             a = args.obj();
         }
-        BSONObj out = func( a );
+        
+        BSONObj out;
+        try {
+            out = func( a );
+        }
+        catch ( std::exception& e ){
+            JS_ReportError( cx , e.what() );
+            return JS_FALSE;
+        }
         
         if ( out.isEmpty() ){
             *rval = JSVAL_VOID;
@@ -1346,6 +1391,7 @@ namespace mongo {
         }
 
         virtual void gc(){
+            smlock;
             JS_GC( _context );
         }
 
@@ -1382,7 +1428,7 @@ namespace mongo {
         stringstream ss;
         ss << "JS Error: " << message;
 
-        if ( report ){
+        if ( report && report->filename ){
             ss << " " << report->filename << ":" << report->lineno;
         }
 

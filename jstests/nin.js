@@ -29,6 +29,7 @@ doTest = function( n ) {
     assert.eq( 4, t.find( { a: { $nin: [ 9 ] } } ).count() , n + " G" );
     assert.eq( 4, t.find( { a: { $nin: [ 3 ] } } ).count() , n + " H" );
     assert.eq( 3, t.find( { a: { $nin: [ 2, 3 ] } } ).count() , n + " I" );
+    assert.eq( 1, t.find( { a: { $ne: 8, $nin: [ 2, 3 ] } } ).count() , n + " I2" );
     
     checkEqual( n + " A" , "a" , 5 );
 
@@ -43,7 +44,7 @@ doTest = function( n ) {
     checkEqual( n + " C" , "a.b" , 5 );
 
     assert.eq( 7, t.find( { 'a.b': { $nin: [ 10 ] } } ).count() , n + " L" );
-    assert.eq( 8, t.find( { 'a.b': { $nin: [ [ 10, 11 ] ] } } ).count() , n + " M" );
+    assert.eq( 7, t.find( { 'a.b': { $nin: [ [ 10, 11 ] ] } } ).count() , n + " M" );
     assert.eq( 7, t.find( { a: { $nin: [ 11 ] } } ).count() , n + " N" );
 
     t.save( { a: { b: [ 20, 30 ] } } );

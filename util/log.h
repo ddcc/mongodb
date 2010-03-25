@@ -18,6 +18,7 @@
 #pragma once
 
 #include <string.h>
+#include <errno.h>
 
 namespace mongo {
 
@@ -117,7 +118,7 @@ namespace mongo {
 #define LOGIT { ss << x; return *this; }
 
     class Logstream : public Nullstream {
-        static boost::mutex &mutex;
+        static mongo::mutex mutex;
         static int doneSetup;
         stringstream ss;
     public:
@@ -127,7 +128,7 @@ namespace mongo {
         void flush() {
             // this ensures things are sane
             if ( doneSetup == 1717 ){
-                boostlock lk(mutex);
+                scoped_lock lk(mutex);
                 cout << ss.str();
                 cout.flush();
             }
@@ -243,5 +244,7 @@ namespace mongo {
 
 #define OUTPUT_ERRNOX(x) "errno:" << x << " " << strerror(x) 
 #define OUTPUT_ERRNO OUTPUT_ERRNOX(errno)
+
+    string errnostring( const char * prefix = 0 );
 
 } // namespace mongo

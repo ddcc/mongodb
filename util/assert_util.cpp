@@ -22,6 +22,26 @@
 
 namespace mongo {
 
+    AssertionCount assertionCount;
+    
+    AssertionCount::AssertionCount()
+        : regular(0),warning(0),msg(0),user(0),rollovers(0){
+    }
+
+    void AssertionCount::rollover(){
+        rollovers++;
+        regular = 0;
+        warning = 0;
+        msg = 0;
+        user = 0;
+    }
+
+    void AssertionCount::condrollover( int newvalue ){
+        static int max = (int)pow( 2.0 , 30 );
+        if ( newvalue >= max )
+            rollover();
+    }
+    
 	string getDbContext();
 	
 	Assertion lastAssert[4];
@@ -32,9 +52,11 @@ namespace mongo {
         sayDbContext();
         raiseError(0,msg && *msg ? msg : "wassertion failure");
         lastAssert[1].set(msg, getDbContext().c_str(), file, line);
+        assertionCount.condrollover( ++assertionCount.warning );
     }
 
     void asserted(const char *msg, const char *file, unsigned line) {
+        assertionCount.condrollover( ++assertionCount.regular );
         problem() << "Assertion failure " << msg << ' ' << file << ' ' << dec << line << endl;
         sayDbContext();
         raiseError(0,msg && *msg ? msg : "assertion failure");
@@ -54,6 +76,7 @@ namespace mongo {
 
     int uacount = 0;
     void uasserted(int msgid, const char *msg) {
+        assertionCount.condrollover( ++assertionCount.user );
         if ( ++uacount < 100 )
             log() << "User Exception " << msgid << ":" << msg << endl;
         else
@@ -64,6 +87,7 @@ namespace mongo {
     }
 
     void msgasserted(int msgid, const char *msg) {
+        assertionCount.condrollover( ++assertionCount.warning );
         log() << "Assertion: " << msgid << ":" << msg << endl;
         lastAssert[2].set(msg, getDbContext().c_str(), "", 0);
         raiseError(msgid,msg && *msg ? msg : "massert failure");
@@ -72,13 +96,22 @@ namespace mongo {
         throw MsgAssertionException(msgid, msg);
     }
 
-    boost::mutex *Assertion::_mutex = new boost::mutex();
+    void streamNotGood( int code , string msg , std::ios& myios ){
+        stringstream ss;
+        // errno might not work on all systems for streams
+        // if it doesn't for a system should deal with here
+        ss << msg << " stream invalie: " << OUTPUT_ERRNO;
+        throw UserException( code , ss.str() );
+    }
+    
+    
+    mongo::mutex *Assertion::_mutex = new mongo::mutex();
 
     string Assertion::toString() {
         if( _mutex == 0 )
             return "";
 
-        boostlock lk(*_mutex);
+        scoped_lock lk(*_mutex);
 
         if ( !isSet() )
             return "";
@@ -166,5 +199,14 @@ namespace mongo {
     void rotateLogs( int signal ){
         loggingManager.rotate();
     }
+
+    string errnostring( const char * prefix ){
+        stringstream ss;
+        if ( prefix )
+            ss << prefix << ": ";
+        ss << OUTPUT_ERRNO;
+        return ss.str();
+    }
+
 }
 

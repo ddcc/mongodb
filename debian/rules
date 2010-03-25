@@ -44,7 +44,10 @@ clean:
 	dh_testroot
 	rm -f build-stamp configure-stamp
 
-	scons -c
+	# FIXME: scons freaks out at the presence of target files
+	# under debian/mongodb.
+	#scons -c
+	rm -rf $(CURDIR)/debian/mongodb
 	rm -f config.log
 	rm -f mongo
 	rm -f mongod
@@ -71,6 +74,8 @@ install: build
 	dh_installdirs
 
 	scons --prefix=$(CURDIR)/debian/mongodb/usr install
+	mkdir -p $(CURDIR)/debian/mongodb/etc
+	cp $(CURDIR)/debian/mongodb.conf $(CURDIR)/debian/mongodb/etc/mongodb.conf 
 
 	mkdir -p $(CURDIR)/debian/mongodb/usr/share/lintian/overrides/
 	install -m 644 $(CURDIR)/debian/lintian-overrides \

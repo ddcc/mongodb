@@ -15,8 +15,9 @@
  *    limitations under the License.
  */
 
+#include "../stdafx.h"
 #include "processinfo.h"
-
+#include "log.h"
 
 
 #include <mach/task_info.h>
@@ -28,6 +29,9 @@
 #include <mach/vm_map.h>
 #include <mach/shared_memory_server.h>
 #include <iostream>
+
+#include <sys/types.h>
+#include <sys/mman.h>
 
 using namespace std;
 
@@ -63,7 +67,7 @@ namespace mongo {
             cout << "error getting task_info: " << result << endl;
             return 0;
         }
-        return (int)((double)ti.virtual_size / (1024.0 * 1024 * 2 ) );
+        return (int)((double)ti.virtual_size / (1024.0 * 1024 ) );
     }
     
     int ProcessInfo::getResidentSize(){
@@ -91,5 +95,23 @@ namespace mongo {
     }
 
     void ProcessInfo::getExtraInfo(BSONObjBuilder& info) {}
+
+    bool ProcessInfo::blockCheckSupported(){
+        return true;
+    }
+    
+    bool ProcessInfo::blockInMemory( char * start ){
+        static long pageSize = 0;
+        if ( pageSize == 0 ){
+            pageSize = sysconf( _SC_PAGESIZE );
+        }
+        start = start - ( (unsigned long long)start % pageSize );
+        char x = 0;
+        if ( mincore( start , 128 , &x ) ){
+            log() << "mincore failed: " << OUTPUT_ERRNO << endl;
+            return 1;
+        }
+        return x & 0x1;
+    }
 
 }

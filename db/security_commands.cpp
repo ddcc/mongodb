@@ -1,4 +1,20 @@
 // security_commands.cpp
+/*
+ *    Copyright (C) 2010 10gen Inc.
+ *
+ *    This program is free software: you can redistribute it and/or  modify
+ *    it under the terms of the GNU Affero General Public License, version 3,
+ *    as published by the Free Software Foundation.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU Affero General Public License for more details.
+ *
+ *    You should have received a copy of the GNU Affero General Public License
+ *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
 // security.cpp links with both dbgrid and db.  this file db only -- at least for now.
 
 // security.cpp
@@ -39,6 +55,7 @@ namespace mongo {
         virtual bool slaveOk() {
             return true;
         }
+        virtual LockType locktype(){ return NONE; }
         CmdGetNonce() : Command("getnonce") {}
         bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             nonce *n = new nonce(security.getNonce());
@@ -58,12 +75,12 @@ namespace mongo {
         virtual bool slaveOk() {
             return true;
         }
+        virtual LockType locktype(){ return NONE; }
         CmdLogout() : Command("logout") {}
         bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             // database->name is the one we are logging out...
-            Client& client = cc();
-            AuthenticationInfo *ai = client.ai;
-            ai->logout(client.database()->name.c_str());
+            AuthenticationInfo *ai = cc().getAuthenticationInfo();
+            ai->logout(nsToDatabase(ns));
             return true;
         }
     } cmdLogout;
@@ -77,6 +94,7 @@ namespace mongo {
         virtual bool slaveOk() {
             return true;
         }
+        virtual LockType locktype(){ return WRITE; } // TODO: make this READ
         CmdAuthenticate() : Command("authenticate") {}
         bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             log(1) << " authenticate: " << cmdObj << endl;
@@ -88,7 +106,7 @@ namespace mongo {
             if( user.empty() || key.empty() || received_nonce.empty() ) { 
                 log() << "field missing/wrong type in received authenticate command " 
                     << cc().database()->name
-                    << '\n';               
+                    << endl;               
                 errmsg = "auth fails";
                 sleepmillis(10);
                 return false;
@@ -107,7 +125,7 @@ namespace mongo {
                 }
                     
                 if ( reject ) {
-                    log() << "auth: bad nonce received or getnonce not called. could be a driver bug or a security attack. db:" << cc().database()->name << '\n';
+                    log() << "auth: bad nonce received or getnonce not called. could be a driver bug or a security attack. db:" << cc().database()->name << endl;
                     errmsg = "auth fails";
                     sleepmillis(30);
                     return false;
@@ -124,7 +142,7 @@ namespace mongo {
                 b << "user" << user;
                 BSONObj query = b.done();
                 if( !Helpers::findOne(systemUsers.c_str(), query, userObj) ) { 
-                    log() << "auth: couldn't find user " << user << ", " << systemUsers << '\n';
+                    log() << "auth: couldn't find user " << user << ", " << systemUsers << endl;
                     errmsg = "auth fails";
                     return false;
                 }
@@ -146,13 +164,24 @@ namespace mongo {
             string computed = digestToString( d );
             
             if ( key != computed ){
-                log() << "auth: key mismatch " << user << ", ns:" << ns << '\n';
+                log() << "auth: key mismatch " << user << ", ns:" << ns << endl;
                 errmsg = "auth fails";
                 return false;
             }
 
-            AuthenticationInfo *ai = currentClient.get()->ai;
-            ai->authorize(cc().database()->name.c_str());
+            AuthenticationInfo *ai = cc().getAuthenticationInfo();
+            
+            if ( userObj[ "readOnly" ].isBoolean() && userObj[ "readOnly" ].boolean() ) {
+                if ( readLockSupported() ){
+                    ai->authorizeReadOnly( cc().database()->name.c_str() );
+                }
+                else {
+                    log() << "warning: old version of boost, read-only users not supported" << endl;
+                    ai->authorize( cc().database()->name.c_str() );
+                }
+            } else {
+                ai->authorize( cc().database()->name.c_str() );
+            }
             return true;
         }
     } cmdAuthenticate;

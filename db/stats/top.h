@@ -23,15 +23,80 @@
 
 namespace mongo {
 
+    /**
+     * tracks usage by collection
+     */
+    class Top {
+
+    public:
+        class UsageData {
+        public:
+            UsageData() : time(0) , count(0){}
+            UsageData( const UsageData& older , const UsageData& newer );
+            long long time;
+            long long count;
+
+            void inc( long long micros ){
+                count++;
+                time += micros;
+            }
+        };
+
+        class CollectionData {
+        public:
+            /**
+             * constructs a diff
+             */
+            CollectionData(){}
+            CollectionData( const CollectionData& older , const CollectionData& newer );
+            
+            UsageData total;
+            
+            UsageData readLock;
+            UsageData writeLock;
+
+            UsageData queries;
+            UsageData getmore;
+            UsageData insert;
+            UsageData update;
+            UsageData remove;
+            UsageData commands;
+        };
+
+        typedef map<string,CollectionData> UsageMap;
+        
+    public:
+        void record( const string& ns , int op , int lockType , long long micros , bool command );
+        void append( BSONObjBuilder& b );
+        void cloneMap(UsageMap& out);
+        CollectionData getGlobalData(){ return _global; }
+        void collectionDropped( const string& ns );
+
+    public: // static stuff
+        static Top global;
+        
+        void append( BSONObjBuilder& b , const char * name , const UsageData& map );
+        void append( BSONObjBuilder& b , const UsageMap& map );
+        
+    private:
+        
+        void _record( CollectionData& c , int op , int lockType , long long micros , bool command );
+
+        mongo::mutex _lock;
+        CollectionData _global;
+        UsageMap _usage;
+        string _lastDropped;
+    };
+
     /* Records per namespace utilization of the mongod process.
        No two functions of this class may be called concurrently.
     */
-    class Top {
+    class TopOld {
         typedef boost::posix_time::ptime T;
         typedef boost::posix_time::time_duration D;
         typedef boost::tuple< D, int, int, int > UsageData;
     public:
-        Top() : _read(false), _write(false) { }
+        TopOld() : _read(false), _write(false) { }
         
         /* these are used to record activity: */
         
@@ -52,7 +117,7 @@ namespace mongo {
             D d = currentTime() - _currentStart;
 
             {
-                boostlock L(topMutex);
+                scoped_lock L(topMutex);
                 recordUsage( _current, d );
             }
 
@@ -71,7 +136,7 @@ namespace mongo {
         };
 
         static void usage( vector< Usage > &res ) {
-            boostlock L(topMutex);
+            scoped_lock L(topMutex);
 
             // Populate parent namespaces
             UsageMap snapshot;
@@ -109,7 +174,7 @@ namespace mongo {
         }
 
         static void completeSnapshot() {
-            boostlock L(topMutex);
+            scoped_lock L(topMutex);
 
             if ( &_snapshot == &_snapshotA ) {
                 _snapshot = _snapshotB;
@@ -124,7 +189,7 @@ namespace mongo {
         }
 
     private:
-        static boost::mutex topMutex;
+        static mongo::mutex topMutex;
         static bool trivialNs( const char *ns ) {
             const char *ret = strrchr( ns, '.' );
             return ret && ret[ 1 ] == '\0';

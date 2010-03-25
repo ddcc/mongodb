@@ -20,7 +20,7 @@
 
 #include "../stdafx.h"
 #include "jsobj.h"
-#include "storage.h"
+#include "diskloc.h"
 #include "pdfile.h"
 
 namespace mongo {
@@ -28,8 +28,8 @@ namespace mongo {
 #pragma pack(1)
 
     struct _KeyNode {
-        DiskLoc prevChildBucket;
-        DiskLoc recordLoc;
+        DiskLoc prevChildBucket; // the lchild
+        DiskLoc recordLoc; // location of the record associated with the key
         short keyDataOfs() const {
             return (short) _kdo;
         }
@@ -53,10 +53,10 @@ namespace mongo {
             */
             recordLoc.GETOFS() |= 1;
         }
-        int isUnused() {
+        int isUnused() const {
             return recordLoc.getOfs() & 1;
         }
-        int isUsed() {
+        int isUsed() const {
             return !isUnused();
         }
     };
@@ -85,12 +85,17 @@ namespace mongo {
         bool isHead() { return parent.isNull(); }
         void assertValid(const BSONObj &order, bool force = false);
         int fullValidate(const DiskLoc& thisLoc, const BSONObj &order); /* traverses everything */
-    protected:
-        void modified(const DiskLoc& thisLoc);
+
         KeyNode keyNode(int i) const {
-            assert( i < n );
+            if ( i >= n ){
+                massert( 13000 , (string)"invalid keyNode: " +  BSON( "i" << i << "n" << n ).jsonString() , i < n );
+            }
             return KeyNode(*this, k(i));
         }
+
+    protected:
+
+        void modified(const DiskLoc& thisLoc);
 
         char * dataAt(short ofs) {
             return data + ofs;
@@ -151,6 +156,10 @@ namespace mongo {
             ss << "    emptySize: " << emptySize << " topSize: " << topSize << endl;
             return ss.str();
         }
+        
+        bool isUsed( int i ) const {
+            return k(i).isUsed();
+        }
 
     protected:
         void _shape(int level, stringstream&);
@@ -184,7 +193,13 @@ namespace mongo {
         */
         bool exists(const IndexDetails& idx, DiskLoc thisLoc, const BSONObj& key, BSONObj order);
 
+        bool wouldCreateDup(
+            const IndexDetails& idx, DiskLoc thisLoc, 
+            const BSONObj& key, BSONObj order,
+            DiskLoc self); 
+
         static DiskLoc addBucket(IndexDetails&); /* start a new index off, empty */
+        void deallocBucket(const DiskLoc &thisLoc); // clear bucket memory, placeholder for deallocation
         
         static void renameIndexNamespace(const char *oldNs, const char *newNs);
 
@@ -256,6 +271,7 @@ namespace mongo {
 
         virtual void noteLocation(); // updates keyAtKeyOfs...
         virtual void checkLocation();
+        virtual bool supportGetMore() { return true; }
 
         /* used for multikey index traversal to avoid sending back dups. see Matcher::matches().
            if a multikey index traversal:
@@ -318,15 +334,20 @@ namespace mongo {
             return key.replaceFieldNames( indexDetails.keyPattern() ).clientReadable();
         }
 
-        virtual BSONObj prettyStartKey() const {
-            return prettyKey( startKey );
-        }
-        virtual BSONObj prettyEndKey() const {
-            return prettyKey( endKey );
+        virtual BSONObj prettyIndexBounds() const {
+            BSONArrayBuilder ba;
+            if ( bounds_.size() == 0 ) {
+                ba << BSON_ARRAY( prettyKey( startKey ) << prettyKey( endKey ) );
+            } else {
+                for( BoundList::const_iterator i = bounds_.begin(); i != bounds_.end(); ++i ) {
+                    ba << BSON_ARRAY( prettyKey( i->first ) << prettyKey( i->second ) );
+                }
+            }
+            return ba.arr();
         }
         
         void forgetEndKey() { endKey = BSONObj(); }
-        
+
     private:
         /* Our btrees may (rarely) have "unused" keys when items are deleted.
            Skip past them.
@@ -362,12 +383,16 @@ namespace mongo {
         DiskLoc locAtKeyOfs;
         BoundList bounds_;
         unsigned boundIndex_;
+        const IndexSpec& _spec;
     };
 
 #pragma pack()
 
     inline bool IndexDetails::hasKey(const BSONObj& key) { 
         return head.btree()->exists(*this, head, key, keyPattern());
+    }
+    inline bool IndexDetails::wouldCreateDup(const BSONObj& key, DiskLoc self) { 
+        return head.btree()->wouldCreateDup(*this, head, key, keyPattern(), self);
     }
 
     /* build btree from the bottom up */

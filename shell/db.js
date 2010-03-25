@@ -20,6 +20,10 @@ DB.prototype.getName = function(){
     return this._name;
 }
 
+DB.prototype.stats = function(){
+    return this.runCommand( { dbstats : 1 } );
+}
+
 DB.prototype.getCollection = function( name ){
     return new DBCollection( this._mongo , this , name , this._name + "." + name );
 }
@@ -48,10 +52,12 @@ DB.prototype._adminCommand = function( obj ){
     return this.getSisterDB( "admin" ).runCommand( obj );
 }
 
-DB.prototype.addUser = function( username , pass ){
+DB.prototype.addUser = function( username , pass, readOnly ){
+    readOnly = readOnly || false;
     var c = this.getCollection( "system.users" );
     
     var u = c.findOne( { user : username } ) || { user : username };
+    u.readOnly = readOnly;
     u.pwd = hex_md5( username + ":mongo:" + pass );
     print( tojson( u ) );
 
@@ -62,6 +68,10 @@ DB.prototype.removeUser = function( username ){
     this.getCollection( "system.users" ).remove( { user : username } );
 }
 
+DB.prototype.__pwHash = function( nonce, username, pass ) {
+    return hex_md5( nonce + username + hex_md5( username + ":mongo:" + pass ) );
+}
+
 DB.prototype.auth = function( username , pass ){
     var n = this.runCommand( { getnonce : 1 } );
 
@@ -70,7 +80,7 @@ DB.prototype.auth = function( username , pass ){
             authenticate : 1 , 
             user : username , 
             nonce : n.nonce , 
-            key : hex_md5( n.nonce + username + hex_md5( username + ":mongo:" + pass ) )
+            key : this.__pwHash( n.nonce, username, pass )
         }
     );
 
@@ -219,12 +229,16 @@ DB.prototype.cloneCollection = function(from, collection, query) {
   * @return Object returned has member ok set to true if operation succeeds, false otherwise.
   * See also: db.clone()
 */
-DB.prototype.copyDatabase = function(fromdb, todb, fromhost) { 
+DB.prototype.copyDatabase = function(fromdb, todb, fromhost, username, password) { 
     assert( isString(fromdb) && fromdb.length );
     assert( isString(todb) && todb.length );
     fromhost = fromhost || "";
-    //this.resetIndexCache();
-    return this._adminCommand( { copydb:1, fromhost:fromhost, fromdb:fromdb, todb:todb } );
+    if ( username && password ) {
+        var n = this._adminCommand( { copydbgetnonce : 1, fromhost:fromhost } );
+        return this._adminCommand( { copydb:1, fromhost:fromhost, fromdb:fromdb, todb:todb, username:username, nonce:n.nonce, key:this.__pwHash( n.nonce, username, password ) } );
+    } else {
+        return this._adminCommand( { copydb:1, fromhost:fromhost, fromdb:fromdb, todb:todb } );
+    }
 }
 
 /**
@@ -239,7 +253,7 @@ DB.prototype.repairDatabase = function() {
 
 DB.prototype.help = function() {
     print("DB methods:");
-    print("\tdb.addUser(username, password)");
+    print("\tdb.addUser(username, password[, readOnly=false])");
     print("\tdb.auth(username, password)");
     print("\tdb.cloneDatabase(fromhost)");
     print("\tdb.commandHelp(name) returns the help for the command");
@@ -268,8 +282,10 @@ DB.prototype.help = function() {
     print("\tdb.repairDatabase()");
     print("\tdb.resetError()");
     print("\tdb.runCommand(cmdObj) run a database command.  if cmdObj is a string, turns it into { cmdObj : 1 }");
+    print("\tdb.serverStatus()");
     print("\tdb.setProfilingLevel(level,<slowms>) 0=off 1=slow 2=all");
     print("\tdb.shutdownServer()");
+    print("\tdb.stats()");
     print("\tdb.version() current version of the server" );
 }
 
@@ -490,7 +506,7 @@ DB.prototype.getCollectionNames = function(){
         function(z){
             var name = z.name;
             
-            if ( name.indexOf( "$" ) >= 0 )
+            if ( name.indexOf( "$" ) >= 0 && name != "local.oplog.$main" )
                 return;
             
             all.push( name.substring( nsLength ) );

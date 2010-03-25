@@ -164,9 +164,12 @@ namespace mongo {
         _loadedVersion = _lastVersion;
 
         string coll = _localDBName + ".system.js";
-
+        
         static DBClientBase * db = createDirectClient();
         auto_ptr<DBClientCursor> c = db->query( coll , Query() );
+        
+        set<string> thisTime;
+        
         while ( c->more() ){
             BSONObj o = c->next();
 
@@ -177,6 +180,26 @@ namespace mongo {
             uassert( 10210 ,  "value has to be set" , v.type() != EOO );
             
             setElement( n.valuestr() , v );
+
+            thisTime.insert( n.valuestr() );
+            _storedNames.insert( n.valuestr() );
+            
+        }
+
+        // --- remove things from scope that were removed
+
+        list<string> toremove;
+
+        for ( set<string>::iterator i=_storedNames.begin(); i!=_storedNames.end(); i++ ){
+            string n = *i;
+            if ( thisTime.count( n ) == 0 )
+                toremove.push_back( n );
+        }
+        
+        for ( list<string>::iterator i=toremove.begin(); i!=toremove.end(); i++ ){
+            string n = *i;
+            _storedNames.erase( n );
+            execSetup( (string)"delete " + n , "clean up scope" );
         }
 
     }
@@ -220,7 +243,7 @@ namespace mongo {
         }
 
         void done( const string& pool , Scope * s ){
-            boostlock lk( _mutex );
+            scoped_lock lk( _mutex );
             list<Scope*> & l = _pools[pool];
             if ( l.size() > 10 ){
                 delete s;
@@ -232,7 +255,7 @@ namespace mongo {
         }
         
         Scope * get( const string& pool ){
-            boostlock lk( _mutex );
+            scoped_lock lk( _mutex );
             list<Scope*> & l = _pools[pool];
             if ( l.size() == 0 )
                 return 0;
@@ -260,7 +283,7 @@ namespace mongo {
 
     private:
         PoolToScopes _pools;
-        boost::mutex _mutex;
+        mongo::mutex _mutex;
         int _magic;
     };
 
@@ -395,5 +418,8 @@ namespace mongo {
         }
     }
     
+    void ( *ScriptEngine::_connectCallback )( DBClientWithCommands & ) = 0;
+    
     ScriptEngine * globalScriptEngine;
 }
+    

@@ -22,8 +22,6 @@
 
 namespace mongo {
 
-    CmdLine cmdLine;
-
     const char * curNs = "in client mode";
 
     bool dbexitCalled = false;
@@ -41,12 +39,21 @@ namespace mongo {
         return dbexitCalled;
     }
 
+    void setupSignals(){
+        // maybe should do SIGPIPE here, not sure
+    }
+
     string getDbContext() {
         return "in client only mode";
     }
 
     bool haveLocalShardingInfo( const string& ns ){
         return false;
+    }
+
+    DBClientBase * createDirectClient(){
+        uassert( 10256 ,  "no createDirectClient in clientOnly" , 0 );
+        return 0;
     }
 /*
     auto_ptr<CursorIterator> Helpers::find( const char *ns , BSONObj query , bool requireIndex ){

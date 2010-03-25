@@ -21,7 +21,7 @@
 #include "../stdafx.h"
 #include "jsobj.h"
 #include "queryutil.h"
-#include "storage.h"
+#include "diskloc.h"
 #include "../util/hashtab.h"
 #include "../util/mmap.h"
 
@@ -75,6 +75,10 @@ namespace mongo {
         NamespaceString( const char * ns ) { init(ns); }
         NamespaceString( const string& ns ) { init(ns.c_str()); }
 
+        string ns() const { 
+            return db + '.' + coll;
+        }
+
         bool isSystem() { 
             return strncmp(coll.c_str(), "system.", 7) == 0;
         }
@@ -99,6 +103,10 @@ namespace mongo {
             string s = string(buf) + "$extra";
             massert( 10348 , "ns name too long", s.size() < MaxNsLen);
             return s;
+        }
+        bool isExtra() const { 
+            const char *p = strstr(buf, "$extra");
+            return p && p[6] == 0; //==0 important in case an index uses name "$extra_1" for example
         }
 
         void kill() {
@@ -186,6 +194,9 @@ namespace mongo {
 
         BOOST_STATIC_ASSERT( NIndexesMax == NIndexesBase + NIndexesExtra );
 
+        /* called when loaded from disk */
+        void onLoad(const Namespace& k);
+
         NamespaceDetails( const DiskLoc &loc, bool _capped ) {
             /* be sure to initialize new fields here -- doesn't default to zeroes the way we use it */
             firstExtent = lastExtent = capExtent = loc;
@@ -251,6 +262,13 @@ namespace mongo {
         int backgroundIndexBuildInProgress; // 1 if in prog
         char reserved[76];
 
+        /* when a background index build is in progress, we don't count the index in nIndexes until 
+           complete, yet need to still use it in _indexRecord() - thus we use this function for that.
+        */
+        int nIndexesBeingBuilt() const {
+            return nIndexes + backgroundIndexBuildInProgress;
+        }
+
         /* NOTE: be careful with flags.  are we manipulating them in read locks?  if so, 
                  this isn't thread safe.  TODO
         */
@@ -263,6 +281,10 @@ namespace mongo {
             if( idxNo < NIndexesBase ) 
                 return _indexes[idxNo];
             return extra()->details[idxNo-NIndexesBase];
+        }
+        IndexDetails& backgroundIdx() { 
+            DEV assert(backgroundIndexBuildInProgress);
+            return idx(nIndexes);
         }
 
         class IndexIterator { 
@@ -324,7 +346,7 @@ namespace mongo {
         /* add a new index.  does not add to system.indexes etc. - just to NamespaceDetails.
            caller must populate returned object. 
          */
-        IndexDetails& addIndex(const char *thisns);
+        IndexDetails& addIndex(const char *thisns, bool resetTransient=true);
 
         void aboutToDeleteAnIndex() {
             flags &= ~Flag_HaveIdIndex;
@@ -410,7 +432,7 @@ namespace mongo {
 
         void checkMigrate();
 
-        long long storageSize();
+        long long storageSize( int * numExtents = 0 );
 
     private:
         bool cappedMayDelete() const {
@@ -450,7 +472,7 @@ namespace mongo {
         static std::map< string, shared_ptr< NamespaceDetailsTransient > > _map;
     public:
         NamespaceDetailsTransient(const char *ns) : _ns(ns), _keysComputed(false), _qcWriteCount(), _cll_enabled() { }
-        /* _get() is not threadsafe */
+        /* _get() is not threadsafe -- see get_inlock() comments */
         static NamespaceDetailsTransient& _get(const char *ns);
         /* use get_w() when doing write operations */
         static NamespaceDetailsTransient& get_w(const char *ns) { 
@@ -484,12 +506,16 @@ namespace mongo {
         /* IndexSpec caching */
     private:
         map<const IndexDetails*,IndexSpec> _indexSpecs;
+        static mongo::mutex _isMutex;
     public:
         const IndexSpec& getIndexSpec( const IndexDetails * details ){
-            DEV assertInWriteLock();
             IndexSpec& spec = _indexSpecs[details];
-            if ( spec.meta.isEmpty() ){
-                spec.reset( details->info );
+            if ( ! spec._finishedInit ){
+                scoped_lock lk(_isMutex);
+                if ( ! spec._finishedInit ){
+                    spec.reset( details );
+                    assert( spec._finishedInit );
+                }
             }
             return spec;
         }
@@ -499,7 +525,7 @@ namespace mongo {
         int _qcWriteCount;
         map< QueryPattern, pair< BSONObj, long long > > _qcCache;
     public:
-        static boost::mutex _qcMutex;
+        static mongo::mutex _qcMutex;
         /* you must be in the qcMutex when calling this (and using the returned val): */
         static NamespaceDetailsTransient& get_inlock(const char *ns) {
             return _get(ns);
@@ -555,9 +581,9 @@ namespace mongo {
         BOOST_STATIC_ASSERT( sizeof(NamespaceDetails::Extra) <= sizeof(NamespaceDetails) );
     public:
         NamespaceIndex(const string &dir, const string &database) :
-        ht( 0 ),
-        dir_( dir ),
-        database_( database ) {}
+          ht( 0 ),
+          dir_( dir ),
+          database_( database ) {}
 
         /* returns true if new db will be created if we init lazily */
         bool exists() const;
@@ -637,6 +663,7 @@ namespace mongo {
 
     private:
         boost::filesystem::path path() const;
+        void maybeMkdir() const;
         
         MemoryMappedFile f;
         HashTable<Namespace,NamespaceDetails> *ht;
@@ -644,7 +671,8 @@ namespace mongo {
         string database_;
     };
 
-    extern string dbpath; // --dbpath parm 
+    extern string dbpath; // --dbpath parm
+    extern bool directoryperdb;
 
     // Rename a namespace within current 'client' db.
     // (Arguments should include db name)

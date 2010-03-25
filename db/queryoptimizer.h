@@ -25,6 +25,8 @@
 namespace mongo {
     
     class IndexDetails;
+    class IndexType;
+
     class QueryPlan : boost::noncopyable {
     public:
         QueryPlan(NamespaceDetails *_d, 
@@ -32,7 +34,8 @@ namespace mongo {
                   const FieldRangeSet &fbs,
                   const BSONObj &order,
                   const BSONObj &startKey = BSONObj(),
-                  const BSONObj &endKey = BSONObj() );
+                  const BSONObj &endKey = BSONObj() ,
+                  string special="" );
 
         /* If true, no other index can do better. */
         bool optimal() const { return optimal_; }
@@ -46,10 +49,11 @@ namespace mongo {
            requested sort order */
         bool unhelpful() const { return unhelpful_; }
         int direction() const { return direction_; }
-        auto_ptr< Cursor > newCursor( const DiskLoc &startLoc = DiskLoc() ) const;
+        auto_ptr< Cursor > newCursor( const DiskLoc &startLoc = DiskLoc() , int numWanted=0 ) const;
         auto_ptr< Cursor > newReverseCursor() const;
         BSONObj indexKey() const;
         const char *ns() const { return fbs_.ns(); }
+        NamespaceDetails *nsd() const { return d; }
         BSONObj query() const { return fbs_.query(); }
         BSONObj simplifiedQuery( const BSONObj& fields = BSONObj() ) const { return fbs_.simplifiedQuery( fields ); }
         const FieldRange &range( const char *fieldName ) const { return fbs_.range( fieldName ); }
@@ -69,6 +73,8 @@ namespace mongo {
         BoundList indexBounds_;
         bool endKeyInclusive_;
         bool unhelpful_;
+        string _special;
+        IndexType * _type;
     };
 
     // Inherit from this interface to implement a new query operation.
@@ -78,11 +84,15 @@ namespace mongo {
     public:
         QueryOp() : complete_(), qp_(), error_() {}
         virtual ~QueryOp() {}
+        
+        /** this gets called after a query plan is set? ERH 2/16/10 */
         virtual void init() = 0;
         virtual void next() = 0;
         virtual bool mayRecordPlan() const = 0;
-        // Return a copy of the inheriting class, which will be run with its own
-        // query plan.
+        
+        /** @return a copy of the inheriting class, which will be run with its own
+                    query plan.
+        */
         virtual QueryOp *clone() const = 0;
         bool complete() const { return complete_; }
         bool error() const { return error_; }
@@ -143,6 +153,7 @@ namespace mongo {
             static void nextOp( QueryOp &op );
         };
         const char *ns;
+        BSONObj query_;
         FieldRangeSet fbs_;
         PlanSet plans_;
         bool mayRecordPlan_;
@@ -153,9 +164,17 @@ namespace mongo {
         bool honorRecordedPlan_;
         BSONObj min_;
         BSONObj max_;
+        string _special;
     };
 
     // NOTE min, max, and keyPattern will be updated to be consistent with the selected index.
     IndexDetails *indexDetailsForRange( const char *ns, string &errmsg, BSONObj &min, BSONObj &max, BSONObj &keyPattern );
+
+    inline bool isSimpleIdQuery( const BSONObj& query ){
+        return 
+            strcmp( query.firstElement().fieldName() , "_id" ) == 0 && 
+            query.nFields() == 1 && 
+            query.firstElement().isSimpleType();
+    }
         
 } // namespace mongo

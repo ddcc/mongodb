@@ -25,11 +25,15 @@ namespace mongo {
     class BSONObj;
     class BSONObjBuilder;
     class BufBuilder;
-    
+    class Client;
+
 // db "commands" (sent via db.$cmd.findOne(...))
 // subclass to make a command.
     class Command {
     public:
+        
+        enum LockType { READ = -1 , NONE = 0 , WRITE = 1 };
+
         string name;
 
         /* run the given command
@@ -42,12 +46,12 @@ namespace mongo {
         */
         virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) = 0;
 
-        /* true if a read lock is sufficient 
-		   note: logTheTop() MUST be false if readOnly
+        /* 
+		   note: logTheTop() MUST be false if READ
+           if NONE, can't use Client::Context setup
+                    use with caution
 		 */
-        virtual bool readOnly() { 
-            return false;
-        }
+        virtual LockType locktype() = 0;
 
         /* Return true if only the admin ns has privileges to run this command. */
         virtual bool adminOnly() {
@@ -105,10 +109,11 @@ namespace mongo {
 
     public:
         static bool runAgainstRegistered(const char *ns, BSONObj& jsobj, BSONObjBuilder& anObjBuilder);
-        static bool readOnly( const string& name );
+        static LockType locktype( const string& name );
         static Command * findCommand( const string& name );
     };
 
     bool _runCommands(const char *ns, BSONObj& jsobj, BufBuilder &b, BSONObjBuilder& anObjBuilder, bool fromRepl, int queryOptions);
+
 
 } // namespace mongo
