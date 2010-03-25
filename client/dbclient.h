@@ -21,6 +21,7 @@
 #include "../util/message.h"
 #include "../db/jsobj.h"
 #include "../db/json.h"
+#include <stack>
 
 namespace mongo {
 
@@ -205,6 +206,13 @@ namespace mongo {
 		/** If true, safe to call next().  Requests more from server if necessary. */
         bool more();
 
+        /** If true, there is more in our local buffers to be fetched via next(). Returns 
+            false when a getMore request back to server would be required.  You can use this 
+            if you want to exhaust whatever data has been fetched to the client already but 
+            then perhaps stop.
+        */
+        bool moreInCurrentBatch() { return !_putBack.empty() || pos < nReturned; }
+
         /** next
 		   @return next object in the result cursor.
            on an error at the remote server, you will get back:
@@ -212,6 +220,11 @@ namespace mongo {
            if you do not want to handle that yourself, call nextSafe().
         */
         BSONObj next();
+        
+        /** 
+            restore an object previously returned by next() to the cursor
+         */
+        void putBack( const BSONObj &o ) { _putBack.push( o.getOwned() ); }
 
 		/** throws AssertionException if get back { $err : ... } */
         BSONObj nextSafe() {
@@ -246,19 +259,25 @@ namespace mongo {
             return (opts & QueryOption_CursorTailable) != 0;
         }
         
+        /** see QueryResult::ResultFlagType (db/dbmessage.h) for flag values 
+            mostly these flags are for internal purposes - 
+            ResultFlag_ErrSet is the possible exception to that
+        */
         bool hasResultFlag( int flag ){
             return (resultFlags & flag) != 0;
         }
-    public:
+
         DBClientCursor( DBConnector *_connector, const string &_ns, BSONObj _query, int _nToReturn,
-                        int _nToSkip, const BSONObj *_fieldsToReturn, int queryOptions ) :
+                        int _nToSkip, const BSONObj *_fieldsToReturn, int queryOptions , int bs ) :
                 connector(_connector),
                 ns(_ns),
                 query(_query),
                 nToReturn(_nToReturn),
+                haveLimit( _nToReturn > 0 && !(queryOptions & QueryOption_CursorTailable)),
                 nToSkip(_nToSkip),
                 fieldsToReturn(_fieldsToReturn),
                 opts(queryOptions),
+                batchSize(bs),
                 m(new Message()),
                 cursorId(),
                 nReturned(),
@@ -271,6 +290,7 @@ namespace mongo {
                 connector(_connector),
                 ns(_ns),
                 nToReturn( _nToReturn ),
+                haveLimit( _nToReturn > 0 && !(options & QueryOption_CursorTailable)),
                 opts( options ),
                 m(new Message()),
                 cursorId( _cursorId ),
@@ -290,14 +310,20 @@ namespace mongo {
         void decouple() { _ownCursor = false; }
         
     private:
+        
+        int nextBatchSize();
+
         DBConnector *connector;
         string ns;
         BSONObj query;
         int nToReturn;
+        bool haveLimit;
         int nToSkip;
         const BSONObj *fieldsToReturn;
         int opts;
+        int batchSize;
         auto_ptr<Message> m;
+        stack< BSONObj > _putBack;
 
         int resultFlags;
         long long cursorId;
@@ -315,7 +341,7 @@ namespace mongo {
     class DBClientInterface : boost::noncopyable {
     public:
         virtual auto_ptr<DBClientCursor> query(const string &ns, Query query, int nToReturn = 0, int nToSkip = 0,
-                                               const BSONObj *fieldsToReturn = 0, int queryOptions = 0) = 0;
+                                               const BSONObj *fieldsToReturn = 0, int queryOptions = 0 , int batchSize = 0 ) = 0;
 
         virtual auto_ptr<DBClientCursor> getMore( const string &ns, long long cursorId, int nToReturn = 0, int options = 0 ) = 0;
         
@@ -343,7 +369,6 @@ namespace mongo {
        Basically just invocations of connection.$cmd.findOne({...});
     */
     class DBClientWithCommands : public DBClientInterface {
-        bool isOk(const BSONObj&);
         set<string> _seenIndexes;
     public:
 
@@ -365,7 +390,7 @@ namespace mongo {
 			       set.
 			@return true if the command returned "ok".
         */
-        bool runCommand(const string &dbname, const BSONObj& cmd, BSONObj &info, int options=0);
+        virtual bool runCommand(const string &dbname, const BSONObj& cmd, BSONObj &info, int options=0);
 
         /** Authorize access to a particular database.
 			Authentication is separate for each database on the server -- you may authenticate for any 
@@ -484,6 +509,7 @@ namespace mongo {
             ProfileOff = 0,
             ProfileSlow = 1, // log very slow (>100ms) operations
             ProfileAll = 2
+            
         };
         bool setDbProfilingLevel(const string &dbname, ProfilingLevel level, BSONObj *info = 0);
         bool getDbProfilingLevel(const string &dbname, ProfilingLevel& level, BSONObj *info = 0);
@@ -638,6 +664,9 @@ namespace mongo {
             return ns.substr( pos + 1 );            
         }
 
+    protected:
+        bool isOk(const BSONObj&);
+
     };
     
     /**
@@ -661,7 +690,7 @@ namespace mongo {
          @throws AssertionException
         */
         virtual auto_ptr<DBClientCursor> query(const string &ns, Query query, int nToReturn = 0, int nToSkip = 0,
-                                               const BSONObj *fieldsToReturn = 0, int queryOptions = 0);
+                                               const BSONObj *fieldsToReturn = 0, int queryOptions = 0 , int batchSize = 0 );
 
         /** @param cursorId id of cursor to retrieve
             @return an handle to a previously allocated cursor
@@ -694,6 +723,13 @@ namespace mongo {
         
         virtual bool isFailed() const = 0;
 
+        static int countCommas( const string& s ){
+            int n = 0;
+            for ( unsigned i=0; i<s.size(); i++ )
+                if ( s[i] == ',' )
+                    n++;
+            return n;
+        }
     };
     
     class DBClientPaired;
@@ -755,9 +791,9 @@ namespace mongo {
         virtual bool auth(const string &dbname, const string &username, const string &pwd, string& errmsg, bool digestPassword = true);
 
         virtual auto_ptr<DBClientCursor> query(const string &ns, Query query, int nToReturn = 0, int nToSkip = 0,
-                                               const BSONObj *fieldsToReturn = 0, int queryOptions = 0) {
+                                               const BSONObj *fieldsToReturn = 0, int queryOptions = 0 , int batchSize = 0 ) {
             checkConnection();
-            return DBClientBase::query( ns, query, nToReturn, nToSkip, fieldsToReturn, queryOptions );
+            return DBClientBase::query( ns, query, nToReturn, nToSkip, fieldsToReturn, queryOptions , batchSize );
         }
 
         /**
@@ -788,7 +824,6 @@ namespace mongo {
             return serverAddress;
         }
 
-    protected:
         virtual bool call( Message &toSend, Message &response, bool assertOk = true );
         virtual void say( Message &toSend );
         virtual void sayPiggyBack( Message &toSend );
@@ -835,7 +870,7 @@ namespace mongo {
         /** throws userassertion "no master found" */
         virtual
         auto_ptr<DBClientCursor> query(const string &ns, Query query, int nToReturn = 0, int nToSkip = 0,
-                                       const BSONObj *fieldsToReturn = 0, int queryOptions = 0);
+                                       const BSONObj *fieldsToReturn = 0, int queryOptions = 0 , int batchSize = 0 );
 
         /** throws userassertion "no master found" */
         virtual

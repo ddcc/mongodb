@@ -20,6 +20,8 @@
 #include "stdafx.h"
 #include "jsobj.h"
 #include "commands.h"
+#include "client.h"
+#include "replset.h"
 
 namespace mongo {
 
@@ -72,9 +74,14 @@ namespace mongo {
                 ok = c->run(ns, jsobj, errmsg, anObjBuilder, false);
             }
 
-            anObjBuilder.append( "ok" , ok ? 1.0 : 0.0 );
+            BSONObj tmp = anObjBuilder.asTempObj();
+            bool have_ok = tmp.hasField("ok");
+            bool have_errmsg = tmp.hasField("errmsg");
+
+            if (!have_ok)
+                anObjBuilder.append( "ok" , ok ? 1.0 : 0.0 );
             
-            if ( !ok ) {
+            if ( !ok && !have_errmsg) {
                 anObjBuilder.append("errmsg", errmsg);
                 uassert_nothrow(errmsg.c_str());
             }
@@ -92,11 +99,12 @@ namespace mongo {
     }
 
 
-    bool Command::readOnly( const string& name ){
+    Command::LockType Command::locktype( const string& name ){
         Command * c = findCommand( name );
         if ( ! c )
-            return false;
-        return c->readOnly();
+            return WRITE;
+        return c->locktype();
     }
+
     
 } // namespace mongo

@@ -18,7 +18,6 @@
 
 #include "../stdafx.h"
 #include "../util/message.h"
-#include "../util/top.h"
 #include "boost/version.hpp"
 #include "concurrency.h"
 #include "pdfile.h"
@@ -47,16 +46,36 @@ namespace mongo {
      */
     class DatabaseHolder {
     public:
+        typedef map<string,Database*> DBs;
+        typedef map<string,DBs> Paths;
+
         DatabaseHolder() : _size(0){
         }
 
-        Database * get( const string& ns , const string& path ){
+        bool isLoaded( const string& ns , const string& path ) const {
             dbMutex.assertAtLeastReadLocked();
-            map<string,Database*>& m = _paths[path];
+            Paths::const_iterator x = _paths.find( path );
+            if ( x == _paths.end() )
+                return false;
+            const DBs& m = x->second;
             
             string db = _todb( ns );
 
-            map<string,Database*>::iterator it = m.find(db);
+            DBs::const_iterator it = m.find(db);
+            return it != m.end();
+        }
+
+        
+        Database * get( const string& ns , const string& path ) const {
+            dbMutex.assertAtLeastReadLocked();
+            Paths::const_iterator x = _paths.find( path );
+            if ( x == _paths.end() )
+                return 0;
+            const DBs& m = x->second;
+            
+            string db = _todb( ns );
+
+            DBs::const_iterator it = m.find(db);
             if ( it != m.end() ) 
                 return it->second;
             return 0;
@@ -64,20 +83,42 @@ namespace mongo {
         
         void put( const string& ns , const string& path , Database * db ){
             dbMutex.assertWriteLocked();
-            map<string,Database*>& m = _paths[path];
+            DBs& m = _paths[path];
             Database*& d = m[_todb(ns)];
             if ( ! d )
                 _size++;
             d = db;
         }
         
+        Database* getOrCreate( const string& ns , const string& path , bool& justCreated ){
+            dbMutex.assertWriteLocked();
+            DBs& m = _paths[path];
+            
+            string dbname = _todb( ns );
+
+            Database* & db = m[dbname];
+            if ( db ){
+                justCreated = false;
+                return db;
+            }
+            
+            log(1) << "Accessing: " << dbname << " for the first time" << endl;
+            db = new Database( dbname.c_str() , justCreated , path );
+            _size++;
+            return db;
+        }
+        
+
+
+
         void erase( const string& ns , const string& path ){
             dbMutex.assertWriteLocked();
-            map<string,Database*>& m = _paths[path];
-            _size -= m.erase( _todb( ns ) );
+            DBs& m = _paths[path];
+            _size -= (int)m.erase( _todb( ns ) );
         }
 
-        bool closeAll( const string& path , BSONObjBuilder& result );
+        /* force - force close even if something underway - use at shutdown */
+        bool closeAll( const string& path , BSONObjBuilder& result, bool force );
 
         int size(){
             return _size;
@@ -86,106 +127,67 @@ namespace mongo {
         /**
          * gets all unique db names, ignoring paths
          */
-        void getAllShortNames( set<string>& all ) const{
+        void getAllShortNames( set<string>& all ) const {
             dbMutex.assertAtLeastReadLocked();
-            for ( map<string, map<string,Database*> >::const_iterator i=_paths.begin(); i!=_paths.end(); i++ ){
-                map<string,Database*> m = i->second;
-                for( map<string,Database*>::const_iterator j=m.begin(); j!=m.end(); j++ ){
+            for ( Paths::const_iterator i=_paths.begin(); i!=_paths.end(); i++ ){
+                DBs m = i->second;
+                for( DBs::const_iterator j=m.begin(); j!=m.end(); j++ ){
                     all.insert( j->first );
                 }
             }
         }
-        
+
     private:
         
-        string _todb( const string& ns ){
+        string _todb( const string& ns ) const {
             size_t i = ns.find( '.' );
             if ( i == string::npos )
                 return ns;
             return ns.substr( 0 , i );
         }
         
-        map<string, map<string,Database*> > _paths;
+        Paths _paths;
         int _size;
         
     };
 
     extern DatabaseHolder dbHolder;
 
-    /* returns true if the database ("database") did not exist, and it was created on this call 
-       path - datafiles directory, if not the default, so we can differentiate between db's of the same
-              name in different places (for example temp ones on repair).
-    */
-    inline bool setClient(const char *ns, const string& path , mongolock *lock ) {
-        if( logLevel > 5 )
-            log() << "setClient: " << ns << endl;
-
-        dbMutex.assertAtLeastReadLocked();
-
-        Client& c = cc();
-        c.top.clientStart( ns );
-
-        Database * db = dbHolder.get( ns , path );
-        if ( db ){
-            c.setns(ns, db );
-            return false;
-        }
-
-        if( lock )
-            lock->releaseAndWriteLock();
-
-        assertInWriteLock();
-        
-        char cl[256];
-        nsToDatabase(ns, cl);
-        bool justCreated;
-        Database *newdb = new Database(cl, justCreated, path);
-        dbHolder.put(ns,path,newdb);
-        c.setns(ns, newdb);
-
-        newdb->finishInit();
-
-        return justCreated;
-    }
-
     // shared functionality for removing references to a database from this program instance
     // does not delete the files on disk
     void closeDatabase( const char *cl, const string& path = dbpath );
-
+    
     struct dbtemprelease {
-        string clientname;
-        string clientpath;
-        int locktype;
+        Client::Context * _context;
+        int _locktype;
+        
         dbtemprelease() {
-            Client& client = cc();
-            Database *database = client.database();
-            if ( database ) {
-                clientname = database->name;
-                clientpath = database->path;
-            }
-            client.top.clientStop();
-            locktype = dbMutex.getState();
-            assert( locktype );
-            if ( locktype > 0 ) {
-				massert( 10298 , "can't temprelease nested write lock", locktype == 1);
+            _context = cc().getContext();
+            _locktype = dbMutex.getState();
+            assert( _locktype );
+            
+            if ( _locktype > 0 ) {
+				massert( 10298 , "can't temprelease nested write lock", _locktype == 1);
+                if ( _context ) _context->unlocked();
                 dbMutex.unlock();
 			}
             else {
-				massert( 10299 , "can't temprelease nested read lock", locktype == -1);
+				massert( 10299 , "can't temprelease nested read lock", _locktype == -1);
+                if ( _context ) _context->unlocked();
                 dbMutex.unlock_shared();
 			}
+
         }
         ~dbtemprelease() {
-            if ( locktype > 0 )
+            if ( _locktype > 0 )
                 dbMutex.lock();
             else
                 dbMutex.lock_shared();
-            if ( clientname.empty() )
-                cc().setns("", 0);
-            else
-                setClient(clientname.c_str(), clientpath.c_str());
+            
+            if ( _context ) _context->relocked();
         }
     };
+
 
     /**
        only does a temp release if we're not nested and have a lock
@@ -211,7 +213,6 @@ namespace mongo {
     };
 
     extern TicketHolder connTicketHolder;
-
 
 } // namespace mongo
 

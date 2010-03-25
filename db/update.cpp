@@ -26,8 +26,11 @@
 
 namespace mongo {
 
+    //#define DEBUGUPDATE(x) cout << x << endl;
+#define DEBUGUPDATE(x)
+    
     const char* Mod::modNames[] = { "$inc", "$set", "$push", "$pushAll", "$pull", "$pullAll" , "$pop", "$unset" ,
-                                     "$bitand" , "$bitor" , "$bit" };
+                                    "$bitand" , "$bitor" , "$bit" , "$addToSet" };
     unsigned Mod::modNamesNum = sizeof(Mod::modNames)/sizeof(char*);
 
     bool Mod::_pullElementMatch( BSONElement& toMatch ) const {
@@ -46,13 +49,42 @@ namespace mongo {
         return matcher->matches( toMatch.embeddedObject() );
     }
 
-    void Mod::apply( BSONObjBuilder& b , BSONElement in ){
+    template< class Builder >
+    void Mod::appendIncremented( Builder& bb , const BSONElement& in, ModState& ms ) const {
+        BSONType a = in.type();
+        BSONType b = elt.type();
+        
+        if ( a == NumberDouble || b == NumberDouble ){
+            ms.incType = NumberDouble;
+            ms.incdouble = elt.numberDouble() + in.numberDouble();
+        }
+        else if ( a == NumberLong || b == NumberLong ){
+            ms.incType = NumberLong;
+            ms.inclong = elt.numberLong() + in.numberLong();
+        }
+        else {
+            ms.incType = NumberInt;
+            ms.incint = elt.numberInt() + in.numberInt();
+        }
+        
+        ms.appendIncValue( bb );
+    }
+
+    template< class Builder >
+    void appendUnset( Builder &b ) {
+    }
+    
+    template<>
+    void appendUnset( BSONArrayBuilder &b ) {
+        b.appendNull();
+    }
+    
+    template< class Builder >
+    void Mod::apply( Builder& b , BSONElement in , ModState& ms ) const {
         switch ( op ){
         
         case INC: {
-            // TODO: this is horrible
-            inc( in );
-            b.appendAs( elt , shortFieldName ); 
+            appendIncremented( b , in , ms );
             break;
         }
             
@@ -63,10 +95,10 @@ namespace mongo {
         }
 
         case UNSET: {
-            //Explicit NOOP
+            appendUnset( b );
             break;
         }
-
+            
         case PUSH: {
             uassert( 10131 ,  "$push can only be applied to an array" , in.type() == Array );
             BSONObjBuilder bb( b.subarrayStart( shortFieldName ) );
@@ -77,12 +109,59 @@ namespace mongo {
                 n++;
             }
 
-            pushStartSize = n;
+            ms.pushStartSize = n;
 
             bb.appendAs( elt ,  bb.numStr( n ) );
             bb.done();
             break;
         }
+            
+        case ADDTOSET: {
+            uassert( 12592 ,  "$addToSet can only be applied to an array" , in.type() == Array );
+            BSONObjBuilder bb( b.subarrayStart( shortFieldName ) );
+            
+            BSONObjIterator i( in.embeddedObject() );
+            int n=0;            
+
+            if ( isEach() ){
+                
+                BSONElementSet toadd;
+                parseEach( toadd );
+                
+                while ( i.more() ){
+                    BSONElement cur = i.next();
+                    bb.append( cur );
+                    n++;           
+                    toadd.erase( cur );
+                }
+                
+                for ( BSONElementSet::iterator j=toadd.begin(); j!=toadd.end(); j++ ){
+                    bb.appendAs( *j , BSONObjBuilder::numStr( n++ ) );
+                }
+
+            }
+            else {
+
+                bool found = false;
+
+                while ( i.more() ){
+                    BSONElement cur = i.next();
+                    bb.append( cur );
+                    n++;
+                    if ( elt.woCompare( cur , false ) == 0 )
+                        found = true;
+                }
+                
+                if ( ! found )
+                    bb.appendAs( elt ,  bb.numStr( n ) );
+                
+            }
+            
+            bb.done();
+            break;
+        }
+
+
             
         case PUSH_ALL: {
             uassert( 10132 ,  "$pushAll can only be applied to an array" , in.type() == Array );
@@ -97,7 +176,7 @@ namespace mongo {
                 n++;
             }
 
-            pushStartSize = n;
+            ms.pushStartSize = n;
 
             i = BSONObjIterator( elt.embeddedObject() );
             while ( i.more() ){
@@ -172,8 +251,8 @@ namespace mongo {
                 }
             }
 
-            pushStartSize = n;
-            assert( pushStartSize == in.embeddedObject().nFields() );
+            ms.pushStartSize = n;
+            assert( ms.pushStartSize == in.embeddedObject().nFields() );
             bb.done();
             break;
         }
@@ -226,97 +305,130 @@ namespace mongo {
         }
     }
 
-    bool ModSet::canApplyInPlaceAndVerify(const BSONObj &obj) const {
-        bool inPlacePossible = true;
+    auto_ptr<ModSetState> ModSet::prepare(const BSONObj &obj) const {
+        ModSetState * mss = new ModSetState( obj );
 
         // Perform this check first, so that we don't leave a partially modified object on uassert.
         for ( ModHolder::const_iterator i = _mods.begin(); i != _mods.end(); ++i ) {
+            ModState& ms = mss->_mods[i->first];
+
             const Mod& m = i->second;
             BSONElement e = obj.getFieldDotted(m.fieldName);
-            
+
+            ms.m = &m;
+            ms.old = e;
+
             if ( e.eoo() ) {
-                inPlacePossible = (m.op == Mod::UNSET);
+                mss->amIInPlacePossible( m.op == Mod::UNSET );
+                continue;
             } 
-            else {
-                switch( m.op ) {
-                case Mod::INC:
-                    uassert( 10140 ,  "Cannot apply $inc modifier to non-number", e.isNumber() || e.eoo() );
-                    if ( !e.isNumber() )
-                        inPlacePossible = false;
-                    break;
-                case Mod::SET:
-                    inPlacePossible = 
-                        m.elt.type() == e.type() &&
-                        m.elt.valuesize() == e.valuesize();
-                    break;
-                case Mod::PUSH:
-                case Mod::PUSH_ALL:
-                    uassert( 10141 ,  "Cannot apply $push/$pushAll modifier to non-array", e.type() == Array || e.eoo() );
-                    inPlacePossible = false;
-                    break;
-                case Mod::PULL:
-                case Mod::PULL_ALL: {
-                    uassert( 10142 ,  "Cannot apply $pull/$pullAll modifier to non-array", e.type() == Array || e.eoo() );
-                    BSONObjIterator i( e.embeddedObject() );
-                    while( inPlacePossible && i.more() ) {
-                        BSONElement arrI = i.next();
-                        if ( m.op == Mod::PULL ) {
-                            if ( m._pullElementMatch( arrI ) )
-                                inPlacePossible = false;
-                        } 
-                        else if ( m.op == Mod::PULL_ALL ) {
-                            BSONObjIterator j( m.elt.embeddedObject() );
-                            while( inPlacePossible && j.moreWithEOO() ) {
-                                BSONElement arrJ = j.next();
-                                if ( arrJ.eoo() )
-                                    break;
-                                if ( arrI.woCompare( arrJ, false ) == 0 ) {
-                                    inPlacePossible = false;
-                                }
-                            }
+            
+            switch( m.op ) {
+            case Mod::INC:
+                uassert( 10140 ,  "Cannot apply $inc modifier to non-number", e.isNumber() || e.eoo() );
+                if ( mss->amIInPlacePossible( e.isNumber() ) ){
+                    // check more typing info here
+                    if ( m.elt.type() != e.type() ){
+                        // if i'm incrememnting with a double, then the storage has to be a double
+                        mss->amIInPlacePossible( m.elt.type() != NumberDouble ); 
+                    }
+                }
+                break;
+
+            case Mod::SET:
+                mss->amIInPlacePossible( m.elt.type() == e.type() &&
+                                         m.elt.valuesize() == e.valuesize() );
+                break;
+            
+            case Mod::PUSH:
+            case Mod::PUSH_ALL:
+                uassert( 10141 ,  "Cannot apply $push/$pushAll modifier to non-array", e.type() == Array || e.eoo() );
+                mss->amIInPlacePossible( false );
+                break;
+
+            case Mod::PULL:
+            case Mod::PULL_ALL: {
+                uassert( 10142 ,  "Cannot apply $pull/$pullAll modifier to non-array", e.type() == Array || e.eoo() );
+                BSONObjIterator i( e.embeddedObject() );
+                while( mss->_inPlacePossible && i.more() ) {
+                    BSONElement arrI = i.next();
+                    if ( m.op == Mod::PULL ) {
+                        mss->amIInPlacePossible( ! m._pullElementMatch( arrI ) );
+                    } 
+                    else if ( m.op == Mod::PULL_ALL ) {
+                        BSONObjIterator j( m.elt.embeddedObject() );
+                        while( mss->_inPlacePossible && j.moreWithEOO() ) {
+                            BSONElement arrJ = j.next();
+                            if ( arrJ.eoo() )
+                                break;
+                            mss->amIInPlacePossible( arrI.woCompare( arrJ, false ) );
                         }
                     }
-                    break;
                 }
-                case Mod::POP: {
-                    uassert( 10143 ,  "Cannot apply $pop modifier to non-array", e.type() == Array || e.eoo() );
-                    if ( ! e.embeddedObject().isEmpty() )
-                        inPlacePossible = false;
-                    break;
+                break;
+            }
+
+            case Mod::POP: {
+                uassert( 10143 ,  "Cannot apply $pop modifier to non-array", e.type() == Array || e.eoo() );
+                mss->amIInPlacePossible( e.embeddedObject().isEmpty() );
+                break;
+            }
+                
+            case Mod::ADDTOSET: {
+                uassert( 12591 ,  "Cannot apply $addToSet modifier to non-array", e.type() == Array || e.eoo() );
+                
+                BSONObjIterator i( e.embeddedObject() );
+                if ( m.isEach() ){
+                    BSONElementSet toadd;
+                    m.parseEach( toadd );
+                    while( i.more() ) {
+                        BSONElement arrI = i.next();
+                        toadd.erase( arrI );
+                    }
+                    mss->amIInPlacePossible( toadd.size() == 0 );
                 }
-                default:
-                    // mods we don't know about shouldn't be done in place
-                    inPlacePossible = false;
+                else {
+                    bool found = false;
+                    while( i.more() ) {
+                        BSONElement arrI = i.next();
+                        if ( arrI.woCompare( m.elt , false ) == 0 ){
+                            found = true;
+                            break;
+                        }
+                    }
+                    mss->amIInPlacePossible( found );
                 }
+                break;
+            }
+                
+            default:
+                // mods we don't know about shouldn't be done in place
+                mss->amIInPlacePossible( false );
             }
         }
-        return inPlacePossible;
+        return auto_ptr<ModSetState>( mss );
     }
     
-    void ModSet::applyModsInPlace(const BSONObj &obj) const {
-        for ( ModHolder::const_iterator i = _mods.begin(); i != _mods.end(); ++i ) {
-            const Mod& m = i->second;
-            BSONElement e = obj.getFieldDotted(m.fieldName);
+    void ModSetState::applyModsInPlace() {
+        for ( ModStateHolder::iterator i = _mods.begin(); i != _mods.end(); ++i ) {
+            ModState& m = i->second;
             
-            switch ( m.op ){
+            switch ( m.m->op ){
             case Mod::UNSET:
             case Mod::PULL:
             case Mod::PULL_ALL:
+            case Mod::ADDTOSET:
+                // this should have been handled by prepare
                 break;
 
             // [dm] the BSONElementManipulator statements below are for replication (correct?)
             case Mod::INC:
-                m.inc(e);
-                m.setElementToOurNumericValue(e);
+                m.m->incrementMe( m.old );
+                m.fixedName = "$set";
+                m.fixed = &(m.old);
                 break;
             case Mod::SET:
-                if ( e.isNumber() && m.elt.isNumber() ) {
-                    // todo: handle NumberLong:
-                    m.setElementToOurNumericValue(e);
-                } 
-                else {
-                    BSONElementManipulator( e ).replaceTypeAndValue( m.elt );
-                }
+                BSONElementManipulator( m.old ).replaceTypeAndValue( m.m->elt );
                 break;
             default:
                 uassert( 10144 ,  "can't apply mod in place - shouldn't have gotten here" , 0 );
@@ -342,18 +454,19 @@ namespace mongo {
             fields[ base + top.fieldName() ] = top;            
     }
     
-    void ModSet::_appendNewFromMods( const string& root , Mod& m , BSONObjBuilder& b , set<string>& onedownseen ){
-        const char * temp = m.fieldName;
+    template< class Builder >
+    void ModSetState::_appendNewFromMods( const string& root , ModState& m , Builder& b , set<string>& onedownseen ){
+        const char * temp = m.fieldName();
         temp += root.size();
         const char * dot = strchr( temp , '.' );
         if ( dot ){
-            string nr( m.fieldName , 0 , 1 + ( dot - m.fieldName ) );
+            string nr( m.fieldName() , 0 , 1 + ( dot - m.fieldName() ) );
             string nf( temp , 0 , dot - temp );
             if ( onedownseen.count( nf ) )
                 return;
             onedownseen.insert( nf );
             BSONObjBuilder bb ( b.subobjStart( nf.c_str() ) );
-            createNewFromMods( nr , bb , BSONObj() );
+            createNewFromMods( nr , bb , BSONObj() ); // don't infer an array from name
             bb.done();
         }
         else {
@@ -362,29 +475,37 @@ namespace mongo {
         
     }
     
-    void ModSet::createNewFromMods( const string& root , BSONObjBuilder& b , const BSONObj &obj ){
+    template< class Builder >
+    void ModSetState::createNewFromMods( const string& root , Builder& b , const BSONObj &obj ){
         BSONObjIteratorSorted es( obj );
         BSONElement e = es.next();
 
-        ModHolder::iterator m = _mods.lower_bound( root );
-        ModHolder::iterator mend = _mods.lower_bound( root + "{" );
+        ModStateHolder::iterator m = _mods.lower_bound( root );
+        ModStateHolder::iterator mend = _mods.lower_bound( root + '{' );
 
         set<string> onedownseen;
         
         while ( e.type() && m != mend ){
             string field = root + e.fieldName();
-            FieldCompareResult cmp = compareDottedFieldNames( m->second.fieldName , field );
-
+            FieldCompareResult cmp = compareDottedFieldNames( m->second.m->fieldName , field );
+            
             switch ( cmp ){
                 
             case LEFT_SUBFIELD: { // Mod is embeddeed under this element
                 uassert( 10145 ,  "LEFT_SUBFIELD only supports Object" , e.type() == Object || e.type() == Array );
                 if ( onedownseen.count( e.fieldName() ) == 0 ){
                     onedownseen.insert( e.fieldName() );
-                    BSONObjBuilder bb ( e.type() == Object ? b.subobjStart( e.fieldName() ) : b.subarrayStart( e.fieldName() ) );
-                    stringstream nr; nr << root << e.fieldName() << ".";
-                    createNewFromMods( nr.str() , bb , e.embeddedObject() );
-                    bb.done();
+                    if ( e.type() == Object ) {
+                        BSONObjBuilder bb( b.subobjStart( e.fieldName() ) );
+                        stringstream nr; nr << root << e.fieldName() << ".";
+                        createNewFromMods( nr.str() , bb , e.embeddedObject() );
+                        bb.done();                        
+                    } else {
+                        BSONArrayBuilder ba( b.subarrayStart( e.fieldName() ) );
+                        stringstream nr; nr << root << e.fieldName() << ".";
+                        createNewFromMods( nr.str() , ba , e.embeddedObject() );
+                        ba.done();
+                    }
                     // inc both as we handled both
                     e = es.next();
                     m++;
@@ -401,7 +522,7 @@ namespace mongo {
                 m++;
                 continue;
             case RIGHT_BEFORE: // field that doesn't have a MOD
-                b.append( e );
+                b.append( e ); // if array, ignore field name
                 e = es.next();
                 continue;
             case RIGHT_SUBFIELD:
@@ -414,7 +535,7 @@ namespace mongo {
         
         // finished looping the mods, just adding the rest of the elements
         while ( e.type() ){
-            b.append( e );
+            b.append( e );  // if array, ignore field name
             e = es.next();
         }
         
@@ -424,9 +545,9 @@ namespace mongo {
         }
     }
 
-    BSONObj ModSet::createNewFromMods( const BSONObj &obj ) {
-        BSONObjBuilder b( (int)(obj.objsize() * 1.1) );
-        createNewFromMods( "" , b , obj );
+    BSONObj ModSetState::createNewFromMods() {
+        BSONObjBuilder b( (int)(_obj.objsize() * 1.1) );
+        createNewFromMods( "" , b , _obj );
         return b.obj();
     }
 
@@ -451,10 +572,12 @@ namespace mongo {
             newObj = bb.obj();
         }
         
-        if ( canApplyInPlaceAndVerify( newObj ) )
-            applyModsInPlace( newObj );
+        auto_ptr<ModSetState> mss = prepare( newObj );
+
+        if ( mss->canApplyInPlace() )
+            mss->applyModsInPlace();
         else
-            newObj = createNewFromMods( newObj );
+            newObj = mss->createNewFromMods();
         
         return newObj;
     }
@@ -468,17 +591,24 @@ namespace mongo {
        { $pullAll : { a:[99,1010] } }
        NOTE: MODIFIES source from object!
     */
-    void ModSet::getMods(const BSONObj &from) {
+    ModSet::ModSet(
+        const BSONObj &from , 
+        const set<string>& idxKeys,
+        const set<string> *backgroundKeys)
+        : _isIndexed(0) , _hasDynamicArray( false ) {
+        
         BSONObjIterator it(from);
+        
         while ( it.more() ) {
             BSONElement e = it.next();
             const char *fn = e.fieldName();
+            
             uassert( 10147 ,  "Invalid modifier specified" + string( fn ), e.type() == Object );
             BSONObj j = e.embeddedObject();
+            
             BSONObjIterator jt(j);
             Mod::Op op = opFromStr( fn );
-            if ( op == Mod::INC )
-                strcpy((char *) fn, "$set"); // rewrite for op log
+
             while ( jt.more() ) {
                 BSONElement f = jt.next(); // x:44
 
@@ -490,28 +620,46 @@ namespace mongo {
                 uassert( 10151 ,  "have conflict mod" , ! haveConflictingMod( fieldName ) );
                 uassert( 10152 ,  "Modifier $inc allowed for numbers only", f.isNumber() || op != Mod::INC );
                 uassert( 10153 ,  "Modifier $pushAll/pullAll allowed for arrays only", f.type() == Array || ( op != Mod::PUSH_ALL && op != Mod::PULL_ALL ) );
-
+                
+                _hasDynamicArray = _hasDynamicArray || strstr( fieldName , ".$" ) > 0;
+                
                 Mod m;
                 m.init( op , f );
                 m.setFieldName( f.fieldName() );
-
-                // horrible - to be cleaned up
-                if ( f.type() == NumberDouble ) {
-                    m.ndouble = (double *) f.value();
-                    m.nint = 0;
-                } else if ( f.type() == NumberInt ) {
-                    m.ndouble = 0;
-                    m.nint = (int *) f.value();
-                }
-                else if( f.type() == NumberLong ) { 
-                    m.ndouble = 0;
-                    m.nint = 0;
-                    m.nlong = (long long *) f.value();
+                
+                if ( m.isIndexed( idxKeys ) ||
+                    (backgroundKeys && m.isIndexed(*backgroundKeys)) ) {
+                    _isIndexed++;
                 }
 
                 _mods[m.fieldName] = m;
+
+                DEBUGUPDATE( "\t\t " << fieldName << "\t" << _hasDynamicArray );
             }
         }
+
+    }
+
+    ModSet * ModSet::fixDynamicArray( const char * elemMatchKey ) const {
+        ModSet * n = new ModSet();
+        n->_isIndexed = _isIndexed;
+        n->_hasDynamicArray = _hasDynamicArray;
+        for ( ModHolder::const_iterator i=_mods.begin(); i!=_mods.end(); i++ ){
+            string s = i->first;
+            size_t idx = s.find( ".$" );
+            if ( idx == string::npos ){
+                n->_mods[s] = i->second;
+                continue;
+            }
+            StringBuilder buf(s.size()+strlen(elemMatchKey));
+            buf << s.substr(0,idx+1) << elemMatchKey << s.substr(idx+2);
+            string fixed = buf.str();
+            DEBUGUPDATE( "fixed dynamic: " << s << " -->> " << fixed );
+            n->_mods[fixed] = i->second;
+            ModHolder::iterator temp = n->_mods.find( fixed );
+            temp->second.setFieldName( temp->first.c_str() );
+        }
+        return n;
     }
     
     void checkNoMods( BSONObj o ) {
@@ -526,51 +674,78 @@ namespace mongo {
     
     class UpdateOp : public QueryOp {
     public:
-        UpdateOp() : nscanned_() {}
+        UpdateOp() : _nscanned() {}
         virtual void init() {
             BSONObj pattern = qp().query();
-            c_.reset( qp().newCursor().release() );
-            if ( !c_->ok() )
+            _c.reset( qp().newCursor().release() );
+            if ( ! _c->ok() )
                 setComplete();
             else
-                matcher_.reset( new CoveredIndexMatcher( pattern, qp().indexKey() ) );
+                _matcher.reset( new CoveredIndexMatcher( pattern, qp().indexKey() ) );
         }
         virtual void next() {
-            if ( !c_->ok() ) {
+            if ( ! _c->ok() ) {
                 setComplete();
                 return;
             }
-            nscanned_++;
-            if ( matcher_->matches(c_->currKey(), c_->currLoc()) ) {
+            _nscanned++;
+            if ( _matcher->matches(_c->currKey(), _c->currLoc(), &_details ) ) {
                 setComplete();
                 return;
             }
-            c_->advance();
+            _c->advance();
         }
         bool curMatches(){
-            return matcher_->matches(c_->currKey(), c_->currLoc() );
+            return _matcher->matches(_c->currKey(), _c->currLoc() , &_details );
         }
         virtual bool mayRecordPlan() const { return false; }
         virtual QueryOp *clone() const {
             return new UpdateOp();
         }
-        shared_ptr< Cursor > c() { return c_; }
-        long long nscanned() const { return nscanned_; }
+        shared_ptr< Cursor > c() { return _c; }
+        long long nscanned() const { return _nscanned; }
+        MatchDetails& getMatchDetails(){ return _details; }
     private:
-        shared_ptr< Cursor > c_;
-        long long nscanned_;
-        auto_ptr< CoveredIndexMatcher > matcher_;
+        shared_ptr< Cursor > _c;
+        long long _nscanned;
+        auto_ptr< CoveredIndexMatcher > _matcher;
+        MatchDetails _details;
     };
 
     
-    UpdateResult updateObjects(const char *ns, BSONObj updateobjOrig, BSONObj patternOrig, bool upsert, bool multi, bool logop , OpDebug& debug ) {
+    UpdateResult updateObjects(const char *ns, const BSONObj& updateobj, BSONObj patternOrig, bool upsert, bool multi, bool logop , OpDebug& debug ) {
+        DEBUGUPDATE( "update: " << ns << " update: " << updateobj << " query: " << patternOrig << " upsert: " << upsert << " multi: " << multi );
         int profile = cc().database()->profile;
         StringBuilder& ss = debug.str;
+
+        if ( logLevel > 2 )
+            ss << " update: " << updateobj;
+        
+        /* idea with these here it to make them loop invariant for multi updates, and thus be a bit faster for that case */
+        /* NOTE: when yield() is added herein, these must be refreshed after each call to yield! */
+        NamespaceDetails *d = nsdetails(ns); // can be null if an upsert...
+        NamespaceDetailsTransient *nsdt = &NamespaceDetailsTransient::get_w(ns);
+        /* end note */
         
         uassert( 10155 , "cannot update reserved $ collection", strchr(ns, '$') == 0 );
         if ( strstr(ns, ".system.") ) {
             /* dm: it's very important that system.indexes is never updated as IndexDetails has pointers into it */
             uassert( 10156 , "cannot update system collection", legalClientSystemNS( ns , true ) );
+        }
+
+        auto_ptr<ModSet> mods;
+        bool isOperatorUpdate = updateobj.firstElement().fieldName()[0] == '$';
+        int modsIsIndexed = false; // really the # of indexes
+        if ( isOperatorUpdate ){
+            if( d && d->backgroundIndexBuildInProgress ) { 
+                set<string> bgKeys;
+                d->backgroundIdx().keyPattern().getFieldNames(bgKeys);
+                mods.reset( new ModSet(updateobj, nsdt->indexKeys(), &bgKeys) );
+            }
+            else {
+                mods.reset( new ModSet(updateobj, nsdt->indexKeys()) );
+            }
+            modsIsIndexed = mods->isIndexed();
         }
 
         set<DiskLoc> seenObjects;
@@ -593,11 +768,10 @@ namespace mongo {
                 c->advance();
                 continue;
             }
-                               
+
             BSONObj js(r);
             
             BSONObj pattern = patternOrig;
-            BSONObj updateobj = updateobjOrig;
 
             if ( logop ) {
                 BSONObjBuilder idPattern;
@@ -620,43 +794,46 @@ namespace mongo {
             
             /* look for $inc etc.  note as listed here, all fields to inc must be this type, you can't set some
                regular ones at the moment. */
-            
-            const char *firstField = updateobj.firstElement().fieldName();
-            
-            if ( firstField[0] == '$' ) {
-
+            if ( isOperatorUpdate ) {
+                
                 if ( multi ){
                     c->advance(); // go to next record in case this one moves
                     if ( seenObjects.count( loc ) )
                         continue;
-                    updateobj = updateobj.copy();
                 }
                 
-                ModSet mods;
-                mods.getMods(updateobj);
-                NamespaceDetailsTransient& ndt = NamespaceDetailsTransient::get_w(ns);
-                set<string>& idxKeys = ndt.indexKeys();
-                int isIndexed = mods.isIndexed( idxKeys );
-                
-                if ( isIndexed && multi ){
+                if ( modsIsIndexed && multi ){
                     c->noteLocation();
                 }
 
-                if ( isIndexed <= 0 && mods.canApplyInPlaceAndVerify( loc.obj() ) ) {
-                    mods.applyModsInPlace( loc.obj() );
-                    //seenObjects.insert( loc );
+                const BSONObj& onDisk = loc.obj();
+
+                ModSet * useMods = mods.get();
+
+                auto_ptr<ModSet> mymodset;
+                if ( u->getMatchDetails().elemMatchKey && mods->hasDynamicArray() ){
+                    useMods = mods->fixDynamicArray( u->getMatchDetails().elemMatchKey );
+                    mymodset.reset( useMods );
+                }
+
+                     
+                auto_ptr<ModSetState> mss = useMods->prepare( onDisk );
+                
+                if ( modsIsIndexed <= 0 && mss->canApplyInPlace() ){
+                    mss->applyModsInPlace();// const_cast<BSONObj&>(onDisk) );
+
                     if ( profile )
                         ss << " fastmod ";
                     
-                    if ( isIndexed ){
+                    if ( modsIsIndexed ){
                         seenObjects.insert( loc );
                     }
                 } 
                 else {
-                    BSONObj newObj = mods.createNewFromMods( loc.obj() );
-                    uassert( 12522 , "$ operator made objcet too large" , newObj.isValid() );
-                    DiskLoc newLoc = theDataFileMgr.update(ns, r, loc , newObj.objdata(), newObj.objsize(), debug);
-                    if ( newLoc != loc || isIndexed ){
+                    BSONObj newObj = mss->createNewFromMods();
+                    uassert( 12522 , "$ operator made object too large" , newObj.objsize() <= ( 4 * 1024 * 1024 ) );
+                    DiskLoc newLoc = theDataFileMgr.updateRecord(ns, d, nsdt, r, loc , newObj.objdata(), newObj.objsize(), debug);
+                    if ( newLoc != loc || modsIsIndexed ) {
                         // object moved, need to make sure we don' get again
                         seenObjects.insert( newLoc );
                     }
@@ -664,25 +841,27 @@ namespace mongo {
                 }
                 
                 if ( logop ) {
-                    
-                    assert( mods.size() );
+                    DEV assert( mods->size() );
 
-                    if ( mods.haveArrayDepMod() ) {
+                    if ( mss->haveArrayDepMod() ) {
                         BSONObjBuilder patternBuilder;
                         patternBuilder.appendElements( pattern );
-                        mods.appendSizeSpecForArrayDepMods( patternBuilder );
+                        mss->appendSizeSpecForArrayDepMods( patternBuilder );
                         pattern = patternBuilder.obj();                        
                     }
                     
-                    if ( mods.needOpLogRewrite() )
-                        updateobj = mods.getOpLogRewrite();
-                    
-                    logOp("u", ns, updateobj, &pattern );
+                    if ( mss->needOpLogRewrite() ){
+                        DEBUGUPDATE( "\t rewrite update: " << mss->getOpLogRewrite() );
+                        logOp("u", ns, mss->getOpLogRewrite() , &pattern );
+                    }
+                    else {
+                        logOp("u", ns, updateobj, &pattern );
+                    }
                 }
                 numModded++;
                 if ( ! multi )
                     break;
-                if ( multi && isIndexed )
+                if ( multi && modsIsIndexed )
                     c->checkLocation();
                 continue;
             } 
@@ -691,7 +870,7 @@ namespace mongo {
 
             BSONElementManipulator::lookForTimestamps( updateobj );
             checkNoMods( updateobj );
-            theDataFileMgr.update(ns, r, loc , updateobj.objdata(), updateobj.objsize(), debug);
+            theDataFileMgr.updateRecord(ns, d, nsdt, r, loc , updateobj.objdata(), updateobj.objsize(), debug);
             if ( logop )
                 logOp("u", ns, updateobj, &pattern );
             return UpdateResult( 1 , 0 , 1 );
@@ -705,13 +884,9 @@ namespace mongo {
             ss << " nscanned:" << u->nscanned();
         
         if ( upsert ) {
-            if ( updateobjOrig.firstElement().fieldName()[0] == '$' ) {
+            if ( updateobj.firstElement().fieldName()[0] == '$' ) {
                 /* upsert of an $inc. build a default */
-                ModSet mods;
-                mods.getMods(updateobjOrig);
-                 
-                BSONObj newObj = mods.createNewFromQuery( patternOrig );
-
+                BSONObj newObj = mods->createNewFromQuery( patternOrig );
                 if ( profile )
                     ss << " fastmodinsert ";
                 theDataFileMgr.insert(ns, newObj);
@@ -722,12 +897,13 @@ namespace mongo {
                 return UpdateResult( 0 , 1 , 1 );
             }
             uassert( 10159 ,  "multi update only works with $ operators" , ! multi );
-            checkNoMods( updateobjOrig );
+            checkNoMods( updateobj );
             if ( profile )
                 ss << " upsert ";
-            theDataFileMgr.insert(ns, updateobjOrig);
+            BSONObj no = updateobj;
+            theDataFileMgr.insert(ns, no);
             if ( logop )
-                logOp( "i", ns, updateobjOrig );
+                logOp( "i", ns, no );
             return UpdateResult( 0 , 0 , 1 );
         }
         return UpdateResult( 0 , 0 , 0 );

@@ -46,6 +46,7 @@ namespace mongo {
            snapshot    - use $snapshot mode for copying collections.  note this should not be used when it isn't required, as it will be slower.
                          for example repairDatabase need not use it.
         */
+        void setConnection( DBClientWithCommands *c ) { conn.reset( c ); }
         bool go(const char *masterHost, string& errmsg, const string& fromdb, bool logForRepl, bool slaveOk, bool useReplAuth, bool snapshot);
         bool startCloneCollection( const char *fromhost, const char *ns, const BSONObj &query, string& errmsg, bool logForRepl, bool copyIndexes, int logSizeMb, long long &cursorId );
         bool finishCloneCollection( const char *fromhost, const char *ns, const BSONObj &query, long long cursorId, string &errmsg );
@@ -97,11 +98,11 @@ namespace mongo {
         
         list<BSONObj> storedForLater;
         
-        assert( c.get() );
+        massert( 13055 , "socket error in Cloner:copy" , c.get() );
         long long n = 0;
         time_t saveLast = time( 0 );
         while ( 1 ) {
-            {
+            if( !c->moreInCurrentBatch() || n % 128 == 127 /*yield some*/ ) {
                 dbtemprelease r;
                 if ( !c->more() )
                     break;
@@ -111,7 +112,7 @@ namespace mongo {
             /* assure object is valid.  note this will slow us down a little. */
             if ( !tmp.valid() ) {
                 stringstream ss;
-                ss << "skipping corrupt object from " << from_collection;
+                ss << "Cloner: skipping corrupt object from " << from_collection;
                 BSONElement e = tmp.firstElement();
                 try {
                     e.validate();
@@ -191,7 +192,9 @@ namespace mongo {
 		
             auto_ptr<DBClientCursor> c;
             {
-                if ( !masterSameProcess ) {
+                if ( conn.get() ) {
+                    // nothing to do
+                } else if ( !masterSameProcess ) {
                     auto_ptr< DBClientConnection > c( new DBClientConnection() );
                     if ( !c->connect( masterHost, errmsg ) )
                         return false;
@@ -215,7 +218,7 @@ namespace mongo {
 
                 log(2) << "\t cloner got " << collection << endl;
 
-                BSONElement e = collection.findElement("name");
+                BSONElement e = collection.getField("name");
                 if ( e.eoo() ) {
                     string s = "bad system.namespaces object " + collection.toString();
                     massert( 10290 , s.c_str(), false);
@@ -231,12 +234,11 @@ namespace mongo {
                         continue;
                     }
                 }
-                else if( strchr(from_name, '$') ) {
+                if( strchr(from_name, '$') ) {
                     // don't clone index namespaces -- we take care of those separately below.
                     log(2) << "\t\t not cloning because has $ " << endl;
                     continue;
                 }            
-                
                 toClone.push_back( collection.getOwned() );
             }
         }
@@ -414,6 +416,7 @@ namespace mongo {
         virtual bool slaveOk() {
             return false;
         }
+        virtual LockType locktype(){ return WRITE; }
         virtual void help( stringstream &help ) const {
             help << "clone this database from an instance of the db on another host\n";
             help << "example: { clone : \"host13\" }";
@@ -436,6 +439,7 @@ namespace mongo {
         virtual bool slaveOk() {
             return false;
         }
+        virtual LockType locktype(){ return WRITE; }
         CmdCloneCollection() : Command("cloneCollection") { }
         virtual void help( stringstream &help ) const {
             help << " example: { cloneCollection: <collection ns>, from: <hostname>, query: <query> }";
@@ -462,7 +466,7 @@ namespace mongo {
             /* replication note: we must logOp() not the command, but the cloned data -- if the slave
              were to clone it would get a different point-in-time and not match.
              */
-            setClient( collection.c_str() );
+            Client::Context ctx( collection );
             
             log() << "cloneCollection.  db:" << ns << " collection:" << collection << " from: " << fromhost << " query: " << query << " logSizeMb: " << logSizeMb << ( copyIndexes ? "" : ", not copying indexes" ) << endl;
             
@@ -479,6 +483,7 @@ namespace mongo {
         virtual bool slaveOk() {
             return false;
         }
+        virtual LockType locktype(){ return WRITE; }
         CmdStartCloneCollection() : Command("startCloneCollection") { }
         virtual void help( stringstream &help ) const {
             help << " example: { startCloneCollection: <collection ns>, from: <hostname>, query: <query> }";
@@ -506,7 +511,7 @@ namespace mongo {
             /* replication note: we must logOp() not the command, but the cloned data -- if the slave
              were to clone it would get a different point-in-time and not match.
              */
-            setClient( collection.c_str() );
+            Client::Context ctx(collection);
             
             log() << "startCloneCollection.  db:" << ns << " collection:" << collection << " from: " << fromhost << " query: " << query << endl;
             
@@ -532,6 +537,7 @@ namespace mongo {
         virtual bool slaveOk() {
             return false;
         }
+        virtual LockType locktype(){ return WRITE; }
         CmdFinishCloneCollection() : Command("finishCloneCollection") { }
         virtual void help( stringstream &help ) const {
             help << " example: { finishCloneCollection: <finishToken> }";
@@ -562,7 +568,7 @@ namespace mongo {
                 cursorId = cursorIdToken._numberLong();
             }
             
-            setClient( collection.c_str() );
+            Client::Context ctx( collection );
             
             log() << "finishCloneCollection.  db:" << ns << " collection:" << collection << " from: " << fromhost << " query: " << query << endl;
             
@@ -571,8 +577,50 @@ namespace mongo {
         }
     } cmdfinishclonecollection;
 
+    thread_specific_ptr< DBClientConnection > authConn_;
     /* Usage:
-       admindb.$cmd.findOne( { copydb: 1, fromhost: <hostname>, fromdb: <db>, todb: <db> } );
+     admindb.$cmd.findOne( { copydbgetnonce: 1, fromhost: <hostname> } );
+     */
+    class CmdCopyDbGetNonce : public Command {
+    public:
+        CmdCopyDbGetNonce() : Command("copydbgetnonce") { }
+        virtual bool adminOnly() {
+            return true;
+        }
+        virtual bool slaveOk() {
+            return false;
+        }
+        virtual LockType locktype(){ return WRITE; }
+        virtual void help( stringstream &help ) const {
+            help << "get a nonce for subsequent copy db request from secure server\n";
+            help << "usage: {copydbgetnonce: 1, fromhost: <hostname>}";
+        }
+        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+            string fromhost = cmdObj.getStringField("fromhost");
+            if ( fromhost.empty() ) {
+                /* copy from self */
+                stringstream ss;
+                ss << "localhost:" << cmdLine.port;
+                fromhost = ss.str();
+            }
+            authConn_.reset( new DBClientConnection() );
+            BSONObj ret;
+            {
+                dbtemprelease t;
+                if ( !authConn_->connect( fromhost, errmsg ) )
+                    return false;
+                if( !authConn_->runCommand( "admin", BSON( "getnonce" << 1 ), ret ) ) {
+                    errmsg = "couldn't get nonce " + string( ret );
+                    return false;
+                }
+            }
+            result.appendElements( ret );
+            return true;
+        }
+    } cmdcopydbgetnonce;
+
+    /* Usage:
+       admindb.$cmd.findOne( { copydb: 1, fromhost: <hostname>, fromdb: <db>, todb: <db>[, username: <username>, nonce: <nonce>, key: <key>] } );
     */
     class CmdCopyDb : public Command {
     public:
@@ -583,9 +631,10 @@ namespace mongo {
         virtual bool slaveOk() {
             return false;
         }
+        virtual LockType locktype(){ return WRITE; }
         virtual void help( stringstream &help ) const {
-            help << "copy a database from antoher host to this host\n";
-            help << "usage: {copydb: 1, fromhost: <hostname>, fromdb: <db>, todb: <db>}";
+            help << "copy a database from another host to this host\n";
+            help << "usage: {copydb: 1, fromhost: <hostname>, fromdb: <db>, todb: <db>[, username: <username>, nonce: <nonce>, key: <key>]}";
         }
         virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             string fromhost = cmdObj.getStringField("fromhost");
@@ -601,9 +650,24 @@ namespace mongo {
                 errmsg = "parms missing - {copydb: 1, fromhost: <hostname>, fromdb: <db>, todb: <db>}";
                 return false;
             }
-            setClient(todb.c_str());
-            bool res = cloneFrom(fromhost.c_str(), errmsg, fromdb, /*logForReplication=*/!fromRepl, /*slaveok*/false, /*replauth*/false, /*snapshot*/true);
-            cc().clearns();
+            Cloner c;
+            string username = cmdObj.getStringField( "username" );
+            string nonce = cmdObj.getStringField( "nonce" );
+            string key = cmdObj.getStringField( "key" );
+            if ( !username.empty() && !nonce.empty() && !key.empty() ) {
+                uassert( 13008, "must call copydbgetnonce first", authConn_.get() );
+                BSONObj ret;
+                {
+                    dbtemprelease t;
+                    if ( !authConn_->runCommand( fromdb, BSON( "authenticate" << 1 << "user" << username << "nonce" << nonce << "key" << key ), ret ) ) {
+                        errmsg = "unable to login " + string( ret );
+                        return false;
+                    }
+                }
+                c.setConnection( authConn_.release() );
+            }
+            Client::Context ctx(todb);
+            bool res = c.go(fromhost.c_str(), errmsg, fromdb, /*logForReplication=*/!fromRepl, /*slaveok*/false, /*replauth*/false, /*snapshot*/true);
             return res;
         }
     } cmdcopydb;
@@ -617,6 +681,7 @@ namespace mongo {
         virtual bool slaveOk() {
             return false;
         }
+        virtual LockType locktype(){ return WRITE; }
         virtual bool logTheOp() {
             return true; // can't log steps when doing fast rename within a db, so always log the op rather than individual steps comprising it.
         }
@@ -631,16 +696,19 @@ namespace mongo {
                 return false;
             }
             
-            setClient( source.c_str() );
-            NamespaceDetails *nsd = nsdetails( source.c_str() );
-            uassert( 10026 ,  "source namespace does not exist", nsd );
-            bool capped = nsd->capped;
+            bool capped = false;
             long long size = 0;
-            if ( capped )
-                for( DiskLoc i = nsd->firstExtent; !i.isNull(); i = i.ext()->xnext )
-                    size += i.ext()->length;
+            {
+                Client::Context ctx( source );
+                NamespaceDetails *nsd = nsdetails( source.c_str() );
+                uassert( 10026 ,  "source namespace does not exist", nsd );
+                capped = nsd->capped;
+                if ( capped )
+                    for( DiskLoc i = nsd->firstExtent; !i.isNull(); i = i.ext()->xnext )
+                        size += i.ext()->length;
+            }
             
-            setClient( target.c_str() );
+            Client::Context ctx( target );
             
             if ( nsdetails( target.c_str() ) ){
                 uassert( 10027 ,  "target namespace exists", cmdObj["dropTarget"].trueValue() );
@@ -715,8 +783,10 @@ namespace mongo {
                 theDataFileMgr.insert( targetIndexes.c_str(), n );
             }
 
-            setClient( source.c_str() );
-            dropCollection( source, errmsg, result );
+            {
+                Client::Context ctx( source );
+                dropCollection( source, errmsg, result );
+            }
             return true;
         }
     } cmdrenamecollection;

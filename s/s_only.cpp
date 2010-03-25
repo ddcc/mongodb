@@ -18,6 +18,7 @@
 #include "../stdafx.h"
 #include "../client/dbclient.h"
 #include "../db/dbhelpers.h"
+#include "../db/matcher.h"
 
 namespace mongo {
 
@@ -26,4 +27,7 @@ namespace mongo {
         auto_ptr<CursorIterator> i;
         return i;
     }
+
+    // need this stub to reduce mongos link dependencies
+    inline Matcher::~Matcher() { assert(!"this shouldn't be called"); }
 }

@@ -73,7 +73,7 @@ namespace mongo {
 
         BSONObj args;
         {
-            BSONElement argsElement = cmd.findElement("args");
+            BSONElement argsElement = cmd.getField("args");
             if ( argsElement.type() == Array ) {
                 args = argsElement.embeddedObject();
                 if ( edebug ) {
@@ -111,8 +111,16 @@ namespace mongo {
         virtual bool slaveOk() {
             return false;
         }
+        // We need at least read only access to run db.eval - auth for eval'd writes will be checked
+        // as they are requested.
+        virtual bool requiresAuth() {
+            return false;
+        }
+        virtual LockType locktype(){ return WRITE; }
         CmdEval() : Command("$eval") { }
         bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+            AuthenticationInfo *ai = cc().getAuthenticationInfo();
+            uassert( 12598 , "$eval reads unauthorized", ai->isAuthorizedReads(cc().database()->name.c_str()));
             return dbEval(ns, cmdObj, result, errmsg);
         }
     } cmdeval;

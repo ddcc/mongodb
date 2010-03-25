@@ -90,7 +90,7 @@ namespace mongo {
             append<double>(j);
         }
 
-        void append(const void *src, int len) {
+        void append(const void *src, size_t len) {
             memcpy(grow(len), src, len);
         }
 
@@ -100,6 +100,10 @@ namespace mongo {
         
         void append(const string &str) {
             append( (void *)str.c_str(), str.length() + 1 );
+        }
+
+        void append( int val , int padding ){
+            
         }
 
         int len() const {
@@ -197,7 +201,7 @@ namespace mongo {
         }
         
         string str(){
-            return string(_buf.data,0,_buf.l);
+            return string(_buf.data, _buf.l);
         }
 
     private:

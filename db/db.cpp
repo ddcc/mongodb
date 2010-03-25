@@ -29,6 +29,7 @@
 #include "instance.h"
 #include "clientcursor.h"
 #include "pdfile.h"
+#include "stats/counters.h"
 #if !defined(_WIN32)
 #include <sys/file.h>
 #endif
@@ -40,6 +41,7 @@
 #include "../scripting/engine.h"
 #include "module.h"
 #include "cmdline.h"
+#include "stats/snapshots.h"
 
 namespace mongo {
 
@@ -54,10 +56,11 @@ namespace mongo {
 
     extern string bind_ip;
     extern char *appsrvPath;
-    extern bool autoresync;
     extern int diagLogging;
     extern int lenForNewNsFiles;
     extern int lockFile;
+    
+    extern string repairpath;
 
     void setupSignals();
     void closeAllSockets();
@@ -65,9 +68,14 @@ namespace mongo {
     void pairWith(const char *remoteEnd, const char *arb);
     void setRecCacheSize(unsigned MB);
 
+    void exitCleanly( ExitCode code );
+
     const char *ourgetns() { 
         Client *c = currentClient.get();
-        return c ? c->ns() : "";
+        if ( ! c )
+            return "";
+        Client::Context* cc = c->getContext();
+        return cc ? cc->ns() : "";
     }
 
     struct MyStartupTests {
@@ -80,7 +88,7 @@ namespace mongo {
 
     void testTheDb() {
         OpDebug debug;
-        setClient("sys.unittest.pdfile");
+        Client::Context ctx("sys.unittest.pdfile");
 
         /* this is not validly formatted, if you query this namespace bad things will happen */
         theDataFileMgr.insert("sys.unittest.pdfile", (void *) "hello worldx", 13);
@@ -99,8 +107,6 @@ namespace mongo {
             c->advance();
         }
         out() << endl;
-
-        cc().clearns();
     }
 
     MessagingPort *connGrab = 0;
@@ -137,13 +143,11 @@ namespace mongo {
     };
 
     void webServerThread();
-    void pdfileInit();
 
     void listen(int port) {
         log() << mongodVersion() << endl;
         printGitVersion();
         printSysInfo();
-        pdfileInit();
         //testTheDb();
         log() << "waiting for connections on port " << port << endl;
         OurListener l(bind_ip, port);
@@ -193,7 +197,7 @@ namespace mongo {
 
         try {
 
-            c.ai->isLocalHost = dbMsgPort.farEnd.isLocalHost();
+            c.getAuthenticationInfo()->isLocalHost = dbMsgPort.farEnd.isLocalHost();
 
             Message m;
             while ( 1 ) {
@@ -206,6 +210,11 @@ namespace mongo {
                     break;
                 }
 
+                if ( inShutdown() ) {
+                    log() << "got request after shutdown()" << endl;
+                    break;
+                }
+                
                 lastError.startRequest( m , le );
 
                 DbResponse dbresponse;
@@ -236,6 +245,9 @@ namespace mongo {
             problem() << "SocketException in connThread, closing client connection" << endl;
             dbMsgPort.shutdown();
         }
+        catch ( const ClockSkewException & ) {
+            exitCleanly( EXIT_CLOCK_SKEW );
+        }        
         catch ( std::exception &e ) {
             problem() << "Uncaught std::exception: " << e.what() << ", terminating" << endl;
             dbexit( EXIT_UNCAUGHT );
@@ -263,8 +275,10 @@ namespace mongo {
 //  SockAddr db("172.16.0.179", MessagingPort::DBPort);
 
         MessagingPort p;
-        if ( !p.connect(db) )
+        if ( !p.connect(db) ){
+            out() << "msg couldn't connect" << endl;
             return;
+        }
 
         const int Loops = 1;
         for ( int q = 0; q < Loops; q++ ) {
@@ -280,8 +294,9 @@ namespace mongo {
             Timer t;
             bool ok = p.call(send, response);
             double tm = ((double) t.micros()) + 1;
-            out() << " ****ok. response.data:" << ok << " time:" << tm / 1000.0 << "ms " <<
-                 ((double) len) * 8 / 1000000 / (tm/1000000) << "Mbps" << endl;
+            out() << " ****ok. response.data:" << ok << " time:" << tm / 1000.0 << "ms "
+                  << "len: " << len << " data: " << response.data->_data << endl;
+
             if (  q+1 < Loops ) {
                 out() << "\t\tSLEEP 8 then sending again as a test" << endl;
                 sleepsecs(8);
@@ -327,15 +342,22 @@ namespace mongo {
         return repairDatabase( dbName.c_str(), errmsg );
     }
     
+    extern bool checkNsFilesOnLoad;
+
     void repairDatabases() {
+        Client::GodScope gs;
         log(1) << "enter repairDatabases" << endl;
+        
+        assert(checkNsFilesOnLoad);
+        checkNsFilesOnLoad = false; // we are mainly just checking the header - don't scan the whole .ns file for every db here.
+
         dblock lk;
         vector< string > dbNames;
         getDatabaseNames( dbNames );
         for ( vector< string >::iterator i = dbNames.begin(); i != dbNames.end(); ++i ) {
             string dbName = *i;
             log(1) << "\t" << dbName << endl;
-            assert( !setClient( dbName.c_str() ) );
+            Client::Context ctx( dbName );
             MongoDataFile *p = cc().database()->getFile( 0 );
             MDFHeader *h = p->getHeader();
             if ( !h->currentVersion() || forceRepair ) {
@@ -369,6 +391,8 @@ namespace mongo {
             cc().shutdown();
             dbexit( EXIT_CLEAN );
         }
+
+        checkNsFilesOnLoad = true;
     }
 
     void clearTmpFiles() {
@@ -377,12 +401,13 @@ namespace mongo {
                 i != boost::filesystem::directory_iterator(); ++i ) {
             string fileName = boost::filesystem::path(*i).leaf();
             if ( boost::filesystem::is_directory( *i ) &&
-                    fileName.length() > 2 && fileName.substr( 0, 3 ) == "tmp" )
+                fileName.length() && fileName[ 0 ] == '$' )
                 boost::filesystem::remove_all( *i );
         }
     }
-
+    
     void clearTmpCollections() {
+        Client::GodScope gs;
         vector< string > toDelete;
         DBDirectClient cli;
         auto_ptr< DBClientCursor > c = cli.query( "local.system.namespaces", Query( fromjson( "{name:/^local.temp./}" ) ) );
@@ -395,7 +420,7 @@ namespace mongo {
             cli.dropCollection( *i );
         }
     }
-
+    
     /**
      * does background async flushes of mmapped files
      */
@@ -403,15 +428,23 @@ namespace mongo {
     public:
         void run(){
             log(1) << "will flush memory every: " << _sleepsecs << " seconds" << endl;
+            int time_flushing = 0;
             while ( ! inShutdown() ){
                 if ( _sleepsecs == 0 ){
                     // in case at some point we add an option to change at runtime
                     sleepsecs(5);
                     continue;
                 }
-                sleepmillis( (int)(_sleepsecs * 1000) );
-                MemoryMappedFile::flushAll( false );
-                log(1) << "flushing mmmap" << endl;
+
+                sleepmillis( (int)(std::max(0.0, (_sleepsecs * 1000) - time_flushing)) );
+
+                Date_t start = jsTime();
+                MemoryMappedFile::flushAll( true );
+                time_flushing = (int) (jsTime() - start);
+
+                globalFlushCounters.flushed(time_flushing);
+
+                log(1) << "flushing mmap took " << time_flushing << "ms" << endl;
             }
         }
         
@@ -445,14 +478,21 @@ namespace mongo {
         bool is32bit = sizeof(int*) == 4;
 
         log() << "Mongo DB : starting : pid = " << pid << " port = " << cmdLine.port << " dbpath = " << dbpath
-              <<  " master = " << master << " slave = " << (int) slave << "  " << ( is32bit ? "32" : "64" ) << "-bit " << endl;
-
+              <<  " master = " << replSettings.master << " slave = " << (int) replSettings.slave << "  " << ( is32bit ? "32" : "64" ) << "-bit " << endl;
+        DEV log() << " FULL DEBUG ENABLED " << endl;
         show_32_warning();
 
-        stringstream ss;
-        ss << "dbpath (" << dbpath << ") does not exist";
-        massert( 10296 ,  ss.str().c_str(), boost::filesystem::exists( dbpath ) );
-
+        {
+            stringstream ss;
+            ss << "dbpath (" << dbpath << ") does not exist";
+            massert( 10296 ,  ss.str().c_str(), boost::filesystem::exists( dbpath ) );
+        }
+        {
+            stringstream ss;
+            ss << "repairpath (" << repairpath << ") does not exist";
+            massert( 12590 ,  ss.str().c_str(), boost::filesystem::exists( repairpath ) );
+        }
+        
         acquirePathLock();
         remove_all( dbpath + "/_tmp/" );
 
@@ -461,10 +501,9 @@ namespace mongo {
         BOOST_CHECK_EXCEPTION( clearTmpFiles() );
 
         Client::initThread("initandlisten");
+        _diaglog.init();
 
         clearTmpCollections();
-
-        _diaglog.init();
 
         Module::initAll();
 
@@ -493,6 +532,7 @@ namespace mongo {
         /* this is for security on certain platforms (nonce generation) */
         srand((unsigned) (curTimeMicros() ^ startupSrandTimer.micros()));
 
+        snapshotThread.go();
         listen(listenPort);
 
         // listen() will return when exit code closes its socket.
@@ -557,6 +597,7 @@ string arg_error_check(int argc, char* argv[]) {
 
 int main(int argc, char* argv[], char *envp[] )
 {
+    static StaticObserver staticObserver;
     getcurns = ourgetns;
 
     po::options_description general_options("General options");
@@ -564,25 +605,17 @@ int main(int argc, char* argv[], char *envp[] )
     po::options_description sharding_options("Sharding options");
     po::options_description visible_options("Allowed options");
     po::options_description hidden_options("Hidden options");
-    po::options_description cmdline_options("Command line options");
 
     po::positional_options_description positional_options;
 
+    CmdLine::addGlobalOptions( general_options , hidden_options );
+
     general_options.add_options()
-        ("help,h", "show this usage information")
-        ("version", "show version information")
-        ("config,f", po::value<string>(), "configuration file specifying additional options")
-        ("port", po::value<int>(&cmdLine.port)/*->default_value(CmdLine::DefaultDBPort)*/, "specify port number")
         ("bind_ip", po::value<string>(&bind_ip),
          "local ip address to bind listener - all local ips bound by default")
-        ("verbose,v", "be more verbose (include multiple times for more verbosity e.g. -vvvvv)")
         ("dbpath", po::value<string>()->default_value("/data/db/"), "directory for datafiles")
-        ("quiet", "quieter output")
-        ("logpath", po::value<string>() , "file to send all output to instead of stdout" )
-        ("logappend" , "appnd to logpath instead of over-writing" )
-#ifndef _WIN32
-        ("fork" , "fork server process" )
-#endif
+        ("directoryperdb", "each database will be stored in a separate directory")
+        ("repairpath", po::value<string>() , "root directory for repair files - defaults to dbpath" )
         ("cpu", "periodically show cpu and iowait utilization")
         ("noauth", "run without security")
         ("auth", "run with security")
@@ -593,6 +626,7 @@ int main(int argc, char* argv[], char *envp[] )
         ("nocursors", "diagnostic/debugging option")
         ("nohints", "ignore query hints")
         ("nohttpinterface", "disable http interface")
+        ("rest","turn on simple rest api")
         ("noscripting", "disable scripting engine")
         ("noprealloc", "disable data file preallocation")
         ("smallfiles", "use a smaller default file size")
@@ -620,8 +654,10 @@ int main(int argc, char* argv[], char *envp[] )
         ("only", po::value<string>(), "when slave: specify a single database to replicate")
         ("pairwith", po::value<string>(), "address of server to pair with")
         ("arbiter", po::value<string>(), "address of arbiter server")
+        ("slavedelay", po::value<int>(), "specify delay (in seconds) to be used when applying master ops to slave")
+        ("fastsync", "indicate that this instance is starting from a dbpath snapshot of the repl peer")
         ("autoresync", "automatically resync if slave data is stale")
-        ("oplogSize", po::value<long>(), "size limit (in MB) for op log")
+        ("oplogSize", po::value<int>(), "size limit (in MB) for op log")
         ("opIdMem", po::value<long>(), "size limit (in bytes) for in memory storage of op ids")
         ;
 
@@ -635,18 +671,12 @@ int main(int argc, char* argv[], char *envp[] )
         ("cacheSize", po::value<long>(), "cache size (in MB) for rec store")
         ;
 
-    /* support for -vv -vvvv etc. */
-    for (string s = "vv"; s.length() <= 10; s.append("v")) {
-        hidden_options.add_options()(s.c_str(), "verbose");
-    }
 
     positional_options.add("command", 3);
     visible_options.add(general_options);
     visible_options.add(replication_options);
     visible_options.add(sharding_options);
     Module::addOptions( visible_options );
-    cmdline_options.add(visible_options);
-    cmdline_options.add(hidden_options);
 
     setupSignals();
 
@@ -677,7 +707,7 @@ int main(int argc, char* argv[], char *envp[] )
         bool removeService = false;
         bool startService = false;
         po::variables_map params;
-
+        
         string error_message = arg_error_check(argc, argv);
         if (error_message != "") {
             cout << error_message << endl << endl;
@@ -685,37 +715,9 @@ int main(int argc, char* argv[], char *envp[] )
             return 0;
         }
 
-        /* don't allow guessing - creates ambiguities when some options are
-         * prefixes of others. allow long disguises and don't allow guessing
-         * to get away with our vvvvvvv trick. */
-        int command_line_style = (((po::command_line_style::unix_style ^
-                                    po::command_line_style::allow_guessing) |
-                                   po::command_line_style::allow_long_disguise) ^
-                                  po::command_line_style::allow_sticky);
 
-        try {
-            po::store(po::command_line_parser(argc, argv).options(cmdline_options).
-                      positional(positional_options).
-                      style(command_line_style).run(), params);
-
-            if (params.count("config")) {
-                ifstream config_file (params["config"].as<string>().c_str());
-                if (config_file.is_open()) {
-                    po::store(po::parse_config_file(config_file, cmdline_options), params);
-                    config_file.close();
-                } else {
-                    cout << "ERROR: could not read from config file" << endl << endl;
-                    cout << visible_options << endl;
-                    return 0;
-                }
-            }
-
-            po::notify(params);
-        } catch (po::error &e) {
-            cout << "ERROR: " << e.what() << endl << endl;
-            cout << visible_options << endl;
+        if ( ! CmdLine::store( argc , argv , visible_options , hidden_options , positional_options , params ) )
             return 0;
-        }
 
         if (params.count("help")) {
             show_help_text(visible_options);
@@ -727,16 +729,8 @@ int main(int argc, char* argv[], char *envp[] )
             return 0;
         }
         dbpath = params["dbpath"].as<string>();
-        if (params.count("quiet")) {
-            cmdLine.quiet = true;
-        }
-        if (params.count("verbose")) {
-            logLevel = 1;
-        }
-        for (string s = "vv"; s.length() <= 10; s.append("v")) {
-            if (params.count(s)) {
-                logLevel = s.length();
-            }
+        if ( params.count("directoryperdb")) {
+            directoryperdb = true;
         }
         if (params.count("cpu")) {
             cmdLine.cpu = true;
@@ -761,25 +755,11 @@ int main(int argc, char* argv[], char *envp[] )
             /* casting away the const-ness here */
             appsrvPath = (char*)(params["appsrvpath"].as<string>().c_str());
         }
-#ifndef _WIN32
-        if (params.count("fork")) {
-            if ( ! params.count( "logpath" ) ){
-                cout << "--fork has to be used with --logpath" << endl;
-                return -1;
-            }
-            pid_t c = fork();
-            if ( c ){
-                cout << "forked process: " << c << endl;
-                ::exit(0);
-            }
-            setsid();
-            setupSignals();
-        }
-#endif
-        if (params.count("logpath")) {
-            string lp = params["logpath"].as<string>();
-            uassert( 10033 ,  "logpath has to be non-zero" , lp.size() );
-            initLogging( lp , params.count( "logappend" ) );
+        if (params.count("repairpath")) {
+            repairpath = params["repairpath"].as<string>();
+            uassert( 12589, "repairpath has to be non-zero", repairpath.size() );
+        } else {
+            repairpath = dbpath;
         }
         if (params.count("nocursors")) {
             useCursors = false;
@@ -789,6 +769,9 @@ int main(int argc, char* argv[], char *envp[] )
         }
         if (params.count("nohttpinterface")) {
             noHttpInterface = true;
+        }
+        if (params.count("rest")) {
+            cmdLine.rest = true;
         }
         if (params.count("noscripting")) {
             useJNI = false;
@@ -831,13 +814,19 @@ int main(int argc, char* argv[], char *envp[] )
             startService = true;
         }
         if (params.count("master")) {
-            master = true;
+            replSettings.master = true;
         }
         if (params.count("slave")) {
-            slave = SimpleSlave;
+            replSettings.slave = SimpleSlave;
+        }
+        if (params.count("slavedelay")) {
+            replSettings.slavedelay = params["slavedelay"].as<int>();
+        }
+        if (params.count("fastsync")) {
+            replSettings.fastsync = true;
         }
         if (params.count("autoresync")) {
-            autoresync = true;
+            replSettings.autoresync = true;
         }
         if (params.count("source")) {
             /* specifies what the source in local.sources should be */
@@ -864,7 +853,7 @@ int main(int argc, char* argv[], char *envp[] )
             assert(lenForNewNsFiles > 0);
         }
         if (params.count("oplogSize")) {
-            long x = params["oplogSize"].as<long>();
+            long x = params["oplogSize"].as<int>();
             uassert( 10035 , "bad --oplogSize arg", x > 0);
             cmdLine.oplogSize = x * 1024 * 1024;
             assert(cmdLine.oplogSize > 0);
@@ -872,8 +861,8 @@ int main(int argc, char* argv[], char *envp[] )
         if (params.count("opIdMem")) {
             long x = params["opIdMem"].as<long>();
             uassert( 10036 , "bad --opIdMem arg", x > 0);
-            opIdMem = x;
-            assert(opIdMem > 0);
+            replSettings.opIdMem = x;
+            assert(replSettings.opIdMem > 0);
         }
         if (params.count("cacheSize")) {
             long x = params["cacheSize"].as<long>();
@@ -974,13 +963,13 @@ namespace mongo {
 
 #undef out
 
-    void exitCleanly() {
+    void exitCleanly( ExitCode code ) {
         goingAway = true;
         killCurrentOp.killAll();
         {
             dblock lk;
             log() << "now exiting" << endl;
-            dbexit( EXIT_KILL );        
+            dbexit( code );        
         }
     }
 
@@ -1026,9 +1015,18 @@ namespace mongo {
         int x;
         sigwait( &asyncSignals, &x );
         log() << "got kill or ctrl c signal " << x << " (" << strsignal( x ) << "), will terminate after current cmd ends" << endl;
-        exitCleanly();
+        Client::initThread( "interruptThread" );
+        exitCleanly( EXIT_KILL );
     }
 
+    // this will be called in certain c++ error cases, for example if there are two active
+    // exceptions
+    void myterminate() {
+        rawOut( "terminate() called, printing stack:\n" );
+        printStackTrace();
+        abort();
+    }
+    
     void setupSignals() {
         assert( signal(SIGSEGV, abruptQuit) != SIG_ERR );
         assert( signal(SIGFPE, abruptQuit) != SIG_ERR );
@@ -1044,12 +1042,15 @@ namespace mongo {
         sigaddset( &asyncSignals, SIGTERM );
         assert( pthread_sigmask( SIG_SETMASK, &asyncSignals, 0 ) == 0 );
         boost::thread it( interruptThread );
+        
+        set_terminate( myterminate );
     }
 
 #else
 void ctrlCTerminate() {
-    log() << "got kill or ctrl c signal, will terminate after current cmd ends" << endl;
-    exitCleanly();
+    log() << "got kill or ctrl-c signal, will terminate after current cmd ends" << endl;
+    Client::initThread( "ctrlCTerminate" );
+    exitCleanly( EXIT_KILL );
 }
 BOOL CtrlHandler( DWORD fdwCtrlType )
 {
@@ -1085,14 +1086,6 @@ BOOL CtrlHandler( DWORD fdwCtrlType )
             massert( 10297 , "Couldn't register Windows Ctrl-C handler", false);
     }
 #endif
-
-void temptestfoo() {
-    MongoMutex m;
-    m.lock();
-//    m.lock_upgrade();
-    m.lock_shared();
-}
-
 
 } // namespace mongo
 

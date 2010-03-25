@@ -37,17 +37,17 @@ namespace ReplTests {
     }    
     
     class Base {
+        dblock lk;
+        Client::Context _context;
     public:
-        Base() {
-            master = true;
+        Base() : _context( ns() ){
+            replSettings.master = true;
             createOplog();
-            dblock lk;
-            setClient( ns() );
             ensureHaveIdIndex( ns() );
         }
         ~Base() {
             try {
-                master = false;
+                replSettings.master = false;
                 deleteAll( ns() );
                 deleteAll( cllNS() );
             } catch ( ... ) {
@@ -88,7 +88,7 @@ namespace ReplTests {
         int count() const {
             int count = 0;
             dblock lk;
-            setClient( ns() );
+            Client::Context ctx( ns() );
             auto_ptr< Cursor > c = theDataFileMgr.findAll( ns() );
             for(; c->ok(); c->advance(), ++count ) {
 //                cout << "obj: " << c->current().toString() << endl;
@@ -97,7 +97,7 @@ namespace ReplTests {
         }
         static int opCount() {
             dblock lk;
-            setClient( cllNS() );
+            Client::Context ctx( cllNS() );
             int count = 0;
             for( auto_ptr< Cursor > c = theDataFileMgr.findAll( cllNS() ); c->ok(); c->advance() )
                 ++count;
@@ -111,17 +111,21 @@ namespace ReplTests {
                 }
             };
             dblock lk;
-            setClient( cllNS() );
             vector< BSONObj > ops;
-            for( auto_ptr< Cursor > c = theDataFileMgr.findAll( cllNS() ); c->ok(); c->advance() )
-                ops.push_back( c->current() );
-            setClient( ns() );
-            for( vector< BSONObj >::iterator i = ops.begin(); i != ops.end(); ++i )
-                Applier::apply( *i );
+            {
+                Client::Context ctx( cllNS() );
+                for( auto_ptr< Cursor > c = theDataFileMgr.findAll( cllNS() ); c->ok(); c->advance() )
+                    ops.push_back( c->current() );
+            }
+            {
+                Client::Context ctx( ns() );
+                for( vector< BSONObj >::iterator i = ops.begin(); i != ops.end(); ++i )
+                    Applier::apply( *i );
+            }
         }
         static void printAll( const char *ns ) {
             dblock lk;
-            setClient( ns );
+            Client::Context ctx( ns );
             auto_ptr< Cursor > c = theDataFileMgr.findAll( ns );
             vector< DiskLoc > toDelete;
             out() << "all for " << ns << endl;
@@ -132,7 +136,7 @@ namespace ReplTests {
         // These deletes don't get logged.
         static void deleteAll( const char *ns ) {
             dblock lk;
-            setClient( ns );
+            Client::Context ctx( ns );
             auto_ptr< Cursor > c = theDataFileMgr.findAll( ns );
             vector< DiskLoc > toDelete;
             for(; c->ok(); c->advance() ) {
@@ -144,7 +148,7 @@ namespace ReplTests {
         }
         static void insert( const BSONObj &o, bool god = false ) {
             dblock lk;
-            setClient( ns() );
+            Client::Context ctx( ns() );
             theDataFileMgr.insert( ns(), o.objdata(), o.objsize(), god );
         }
         static BSONObj wid( const char *json ) {
@@ -459,6 +463,75 @@ namespace ReplTests {
         protected:
             BSONObj o_, q_, u_, ou_;            
         };
+
+        class UpdateInc2 : public Base {
+        public:
+            UpdateInc2() :
+            o_( fromjson( "{'_id':1,a:5}" ) ),
+            q_( fromjson( "{a:5}" ) ),
+            u_( fromjson( "{$inc:{a:3},$set:{x:5}}" ) ),
+            ou_( fromjson( "{'_id':1,a:8,x:5}" ) ) {}
+            void doIt() const {
+                client()->update( ns(), q_, u_ );
+            }
+            void check() const {
+                ASSERT_EQUALS( 1, count() );
+                checkOne( ou_ );
+            }
+            void reset() const {
+                deleteAll( ns() );
+                insert( o_ );
+            }
+        protected:
+            BSONObj o_, q_, u_, ou_;            
+        };
+        
+        class IncEmbedded : public Base {
+        public:
+            IncEmbedded() :
+            o_( fromjson( "{'_id':1,a:{b:3},b:{b:1}}" ) ),
+            q_( fromjson( "{'_id':1}" ) ),
+            u_( fromjson( "{$inc:{'a.b':1,'b.b':1}}" ) ),
+            ou_( fromjson( "{'_id':1,a:{b:4},b:{b:2}}" ) )
+            {}
+            void doIt() const {
+                client()->update( ns(), q_, u_ );
+            }
+            void check() const {
+                ASSERT_EQUALS( 1, count() );
+                checkOne( ou_ );
+            }
+            void reset() const {
+                deleteAll( ns() );
+                insert( o_ );
+            }
+        protected:
+            BSONObj o_, q_, u_, ou_;            
+        };
+
+        class IncCreates : public Base {
+        public:
+            IncCreates() :
+            o_( fromjson( "{'_id':1}" ) ),
+            q_( fromjson( "{'_id':1}" ) ),
+            u_( fromjson( "{$inc:{'a':1}}" ) ),
+            ou_( fromjson( "{'_id':1,a:1}") )
+            {}
+            void doIt() const {
+                client()->update( ns(), q_, u_ );
+            }
+            void check() const {
+                ASSERT_EQUALS( 1, count() );
+                checkOne( ou_ );
+            }
+            void reset() const {
+                deleteAll( ns() );
+                insert( o_ );
+            }
+        protected:
+            BSONObj o_, q_, u_, ou_;            
+        };
+
 
         class UpsertInsertIdMod : public Base {
         public:
@@ -885,7 +958,7 @@ namespace ReplTests {
     class DbIdsTest {
     public:
         void run() {
-            setClient( "unittests.repltest.DbIdsTest" );
+            Client::Context ctx( "unittests.repltest.DbIdsTest" );
             
             s_.reset( new DbIds( "local.temp.DbIdsTest" ) );
             s_->reset();
@@ -960,7 +1033,7 @@ namespace ReplTests {
     class IdTrackerTest {
     public:
         void run() {
-            setClient( "unittests.repltests.IdTrackerTest" );
+            Client::Context ctx( "unittests.repltests.IdTrackerTest" );
             
             ASSERT( s_.inMem() );
             s_.reset( 4 * sizeof( BSONObj ) - 1 );
@@ -1016,6 +1089,9 @@ namespace ReplTests {
             add< Idempotence::UpsertInsertNoMods >();
             add< Idempotence::UpdateSet >();
             add< Idempotence::UpdateInc >();
+            add< Idempotence::UpdateInc2 >();
+            add< Idempotence::IncEmbedded >(); // SERVER-716
+            add< Idempotence::IncCreates >(); // SERVER-717
             add< Idempotence::UpsertInsertIdMod >();
             add< Idempotence::UpsertInsertSet >();
             add< Idempotence::UpsertInsertInc >();

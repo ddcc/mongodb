@@ -32,7 +32,7 @@ namespace mongo {
             when = 0;
         }
     private:
-        static boost::mutex *_mutex;
+        static mongo::mutex *_mutex;
         char msg[128];
         char context[128];
         const char *file;
@@ -44,7 +44,7 @@ namespace mongo {
                 /* asserted during global variable initialization */
                 return;
             }
-            boostlock lk(*_mutex);
+            scoped_lock lk(*_mutex);
             strncpy(msg, m, 127);
             strncpy(context, ctxt, 127);
             file = f;
@@ -66,6 +66,21 @@ namespace mongo {
 
     /* last assert of diff types: regular, wassert, msgassert, uassert: */
     extern Assertion lastAssert[4];
+
+    class AssertionCount {
+    public:
+        AssertionCount();
+        void rollover();
+        void condrollover( int newValue );
+
+        int regular;
+        int warning;
+        int msg;
+        int user;
+        int rollovers;
+    };
+    
+    extern AssertionCount assertionCount;
 
     class DBException : public std::exception {
     public:
@@ -91,6 +106,11 @@ namespace mongo {
         }
         virtual int getCode(){ return code; }
         virtual const char* what() const throw() { return msg.c_str(); }
+
+        /* true if an interrupted exception - see KillCurrentOp */
+        bool interrupted() { 
+            return code == 11600 || code == 11601;
+        }
     };
 
     /* UserExceptions are valid errors that a user can cause, like out of disk space or duplicate key */
@@ -173,6 +193,10 @@ namespace mongo {
     
 #define ASSERT_ID_DUPKEY 11000
 
+    void streamNotGood( int code , string msg , std::ios& myios );
+
+#define ASSERT_STREAM_GOOD(msgid,msg,stream) (void)( (!!((stream).good())) || (mongo::streamNotGood(msgid, msg, stream), 0) )
+
 } // namespace mongo
 
 #define BOOST_CHECK_EXCEPTION( expression ) \
@@ -184,3 +208,12 @@ namespace mongo {
 	} catch ( ... ) { \
 		massert( 10437 ,  "unknown boost failed" , false );   \
 	}
+
+#define DESTRUCTOR_GUARD( expression ) \
+    try { \
+        expression; \
+    } catch ( const std::exception &e ) { \
+        problem() << "caught exception (" << e.what() << ") in destructor (" << __FUNCTION__ << ")" << endl; \
+    } catch ( ... ) { \
+        problem() << "caught unknown exception in destructor (" << __FUNCTION__ << ")" << endl; \
+    }

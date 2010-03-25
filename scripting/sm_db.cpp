@@ -18,6 +18,7 @@
 // hacked in right now from engine_spidermonkey.cpp
 
 #include "../client/syncclusterconnection.h"
+#include "../util/base64.h"
 
 namespace mongo {
 
@@ -101,7 +102,6 @@ namespace mongo {
         *rval = c.toval( &n );
         return JS_TRUE;
     }
-    
 
     JSFunctionSpec internal_cursor_functions[] = {
         { "hasNext" , internal_cursor_hasNext , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
@@ -144,41 +144,35 @@ namespace mongo {
         string host = "127.0.0.1";
         if ( argc > 0 )
             host = c.toString( argv[0] );
+        
+        int numCommas = DBClientBase::countCommas( host );
 
         shared_ptr< DBClientWithCommands > conn;
         
         string errmsg;
-        if ( host.find( "," ) == string::npos ){
+        if ( numCommas == 0 ){
             DBClientConnection * c = new DBClientConnection( true );
             conn.reset( c );
             if ( ! c->connect( host , errmsg ) ){
                 JS_ReportError( cx , ((string)"couldn't connect: " + errmsg).c_str() );
                 return JS_FALSE;
             }
+            ScriptEngine::runConnectCallback( *c );
         }
-        else { // paired
-            int numCommas = 0;
-            for ( uint i=0; i<host.size(); i++ )
-                if ( host[i] == ',' )
-                    numCommas++;
-            
-            assert( numCommas > 0 );
-
-            if ( numCommas == 1 ){
-                DBClientPaired * c = new DBClientPaired();
-                conn.reset( c );
-                if ( ! c->connect( host ) ){
-                    JS_ReportError( cx , "couldn't connect to pair" );
+        else if ( numCommas == 1 ){ // paired
+            DBClientPaired * c = new DBClientPaired();
+            conn.reset( c );
+            if ( ! c->connect( host ) ){
+                JS_ReportError( cx , "couldn't connect to pair" );
                     return JS_FALSE;
-                }
             }
-            else if ( numCommas == 2 ){
-                conn.reset( new SyncCluterConnection( host ) );
-            }
-            else {
-                JS_ReportError( cx , "1 (paired) or 2(quorum) commas are allowed" );
-                return JS_FALSE;
-            }
+        }
+        else if ( numCommas == 2 ){
+            conn.reset( new SyncClusterConnection( host ) );
+        }
+        else {
+            JS_ReportError( cx , "1 (paired) or 2(quorum) commas are allowed" );
+            return JS_FALSE;
         }
         
         
@@ -211,7 +205,7 @@ namespace mongo {
      };
 
     JSBool mongo_find(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){
-        uassert( 10240 ,  "mongo_find neesd 5 args" , argc == 5 );
+        uassert( 10240 ,  "mongo_find neesd 6 args" , argc == 6 );
         shared_ptr< DBClientWithCommands > * connHolder = (shared_ptr< DBClientWithCommands >*)JS_GetPrivate( cx , obj );
         uassert( 10241 ,  "no connection!" , connHolder && connHolder->get() );
         DBClientWithCommands *conn = connHolder->get();
@@ -226,15 +220,18 @@ namespace mongo {
         int nToReturn = (int) c.toNumber( argv[3] );
         int nToSkip = (int) c.toNumber( argv[4] );
         bool slaveOk = c.getBoolean( obj , "slaveOk" );
+        int batchSize = (int) c.toNumber( argv[5] );
 
         try {
 
-            auto_ptr<DBClientCursor> cursor = conn->query( ns , q , nToReturn , nToSkip , f.nFields() ? &f : 0  , slaveOk ? QueryOption_SlaveOk : 0 );
+            auto_ptr<DBClientCursor> cursor = conn->query( ns , q , nToReturn , nToSkip , f.nFields() ? &f : 0  , slaveOk ? QueryOption_SlaveOk : 0 , batchSize );
             if ( ! cursor.get() ){
+                log() << "query failed : " << ns << " " << q << " to: " << conn->toString() << endl;
                 JS_ReportError( cx , "error doing query: failed" );
                 return JS_FALSE;
             }
             JSObject * mycursor = JS_NewObject( cx , &internal_cursor_class , 0 , 0 );
+            CHECKNEWOBJECT( mycursor, cx, "internal_cursor_class" );
             assert( JS_SetPrivate( cx , mycursor , new CursorHolder( cursor, *connHolder ) ) );
             *rval = OBJECT_TO_JSVAL( mycursor );
             return JS_TRUE;
@@ -412,6 +409,7 @@ namespace mongo {
          assert( c.hasProperty( db , "_name" ) );
          
          JSObject * coll = JS_NewObject( cx , &db_collection_class , 0 , 0 );
+         CHECKNEWOBJECT( coll, cx, "doCreateCollection" );
          c.setProperty( coll , "_mongo" , c.getProperty( db , "_mongo" ) );
          c.setProperty( coll , "_db" , OBJECT_TO_JSVAL( db ) );
          c.setProperty( coll , "_shortName" , c.toval( shortName.c_str() ) );
@@ -499,7 +497,7 @@ namespace mongo {
         
         if ( ! JS_InstanceOf( cx , obj , &object_id_class , 0 ) ){
             obj = JS_NewObject( cx , &object_id_class , 0 , 0 );
-            assert( obj );
+            CHECKNEWOBJECT( obj, cx, "object_id_constructor" );
             *rval = OBJECT_TO_JSVAL( obj );
         }
         
@@ -525,6 +523,7 @@ namespace mongo {
         { "toString" , object_id_tostring , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
         { 0 }
     };
+
 
     // dbpointer
 
@@ -562,46 +561,82 @@ namespace mongo {
 
     JSBool dbref_constructor( JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval ){
         Convertor c( cx );
-                
+
         if ( argc == 2 ){
-            assert( JS_SetProperty( cx , obj , "$ref" , &(argv[0]) ) );
-            assert( JS_SetProperty( cx , obj , "$id" , &(argv[1]) ) );
+            JSObject * o = JS_NewObject( cx , NULL , NULL, NULL );
+            CHECKNEWOBJECT( o, cx, "dbref_constructor" );
+            assert( JS_SetProperty( cx, o , "$ref" , &argv[ 0 ] ) );
+            assert( JS_SetProperty( cx, o , "$id" , &argv[ 1 ] ) );
+            BSONObj bo = c.toObject( o );
+            assert( JS_SetPrivate( cx , obj , (void*)(new BSONHolder( bo.getOwned() ) ) ) );
             return JS_TRUE;
         }
         else {
             JS_ReportError( cx , "DBRef needs 2 arguments" );
+            assert( JS_SetPrivate( cx , obj , (void*)(new BSONHolder( BSONObj().getOwned() ) ) ) );
             return JS_FALSE;            
         }
     }
  
-    JSClass dbref_class = {
-        "DBRef" , JSCLASS_HAS_PRIVATE ,
-        JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_PropertyStub,
-        JS_EnumerateStub, JS_ResolveStub , JS_ConvertStub, JS_FinalizeStub,
-        JSCLASS_NO_OPTIONAL_MEMBERS
-    };
-
-    JSFunctionSpec dbref_functions[] = {
-        { 0 }
-    };
-
+    JSClass dbref_class = bson_class; // name will be fixed later
 
     // BinData
 
 
     JSBool bindata_constructor( JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval ){
-        JS_ReportError( cx , "can't create a BinData yet" );
-        return JS_FALSE;            
+        Convertor c( cx );
+        
+        if ( argc == 2 ){
+
+            int type = (int)c.toNumber( argv[ 0 ] );
+            string encoded = c.toString( argv[ 1 ] );
+            string decoded = base64::decode( encoded );
+
+            assert( JS_SetPrivate( cx, obj, new BinDataHolder( decoded.data(), decoded.length() ) ) );
+            c.setProperty( obj, "len", c.toval( decoded.length() ) );
+            c.setProperty( obj, "type", c.toval( type ) );
+
+            return JS_TRUE;
+        }
+        else {
+            JS_ReportError( cx , "BinData needs 2 arguments" );
+            return JS_FALSE;            
+        }
     }
  
+    JSBool bindata_tostring(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){    
+        Convertor c(cx);
+        int type = (int)c.getNumber( obj , "type" );
+        int len = (int)c.getNumber( obj, "len" );
+        void *holder = JS_GetPrivate( cx, obj );
+        assert( holder );
+        const char *data = ( ( BinDataHolder* )( holder ) )->c_;
+        stringstream ss;
+        ss << "BinData( type: " << type << ", base64: \"";
+        base64::encode( ss, (const char *)data, len );
+        ss << "\" )";
+        string ret = ss.str();
+        return *rval = c.toval( ret.c_str() );
+    }
+
+    void bindata_finalize( JSContext * cx , JSObject * obj ){
+        Convertor c(cx);
+        void *holder = JS_GetPrivate( cx, obj );
+        if ( holder ){
+            delete ( BinDataHolder* )holder;
+            assert( JS_SetPrivate( cx , obj , 0 ) );
+        }
+    }    
+    
     JSClass bindata_class = {
         "BinData" , JSCLASS_HAS_PRIVATE ,
         JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_PropertyStub,
-        JS_EnumerateStub, JS_ResolveStub , JS_ConvertStub, JS_FinalizeStub,
+        JS_EnumerateStub, JS_ResolveStub , JS_ConvertStub, bindata_finalize,
         JSCLASS_NO_OPTIONAL_MEMBERS
     };
 
     JSFunctionSpec bindata_functions[] = {
+        { "toString" , bindata_tostring , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
         { 0 }
     };
     
@@ -618,7 +653,7 @@ namespace mongo {
         }
 
         JSObject * array = JS_NewObject( cx , 0 , 0 , 0 );
-        assert( array );
+        CHECKNEWOBJECT( array, cx, "map_constructor" );
 
         jsval a = OBJECT_TO_JSVAL( array );
         JS_SetProperty( cx , obj , "_data" , &a );
@@ -656,7 +691,38 @@ namespace mongo {
         JS_EnumerateStub, JS_ResolveStub , JS_ConvertStub, JS_FinalizeStub,
         JSCLASS_NO_OPTIONAL_MEMBERS
     };
+    
+    JSClass numberlong_class = {
+        "NumberLong" , JSCLASS_HAS_PRIVATE ,
+        JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_PropertyStub,
+        JS_EnumerateStub, JS_ResolveStub , JS_ConvertStub, JS_FinalizeStub,
+        JSCLASS_NO_OPTIONAL_MEMBERS
+    };
+    
+    JSBool numberlong_valueof(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){    
+        Convertor c(cx);
+        return *rval = c.toval( double( c.toNumberLongUnsafe( obj ) ) );        
+    }
+    
+    JSBool numberlong_tonumber(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){    
+        return numberlong_valueof( cx, obj, argc, argv, rval );
+    }
 
+    JSBool numberlong_tostring(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){    
+        Convertor c(cx);
+        stringstream ss;
+        ss <<  c.toNumberLongUnsafe( obj );
+        string ret = ss.str();
+        return *rval = c.toval( ret.c_str() );
+    }
+
+    JSFunctionSpec numberlong_functions[] = {
+    { "valueOf" , numberlong_valueof , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
+    { "toNumber" , numberlong_tonumber , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
+    { "toString" , numberlong_tostring , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
+    { 0 }
+    };    
+    
     JSClass minkey_class = {
         "MinKey" , JSCLASS_HAS_PRIVATE ,
         JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_PropertyStub,
@@ -684,8 +750,11 @@ namespace mongo {
 
         if ( argc > 4 && JSVAL_IS_OBJECT( argv[4] ) )
             c.setProperty( obj , "_query" , argv[4] );
-        else 
-            c.setProperty( obj , "_query" , OBJECT_TO_JSVAL( JS_NewObject( cx , 0 , 0 , 0 ) ) );
+        else {
+            JSObject * temp = JS_NewObject( cx , 0 , 0 , 0 );
+            CHECKNEWOBJECT( temp, cx, "dbquery_constructor" );
+            c.setProperty( obj , "_query" , OBJECT_TO_JSVAL( temp ) );
+        }
         
         if ( argc > 5 && JSVAL_IS_OBJECT( argv[5] ) )
             c.setProperty( obj , "_fields" , argv[5] );
@@ -702,6 +771,11 @@ namespace mongo {
             c.setProperty( obj , "_skip" , argv[7] );
         else 
             c.setProperty( obj , "_skip" , JSVAL_ZERO );
+
+        if ( argc > 8 && JSVAL_IS_NUMBER( argv[8] ) )
+            c.setProperty( obj , "_batchSize" , argv[8] );
+        else 
+            c.setProperty( obj , "_batchSize" , JSVAL_ZERO );
         
         c.setProperty( obj , "_cursor" , JSVAL_NULL );
         c.setProperty( obj , "_numReturned" , JSVAL_ZERO );
@@ -744,10 +818,10 @@ namespace mongo {
         assert( JS_InitClass( cx , global , 0 , &internal_cursor_class , internal_cursor_constructor , 0 , 0 , internal_cursor_functions , 0 , 0 ) );
         assert( JS_InitClass( cx , global , 0 , &dbquery_class , dbquery_constructor , 0 , 0 , 0 , 0 , 0 ) );
         assert( JS_InitClass( cx , global , 0 , &dbpointer_class , dbpointer_constructor , 0 , 0 , dbpointer_functions , 0 , 0 ) );
-        assert( JS_InitClass( cx , global , 0 , &dbref_class , dbref_constructor , 0 , 0 , dbref_functions , 0 , 0 ) );
         assert( JS_InitClass( cx , global , 0 , &bindata_class , bindata_constructor , 0 , 0 , bindata_functions , 0 , 0 ) );
 
         assert( JS_InitClass( cx , global , 0 , &timestamp_class , 0 , 0 , 0 , 0 , 0 , 0 ) );
+        assert( JS_InitClass( cx , global , 0 , &numberlong_class , 0 , 0 , 0 , numberlong_functions , 0 , 0 ) );
         assert( JS_InitClass( cx , global , 0 , &minkey_class , 0 , 0 , 0 , 0 , 0 , 0 ) );
         assert( JS_InitClass( cx , global , 0 , &maxkey_class , 0 , 0 , 0 , 0 , 0 , 0 ) );
 
@@ -755,6 +829,10 @@ namespace mongo {
         
         assert( JS_InitClass( cx , global , 0 , &bson_ro_class , bson_cons , 0 , 0 , bson_functions , 0 , 0 ) );
         assert( JS_InitClass( cx , global , 0 , &bson_class , bson_cons , 0 , 0 , bson_functions , 0 , 0 ) );
+        
+        static const char *dbrefName = "DBRef";
+        dbref_class.name = dbrefName;
+        assert( JS_InitClass( cx , global , 0 , &dbref_class , dbref_constructor , 2 , 0 , bson_functions , 0 , 0 ) );
         
         scope->exec( jsconcatcode );
     }
@@ -783,15 +861,22 @@ namespace mongo {
             return true;
         }
 
+        if ( JS_InstanceOf( c->_context , o , &numberlong_class , 0 ) ){
+            b.append( name.c_str() , c->toNumberLongUnsafe( o ) );
+            return true;
+        }
+        
         if ( JS_InstanceOf( c->_context , o , &dbpointer_class , 0 ) ){
             b.appendDBRef( name.c_str() , c->getString( o , "ns" ).c_str() , c->toOID( c->getProperty( o , "id" ) ) );
             return true;
         }
         
         if ( JS_InstanceOf( c->_context , o , &bindata_class , 0 ) ){
+            void *holder = JS_GetPrivate( c->_context , o );
+            const char *data = ( ( BinDataHolder * )( holder ) )->c_;
             b.appendBinData( name.c_str() , 
                              (int)(c->getNumber( o , "len" )) , (BinDataType)((char)(c->getNumber( o , "type" ) ) ) , 
-                             (char*)JS_GetPrivate( c->_context , o ) + 1
+                             data
                              );
             return true;
         }

@@ -27,7 +27,7 @@
 
 #include "../stdafx.h"
 #include "../util/mmap.h"
-#include "storage.h"
+#include "diskloc.h"
 #include "jsobjmanipulator.h"
 #include "namespace.h"
 #include "client.h"
@@ -98,8 +98,10 @@ namespace mongo {
         static Extent* allocFromFreeList(const char *ns, int approxSize, bool capped = false);
 
         /** @return DiskLoc where item ends up */
-        const DiskLoc update(
+        const DiskLoc updateRecord(
             const char *ns,
+            NamespaceDetails *d,
+            NamespaceDetailsTransient *nsdt,
             Record *toupdate, const DiskLoc& dl,
             const char *buf, int len, OpDebug& debug);
         // The object o may be updated if modified on insert.                                
@@ -392,6 +394,10 @@ namespace mongo {
     void _applyOpToDataFiles( const char *database, FileOp &fo, bool afterAllocator = false, const string& path = dbpath );
 
     inline void _deleteDataFiles(const char *database) {
+        if ( directoryperdb ) {
+            BOOST_CHECK_EXCEPTION( boost::filesystem::remove_all( boost::filesystem::path( dbpath ) / database ) );
+            return;
+        }
         class : public FileOp {
             virtual bool apply( const boost::filesystem::path &p ) {
                 return boost::filesystem::remove( p );
@@ -443,6 +449,6 @@ namespace mongo {
     
     void ensureHaveIdIndex(const char *ns);
     
-    bool deleteIndexes( NamespaceDetails *d, const char *ns, const char *name, string &errmsg, BSONObjBuilder &anObjBuilder, bool maydeleteIdIndex );
+    bool dropIndexes( NamespaceDetails *d, const char *ns, const char *name, string &errmsg, BSONObjBuilder &anObjBuilder, bool maydeleteIdIndex );
         
 } // namespace mongo

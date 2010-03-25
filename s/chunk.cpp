@@ -28,7 +28,7 @@ namespace mongo {
 
     // -------  Shard --------
 
-    long Chunk::MaxChunkSize = 1024 * 1204 * 50;
+    int Chunk::MaxChunkSize = 1024 * 1204 * 200;
     
     Chunk::Chunk( ChunkManager * manager ) : _manager( manager ){
         _modified = false;
@@ -41,13 +41,13 @@ namespace mongo {
         _markModified();
     }
     
-    bool Chunk::contains( const BSONObj& obj ){
+    bool Chunk::contains( const BSONObj& obj ) const{
         return
             _manager->getShardKey().compare( getMin() , obj ) <= 0 &&
             _manager->getShardKey().compare( obj , getMax() ) < 0;
     }
 
-    BSONObj Chunk::pickSplitPoint(){
+    BSONObj Chunk::pickSplitPoint() const{
         int sort = 0;
         
         if ( _manager->getShardKey().globalMin().woCompare( getMin() ) == 0 ){
@@ -77,7 +77,7 @@ namespace mongo {
             }
             BSONObj end = conn->findOne( _ns , q );
             conn.done();
-            
+
             if ( ! end.isEmpty() )
                 return _manager->getShardKey().extractKey( end );
         }
@@ -93,9 +93,25 @@ namespace mongo {
             ss << "medianKey command failed: " << result;
             uassert( 10164 ,  ss.str() , 0 );
         }
+
+        BSONObj median = result.getObjectField( "median" );
+        if (median == getMin()){
+            //TODO compound support
+            BSONElement key = getMin().firstElement();
+            BSONObjBuilder b;
+            b.appendAs("$gt", key);
+
+            Query q = QUERY(key.fieldName() << b.obj());
+            q.sort(_manager->getShardKey().key());
+
+            median = conn->findOne(_ns, q);
+            median = _manager->getShardKey().extractKey( median );
+            PRINT(median);
+        }
+
         conn.done();
         
-        return result.getObjectField( "median" ).getOwned();
+        return median.getOwned();
     }
 
     Chunk * Chunk::split(){
@@ -109,6 +125,8 @@ namespace mongo {
                << "\t self  : " << toString() << endl;
 
         uassert( 10166 ,  "locking namespace on server failed" , lockNamespaceOnServer( getShard() , _ns ) );
+        uassert( 13003 ,  "can't split chunk. does it have only one distinct value?" ,
+                          !m.isEmpty() && _min.woCompare(m) && _max.woCompare(m)); 
 
         Chunk * s = new Chunk( _manager );
         s->_ns = _ns;
@@ -216,10 +234,13 @@ namespace mongo {
         
         if ( _dataWritten < MaxChunkSize / 5 )
             return false;
+        
+        log(1) << "\t want to split chunk : " << this << endl;
 
         _dataWritten = 0;
         
-        if ( _min.woCompare( _max ) == 0 ){
+        BSONObj split_point = pickSplitPoint();
+        if ( split_point.isEmpty() || _min == split_point || _max == split_point) {
             log() << "SHARD PROBLEM** shard is too big, but can't split: " << toString() << endl;
             return false;
         }
@@ -229,7 +250,7 @@ namespace mongo {
             return false;
         
         log() << "autosplitting " << _ns << " size: " << size << " shard: " << toString() << endl;
-        Chunk * newShard = split();
+        Chunk * newShard = split(split_point);
 
         moveIfShould( newShard );
         
@@ -268,7 +289,7 @@ namespace mongo {
         return true;
     }
 
-    long Chunk::getPhysicalSize(){
+    long Chunk::getPhysicalSize() const{
         ScopedDbConnection conn( getShard() );
         
         BSONObj result;
@@ -283,7 +304,7 @@ namespace mongo {
     }
 
     
-    long Chunk::countObjects( const BSONObj& filter ){
+    long Chunk::countObjects( const BSONObj& filter ) const{
         ScopedDbConnection conn( getShard() );
         
         BSONObj f = getFilter();
@@ -297,14 +318,14 @@ namespace mongo {
         return (long)n;
     }
     
-    bool Chunk::operator==( const Chunk& s ){
+    bool Chunk::operator==( const Chunk& s ) const{
         return 
             _manager->getShardKey().compare( _min , s._min ) == 0 &&
             _manager->getShardKey().compare( _max , s._max ) == 0
             ;
     }
 
-    void Chunk::getFilter( BSONObjBuilder& b ){
+    void Chunk::getFilter( BSONObjBuilder& b ) const{
         _manager->_key.getFilter( b , _min , _max );
     }
     
@@ -383,7 +404,7 @@ namespace mongo {
     }
     
     
-    ShardKeyPattern Chunk::skey(){
+    ShardKeyPattern Chunk::skey() const{
         return _manager->getShardKey();
     }
 

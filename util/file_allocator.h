@@ -54,7 +54,7 @@ namespace mongo {
                on windows anyway as we don't have to pre-zero the file there.
             */
 #if !defined(_WIN32)
-            boostlock lk( pendingMutex_ );
+            scoped_lock lk( pendingMutex_ );
             if ( failed_ )
                 return;
             long oldSize = prevSize( name );
@@ -71,7 +71,7 @@ namespace mongo {
         // updated to match existing file size.
         void allocateAsap( const string &name, long &size ) {
 #if !defined(_WIN32)
-            boostlock lk( pendingMutex_ );
+            scoped_lock lk( pendingMutex_ );
             long oldSize = prevSize( name );
             if ( oldSize != -1 ) {
                 size = oldSize;
@@ -91,7 +91,7 @@ namespace mongo {
             pendingUpdated_.notify_all();
             while( inProgress( name ) ) {
                 checkFailure();
-                pendingUpdated_.wait( lk );
+                pendingUpdated_.wait( lk.boost() );
             }
 #endif
         }
@@ -100,9 +100,9 @@ namespace mongo {
 #if !defined(_WIN32)
             if ( failed_ )
                 return;
-            boostlock lk( pendingMutex_ );
+            scoped_lock lk( pendingMutex_ );
             while( pending_.size() != 0 )
-                pendingUpdated_.wait( lk );
+                pendingUpdated_.wait( lk.boost() );
 #endif
         }
         
@@ -130,7 +130,7 @@ namespace mongo {
             return false;
         }
 
-        mutable boost::mutex pendingMutex_;
+        mutable mongo::mutex pendingMutex_;
         mutable boost::condition pendingUpdated_;
         list< string > pending_;
         mutable map< string, long > pendingSize_;
@@ -142,21 +142,22 @@ namespace mongo {
             void operator()() {
                 while( 1 ) {
                     {
-                        boostlock lk( a_.pendingMutex_ );
+                        scoped_lock lk( a_.pendingMutex_ );
                         if ( a_.pending_.size() == 0 )
-                            a_.pendingUpdated_.wait( lk );
+                            a_.pendingUpdated_.wait( lk.boost() );
                     }
                     while( 1 ) {
                         string name;
                         long size;
                         {
-                            boostlock lk( a_.pendingMutex_ );
+                            scoped_lock lk( a_.pendingMutex_ );
                             if ( a_.pending_.size() == 0 )
                                 break;
                             name = a_.pending_.front();
                             size = a_.pendingSize_[ name ];
                         }
                         try {
+                            log() << "allocating new datafile " << name << ", filling with zeroes..." << endl;
                             long fd = open(name.c_str(), O_CREAT | O_RDWR | O_NOATIME, S_IRUSR | S_IWUSR);
                             if ( fd <= 0 ) {
                                 stringstream ss;
@@ -180,19 +181,19 @@ namespace mongo {
                                 massert( 10442 ,  "Unable to allocate file of desired size",
                                         1 == write(fd, "", 1) );
                                 lseek(fd, 0, SEEK_SET);
-                                log() << "allocating new datafile " << name << ", filling with zeroes..." << endl;
                                 Timer t;
                                 long z = 256 * 1024;
                                 char buf[z];
                                 memset(buf, 0, z);
                                 long left = size;
-                                while ( 1 ) {
-                                    if ( left <= z ) {
-                                        massert( 10443 ,  "write failed", left == write(fd, buf, left) );
-                                        break;
-                                    }
-                                    massert( 10444 ,  "write failed", z == write(fd, buf, z) );
-                                    left -= z;
+                                while ( left > 0 ) {
+                                    long towrite = left;
+                                    if ( towrite > z )
+                                        towrite = z;
+                                    
+                                    int written = write( fd , buf , towrite );
+                                    massert( 10443 , errnostring("write failed" ), written > 0 );
+                                    left -= written;
                                 }
                                 log() << "done allocating datafile " << name << ", size: " << size/1024/1024 << "MB, took " << ((double)t.millis())/1000.0 << " secs" << endl;
                             }                            
@@ -205,7 +206,7 @@ namespace mongo {
                                 BOOST_CHECK_EXCEPTION( boost::filesystem::remove( name ) );
                             } catch ( ... ) {
                             }
-                            boostlock lk( a_.pendingMutex_ );
+                            scoped_lock lk( a_.pendingMutex_ );
                             a_.failed_ = true;
                             // not erasing from pending
                             a_.pendingUpdated_.notify_all();
@@ -213,7 +214,7 @@ namespace mongo {
                         }
                         
                         {
-                            boostlock lk( a_.pendingMutex_ );
+                            scoped_lock lk( a_.pendingMutex_ );
                             a_.pendingSize_.erase( name );
                             a_.pending_.pop_front();
                             a_.pendingUpdated_.notify_all();

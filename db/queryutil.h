@@ -48,8 +48,9 @@ namespace mongo {
     // determine index limits
     class FieldRange {
     public:
-        FieldRange( const BSONElement &e = BSONObj().firstElement() , bool optimize=true );
+        FieldRange( const BSONElement &e = BSONObj().firstElement() , bool isNot=false , bool optimize=true );
         const FieldRange &operator&=( const FieldRange &other );
+    const FieldRange &operator|=( const FieldRange &other );
         BSONElement min() const { assert( !empty() ); return intervals_[ 0 ].lower_.bound_; }
         BSONElement max() const { assert( !empty() ); return intervals_[ intervals_.size() - 1 ].upper_.bound_; }
         bool minInclusive() const { assert( !empty() ); return intervals_[ 0 ].lower_.inclusive_; }
@@ -69,11 +70,13 @@ namespace mongo {
         }
         bool empty() const { return intervals_.empty(); }
 		const vector< FieldInterval > &intervals() const { return intervals_; }
+        string getSpecial() const { return _special; }
+
     private:
         BSONObj addObj( const BSONObj &o );
-        string simpleRegexEnd( string regex );
         vector< FieldInterval > intervals_;
         vector< BSONObj > objData_;
+        string _special;
     };
     
     // implements query pattern matching, used to determine if a query is
@@ -171,7 +174,9 @@ namespace mongo {
         }
         QueryPattern pattern( const BSONObj &sort = BSONObj() ) const;
         BoundList indexBounds( const BSONObj &keyPattern, int direction ) const;
+        string getSpecial() const;
     private:
+        void processOpElement( const char *fieldName, const BSONElement &f, bool isNot, bool optimize );
         static FieldRange *trivialRange_;
         static FieldRange &trivialRange();
         mutable map< string, FieldRange > ranges_;
@@ -185,26 +190,34 @@ namespace mongo {
     class FieldMatcher {
     public:
 
-        FieldMatcher(bool include=false) : errmsg(NULL), include_(include)  {}
+        FieldMatcher(bool include=false) : _include(include){}
         
         void add( const BSONObj& o );
 
         void append( BSONObjBuilder& b , const BSONElement& e ) const;
 
         BSONObj getSpec() const;
-
-        const char* errmsg; //null if FieldMatcher is valid
     private:
 
         void add( const string& field, bool include );
         void appendArray( BSONObjBuilder& b , const BSONObj& a ) const;
 
-        bool include_; // true if default at this level is to include
+        bool _include; // true if default at this level is to include
         //TODO: benchmark vector<pair> vs map
         typedef map<string, boost::shared_ptr<FieldMatcher> > FieldMap;
-        FieldMap fields_;
-        BSONObj source_;
+        FieldMap _fields;
+        BSONObj _source;
     };
 
+    /** returns a string that when used as a matcher, would match a super set of regex()
+        returns "" for complex regular expressions
+        used to optimize queries in some simple regex cases that start with '^'
+
+        if purePrefix != NULL, sets it to whether the regex can be converted to a range query
+    */
+    string simpleRegex(const char* regex, const char* flags, bool* purePrefix=NULL);
+
+    /** returns the upper bound of a query that matches prefix */
+    string simpleRegexEnd( string prefix );
 
 } // namespace mongo

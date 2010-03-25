@@ -76,28 +76,44 @@ class Import : public Tool {
             }
             pos++;
             
-            int skip = 1;
-            char * end;
-            if ( _type == CSV && line[0] == '"' ){
-                line++;
-                end = strstr( line , "\"" );
-                skip = 2;
-            }
-            else {
-                end = strstr( line , _sep );
-            }
-            
             bool done = false;
             string data;
+            char * end;
+            if ( _type == CSV && line[0] == '"' ){
+                line++; //skip first '"'
 
-            if ( ! end ){
-                done = true;
-                data = string( line );
+                while (true) {
+                    end = strchr( line , '"' );
+                    if (!end){
+                        data += line;
+                        done = true;
+                        break;
+                    } else if (end[1] == '"') {
+                        // two '"'s get appended as one
+                        data.append(line, end-line+1); //include '"'
+                        line = end+2; //skip both '"'s
+                    } else if (end[-1] == '\\') {
+                        // "\\\"" gets appended as '"'
+                        data.append(line, end-line-1); //exclude '\\'
+                        data.append("\"");
+                        line = end+1; //skip the '"'
+                    } else {
+                        data.append(line, end-line);
+                        line = end+2; //skip '"' and ','
+                        break;
+                    }
+                }
+            } else {
+                end = strstr( line , _sep );
+                if ( ! end ){
+                    done = true;
+                    data = string( line );
+                } else {
+                    data = string( line , end - line );
+                    line = end+1;
+                }
             }
-            else {
-                data = string( line , end - line );
-            }
-            
+
             if ( _headerLine ){
                 while ( isspace( data[0] ) )
                     data = data.substr( 1 );
@@ -108,7 +124,6 @@ class Import : public Tool {
             
             if ( done )
                 break;
-            line = end + skip;
         }
         return b.obj();
     }
@@ -135,7 +150,7 @@ public:
 
         istream * in = &cin;
 
-        ifstream file( filename.c_str() , ios_base::in | ios_base::binary);
+        ifstream file( filename.c_str() , ios_base::in);
 
         if ( filename.size() > 0 && filename != "-" ){
             if ( ! exists( filename ) ){
@@ -201,7 +216,7 @@ public:
         log(1) << "filesize: " << fileSize << endl;
         ProgressMeter pm( fileSize );
         const int BUF_SIZE = 1024 * 1024 * 4;
-        boost::scoped_array<char> line(new char[BUF_SIZE]);
+        boost::scoped_array<char> line(new char[BUF_SIZE+2]);
         while ( *in ){
             char * buf = line.get();
             in->getline( buf , BUF_SIZE );
@@ -214,6 +229,8 @@ public:
             if ( ! len )
                 continue;
             
+            buf[len+1] = 0;
+
             if ( in->rdstate() == ios_base::eofbit )
                 break;
             assert( in->rdstate() == 0 );
@@ -238,6 +255,8 @@ public:
         }
 
         cout << "imported " << num << " objects" << endl;
+
+        conn().getLastError();
         
         if ( errors == 0 )
             return 0;

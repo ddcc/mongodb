@@ -36,7 +36,7 @@ namespace mongo {
     boost::recursive_mutex ClientCursor::ccmutex;
 
     unsigned ClientCursor::byLocSize() { 
-        recursive_boostlock lock(ccmutex);
+        recursive_scoped_lock lock(ccmutex);
         return byLoc.size();
     }
 
@@ -63,7 +63,7 @@ namespace mongo {
 
     /* todo: this implementation is incomplete.  we use it as a prefix for dropDatabase, which
              works fine as the prefix will end with '.'.  however, when used with drop and
-    		 deleteIndexes, this could take out cursors that belong to something else -- if you
+    		 dropIndexes, this could take out cursors that belong to something else -- if you
     		 drop "foo", currently, this will kill cursors for "foobar".
     */
     void ClientCursor::invalidate(const char *nsPrefix) {
@@ -73,7 +73,7 @@ namespace mongo {
         assert( len > 0 && strchr(nsPrefix, '.') );
 
         {
-            recursive_boostlock lock(ccmutex);
+            recursive_scoped_lock lock(ccmutex);
 
             for ( CCByLoc::iterator i = byLoc.begin(); i != byLoc.end(); ++i ) {
                 ClientCursor *cc = i->second;
@@ -88,7 +88,7 @@ namespace mongo {
 
     /* called every 4 seconds.  millis is amount of idle time passed since the last call -- could be zero */
     void ClientCursor::idleTimeReport(unsigned millis) {
-        recursive_boostlock lock(ccmutex);
+        recursive_scoped_lock lock(ccmutex);
         for ( CCByLoc::iterator i = byLoc.begin(); i != byLoc.end();  ) {
             CCByLoc::iterator j = i;
             i++;
@@ -104,7 +104,7 @@ namespace mongo {
        note this is potentially slow
     */
     void ClientCursor::informAboutToDeleteBucket(const DiskLoc& b) {
-        recursive_boostlock lock(ccmutex);
+        recursive_scoped_lock lock(ccmutex);
         RARELY if ( byLoc.size() > 70 ) {
             log() << "perf warning: byLoc.size=" << byLoc.size() << " in aboutToDeleteBucket\n";
         }
@@ -117,7 +117,7 @@ namespace mongo {
 
     /* must call this on a delete so we clean up the cursors. */
     void ClientCursor::aboutToDelete(const DiskLoc& dl) {
-        recursive_boostlock lock(ccmutex);
+        recursive_scoped_lock lock(ccmutex);
 
         CCByLoc::iterator j = byLoc.lower_bound(dl);
         CCByLoc::iterator stop = byLoc.upper_bound(dl);
@@ -170,7 +170,7 @@ namespace mongo {
         assert( pos != -2 );
 
         {
-            recursive_boostlock lock(ccmutex);
+            recursive_scoped_lock lock(ccmutex);
             setLastLoc_inlock( DiskLoc() ); // removes us from bylocation multimap
             clientCursorsById.erase(cursorid);
 
@@ -193,7 +193,7 @@ namespace mongo {
             return;
         }
         {
-            recursive_boostlock lock(ccmutex);
+            recursive_scoped_lock lock(ccmutex);
             setLastLoc_inlock(cl);
             c->noteLocation();
         }
@@ -217,7 +217,7 @@ namespace mongo {
             static bool inEmpty = false;
             if( test && !inEmpty ) { 
                 inEmpty = true;
-                log() << "TEST: manipulate collection during remove" << endl;
+                log() << "TEST: manipulate collection during cc:yield" << endl;
                 if( test == 1 ) 
                     Helpers::emptyCollection(ns.c_str());
                 else if( test == 2 ) {
@@ -267,8 +267,9 @@ namespace mongo {
         virtual void help( stringstream& help ) const {
             help << " example: { cursorInfo : 1 }";
         }
+        virtual LockType locktype(){ return NONE; }
         bool run(const char *dbname, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
-            recursive_boostlock lock(ClientCursor::ccmutex);
+            recursive_scoped_lock lock(ClientCursor::ccmutex);
             result.append("byLocation_size", unsigned( ClientCursor::byLoc.size() ) );
             result.append("clientCursors_size", unsigned( ClientCursor::clientCursorsById.size() ) );
             return true;

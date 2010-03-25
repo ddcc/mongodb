@@ -18,13 +18,14 @@
 #pragma once
 
 #include "../util/sock.h"
+#include "../util/atomic_int.h"
 
 namespace mongo {
 
     class Message;
     class MessagingPort;
     class PiggyBackData;
-    typedef WrappingInt MSGID;
+    typedef AtomicUInt MSGID;
 
     class Listener {
     public:
@@ -73,6 +74,9 @@ namespace mongo {
         void piggyBack( Message& toSend , int responseTo = -1 );
 
         virtual unsigned remotePort();
+
+        int send( const char * data , const int len );
+        int recv( char * data , int max );
     private:
         int sock;
         PiggyBackData * piggyBackData;
@@ -98,6 +102,24 @@ namespace mongo {
     };
 
     bool doesOpGetAResponse( int op );
+
+    inline const char * opToString( int op ){
+        switch ( op ){
+        case 0: return "none";
+        case opReply: return "reply";
+        case dbMsg: return "msg";
+        case dbUpdate: return "update";
+        case dbInsert: return "insert";
+        case dbQuery: return "query";
+        case dbGetMore: return "getmore";
+        case dbDelete: return "remove";
+        case dbKillCursors: return "killcursors";
+        default: 
+            PRINT(op);
+            assert(0); 
+            return "";
+        }
+    }
 
     struct MsgData {
         int len; /* len of the msg, including this field */
@@ -146,9 +168,13 @@ namespace mongo {
         ~Message() {
             reset();
         }
-
+        
         SockAddr from;
         MsgData *data;
+
+        int operation() const {
+            return data->operation();
+        }
 
         Message& operator=(Message& r) {
             assert( data == 0 );
@@ -175,9 +201,9 @@ namespace mongo {
         void setData(int operation, const char *msgtxt) {
             setData(operation, msgtxt, strlen(msgtxt)+1);
         }
-        void setData(int operation, const char *msgdata, int len) {
+        void setData(int operation, const char *msgdata, size_t len) {
             assert(data == 0);
-            int dataLen = len + sizeof(MsgData) - 4;
+            size_t dataLen = len + sizeof(MsgData) - 4;
             MsgData *d = (MsgData *) malloc(dataLen);
             memcpy(d->_data, msgdata, len);
             d->len = fixEndian(dataLen);

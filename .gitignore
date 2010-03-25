@@ -5,7 +5,10 @@
 
 *~
 *.o
+*.os
+*.obj
 *.aps
+*.ilk
 *.tar.gz
 *.suo
 *.ncb
@@ -38,6 +41,7 @@ config.log
 settings.py
 buildinfo.cpp
 tags
+TAGS
 
 #temp dirs
 dump
@@ -63,6 +67,7 @@ mongoexport
 mongoimport
 mongosniff
 mongobridge
+mongostat
 
 *.tgz
 *.zip
@@ -84,12 +89,14 @@ test
 authTest
 perftest
 clientTest
+httpClientTest
 
 #debian
 build-stamp
 configure-stamp
 debian/mongodb
-debian/mongodb.*
+# This was inserted 2009-08-16, nobody knows why.
+#debian/mongodb.*
 
 #osx
 .DS_Store

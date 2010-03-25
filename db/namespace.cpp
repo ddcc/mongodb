@@ -47,11 +47,43 @@ namespace mongo {
     }
     
     boost::filesystem::path NamespaceIndex::path() const {
-        return boost::filesystem::path( dir_ ) / ( database_ + ".ns" );
+        boost::filesystem::path ret( dir_ );
+        if ( directoryperdb )
+            ret /= database_;
+        ret /= ( database_ + ".ns" );
+        return ret;
     }
 
+    void NamespaceIndex::maybeMkdir() const {
+        if ( !directoryperdb )
+            return;
+        boost::filesystem::path dir( dir_ );
+        dir /= database_;
+        if ( !boost::filesystem::exists( dir ) )
+            BOOST_CHECK_EXCEPTION( boost::filesystem::create_directory( dir ) );
+    }
+    
 	int lenForNewNsFiles = 16 * 1024 * 1024;
     
+    void NamespaceDetails::onLoad(const Namespace& k) { 
+        if( k.isExtra() ) { 
+            /* overflow storage for indexes - so don't treat as a NamespaceDetails object. */
+            return;
+        }
+
+        assertInWriteLock();
+        if( backgroundIndexBuildInProgress ) { 
+            log() << "backgroundIndexBuildInProgress was " << backgroundIndexBuildInProgress << " for " << k << ", indicating an abnormal db shutdown" << endl;
+            backgroundIndexBuildInProgress = 0;
+        }
+    }
+
+    static void callback(const Namespace& k, NamespaceDetails& v) { 
+        v.onLoad(k);
+    }
+
+    bool checkNsFilesOnLoad = true;
+
     void NamespaceIndex::init() {
         if ( ht )
             return;
@@ -82,6 +114,7 @@ namespace mongo {
 		else {
 			// use lenForNewNsFiles, we are making a new database
 			massert( 10343 ,  "bad lenForNewNsFiles", lenForNewNsFiles >= 1024*1024 );
+            maybeMkdir();
 			long l = lenForNewNsFiles;
 			p = f.map(pathString.c_str(), l);
             if( p ) { 
@@ -95,6 +128,8 @@ namespace mongo {
             dbexit( EXIT_FS );
         }
         ht = new HashTable<Namespace,NamespaceDetails>(p, len, "namespace index");
+        if( checkNsFilesOnLoad )
+            ht->iterAll(callback);
     }
 
     void NamespaceDetails::addDeletedRec(DeletedRecord *d, DiskLoc dloc) {
@@ -446,9 +481,14 @@ namespace mongo {
         // signal done allocating new extents.
         if ( !deletedList[ 1 ].isValid() )
             deletedList[ 1 ] = DiskLoc();
-
+        
         assert( len < 400000000 );
         int passes = 0;
+        int maxPasses = ( len / 30 ) + 2; // 30 is about the smallest entry that could go in the oplog
+        if ( maxPasses < 5000 ){
+            // this is for bacwards safety since 5000 was the old value
+            maxPasses = 5000;
+        }
         DiskLoc loc;
 
         // delete records until we have room and the max # objects limit achieved.
@@ -497,10 +537,10 @@ namespace mongo {
             DiskLoc fr = theCapExtent()->firstRecord;
             theDataFileMgr.deleteRecord(ns, fr.rec(), fr, true);
             compact();
-            if( ++passes >= 5000 ) {
-                log() << "passes ns:" << ns << " len:" << len << '\n';
+            if( ++passes > maxPasses ) {
+                log() << "passes ns:" << ns << " len:" << len << " maxPasses: " << maxPasses << '\n';
                 log() << "passes max:" << max << " nrecords:" << nrecords << " datasize: " << datasize << endl;
-                massert( 10345 ,  "passes >= 5000 in capped collection alloc", false );
+                massert( 10345 ,  "passes >= maxPasses in capped collection alloc", false );
             }
         }
 
@@ -512,7 +552,7 @@ namespace mongo {
     }
 
     /* you MUST call when adding an index.  see pdfile.cpp */
-    IndexDetails& NamespaceDetails::addIndex(const char *thisns) {
+    IndexDetails& NamespaceDetails::addIndex(const char *thisns, bool resetTransient) {
         assert( nsdetails(thisns) == this );
 
         if( nIndexes == NIndexesBase && extraOffset == 0 ) { 
@@ -521,7 +561,8 @@ namespace mongo {
 
         IndexDetails& id = idx(nIndexes);
         nIndexes++;
-        NamespaceDetailsTransient::get_w(thisns).addedIndex();
+        if ( resetTransient )
+            NamespaceDetailsTransient::get_w(thisns).addedIndex();
         return id;
     }
 
@@ -543,31 +584,39 @@ namespace mongo {
         for ( int i = 0; i < nIndexes; i++ ) {
             IndexDetails& idx = indexes[i];
             BSONObj idxKey = idx.info.obj().getObjectField("key"); // e.g., { ts : -1 }
-            if ( !idxKey.findElement(fieldName).eoo() )
+            if ( !idxKey.getField(fieldName).eoo() )
                 return i;
         }*/
         return -1;
     }
     
-    long long NamespaceDetails::storageSize(){
+    long long NamespaceDetails::storageSize( int * numExtents ){
         Extent * e = firstExtent.ext();
         assert( e );
         
         long long total = 0;
+        int n = 0;
         while ( e ){
-                total += e->length;
-                e = e->getNextExtent();
+            total += e->length;
+            e = e->getNextExtent();
+            n++;
         }
+        
+        if ( numExtents )
+            *numExtents = n;
+        
         return total;
     }
     
     /* ------------------------------------------------------------------------- */
 
-    boost::mutex NamespaceDetailsTransient::_qcMutex;
+    mongo::mutex NamespaceDetailsTransient::_qcMutex;
+    mongo::mutex NamespaceDetailsTransient::_isMutex;
     map< string, shared_ptr< NamespaceDetailsTransient > > NamespaceDetailsTransient::_map;
     typedef map< string, shared_ptr< NamespaceDetailsTransient > >::iterator ouriter;
 
     void NamespaceDetailsTransient::reset() {
+        DEV assertInWriteLock();
         clearQueryCache();
         _keysComputed = false;
         _indexSpecs.clear();
@@ -595,11 +644,13 @@ namespace mongo {
         _keysComputed = true;
         _indexKeys.clear();
         NamespaceDetails *d = nsdetails(_ns.c_str());
+        if ( ! d )
+            return;
         NamespaceDetails::IndexIterator i = d->ii();
         while( i.more() )
             i.next().keyPattern().getFieldNames(_indexKeys);
     }
-    
+
     void NamespaceDetailsTransient::cllStart( int logSizeMb ) {
         assertInWriteLock();
         _cll_ns = "local.temp.oplog." + _ns;
@@ -607,7 +658,7 @@ namespace mongo {
         stringstream spec;
         // 128MB
         spec << "{size:" << logSizeMb * 1024 * 1024 << ",capped:true,autoIndexId:false}";
-        setClient( _cll_ns.c_str() );
+        Client::Context ct( _cll_ns );
         string err;
         massert( 10347 ,  "Could not create log ns", userCreateNS( _cll_ns.c_str(), fromjson( spec.str() ), err, false ) );
         NamespaceDetails *d = nsdetails( _cll_ns.c_str() );
@@ -633,7 +684,7 @@ namespace mongo {
         assertInWriteLock();
         if ( !_cll_enabled )
             return;
-        setClient( _cll_ns.c_str() );
+        Client::Context ctx( _cll_ns );
         dropNS( _cll_ns );
     }
 

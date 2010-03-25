@@ -1,3 +1,19 @@
+/*
+ *    Copyright (C) 2010 10gen Inc.
+ *
+ *    This program is free software: you can redistribute it and/or  modify
+ *    it under the terms of the GNU Affero General Public License, version 3,
+ *    as published by the Free Software Foundation.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU Affero General Public License for more details.
+ *
+ *    You should have received a copy of the GNU Affero General Public License
+ *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
 // storage.cpp
 
 #include "stdafx.h"
@@ -222,7 +238,7 @@ inline void RecCache::writeIfDirty(Node *n) {
 
 void RecCache::closeFiles(string dbname, string path) { 
     assertInWriteLock();
-    boostlock lk(rcmutex);
+    scoped_lock lk(rcmutex);
 
     // first we write all dirty pages.  it is not easy to check which Nodes are for a particular
     // db, so we just write them all.
@@ -243,7 +259,7 @@ void RecCache::closeFiles(string dbname, string path) {
 }
 
 void RecCache::closing() { 
-    boostlock lk(rcmutex);
+    scoped_lock lk(rcmutex);
     (cout << "TEMP: recCacheCloseAll() writing dirty pages...\n").flush();
     writeDirty( dirtyl.begin(), true );
     for( unsigned i = 0; i < stores.size(); i++ ) { 
@@ -280,7 +296,7 @@ void RecCache::writeLazily() {
     int sleep = 0;
     int k;
     {
-        boostlock lk(rcmutex);
+        scoped_lock lk(rcmutex);
         Timer t;
         set<DiskLoc>::iterator i = dirtyl.end();
         for( k = 0; k < 100; k++ ) {
@@ -302,7 +318,7 @@ void RecCache::writeLazily() {
 }
 
 void RecCache::_ejectOld() { 
-    boostlock lk(rcmutex);
+    scoped_lock lk(rcmutex);
     if( nnodes <= MAXNODES )
         return;
     Node *n = oldest;
@@ -368,7 +384,7 @@ void RecCache::closeStore(BasicRecStore *rs) {
 
 void RecCache::drop(const char *_ns) { 
     // todo: test with a non clean shutdown file
-    boostlock lk(rcmutex);
+    scoped_lock lk(rcmutex);
 
     map<string, BasicRecStore*>::iterator it = storesByNsKey.find(mknskey(_ns));
     string fname;

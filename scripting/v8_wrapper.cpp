@@ -67,16 +67,15 @@ namespace mongo {
     
     Local<v8::Object> mongoToV8( const BSONObj& m , bool array, bool readOnly ){
 
+        Local<v8::Object> o;
+
         // handle DBRef. needs to come first. isn't it? (metagoto)
         static string ref = "$ref";
         if ( ref == m.firstElement().fieldName() ) {
             const BSONElement& id = m["$id"];
             if (!id.eoo()) { // there's no check on $id exitence in sm implementation. risky ?
                 v8::Function* dbRef = getNamedCons( "DBRef" );
-                v8::Handle<v8::Value> argv[2];
-                argv[0] = mongoToV8Element(m.firstElement());
-                argv[1] = mongoToV8Element(m["$id"]);
-                return dbRef->NewInstance(2, argv);
+                o = dbRef->NewInstance();
             }
         }
 
@@ -85,9 +84,11 @@ namespace mongo {
         Local< v8::ObjectTemplate > internalFieldObjects = v8::ObjectTemplate::New();
         internalFieldObjects->SetInternalFieldCount( 1 );
 
-        Local<v8::Object> o;
-        if ( array ) {
-            // NOTE Looks like it's impossible to add interceptors to non array objects in v8.
+        if ( !o.IsEmpty() ) {
+            readOnly = false;
+        } else if ( array ) {
+            // NOTE Looks like it's impossible to add interceptors to v8 arrays.
+            readOnly = false;
             o = v8::Array::New();
         } else if ( !readOnly ) {
             o = v8::Object::New();
@@ -149,7 +150,6 @@ namespace mongo {
             
             case mongo::NumberDouble:
             case mongo::NumberInt:
-            case mongo::NumberLong: // may lose information here - just copying sm engine behavior
                 o->Set( v8::String::New( f.fieldName() ) , v8::Number::New( f.number() ) );
                 break;
             
@@ -168,6 +168,7 @@ namespace mongo {
                 break;
             
             case mongo::jstNULL:
+            case mongo::Undefined: // duplicate sm behavior
                 o->Set( v8::String::New( f.fieldName() ) , v8::Null() );
                 break;
             
@@ -200,7 +201,7 @@ namespace mongo {
             case mongo::Timestamp: {
                 Local<v8::Object> sub = readOnly ? readOnlyObjects->NewInstance() : internalFieldObjects->NewInstance();
                 
-                sub->Set( v8::String::New( "time" ) , v8::Date::New( f.timestampTime() ) );
+                sub->Set( v8::String::New( "t" ) , v8::Number::New( f.timestampTime() ) );
                 sub->Set( v8::String::New( "i" ) , v8::Number::New( f.timestampInc() ) );
                 sub->SetInternalField( 0, v8::Uint32::New( f.type() ) );
                 
@@ -208,6 +209,24 @@ namespace mongo {
                 break;
             }
             
+            case mongo::NumberLong: {
+                Local<v8::Object> sub = readOnly ? readOnlyObjects->NewInstance() : internalFieldObjects->NewInstance();
+                unsigned long long val = f.numberLong();
+                v8::Function* numberLong = getNamedCons( "NumberLong" );
+                if ( (long long)val == (long long)(double)(long long)(val) ) {
+                    v8::Handle<v8::Value> argv[1];                
+                    argv[0] = v8::Number::New( (double)(long long)( val ) );
+                    o->Set( v8::String::New( f.fieldName() ), numberLong->NewInstance( 1, argv ) );
+                } else {                    
+                    v8::Handle<v8::Value> argv[3];
+                    argv[0] = v8::Number::New( (double)(long long)(val) );
+                    argv[1] = v8::Integer::New( val >> 32 );
+                    argv[2] = v8::Integer::New( (unsigned long)(val & 0x00000000ffffffff) );
+                    o->Set( v8::String::New( f.fieldName() ), numberLong->NewInstance(3, argv) );
+                }
+                break;                
+            }
+                    
             case mongo::MinKey: {
                 Local<v8::Object> sub = readOnly ? readOnlyObjects->NewInstance() : internalFieldObjects->NewInstance();
                 sub->Set( v8::String::New( "$MinKey" ), v8::Boolean::New( true ) );
@@ -223,10 +242,6 @@ namespace mongo {
                 o->Set( v8::String::New( f.fieldName() ) , sub );
                 break;
             }
-
-            case mongo::Undefined:
-                o->Set( v8::String::New( f.fieldName() ), v8::Undefined() );
-                break;
 
             case mongo::DBRef: {
                 v8::Function* dbPointer = getNamedCons( "DBPointer" );
@@ -247,7 +262,7 @@ namespace mongo {
         
         }
 
-        if ( !array && readOnly ) {
+        if ( readOnly ) {
             readOnlyObjects->SetNamedPropertyHandler( 0, NamedReadOnlySet, 0, NamedReadOnlyDelete );
             readOnlyObjects->SetIndexedPropertyHandler( 0, IndexedReadOnlySet, 0, IndexedReadOnlyDelete );            
         }
@@ -291,6 +306,7 @@ namespace mongo {
 
         case mongo::EOO:            
         case mongo::jstNULL:
+        case mongo::Undefined: // duplicate sm behavior
             return v8::Null();
             
         case mongo::RegEx: {
@@ -319,11 +335,28 @@ namespace mongo {
         case mongo::Timestamp: {
             Local<v8::Object> sub = internalFieldObjects->NewInstance();
             
-            sub->Set( v8::String::New( "time" ) , v8::Date::New( f.timestampTime() ) );
+            sub->Set( v8::String::New( "t" ) , v8::Number::New( f.timestampTime() ) );
             sub->Set( v8::String::New( "i" ) , v8::Number::New( f.timestampInc() ) );
             sub->SetInternalField( 0, v8::Uint32::New( f.type() ) );
 
             return sub;
+        }
+                
+        case mongo::NumberLong: {
+            Local<v8::Object> sub = internalFieldObjects->NewInstance();
+            unsigned long long val = f.numberLong();
+            v8::Function* numberLong = getNamedCons( "NumberLong" );
+            if ( (long long)val == (long long)(double)(long long)(val) ) {
+                v8::Handle<v8::Value> argv[1];                
+                argv[0] = v8::Number::New( (double)(long long)( val ) );
+                return numberLong->NewInstance( 1, argv );
+            } else {
+                v8::Handle<v8::Value> argv[3];
+                argv[0] = v8::Number::New( (double)(long long)( val ) );
+                argv[1] = v8::Integer::New( val >> 32 );
+                argv[2] = v8::Integer::New( (unsigned long)(val & 0x00000000ffffffff) );
+                return numberLong->NewInstance( 3, argv );
+            }
         }
             
         case mongo::MinKey: {
@@ -340,9 +373,6 @@ namespace mongo {
             return sub;
         }
                 
-        case mongo::Undefined:
-            return v8::Undefined();
-
         case mongo::DBRef: {
             v8::Function* dbPointer = getNamedCons( "DBPointer" );
             v8::Handle<v8::Value> argv[2];
@@ -362,7 +392,7 @@ namespace mongo {
         return v8::Undefined();
     }
 
-    void v8ToMongoElement( BSONObjBuilder & b , v8::Handle<v8::String> name , const string sname , v8::Handle<v8::Value> value ){
+    void v8ToMongoElement( BSONObjBuilder & b , v8::Handle<v8::String> name , const string sname , v8::Handle<v8::Value> value , int depth ){
         
         if ( value->IsString() ){
             b.append( sname.c_str() , toSTLString( value ).c_str() );
@@ -383,7 +413,7 @@ namespace mongo {
         }
     
         if ( value->IsArray() ){
-            BSONObj sub = v8ToMongo( value->ToObject() );
+            BSONObj sub = v8ToMongo( value->ToObject() , depth );
             b.appendArray( sname.c_str() , sub );
             return;
         }
@@ -405,7 +435,7 @@ namespace mongo {
                 switch( obj->GetInternalField( 0 )->ToInt32()->Value() ) { // NOTE Uint32's Value() gave me a linking error, so going with this instead
                     case Timestamp:
                         b.appendTimestamp( sname.c_str(),
-                                          Date_t( v8::Date::Cast( *obj->Get( v8::String::New( "time" ) ) )->NumberValue() ),
+                                          Date_t( obj->Get( v8::String::New( "t" ) )->ToNumber()->Value() ),
                                           obj->Get( v8::String::New( "i" ) )->ToInt32()->Value() );
                         return;
                     case MinKey:
@@ -421,8 +451,8 @@ namespace mongo {
             string s = toSTLString( value );
             if ( s.size() && s[0] == '/' ){
                 s = s.substr( 1 );
-                string r = s.substr( 0 , s.find( "/" ) );
-                string o = s.substr( s.find( "/" ) + 1 );
+                string r = s.substr( 0 , s.rfind( "/" ) );
+                string o = s.substr( s.rfind( "/" ) + 1 );
                 b.appendRegex( sname.c_str() , r.c_str() , o.c_str() );
             }
             else if ( value->ToObject()->GetPrototype()->IsObject() &&
@@ -431,10 +461,23 @@ namespace mongo {
                 oid.init( toSTLString( value ) );
                 b.appendOID( sname.c_str() , &oid );
             }
-            else if ( !value->ToObject()->GetHiddenValue( v8::String::New( "__DBPointer" ) ).IsEmpty() ) {
+            else if ( !value->ToObject()->GetHiddenValue( v8::String::New( "__NumberLong" ) ).IsEmpty() ) {
                 // TODO might be nice to potentially speed this up with an indexed internal
                 // field, but I don't yet know how to use an ObjectTemplate with a
                 // constructor.
+                v8::Handle< v8::Object > it = value->ToObject();
+                long long val;
+                if ( !it->Has( v8::String::New( "top" ) ) ) {
+                    val = (long long)( it->Get( v8::String::New( "floatApprox" ) )->NumberValue() );
+                } else {
+                    val = (long long)
+                    ( (unsigned long long)( it->Get( v8::String::New( "top" ) )->ToInt32()->Value() ) << 32 ) +
+                    (unsigned)( it->Get( v8::String::New( "bottom" ) )->ToInt32()->Value() );        
+                }
+                
+                b.append( sname.c_str(), val );
+            }
+            else if ( !value->ToObject()->GetHiddenValue( v8::String::New( "__DBPointer" ) ).IsEmpty() ) {
                 OID oid;
                 oid.init( toSTLString( value->ToObject()->Get( v8::String::New( "id" ) ) ) );
                 string ns = toSTLString( value->ToObject()->Get( v8::String::New( "ns" ) ) );
@@ -450,7 +493,7 @@ namespace mongo {
                                 mongo::BinDataType( obj->Get( v8::String::New( "type" ) )->ToInt32()->Value() ),
                                 dataArray );
             } else {
-                BSONObj sub = v8ToMongo( value->ToObject() );
+                BSONObj sub = v8ToMongo( value->ToObject() , depth );
                 b.append( sname.c_str() , sub );
             }
             return;
@@ -474,12 +517,14 @@ namespace mongo {
         cout << "don't know how to convert to mongo field [" << name << "]\t" << value << endl;
     }
 
-    BSONObj v8ToMongo( v8::Handle<v8::Object> o ){
+    BSONObj v8ToMongo( v8::Handle<v8::Object> o , int depth ){
         BSONObjBuilder b;
-
-        v8::Handle<v8::String> idName = v8::String::New( "_id" );
-        if ( o->HasRealNamedProperty( idName ) ){
-            v8ToMongoElement( b , idName , "_id" , o->Get( idName ) );
+        
+        if ( depth == 0 ){
+            v8::Handle<v8::String> idName = v8::String::New( "_id" );
+            if ( o->HasRealNamedProperty( idName ) ){
+                v8ToMongoElement( b , idName , "_id" , o->Get( idName ) );
+            }
         }
     
         Local<v8::Array> names = o->GetPropertyNames();
@@ -493,10 +538,10 @@ namespace mongo {
             v8::Local<v8::Value> value = o->Get( name );
         
             const string sname = toSTLString( name );
-            if ( sname == "_id" )
+            if ( depth == 0 && sname == "_id" )
                 continue;
 
-            v8ToMongoElement( b , name , sname , value );
+            v8ToMongoElement( b , name , sname , value , depth + 1 );
         }
         return b.obj();
     }

@@ -251,6 +251,133 @@ namespace JsobjTests {
             }
         };
 
+        class AsTempObj{
+        public:
+            void run(){
+                {
+                    BSONObjBuilder bb;
+                    bb << "a" << 1;
+                    BSONObj tmp = bb.asTempObj();
+                    ASSERT(tmp.objsize() == 4+(1+2+4)+1);
+                    ASSERT(tmp.valid());
+                    ASSERT(tmp.hasField("a"));
+                    ASSERT(!tmp.hasField("b"));
+                    ASSERT(tmp == BSON("a" << 1));
+                    
+                    bb << "b" << 2;
+                    BSONObj obj = bb.obj();
+                    ASSERT(obj.objsize() == 4+(1+2+4)+(1+2+4)+1);
+                    ASSERT(obj.valid());
+                    ASSERT(obj.hasField("a"));
+                    ASSERT(obj.hasField("b"));
+                    ASSERT(obj == BSON("a" << 1 << "b" << 2));
+                }
+                {
+                    BSONObjBuilder bb;
+                    bb << "a" << GT << 1;
+                    BSONObj tmp = bb.asTempObj();
+                    ASSERT(tmp.objsize() == 4+(1+2+(4+1+4+4+1))+1);
+                    ASSERT(tmp.valid());
+                    ASSERT(tmp.hasField("a"));
+                    ASSERT(!tmp.hasField("b"));
+                    ASSERT(tmp == BSON("a" << BSON("$gt" << 1)));
+                    
+                    bb << "b" << LT << 2;
+                    BSONObj obj = bb.obj();
+                    ASSERT(obj.objsize() == 4+(1+2+(4+1+4+4+1))+(1+2+(4+1+4+4+1))+1);
+                    ASSERT(obj.valid());
+                    ASSERT(obj.hasField("a"));
+                    ASSERT(obj.hasField("b"));
+                    ASSERT(obj == BSON("a" << BSON("$gt" << 1)
+                                    << "b" << BSON("$lt" << 2)));
+                }
+                {
+                    BSONObjBuilder bb(32);
+                    bb << "a" << 1;
+                    BSONObj tmp = bb.asTempObj();
+                    ASSERT(tmp.objsize() == 4+(1+2+4)+1);
+                    ASSERT(tmp.valid());
+                    ASSERT(tmp.hasField("a"));
+                    ASSERT(!tmp.hasField("b"));
+                    ASSERT(tmp == BSON("a" << 1));
+
+                    //force a realloc
+                    BSONArrayBuilder arr;
+                    for (int i=0; i < 10000; i++){
+                        arr << i;
+                    }
+                    bb << "b" << arr.arr();
+                    BSONObj obj = bb.obj();
+                    ASSERT(obj.valid());
+                    ASSERT(obj.hasField("a"));
+                    ASSERT(obj.hasField("b"));
+                    ASSERT(obj.objdata() != tmp.objdata());
+                }
+            }
+        };
+
+        struct AppendIntOrLL{
+            void run(){
+                const long long billion = 1000*1000*1000;
+                BSONObjBuilder b;
+                b.appendIntOrLL("i1",  1);
+                b.appendIntOrLL("i2", -1);
+                b.appendIntOrLL("i3",  1*billion);
+                b.appendIntOrLL("i4", -1*billion);
+
+                b.appendIntOrLL("L1",  2*billion);
+                b.appendIntOrLL("L2", -2*billion);
+                b.appendIntOrLL("L3",  4*billion);
+                b.appendIntOrLL("L4", -4*billion);
+                b.appendIntOrLL("L5",  16*billion);
+                b.appendIntOrLL("L6", -16*billion);
+
+                BSONObj o = b.obj();
+
+                ASSERT(o["i1"].type() == NumberInt);
+                ASSERT(o["i1"].number() == 1);
+                ASSERT(o["i2"].type() == NumberInt);
+                ASSERT(o["i2"].number() == -1);
+                ASSERT(o["i3"].type() == NumberInt);
+                ASSERT(o["i3"].number() == 1*billion);
+                ASSERT(o["i4"].type() == NumberInt);
+                ASSERT(o["i4"].number() == -1*billion);
+
+                ASSERT(o["L1"].type() == NumberLong);
+                ASSERT(o["L1"].number() == 2*billion);
+                ASSERT(o["L2"].type() == NumberLong);
+                ASSERT(o["L2"].number() == -2*billion);
+                ASSERT(o["L3"].type() == NumberLong);
+                ASSERT(o["L3"].number() == 4*billion);
+                ASSERT(o["L4"].type() == NumberLong);
+                ASSERT(o["L4"].number() == -4*billion);
+                ASSERT(o["L5"].type() == NumberLong);
+                ASSERT(o["L5"].number() == 16*billion);
+                ASSERT(o["L6"].type() == NumberLong);
+                ASSERT(o["L6"].number() == -16*billion);
+            }
+        };
+
+        struct AppendNumber {
+            void run(){
+                BSONObjBuilder b;
+                b.appendNumber( "a" , 5 );
+                b.appendNumber( "b" , 5.5 );
+                b.appendNumber( "c" , (1024LL*1024*1024)-1 );
+                b.appendNumber( "d" , (1024LL*1024*1024*1024)-1 );
+                b.appendNumber( "e" , 1024LL*1024*1024*1024*1024*1024 );
+                
+                BSONObj o = b.obj();
+                
+                ASSERT( o["a"].type() == NumberInt );
+                ASSERT( o["b"].type() == NumberDouble );
+                ASSERT( o["c"].type() == NumberInt );
+                ASSERT( o["d"].type() == NumberDouble );
+                ASSERT( o["e"].type() == NumberLong );
+
+            }
+        };
+
         namespace Validation {
 
             class Base {
@@ -339,8 +466,9 @@ namespace JsobjTests {
                 }
                 BSONObj invalid() const {
                     BSONObj ret = valid();
-                    set( ret, 0, get( ret, 0 ) + 1 );
-                    set( ret, 7, get( ret, 7 ) + 1 );
+                    ASSERT_EQUALS( ret.firstElement().valuestr()[0] , 'b' );
+                    ASSERT_EQUALS( ret.firstElement().valuestr()[1] , 0 );
+                    ((char*)ret.firstElement().valuestr())[1] = 1;
                     return ret.copy();
                 }
             };
@@ -389,32 +517,6 @@ namespace JsobjTests {
                     set( ret, 7, get( ret, 7 ) + 1 );
                     return ret.copy();
                 };
-            };
-
-            class WrongSymbolSize : public Base {
-                BSONObj valid() const {
-                    return fromjson( "{\"a\":\"b\"}" );
-                }
-                BSONObj invalid() const {
-                    BSONObj ret = valid();
-                    set( ret, 4, Symbol );
-                    set( ret, 0, get( ret, 0 ) + 1 );
-                    set( ret, 7, get( ret, 7 ) + 1 );
-                    return ret.copy();
-                }
-            };
-
-            class WrongCodeSize : public Base {
-                BSONObj valid() const {
-                    return fromjson( "{\"a\":\"b\"}" );
-                }
-                BSONObj invalid() const {
-                    BSONObj ret = valid();
-                    set( ret, 4, Code );
-                    set( ret, 0, get( ret, 0 ) + 1 );
-                    set( ret, 7, get( ret, 7 ) + 1 );
-                    return ret.copy();
-                }
             };
 
             class NoFieldNameEnd : public Base {
@@ -759,7 +861,9 @@ namespace JsobjTests {
     public:
         void run() {
             Date_t before = jsTime();
+            sleepmillis(1);
             time_t now = time(NULL);
+            sleepmillis(1);
             Date_t after = jsTime();
 
             BSONObjBuilder b;
@@ -1245,6 +1349,77 @@ namespace JsobjTests {
         }
     };
 
+    class InvalidIDFind {
+    public:
+        void run(){
+            BSONObj x = BSON( "_id" << 5 << "t" << 2 );
+            {
+                char * crap = (char*)malloc( x.objsize() );
+                memcpy( crap , x.objdata() , x.objsize() );
+                BSONObj y( crap , false );
+                ASSERT_EQUALS( x , y );
+                free( crap );
+            }
+            
+            {
+                char * crap = (char*)malloc( x.objsize() );
+                memcpy( crap , x.objdata() , x.objsize() );
+                int * foo = (int*)crap;
+                foo[0] = 123123123;
+                int state = 0;
+                try {
+                    BSONObj y( crap , false );
+                    state = 1;
+                }
+                catch ( std::exception& e ){
+                    state = 2;
+                    ASSERT( strstr( e.what() , "_id: 5" ) > 0 );
+                }
+                free( crap );
+                ASSERT_EQUALS( 2 , state );
+            }
+                
+            
+        }
+    };
+
+    class ElementSetTest {
+    public:
+        void run(){
+            BSONObj x = BSON( "a" << 1 << "b" << 1 << "c" << 2 );
+            BSONElement a = x["a"];
+            BSONElement b = x["b"];
+            BSONElement c = x["c"];
+            cout << "c: " << c << endl;
+            ASSERT( a.woCompare( b ) != 0 );
+            ASSERT( a.woCompare( b , false ) == 0 );
+            
+            BSONElementSet s;
+            s.insert( a );
+            ASSERT_EQUALS( 1U , s.size() );
+            s.insert( b );
+            ASSERT_EQUALS( 1U , s.size() );
+            ASSERT( ! s.count( c ) );
+
+            ASSERT( s.find( a ) != s.end() );
+            ASSERT( s.find( b ) != s.end() );
+            ASSERT( s.find( c ) == s.end() );
+                    
+            
+            s.insert( c );
+            ASSERT_EQUALS( 2U , s.size() );
+
+
+            ASSERT( s.find( a ) != s.end() );
+            ASSERT( s.find( b ) != s.end() );
+            ASSERT( s.find( c ) != s.end() );
+
+            ASSERT( s.count( a ) );
+            ASSERT( s.count( b ) );
+            ASSERT( s.count( c ) );
+        }
+    };
+
     class All : public Suite {
     public:
         All() : Suite( "jsobj" ){
@@ -1264,6 +1439,9 @@ namespace JsobjTests {
             add< BSONObjTests::MultiKeySortOrder > ();
             add< BSONObjTests::TimestampTest >();
             add< BSONObjTests::Nan >();
+            add< BSONObjTests::AsTempObj >();
+            add< BSONObjTests::AppendIntOrLL >();
+            add< BSONObjTests::AppendNumber >();
             add< BSONObjTests::Validation::BadType >();
             add< BSONObjTests::Validation::EooBeforeEnd >();
             add< BSONObjTests::Validation::Undefined >();
@@ -1274,8 +1452,6 @@ namespace JsobjTests {
             add< BSONObjTests::Validation::NegativeStringSize >();
             add< BSONObjTests::Validation::WrongSubobjectSize >();
             add< BSONObjTests::Validation::WrongDbrefNsSize >();
-            add< BSONObjTests::Validation::WrongSymbolSize >();
-            add< BSONObjTests::Validation::WrongCodeSize >();
             add< BSONObjTests::Validation::NoFieldNameEnd >();
             add< BSONObjTests::Validation::BadRegex >();
             add< BSONObjTests::Validation::BadRegexOptions >();
@@ -1332,7 +1508,8 @@ namespace JsobjTests {
             add< NumberParsing >();
             add< bson2settest >();
             add< checkForStorageTests >();
-
+            add< InvalidIDFind >();
+            add< ElementSetTest >();
         }
     } myall;
     

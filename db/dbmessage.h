@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include "storage.h"
+#include "diskloc.h"
 #include "jsobj.h"
 #include "namespace.h"
 #include "../util/message.h"
@@ -133,8 +133,10 @@ namespace mongo {
             return nextjsobj != 0;
         }
         BSONObj nextJsObj() {
-            if ( nextjsobj == data )
+            if ( nextjsobj == data ) {
                 nextjsobj += strlen(data) + 1; // skip namespace
+                massert( 13066 ,  "Message contains no documents", theEnd > nextjsobj );
+            }
             massert( 10304 ,  "Remaining data too small for BSON object", theEnd - nextjsobj > 3 );
             BSONObj js(nextjsobj);
             massert( 10305 ,  "Invalid object size", js.objsize() > 3 );
@@ -180,7 +182,7 @@ namespace mongo {
         int ntoreturn;
         int queryOptions;
         BSONObj query;
-        auto_ptr< FieldMatcher > fields;
+        BSONObj fields;
         
         /* parses the message into the above fields */
         QueryMessage(DbMessage& d) {
@@ -189,11 +191,7 @@ namespace mongo {
             ntoreturn = d.pullInt();
             query = d.nextJsObj();
             if ( d.moreJSObjs() ) {
-                BSONObj o = d.nextJsObj();
-                if (!o.isEmpty()){
-                    fields = auto_ptr< FieldMatcher >(new FieldMatcher() );
-                    fields->add( o );
-                }
+                fields = d.nextJsObj();
             }
             queryOptions = d.msg().data->dataAsInt();
         }
@@ -222,9 +220,8 @@ namespace mongo {
         qr->startingFrom = startingFrom;
         qr->nReturned = nReturned;
         b.decouple();
-        Message *resp = new Message();
-        resp->setData(qr, true); // transport will free
-        p->reply(requestMsg, *resp, requestMsg.data->id);
+        Message resp(qr, true);
+        p->reply(requestMsg, resp, requestMsg.data->id);
     }
 
 } // namespace mongo

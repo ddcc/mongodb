@@ -55,11 +55,11 @@ namespace mongo {
             justOne_( justOne ),
             count_(),
             bestCount_( bestCount ),
-            nScanned_() {
+            _nscanned() {
         }
         virtual void init() {
             c_ = qp().newCursor();
-            matcher_.reset( new CoveredIndexMatcher( qp().query(), qp().indexKey() ) );
+            _matcher.reset( new CoveredIndexMatcher( qp().query(), qp().indexKey() ) );
         }
         virtual void next() {
             if ( !c_->ok() ) {
@@ -69,20 +69,20 @@ namespace mongo {
             
             DiskLoc rloc = c_->currLoc();
             
-            if ( matcher_->matches(c_->currKey(), rloc ) ) {
+            if ( _matcher->matches(c_->currKey(), rloc ) ) {
                 if ( !c_->getsetdup(rloc) )
                     ++count_;
             }
 
             c_->advance();
-            ++nScanned_;
+            ++_nscanned;
             if ( count_ > bestCount_ )
                 bestCount_ = count_;
             
             if ( count_ > 0 ) {
                 if ( justOne_ )
                     setComplete();
-                else if ( nScanned_ >= 100 && count_ == bestCount_ )
+                else if ( _nscanned >= 100 && count_ == bestCount_ )
                     setComplete();
             }
         }
@@ -95,16 +95,17 @@ namespace mongo {
         bool justOne_;
         int count_;
         int &bestCount_;
-        long long nScanned_;
+        long long _nscanned;
         auto_ptr< Cursor > c_;
-        auto_ptr< CoveredIndexMatcher > matcher_;
+        auto_ptr< CoveredIndexMatcher > _matcher;
     };
     
     /* ns:      namespace, e.g. <database>.<collection>
        pattern: the "where" clause / criteria
        justOne: stop after 1 match
+       god:     allow access to system namespaces, and don't yield
     */
-    int deleteObjects(const char *ns, BSONObj pattern, bool justOne, bool logop, bool god) {
+    long long deleteObjects(const char *ns, BSONObj pattern, bool justOne, bool logop, bool god) {
         if( !god ) {
             if ( strstr(ns, ".system.") ) {
                 /* note a delete from system.indexes would corrupt the db 
@@ -124,7 +125,7 @@ namespace mongo {
             return 0;
         uassert( 10101 ,  "can't remove from a capped collection" , ! d->capped );
 
-        int nDeleted = 0;
+        long long nDeleted = 0;
         QueryPlanSet s( ns, pattern, BSONObj() );
         int best = 0;
         DeleteOp original( justOne, best );
@@ -136,18 +137,14 @@ namespace mongo {
 
         CoveredIndexMatcher matcher(pattern, creal->indexKeyPattern());
 
-        auto_ptr<ClientCursor> cc;
-        cc.reset( new ClientCursor() );
-        cc->c = creal;
-        cc->ns = ns;
-        cc->noTimeout();
+        auto_ptr<ClientCursor> cc( new ClientCursor(creal, ns, false) );
         cc->setDoingDeletes( true );
 
         CursorId id = cc->cursorid;
         
         unsigned long long nScanned = 0;
         do {
-            if ( ++nScanned % 128 == 0 && !matcher.docMatcher().atomic() ) {
+            if ( ++nScanned % 128 == 0 && !god && !matcher.docMatcher().atomic() ) {
                 if ( ! cc->yield() ){
                     cc.release(); // has already been deleted elsewhere
                     break;
@@ -233,31 +230,8 @@ namespace mongo {
         log( k == n ) << "killcursors: found " << k << " of " << n << '\n';
     }
 
-    BSONObj id_obj = fromjson("{\"_id\":ObjectId( \"000000000000000000000000\" )}");
+    BSONObj id_obj = fromjson("{\"_id\":1}");
     BSONObj empty_obj = fromjson("{}");
-
-    /* This is for languages whose "objects" are not well ordered (JSON is well ordered).
-       [ { a : ... } , { b : ... } ] -> { a : ..., b : ... }
-    */
-    inline BSONObj transformOrderFromArrayFormat(BSONObj order) {
-        /* note: this is slow, but that is ok as order will have very few pieces */
-        BSONObjBuilder b;
-        char p[2] = "0";
-
-        while ( 1 ) {
-            BSONObj j = order.getObjectField(p);
-            if ( j.isEmpty() )
-                break;
-            BSONElement e = j.firstElement();
-            uassert( 10102 , "bad order array", !e.eoo());
-            uassert( 10103 , "bad order array [2]", e.isNumber());
-            b.append(e);
-            (*p)++;
-            uassert( 10104 , "too many ordering elements", *p <= '9');
-        }
-
-        return b.obj();
-    }
 
 
     //int dump = 0;
@@ -328,7 +302,7 @@ namespace mongo {
                     }
                     else {
                         BSONObj js = c->current();
-                        fillQueryResultFromObj(b, cc->filter.get(), js);
+                        fillQueryResultFromObj(b, cc->fields.get(), js);
                         n++;
                         if ( (ntoreturn>0 && (n >= ntoreturn || b.len() > MaxBytesToReturnToClientAtOnce)) ||
                              (ntoreturn==0 && b.len()>1*1024*1024) ) {
@@ -365,8 +339,8 @@ namespace mongo {
         virtual void init() {
             query_ = spec_.getObjectField( "query" );
             c_ = qp().newCursor();
-            matcher_.reset( new CoveredIndexMatcher( query_, c_->indexKeyPattern() ) );
-            if ( qp().exactKeyMatch() && ! matcher_->needRecord() ) {
+            _matcher.reset( new CoveredIndexMatcher( query_, c_->indexKeyPattern() ) );
+            if ( qp().exactKeyMatch() && ! _matcher->needRecord() ) {
                 query_ = qp().simplifiedQuery( qp().indexKey() );
                 bc_ = dynamic_cast< BtreeCursor* >( c_.get() );
                 bc_->forgetEndKey();
@@ -398,7 +372,7 @@ namespace mongo {
                     _gotOne();
                 }
             } else {
-                if ( !matcher_->matches(c_->currKey(), c_->currLoc() ) ) {
+                if ( !_matcher->matches(c_->currKey(), c_->currLoc() ) ) {
                 }
                 else if( !c_->getsetdup(c_->currLoc()) ) {
                     _gotOne();
@@ -434,7 +408,7 @@ namespace mongo {
         auto_ptr< Cursor > c_;
         BSONObj query_;
         BtreeCursor *bc_;
-        auto_ptr< CoveredIndexMatcher > matcher_;
+        auto_ptr< CoveredIndexMatcher > _matcher;
         BSONObj firstMatch_;
     };
     
@@ -479,438 +453,389 @@ namespace mongo {
     // Implements database 'query' requests using the query optimizer's QueryOp interface
     class UserQueryOp : public QueryOp {
     public:
-        UserQueryOp( int ntoskip, int ntoreturn, const BSONObj &order, bool wantMore,
-                   bool explain, FieldMatcher *filter, int queryOptions ) :
-            b_( 32768 ),
-            ntoskip_( ntoskip ),
-            ntoreturn_( ntoreturn ),
-            order_( order ),
-            wantMore_( wantMore ),
-            explain_( explain ),
-            filter_( filter ),
-            ordering_(),
-            nscanned_(),
-            queryOptions_( queryOptions ),
-            n_(),
-            soSize_(),
-            saveClientCursor_(),
-            findingStart_( (queryOptions & QueryOption_OplogReplay) != 0 ),
-            findingStartCursor_()
-        {
-            uassert( 10105 , "bad skip value in query", ntoskip >= 0);
-        }
-
+        
+        UserQueryOp( const ParsedQuery& pq ) :
+        //int ntoskip, int ntoreturn, const BSONObj &order, bool wantMore,
+        //                   bool explain, FieldMatcher *filter, int queryOptions ) :
+            _buf( 32768 ) , // TODO be smarter here
+            _pq( pq ) ,
+            _ntoskip( pq.getSkip() ) ,
+            _nscanned(0), _nscannedObjects(0),
+            _n(0),
+            _inMemSort(false),
+            _saveClientCursor(false),
+            _oplogReplay( pq.hasOption( QueryOption_OplogReplay) )
+        {}
+        
         virtual void init() {
-            b_.skip( sizeof( QueryResult ) );
+            _buf.skip( sizeof( QueryResult ) );
             
-            // findingStart mode is used to find the first operation of interest when
-            // we are scanning through a repl log.  For efficiency in the common case,
-            // where the first operation of interest is closer to the tail than the head,
-            // we start from the tail of the log and work backwards until we find the
-            // first operation of interest.  Then we scan forward from that first operation,
-            // actually returning results to the client.  During the findingStart phase,
-            // we release the db mutex occasionally to avoid blocking the db process for
-            // an extended period of time.
-            if ( findingStart_ ) {
-                // Use a ClientCursor here so we can release db mutex while scanning
-                // oplog (can take quite a while with large oplogs).
-                findingStartCursor_ = new ClientCursor();
-				findingStartCursor_->noTimeout();
-                findingStartCursor_->c = qp().newReverseCursor();
-                findingStartCursor_->ns = qp().ns();
+            if ( _oplogReplay ) {
+                _findingStartCursor.reset( new FindingStartCursor( qp() ) );
             } else {
-                c_ = qp().newCursor();
+                _c = qp().newCursor( DiskLoc() , _pq.getNumToReturn() + _pq.getSkip() );
             }
-            
-            matcher_.reset(new CoveredIndexMatcher(qp().query(), qp().indexKey()));
-            
+            _matcher.reset(new CoveredIndexMatcher( qp().query() , qp().indexKey()));
+
             if ( qp().scanAndOrderRequired() ) {
-                ordering_ = true;
-                so_.reset( new ScanAndOrder( ntoskip_, ntoreturn_, order_ ) );
-                wantMore_ = false;
+                _inMemSort = true;
+                _so.reset( new ScanAndOrder( _pq.getSkip() , _pq.getNumToReturn() , _pq.getOrder() ) );
             }
         }
+        
         virtual void next() {
-            if ( findingStart_ ) {
-                if ( !findingStartCursor_ || !findingStartCursor_->c->ok() ) {
-                    findingStart_ = false;
-                    c_ = qp().newCursor();
-                } else if ( !matcher_->matches( findingStartCursor_->c->currKey(), findingStartCursor_->c->currLoc() ) ) {
-                    findingStart_ = false;
-                    c_ = qp().newCursor( findingStartCursor_->c->currLoc() );
+            if ( _findingStartCursor.get() ) {
+                if ( _findingStartCursor->done() ) {
+                    _c = _findingStartCursor->cRelease();
+                    _findingStartCursor.reset( 0 );
                 } else {
-                    findingStartCursor_->c->advance();
-                    RARELY {
-                        CursorId id = findingStartCursor_->cursorid;
-                        findingStartCursor_->updateLocation();
-                        {
-                            dbtemprelease t;
-                        }
-                        findingStartCursor_ = ClientCursor::find( id, false );
-                    }
-                    return;
+                    _findingStartCursor->next();
                 }
+                return;
             }
             
-            if ( findingStartCursor_ ) {
-                ClientCursor::erase( findingStartCursor_->cursorid );
-                findingStartCursor_ = 0;
-            }
-            
-            if ( !c_->ok() ) {
+            if ( !_c->ok() ) {
                 finish();
                 return;
             }
             
-            bool mayCreateCursor1 = wantMore_ && ntoreturn_ != 1 && useCursors;
+            bool mayCreateCursor1 = _pq.wantMore() && ! _inMemSort && _pq.getNumToReturn() != 1 && useCursors;
             
             if( 0 ) { 
-                BSONObj js = c_->current();
-                cout << "SCANNING " << js << endl;
+                cout << "SCANNING this: " << this << " key: " << _c->currKey() << " obj: " << _c->current() << endl;
             }
 
-            nscanned_++;
-            if ( !matcher_->matches(c_->currKey(), c_->currLoc() ) ) {
-                ;
+            _nscanned++;
+            if ( !_matcher->matches(_c->currKey(), _c->currLoc() , &_details ) ) {
+                // not a match, continue onward
+                if ( _details.loadedObject )
+                    _nscannedObjects++;
             }
             else {
-                DiskLoc cl = c_->currLoc();
-                if( !c_->getsetdup(cl) ) { 
-                    BSONObj js = c_->current();
+                _nscannedObjects++;
+                DiskLoc cl = _c->currLoc();
+                if( !_c->getsetdup(cl) ) { 
                     // got a match.
+                    
+                    BSONObj js = _pq.returnKey() ? _c->currKey() : _c->current();
                     assert( js.objsize() >= 0 ); //defensive for segfaults
-                    if ( ordering_ ) {
+
+                    if ( _inMemSort ) {
                         // note: no cursors for non-indexed, ordered results.  results must be fairly small.
-                        so_->add(js);
+                        _so->add(js);
                     }
-                    else if ( ntoskip_ > 0 ) {
-                        ntoskip_--;
-                    } else {
-                        if ( explain_ ) {
-                            n_++;
-                            if ( n_ >= ntoreturn_ && !wantMore_ ) {
+                    else if ( _ntoskip > 0 ) {
+                        _ntoskip--;
+                    } 
+                    else {
+                        if ( _pq.isExplain() ) {
+                            _n++;
+                            if ( _n >= _pq.getNumToReturn() && !_pq.wantMore() ) {
                                 // .limit() was used, show just that much.
                                 finish();
                                 return;
                             }
                         }
                         else {
-                            fillQueryResultFromObj(b_, filter_, js);
-                            n_++;
-                            if ( (ntoreturn_>0 && (n_ >= ntoreturn_ || b_.len() > MaxBytesToReturnToClientAtOnce)) ||
-                                 (ntoreturn_==0 && (b_.len()>1*1024*1024 || n_>=101)) ) {
-                                /* if ntoreturn is zero, we return up to 101 objects.  on the subsequent getmore, there
-                                   is only a size limit.  The idea is that on a find() where one doesn't use much results,
-                                   we don't return much, but once getmore kicks in, we start pushing significant quantities.
-                             
-                                   The n limit (vs. size) is important when someone fetches only one small field from big
-                                   objects, which causes massive scanning server-side.
-                                */
+                            if ( _pq.returnKey() ){
+                                BSONObjBuilder bb( _buf );
+                                bb.appendKeys( _c->indexKeyPattern() , js );
+                                bb.done();
+                            }
+                            else {
+                                fillQueryResultFromObj( _buf , _pq.getFields() , js );
+                            }
+                            _n++;
+                            if ( ! _c->supportGetMore() ){
+                                if ( _pq.enough( _n ) || _buf.len() >= MaxBytesToReturnToClientAtOnce ){
+                                    finish();
+                                    return;
+                                }
+                            }
+                            else if ( _pq.enoughForFirstBatch( _n , _buf.len() ) ){
                                 /* if only 1 requested, no cursor saved for efficiency...we assume it is findOne() */
                                 if ( mayCreateCursor1 ) {
-                                    c_->advance();
-                                    if ( c_->ok() ) {
+                                    _c->advance();
+                                    if ( _c->ok() ) {
                                         // more...so save a cursor
-                                        saveClientCursor_ = true;
+                                        _saveClientCursor = true;
                                     }
                                 }
                                 finish();
                                 return;
-                                }
+                            }
                         }
                     }
                 }
             }
-            c_->advance();            
+            _c->advance();            
         }
+
         void finish() {
-            if ( explain_ ) {
-                n_ = ordering_ ? so_->size() : n_;
-            } else if ( ordering_ ) {
-                so_->fill(b_, filter_, n_);
+            if ( _pq.isExplain() ) {
+                _n = _inMemSort ? _so->size() : _n;
+            } 
+            else if ( _inMemSort ) {
+                _so->fill( _buf, _pq.getFields() , _n );
             }
-            if ( mayCreateCursor2() ) {
-                c_->setTailable();
-            }
+            
+            if ( _pq.hasOption( QueryOption_CursorTailable ) && _pq.getNumToReturn() != 1 )
+                _c->setTailable();
+            
             // If the tailing request succeeded.
-            if ( c_->tailable() ) {
-                saveClientCursor_ = true;
-            }
+            if ( _c->tailable() )
+                _saveClientCursor = true;
+
             setComplete();            
         }
-        virtual bool mayRecordPlan() const { return ntoreturn_ != 1; }
+        
+        virtual bool mayRecordPlan() const { return _pq.getNumToReturn() != 1; }
+        
         virtual QueryOp *clone() const {
-            return new UserQueryOp( ntoskip_, ntoreturn_, order_, wantMore_, explain_, filter_, queryOptions_ );
+            return new UserQueryOp( _pq );
         }
-        BufBuilder &builder() { return b_; }
-        bool scanAndOrderRequired() const { return ordering_; }
-        auto_ptr< Cursor > cursor() { return c_; }
-        auto_ptr< CoveredIndexMatcher > matcher() { return matcher_; }
-        int n() const { return n_; }
-        long long nscanned() const { return nscanned_; }
-        bool saveClientCursor() const { return saveClientCursor_; }
-        bool mayCreateCursor2() const { return ( queryOptions_ & QueryOption_CursorTailable ) && ntoreturn_ != 1; }
+
+        BufBuilder &builder() { return _buf; }
+        bool scanAndOrderRequired() const { return _inMemSort; }
+        auto_ptr< Cursor > cursor() { return _c; }
+        auto_ptr< CoveredIndexMatcher > matcher() { return _matcher; }
+        int n() const { return _n; }
+        long long nscanned() const { return _nscanned; }
+        long long nscannedObjects() const { return _nscannedObjects; }
+        bool saveClientCursor() const { return _saveClientCursor; }
+
     private:
-        BufBuilder b_;
-        int ntoskip_;
-        int ntoreturn_;
-        BSONObj order_;
-        bool wantMore_;
-        bool explain_;
-        FieldMatcher *filter_;   
-        bool ordering_;
-        auto_ptr< Cursor > c_;
-        long long nscanned_;
-        int queryOptions_;
-        auto_ptr< CoveredIndexMatcher > matcher_;
-        int n_;
-        int soSize_;
-        bool saveClientCursor_;
-        auto_ptr< ScanAndOrder > so_;
-        bool findingStart_;
-        ClientCursor * findingStartCursor_;
+        BufBuilder _buf;
+        const ParsedQuery& _pq;
+
+        long long _ntoskip;
+        long long _nscanned;
+        long long _nscannedObjects;
+        int _n; // found so far
+        
+        MatchDetails _details;
+
+        bool _inMemSort;
+        auto_ptr< ScanAndOrder > _so;
+        
+        auto_ptr< Cursor > _c;
+
+        auto_ptr< CoveredIndexMatcher > _matcher;
+
+        bool _saveClientCursor;
+        bool _oplogReplay;
+        auto_ptr< FindingStartCursor > _findingStartCursor;
     };
     
     /* run a query -- includes checking for and running a Command */
     auto_ptr< QueryResult > runQuery(Message& m, QueryMessage& q, CurOp& curop ) {
         StringBuilder& ss = curop.debug().str;
+        ParsedQuery pq( q );
         const char *ns = q.ns;
         int ntoskip = q.ntoskip;
-        int _ntoreturn = q.ntoreturn;
         BSONObj jsobj = q.query;
-        auto_ptr< FieldMatcher > filter = q.fields; // what fields to return (unspecified = full object)
         int queryOptions = q.queryOptions;
         BSONObj snapshotHint;
         
-        Timer t;
         if( logLevel >= 2 )
             log() << "runQuery: " << ns << jsobj << endl;
         
         long long nscanned = 0;
-        bool wantMore = true;
-        int ntoreturn = _ntoreturn;
-        if ( _ntoreturn < 0 ) {
-            /* _ntoreturn greater than zero is simply a hint on how many objects to send back per 
-               "cursor batch".
-               A negative number indicates a hard limit.
-            */
-            ntoreturn = -_ntoreturn;
-            wantMore = false;
-        }
-        ss << "query " << ns << " ntoreturn:" << ntoreturn;
+        ss << ns << " ntoreturn:" << pq.getNumToReturn();
         curop.setQuery(jsobj);
         
-        BufBuilder bb;
         BSONObjBuilder cmdResBuf;
         long long cursorid = 0;
-        
-        bb.skip(sizeof(QueryResult));
         
         auto_ptr< QueryResult > qr;
         int n = 0;
         
         Client& c = cc();
-        /* we assume you are using findOne() for running a cmd... */
-        if ( ntoreturn == 1 && runCommands(ns, jsobj, curop, bb, cmdResBuf, false, queryOptions) ) {
-            n = 1;
-            qr.reset( (QueryResult *) bb.buf() );
-            bb.decouple();
-            qr->setResultFlagsToOk();
-            qr->len = bb.len();
-            ss << " reslen:" << bb.len();
-            //	qr->channel = 0;
-            qr->setOperation(opReply);
-            qr->cursorId = cursorid;
-            qr->startingFrom = 0;
-            qr->nReturned = n;            
-        }
-        else {
-            /* regular query */
-            
-            AuthenticationInfo *ai = currentClient.get()->ai;
-            uassert( 10106 , "unauthorized", ai->isAuthorized(c.database()->name.c_str()));
 
-			/* we allow queries to SimpleSlave's -- but not to the slave (nonmaster) member of a replica pair 
-			   so that queries to a pair are realtime consistent as much as possible.  use setSlaveOk() to 
-			   query the nonmaster member of a replica pair.
-			*/
-            uassert( 10107 ,  "not master", isMaster() || (queryOptions & QueryOption_SlaveOk) || slave == SimpleSlave );
+        if ( pq.couldBeCommand() ){
+            BufBuilder bb;
+            bb.skip(sizeof(QueryResult));
 
-            BSONElement hint;
-            BSONObj min;
-            BSONObj max;
-            bool explain = false;
-            bool _gotquery = false;
-            bool snapshot = false;
-            BSONObj query;
-            {
-                BSONElement e = jsobj.findElement("$query");
-                if ( e.eoo() )
-                    e = jsobj.findElement("query");                    
-                if ( !e.eoo() && (e.type() == Object || e.type() == Array) ) {
-                    query = e.embeddedObject();
-                    _gotquery = true;
-                }
-            }
-            BSONObj order;
-            {
-                BSONElement e = jsobj.findElement("$orderby");
-                if ( e.eoo() )
-                    e = jsobj.findElement("orderby");                    
-                if ( !e.eoo() ) {
-                    order = e.embeddedObjectUserCheck();
-                    if ( e.type() == Array )
-                        order = transformOrderFromArrayFormat(order);
-                }
-            }
-            if ( !_gotquery && order.isEmpty() )
-                query = jsobj;
-            else {
-                explain = jsobj.getBoolField("$explain");
-                if ( useHints )
-                    hint = jsobj.getField("$hint");
-                min = jsobj.getObjectField("$min");
-                max = jsobj.getObjectField("$max");
-                BSONElement e = jsobj.getField("$snapshot");
-                snapshot = !e.eoo() && e.trueValue();
-                if( snapshot ) { 
-                    uassert( 12001 , "E12001 can't sort with $snapshot", order.isEmpty());
-					uassert( 12002 , "E12002 can't use hint with $snapshot", hint.eoo());
-                    NamespaceDetails *d = nsdetails(ns);
-                    if ( d ){
-                        int i = d->findIdIndex();
-                        if( i < 0 ) { 
-                            if ( strstr( ns , ".system." ) == 0 )
-                                log() << "warning: no _id index on $snapshot query, ns:" << ns << endl;
-                        }
-                        else {
-                            /* [dm] the name of an _id index tends to vary, so we build the hint the hard way here.
-                               probably need a better way to specify "use the _id index" as a hint.  if someone is
-                               in the query optimizer please fix this then!
-                            */
-                            BSONObjBuilder b;
-                            b.append("$hint", d->idx(i).indexName());
-                            snapshotHint = b.obj();
-                            hint = snapshotHint.firstElement();
-                        }
-                    }
-                }
-            }
-            
-            /* The ElemIter will not be happy if this isn't really an object. So throw exception
-               here when that is true.
-               (Which may indicate bad data from client.)
-            */
-            if ( query.objsize() == 0 ) {
-                out() << "Bad query object?\n  jsobj:";
-                out() << jsobj.toString() << "\n  query:";
-                out() << query.toString() << endl;
-                uassert( 10110 , "bad query object", false);
-            }
-            
-            bool idHackWorked = false;
-
-            if ( strcmp( query.firstElement().fieldName() , "_id" ) == 0 && query.nFields() == 1 && query.firstElement().isSimpleType() ){
-                nscanned = 1;
-
-                bool nsFound = false;
-                bool indexFound = false;
-
-                BSONObj resObject;
-                bool found = Helpers::findById( c, ns , query , resObject , &nsFound , &indexFound );
-                if ( nsFound == false || indexFound == true ){
-                    idHackWorked = true;
-                    if ( found ){
-                        n = 1;
-                        fillQueryResultFromObj( bb , filter.get() , resObject );
-                    }
-                    qr.reset( (QueryResult *) bb.buf() );
-                    bb.decouple();
-                    qr->setResultFlagsToOk();
-                    qr->len = bb.len();
-                    ss << " reslen:" << bb.len();
-                    qr->setOperation(opReply);
-                    qr->cursorId = cursorid;
-                    qr->startingFrom = 0;
-                    qr->nReturned = n;       
-                }     
-            }
-            
-            if ( ! idHackWorked ){ // non-simple _id lookup
-                BSONObj oldPlan;
-                if ( explain && hint.eoo() && min.isEmpty() && max.isEmpty() ) {
-                    QueryPlanSet qps( ns, query, order );
-                    if ( qps.usingPrerecordedPlan() )
-                        oldPlan = qps.explain();
-                }
-                QueryPlanSet qps( ns, query, order, &hint, !explain, min, max );
-                UserQueryOp original( ntoskip, ntoreturn, order, wantMore, explain, filter.get(), queryOptions );
-                shared_ptr< UserQueryOp > o = qps.runOp( original );
-                UserQueryOp &dqo = *o;
-                massert( 10362 ,  dqo.exceptionMessage(), dqo.complete() );
-                n = dqo.n();
-                nscanned = dqo.nscanned();
-                if ( dqo.scanAndOrderRequired() )
-                    ss << " scanAndOrder ";
-                auto_ptr< Cursor > c = dqo.cursor();
-                log( 5 ) << "   used cursor: " << c.get() << endl;
-                if ( dqo.saveClientCursor() ) {
-                    ClientCursor *cc = new ClientCursor();
-                    if ( queryOptions & QueryOption_NoCursorTimeout )
-                        cc->noTimeout();
-                    cc->c = c;
-                    cursorid = cc->cursorid;
-                    cc->query = jsobj.getOwned();
-                    DEV out() << "  query has more, cursorid: " << cursorid << endl;
-                    cc->matcher = dqo.matcher();
-                    cc->ns = ns;
-                    cc->pos = n;
-                    cc->filter = filter;
-                    cc->originalMessage = m;
-                    cc->updateLocation();
-                    if ( !cc->c->ok() && cc->c->tailable() ) {
-                        DEV out() << "  query has no more but tailable, cursorid: " << cursorid << endl;
-                    } else {
-                        DEV out() << "  query has more, cursorid: " << cursorid << endl;
-                    }
-                }
-                if ( explain ) {
-                    BSONObjBuilder builder;
-                    builder.append("cursor", c->toString());
-                    builder.append("startKey", c->prettyStartKey());
-                    builder.append("endKey", c->prettyEndKey());
-                    builder.append("nscanned", double( dqo.nscanned() ) );
-                    builder.append("n", n);
-                    if ( dqo.scanAndOrderRequired() )
-                        builder.append("scanAndOrder", true);
-                    builder.append("millis", t.millis());
-                    if ( !oldPlan.isEmpty() )
-                        builder.append( "oldPlan", oldPlan.firstElement().embeddedObject().firstElement().embeddedObject() );
-                    if ( hint.eoo() )
-                        builder.appendElements(qps.explain());
-                    BSONObj obj = builder.done();
-                    fillQueryResultFromObj(dqo.builder(), 0, obj);
-                    n = 1;
-                }
-                qr.reset( (QueryResult *) dqo.builder().buf() );
-                dqo.builder().decouple();
-                qr->cursorId = cursorid;
+            if ( runCommands(ns, jsobj, curop, bb, cmdResBuf, false, queryOptions) ) {
+                ss << " command ";
+                curop.markCommand();
+                n = 1;
+                qr.reset( (QueryResult *) bb.buf() );
+                bb.decouple();
                 qr->setResultFlagsToOk();
-                qr->len = dqo.builder().len();
-                ss << " reslen:" << qr->len;
+                qr->len = bb.len();
+                ss << " reslen:" << bb.len();
+                //	qr->channel = 0;
                 qr->setOperation(opReply);
+                qr->cursorId = cursorid;
                 qr->startingFrom = 0;
                 qr->nReturned = n;
             }
+            return qr;
         }
         
-        int duration = t.millis();
-        Database *database = c.database();
-        if ( (database && database->profile) || duration >= 100 ) {
+        // regular query
+
+        mongolock lk(false); // read lock
+        Client::Context ctx( ns , dbpath , &lk );
+
+        /* we allow queries to SimpleSlave's -- but not to the slave (nonmaster) member of a replica pair 
+           so that queries to a pair are realtime consistent as much as possible.  use setSlaveOk() to 
+           query the nonmaster member of a replica pair.
+        */
+        uassert( 10107 , "not master" , isMaster() || pq.hasOption( QueryOption_SlaveOk ) || replSettings.slave == SimpleSlave );
+
+        BSONElement hint = useHints ? pq.getHint() : BSONElement();
+        bool explain = pq.isExplain();
+        bool snapshot = pq.isSnapshot();
+        BSONObj query = pq.getFilter();
+        BSONObj order = pq.getOrder();
+
+        if ( pq.hasOption( QueryOption_CursorTailable ) ) {
+            NamespaceDetails *d = nsdetails( ns );
+            uassert( 13051, "tailable cursor requested on non capped collection", d && d->capped );
+            if ( order.isEmpty() ) {
+                order = BSON( "$natural" << 1 );
+            } else {
+                uassert( 13052, "only {$natural:1} order allowed for tailable cursor", order == BSON( "$natural" << 1 ) );
+            }
+        }
+        
+        if( snapshot ) { 
+            NamespaceDetails *d = nsdetails(ns);
+            if ( d ){
+                int i = d->findIdIndex();
+                if( i < 0 ) { 
+                    if ( strstr( ns , ".system." ) == 0 )
+                        log() << "warning: no _id index on $snapshot query, ns:" << ns << endl;
+                }
+                else {
+                    /* [dm] the name of an _id index tends to vary, so we build the hint the hard way here.
+                       probably need a better way to specify "use the _id index" as a hint.  if someone is
+                       in the query optimizer please fix this then!
+                    */
+                    BSONObjBuilder b;
+                    b.append("$hint", d->idx(i).indexName());
+                    snapshotHint = b.obj();
+                    hint = snapshotHint.firstElement();
+                }
+            }
+        }
+            
+        /* The ElemIter will not be happy if this isn't really an object. So throw exception
+           here when that is true.
+           (Which may indicate bad data from client.)
+        */
+        if ( query.objsize() == 0 ) {
+            out() << "Bad query object?\n  jsobj:";
+            out() << jsobj.toString() << "\n  query:";
+            out() << query.toString() << endl;
+            uassert( 10110 , "bad query object", false);
+        }
+            
+
+        if ( ! explain && isSimpleIdQuery( query ) && !pq.hasOption( QueryOption_CursorTailable ) ) {
+            nscanned = 1;
+
+            bool nsFound = false;
+            bool indexFound = false;
+
+            BSONObj resObject;
+            bool found = Helpers::findById( c, ns , query , resObject , &nsFound , &indexFound );
+            if ( nsFound == false || indexFound == true ){
+                BufBuilder bb(sizeof(QueryResult)+resObject.objsize()+32);
+                bb.skip(sizeof(QueryResult));
+                
+                ss << " idhack ";
+                if ( found ){
+                    n = 1;
+                    fillQueryResultFromObj( bb , pq.getFields() , resObject );
+                }
+                qr.reset( (QueryResult *) bb.buf() );
+                bb.decouple();
+                qr->setResultFlagsToOk();
+                qr->len = bb.len();
+                ss << " reslen:" << bb.len();
+                qr->setOperation(opReply);
+                qr->cursorId = cursorid;
+                qr->startingFrom = 0;
+                qr->nReturned = n;       
+                return qr;
+            }     
+        }
+        
+        // regular, not QO bypass query
+        
+        BSONObj oldPlan;
+        if ( explain && ! pq.hasIndexSpecifier() ){
+            QueryPlanSet qps( ns, query, order );
+            if ( qps.usingPrerecordedPlan() )
+                oldPlan = qps.explain();
+        }
+        QueryPlanSet qps( ns, query, order, &hint, !explain, pq.getMin(), pq.getMax() );
+        UserQueryOp original( pq );
+        shared_ptr< UserQueryOp > o = qps.runOp( original );
+        UserQueryOp &dqo = *o;
+        massert( 10362 ,  dqo.exceptionMessage(), dqo.complete() );
+        n = dqo.n();
+        nscanned = dqo.nscanned();
+        if ( dqo.scanAndOrderRequired() )
+            ss << " scanAndOrder ";
+        auto_ptr<Cursor> cursor = dqo.cursor();
+        log( 5 ) << "   used cursor: " << cursor.get() << endl;
+        if ( dqo.saveClientCursor() ) {
+            // the clientcursor now owns the Cursor* and 'c' is released:
+            ClientCursor *cc = new ClientCursor(cursor, ns, !(queryOptions & QueryOption_NoCursorTimeout));
+            cursorid = cc->cursorid;
+            cc->query = jsobj.getOwned();
+            DEV out() << "  query has more, cursorid: " << cursorid << endl;
+            cc->matcher = dqo.matcher();
+            cc->pos = n;
+            cc->fields = pq.getFieldPtr();
+            cc->originalMessage = m;
+            cc->updateLocation();
+            if ( !cc->c->ok() && cc->c->tailable() ) {
+                DEV out() << "  query has no more but tailable, cursorid: " << cursorid << endl;
+            } else {
+                DEV out() << "  query has more, cursorid: " << cursorid << endl;
+            }
+        }
+        if ( explain ) {
+            BSONObjBuilder builder;
+            builder.append("cursor", cursor->toString());
+            builder.appendArray("indexBounds", cursor->prettyIndexBounds());
+            builder.appendNumber("nscanned", dqo.nscanned() );
+            builder.appendNumber("nscannedObjects", dqo.nscannedObjects() );
+            builder.append("n", n);
+            if ( dqo.scanAndOrderRequired() )
+                builder.append("scanAndOrder", true);
+            builder.append("millis", curop.elapsedMillis());
+            if ( !oldPlan.isEmpty() )
+                builder.append( "oldPlan", oldPlan.firstElement().embeddedObject().firstElement().embeddedObject() );
+            if ( hint.eoo() )
+                builder.appendElements(qps.explain());
+            BSONObj obj = builder.done();
+            fillQueryResultFromObj(dqo.builder(), 0, obj);
+            n = 1;
+        }
+        qr.reset( (QueryResult *) dqo.builder().buf() );
+        dqo.builder().decouple();
+        qr->cursorId = cursorid;
+        qr->setResultFlagsToOk();
+        qr->len = dqo.builder().len();
+        ss << " reslen:" << qr->len;
+        qr->setOperation(opReply);
+        qr->startingFrom = 0;
+        qr->nReturned = n;
+
+        
+        int duration = curop.elapsedMillis();
+        bool dbprofile = curop.shouldDBProfile( duration );
+        if ( dbprofile || duration >= cmdLine.slowMS ) {
             ss << " nscanned:" << nscanned << ' ';
             if ( ntoskip )
                 ss << " ntoskip:" << ntoskip;
-            if ( database && database->profile )
+            if ( dbprofile )
                 ss << " \nquery: ";
             ss << jsobj << ' ';
         }

@@ -132,6 +132,17 @@ assert.gt = function( a , b , msg ){
     doassert( a + " is not greater than " + b + " : " + msg );
 }
 
+assert.close = function( a , b , msg , places ){
+    if (places === undefined) {
+        places = 4;
+    }
+    if (Math.round((a - b) * Math.pow(10, places)) === 0) {
+        return;
+    }
+    doassert( a + " is not equal to " + b + " within " + places +
+              " places, diff: " + (a-b) + " : " + msg );
+};
+
 Object.extend = function( dst , src , deep ){
     for ( var k in src ){
         var v = src[k];
@@ -477,7 +488,8 @@ if ( typeof _threadInject != "undefined" ){
                                    "jstests/extent.js",
                                    "jstests/indexb.js",
                                    "jstests/profile1.js",
-                                   "jstests/mr3.js"] );
+                                   "jstests/mr3.js",
+                                   "jstests/apitest_db.js"] );
         
         // some tests can't be run in parallel with each other
         var serialTestsArr = [ "jstests/fsync.js",
@@ -576,10 +588,10 @@ if ( typeof _threadInject != "undefined" ){
 }
 
 tojson = function( x, indent , nolint ){
-    if ( x == null )
+    if ( x === null )
         return "null";
     
-    if ( x == undefined )
+    if ( x === undefined )
         return "undefined";
     
     if (!indent) 
@@ -904,4 +916,40 @@ Random.setRandomSeed = function( s ) {
 // generate a random value from the exponential distribution with the specified mean
 Random.genExp = function( mean ) {
     return -Math.log( Random.rand() ) * mean;
+}
+
+killWithUris = function( uris ) {
+    var inprog = db.currentOp().inprog;
+    for( var u in uris ) {
+        for ( var i in inprog ) {
+            if ( uris[ u ] == inprog[ i ].client ) {
+                db.killOp( inprog[ i ].opid );
+            }
+        }
+    }
+}
+
+Geo = {};
+Geo.distance = function( a , b ){
+    var ax = null;
+    var ay = null;
+    var bx = null;
+    var by = null;
+    
+    for ( var key in a ){
+        if ( ax == null )
+            ax = a[key];
+        else if ( ay == null )
+            ay = a[key];
+    }
+    
+    for ( var key in b ){
+        if ( bx == null )
+            bx = b[key];
+        else if ( by == null )
+            by = b[key];
+    }
+
+    return Math.sqrt( Math.pow( by - ay , 2 ) + 
+                      Math.pow( bx - ax , 2 ) );
 }

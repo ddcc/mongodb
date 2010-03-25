@@ -26,15 +26,16 @@ DBCollection.prototype.getName = function(){
     return this._shortName;
 }
 
-DBCollection.prototype.help = function(){
+DBCollection.prototype.help = function() {
     print("DBCollection help");
     print("\tdb.foo.count()");
     print("\tdb.foo.dataSize()");
-    print("\tdb.foo.distinct( key ) - eg. db.foo.distinct( 'x' )" );
+    print("\tdb.foo.distinct( key ) - eg. db.foo.distinct( 'x' )");
     print("\tdb.foo.drop() drop the collection");
     print("\tdb.foo.dropIndex(name)");
     print("\tdb.foo.dropIndexes()");
     print("\tdb.foo.ensureIndex(keypattern,options) - options should be an object with these possible fields: name, unique, dropDups");
+    print("\tdb.foo.reIndex()");
     print("\tdb.foo.find( [query] , [fields]) - first parameter is an optional query filter. second parameter is optional set of fields to return.");
     print("\t                                   e.g. db.foo.find( { x : 77 } , { name : 1 , x : 1 } )");
     print("\tdb.foo.find(...).count()");
@@ -46,9 +47,10 @@ DBCollection.prototype.help = function(){
     print("\tdb.foo.getDB() get DB object associated with collection");
     print("\tdb.foo.getIndexes()");
     print("\tdb.foo.group( { key : ..., initial: ..., reduce : ...[, cond: ...] } )");
-    print("\tdb.foo.mapReduce( mapFunction , reduceFunction , <optional params> )" );
-    print("\tdb.foo.remove(query)" );
+    print("\tdb.foo.mapReduce( mapFunction , reduceFunction , <optional params> )");
+    print("\tdb.foo.remove(query)");
     print("\tdb.foo.renameCollection( newName , <dropTarget> ) renames the collection.");
+    print("\tdb.foo.runCommand( name , <options> ) runs a db command with the given name where the 1st param is the colleciton name" );
     print("\tdb.foo.save(obj)");
     print("\tdb.foo.stats()");
     print("\tdb.foo.storageSize() - includes free space allocated to this collection");
@@ -56,7 +58,7 @@ DBCollection.prototype.help = function(){
     print("\tdb.foo.totalSize() - storage allocated for all data and indexes");
     print("\tdb.foo.update(query, object[, upsert_bool, multi_bool])");
     print("\tdb.foo.validate() - SLOW");
-    print("\tdb.foo.getShardVersion() - only for use with sharding" );
+    print("\tdb.foo.getShardVersion() - only for use with sharding");
 }
 
 DBCollection.prototype.getFullName = function(){
@@ -66,9 +68,18 @@ DBCollection.prototype.getDB = function(){
     return this._db;
 }
 
-DBCollection.prototype._dbCommand = function( cmd ){
-    return this._db._dbCommand( cmd );
+DBCollection.prototype._dbCommand = function( cmd , params ){
+    if ( typeof( cmd ) == "object" )
+        return this._db._dbCommand( cmd );
+    
+    var c = {};
+    c[cmd] = this.getName();
+    if ( params )
+        Object.extend( c , params );
+    return this._db._dbCommand( c );    
 }
+
+DBCollection.prototype.runCommand = DBCollection.prototype._dbCommand;
 
 DBCollection.prototype._massageObject = function( q ){
     if ( ! q )
@@ -128,7 +139,7 @@ DBCollection.prototype.find = function( query , fields , limit , skip ){
 }
 
 DBCollection.prototype.findOne = function( query , fields ){
-    var cursor = this._mongo.find( this._fullName , this._massageObject( query ) || {} , fields , -1 , 0  );
+    var cursor = this._mongo.find( this._fullName , this._massageObject( query ) || {} , fields , -1 , 0 , 0 );
     if ( ! cursor.hasNext() )
         return null;
     var ret = cursor.next();
@@ -144,7 +155,15 @@ DBCollection.prototype.insert = function( obj , _allow_dot ){
     if ( ! _allow_dot ) {
         this._validateForStorage( obj );
     }
-    return this._mongo.insert( this._fullName , obj );
+    if ( typeof( obj._id ) == "undefined" ){
+        var tmp = obj; // don't want to modify input
+        obj = {_id: new ObjectId()};
+        for (var key in tmp){
+            obj[key] = tmp[key];
+        }
+    }
+    this._mongo.insert( this._fullName , obj );
+    this._lastID = obj._id;
 }
 
 DBCollection.prototype.remove = function( t ){
@@ -275,12 +294,8 @@ DBCollection.prototype.resetIndexCache = function(){
     this._indexCache = {};
 }
 
-DBCollection.prototype.reIndex = function(){
-    var specs = this.getIndexSpecs();
-    this.dropIndexes();
-    for ( var i = 0; i < specs.length; ++i ){
-        this.ensureIndex( specs[i].key, [ specs[i].unique, specs[i].name ] );
-    }
+DBCollection.prototype.reIndex = function() {
+    return this._db.runCommand({ reIndex: this.getName() });
 }
 
 DBCollection.prototype.dropIndexes = function(){
@@ -311,7 +326,7 @@ DBCollection.prototype.drop = function(){
 
 DBCollection.prototype.findAndModify = function(args){
     var cmd = { findandmodify: this.getName() };
-    for (key in args){
+    for (var key in args){
         cmd[key] = args[key];
     }
 
@@ -402,7 +417,7 @@ DBCollection.prototype.dropIndex =  function(index) {
     if ( ! isString( index ) && isObject( index ) )
     	index = this._genIndexName( index );
 
-    var res = this._dbCommand( { deleteIndexes: this.getName(), index: index } );
+    var res = this._dbCommand( "deleteIndexes" ,{ index: index } );
     this.resetIndexCache();
     return res;
 }
@@ -431,8 +446,8 @@ DBCollection.prototype.getCollection = function( subName ){
     return this._db.getCollection( this._shortName + "." + subName );
 }
 
-DBCollection.prototype.stats = function(){
-    return this._db.runCommand( { collstats : this._shortName } );
+DBCollection.prototype.stats = function( scale ){
+    return this._db.runCommand( { collstats : this._shortName , scale : scale } );
 }
 
 DBCollection.prototype.dataSize = function(){
@@ -444,20 +459,13 @@ DBCollection.prototype.storageSize = function(){
 }
 
 DBCollection.prototype.totalIndexSize = function( verbose ){
-    var total = 0;
-    var mydb = this._db;
-    var shortName = this._shortName;
-    this.getIndexes().forEach(
-        function( spec ){
-            var coll = mydb.getCollection( shortName + ".$" + spec.name );
-            var mysize = coll.dataSize();
-            total += coll.dataSize();
-            if ( verbose ) {
-                print( coll + "\t" + mysize );
-            }
+    var stats = this.stats();
+    if (verbose){
+        for (var ns in stats.indexSizes){
+            print( ns + "\t" + stats.indexSizes[ns] );
         }
-    );
-    return total;
+    }
+    return stats.totalIndexSize;
 }
 
 
