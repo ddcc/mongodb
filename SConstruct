@@ -1213,15 +1213,15 @@ def ensureDir( name ):
             Exit( 1 )
 
 def ensureTestDirs():
-    ensureDir( "/tmp/unittest/" )
-    ensureDir( "/data/" )
-    ensureDir( "/data/db/" )
+    ensureDir( installDir + "/tmp/unittest/" )
+    ensureDir( installDir + "/data/" )
+    ensureDir( installDir + "/data/db/" )
 
 def testSetup( env , target , source ):
     ensureTestDirs()
 
 if len( COMMAND_LINE_TARGETS ) == 1 and str( COMMAND_LINE_TARGETS[0] ) == "test":
-    ensureDir( "/tmp/unittest/" );
+    ensureDir( installDir +  "/tmp/unittest/" );
 
 addSmoketest( "smoke", [ add_exe( "test" ) ] , [ test[ 0 ].abspath ] )
 addSmoketest( "smokePerf", [ "perftest" ] , [ perftest[ 0 ].abspath ] )
@@ -1299,7 +1299,7 @@ def startMongodWithArgs(*args):
     mongodForTestsPort = "32000"
     import os
     ensureTestDirs()
-    dirName = "/data/db/sconsTests/"
+    dirName = installDir + "/data/db/sconsTests/"
     ensureDir( dirName )
     from subprocess import Popen
     mongodForTests = Popen([mongod[0].abspath, "--port", mongodForTestsPort,
