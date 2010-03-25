@@ -37,6 +37,10 @@ build-stamp: configure-stamp
         #docbook-to-man debian/mongodb.sgml > mongodb.1
 	ls debian/*.1 > debian/mongodb.manpages
 
+	#run regression tests
+	scons --prefix=$(CURDIR)/debian/tmp-test smoke
+	rm -rf $(CURDIR)/debian/tmp-test
+
 	touch $@
 
 clean: 
@@ -44,10 +48,10 @@ clean:
 	dh_testroot
 	rm -f build-stamp configure-stamp
 
+	rm -rf $(CURDIR)/debian/mongodb
 	# FIXME: scons freaks out at the presence of target files
 	# under debian/mongodb.
-	#scons -c
-	rm -rf $(CURDIR)/debian/mongodb
+	scons -c
 	rm -f config.log
 	rm -f mongo
 	rm -f mongod
@@ -65,6 +69,8 @@ clean:
 	rm -f buildscripts/*.pyc 
 	rm -f *.pyc
 	rm -f buildinfo.cpp
+	rm -rf debian/tmp-test
+	rm -f debian/mongodb.upstart
 	dh_clean debian/files
 
 install: build
@@ -74,8 +80,6 @@ install: build
 	dh_installdirs
 
 	scons --prefix=$(CURDIR)/debian/mongodb/usr install
-	mkdir -p $(CURDIR)/debian/mongodb/etc
-	cp $(CURDIR)/debian/mongodb.conf $(CURDIR)/debian/mongodb/etc/mongodb.conf 
 
 	mkdir -p $(CURDIR)/debian/mongodb/usr/share/lintian/overrides/
 	install -m 644 $(CURDIR)/debian/lintian-overrides \
