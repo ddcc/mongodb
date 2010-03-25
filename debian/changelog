@@ -1,3 +1,15 @@
+mongodb (1:1.4.0-1) unstable; urgency=low
+
+  * [0ca01a9] Imported Upstream version 1.4.0
+  * [76c18ea] removed not needed files for debian
+  * [c1578d9] merged changes from debianization from 1.2.4
+  * full upstream changelog
+    http://jira.mongodb.org/secure/IssueNavigator.jspa?requestId=10080
+  * upstream release notes
+    http://www.mongodb.org/display/DOCS/1.4+Release+Notes
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 25 Mar 2010 19:44:59 +0100
+
 mongodb (1:1.2.4-1) unstable; urgency=low
 
   * [c3803a1] Imported Upstream version 1.2.4
