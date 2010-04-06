@@ -9,3 +9,4 @@ mongodb: binary-or-shlib-defines-rpath ./usr/bin/mongoimport /usr/lib64/xulrunne
 mongodb: binary-or-shlib-defines-rpath ./usr/bin/mongorestore /usr/lib64/xulrunner-1.9.1
 mongodb: binary-or-shlib-defines-rpath ./usr/bin/mongos /usr/lib64/xulrunner-1.9.1
 mongodb: binary-or-shlib-defines-rpath ./usr/bin/mongosniff /usr/lib64/xulrunner-1.9.1
+mongodb: binary-or-shlib-defines-rpath ./usr/bin/mongostat /usr/lib64/xulrunner-1.9.1
