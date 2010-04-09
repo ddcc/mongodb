@@ -1,3 +1,9 @@
+mongodb (1:1.4.0-2) unstable; urgency=low
+
+  * added Roberto C. Sanchez as co-maintainer
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Fri, 09 Apr 2010 21:40:49 +0200
+
 mongodb (1:1.4.0-1) unstable; urgency=low
 
   * [0ca01a9] Imported Upstream version 1.4.0
@@ -8,7 +14,7 @@ mongodb (1:1.4.0-1) unstable; urgency=low
   * upstream release notes
     http://www.mongodb.org/display/DOCS/1.4+Release+Notes
 
- -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 25 Mar 2010 19:44:59 +0100
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 25 Mar 2010 19:44:59 +0100 
 
 mongodb (1:1.2.4-1) unstable; urgency=low
 
