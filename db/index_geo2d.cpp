@@ -893,14 +893,14 @@ namespace mongo {
     public:
         typedef multiset<GeoPoint> Holder;
 
-        GeoHopper( const Geo2dType * g , unsigned max , const GeoHash& n , const BSONObj& filter = BSONObj() )
-            : GeoAccumulator( g , filter ) , _max( max ) , _near( n ) {
+        GeoHopper( const Geo2dType * g , unsigned max , const GeoHash& n , const BSONObj& filter = BSONObj() , double maxDistance = numeric_limits<double>::max() )
+            : GeoAccumulator( g , filter ) , _max( max ) , _near( n ), _maxDistance( maxDistance ) {
 
         }
 
         virtual bool checkDistance( const GeoHash& h , double& d ){
             d = _g->distance( _near , h );
-            bool good = _points.size() < _max || d < farthest();
+            bool good = d < _maxDistance && ( _points.size() < _max || d < farthest() );
             GEODEBUG( "\t\t\t\t\t\t\t checkDistance " << _near << "\t" << h << "\t" << d 
                       << " ok: " << good << " farthest: " << farthest() );
             return good;
@@ -926,6 +926,7 @@ namespace mongo {
         unsigned _max;
         GeoHash _near;
         Holder _points;
+        double _maxDistance;
 
     };
 
@@ -999,10 +1000,10 @@ namespace mongo {
 
     class GeoSearch {
     public:
-        GeoSearch( const Geo2dType * g , const GeoHash& n , int numWanted=100 , BSONObj filter=BSONObj() )
+        GeoSearch( const Geo2dType * g , const GeoHash& n , int numWanted=100 , BSONObj filter=BSONObj() , double maxDistance = numeric_limits<double>::max() )
             : _spec( g ) , _n( n ) , _start( n ) ,
-              _numWanted( numWanted ) , _filter( filter ) , 
-              _hopper( new GeoHopper( g , numWanted , n , filter ) )
+              _numWanted( numWanted ) , _filter( filter ) , _maxDistance( maxDistance ) ,
+              _hopper( new GeoHopper( g , numWanted , n , filter , maxDistance ) )
         {
             assert( g->getDetails() );
             _nscanned = 0;
@@ -1042,6 +1043,10 @@ namespace mongo {
                     if ( ! _prefix.constrains() )
                         break;
                     _prefix = _prefix.up();
+                    
+                    double temp = _spec->distance( _prefix , _start );
+                    if ( temp > ( _maxDistance * 2 ) )
+                        break;
                 }
             }
             GEODEBUG( "done part 1" );
@@ -1105,6 +1110,7 @@ namespace mongo {
         GeoHash _prefix;
         int _numWanted;
         BSONObj _filter;
+        double _maxDistance;
         shared_ptr<GeoHopper> _hopper;
 
         long long _nscanned;
@@ -1478,7 +1484,16 @@ namespace mongo {
             switch ( e.embeddedObject().firstElement().getGtLtOp() ){
             case BSONObj::opNEAR: {
                 e = e.embeddedObject().firstElement();
-                shared_ptr<GeoSearch> s( new GeoSearch( this , _tohash(e) , numWanted , query ) );
+                double maxDistance = numeric_limits<double>::max();
+                if ( e.isABSONObj() && e.embeddedObject().nFields() > 2 ){
+                    BSONObjIterator i(e.embeddedObject());
+                    i.next();
+                    i.next();
+                    BSONElement e = i.next();
+                    if ( e.isNumber() )
+                        maxDistance = e.numberDouble();
+                }
+                shared_ptr<GeoSearch> s( new GeoSearch( this , _tohash(e) , numWanted , query , maxDistance ) );
                 s->exec();
                 auto_ptr<Cursor> c;
                 c.reset( new GeoSearchCursor( s ) );
@@ -1568,7 +1583,11 @@ namespace mongo {
             if ( cmdObj["query"].type() == Object )
                 filter = cmdObj["query"].embeddedObject();
 
-            GeoSearch gs( g , n , numWanted , filter );
+            double maxDistance = numeric_limits<double>::max();
+            if ( cmdObj["maxDistance"].isNumber() )
+                maxDistance = cmdObj["maxDistance"].number();
+
+            GeoSearch gs( g , n , numWanted , filter , maxDistance );
 
             if ( cmdObj["start"].type() == String){
                 GeoHash start = (string) cmdObj["start"].valuestr();

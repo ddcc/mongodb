@@ -24,11 +24,11 @@
 #include "repl.h"
 #include "update.h"
 
+//#define DEBUGUPDATE(x) cout << x << endl;
+#define DEBUGUPDATE(x)
+
 namespace mongo {
 
-    //#define DEBUGUPDATE(x) cout << x << endl;
-#define DEBUGUPDATE(x)
-    
     const char* Mod::modNames[] = { "$inc", "$set", "$push", "$pushAll", "$pull", "$pullAll" , "$pop", "$unset" ,
                                     "$bitand" , "$bitor" , "$bit" , "$addToSet" };
     unsigned Mod::modNamesNum = sizeof(Mod::modNames)/sizeof(char*);
@@ -310,11 +310,12 @@ namespace mongo {
 
         // Perform this check first, so that we don't leave a partially modified object on uassert.
         for ( ModHolder::const_iterator i = _mods.begin(); i != _mods.end(); ++i ) {
+            DEBUGUPDATE( "\t\t prepare : " << i->first );
             ModState& ms = mss->_mods[i->first];
 
             const Mod& m = i->second;
             BSONElement e = obj.getFieldDotted(m.fieldName);
-
+            
             ms.m = &m;
             ms.old = e;
 
@@ -406,6 +407,7 @@ namespace mongo {
                 mss->amIInPlacePossible( false );
             }
         }
+        
         return auto_ptr<ModSetState>( mss );
     }
     
@@ -424,7 +426,7 @@ namespace mongo {
             // [dm] the BSONElementManipulator statements below are for replication (correct?)
             case Mod::INC:
                 m.m->incrementMe( m.old );
-                m.fixedName = "$set";
+                m.fixedOpName = "$set";
                 m.fixed = &(m.old);
                 break;
             case Mod::SET:
@@ -477,6 +479,7 @@ namespace mongo {
     
     template< class Builder >
     void ModSetState::createNewFromMods( const string& root , Builder& b , const BSONObj &obj ){
+        DEBUGUPDATE( "\t\t createNewFromMods root: " << root );
         BSONObjIteratorSorted es( obj );
         BSONElement e = es.next();
 
@@ -488,6 +491,8 @@ namespace mongo {
         while ( e.type() && m != mend ){
             string field = root + e.fieldName();
             FieldCompareResult cmp = compareDottedFieldNames( m->second.m->fieldName , field );
+
+            DEBUGUPDATE( "\t\t\t" << field << "\t" << m->second.m->fieldName << "\t" << cmp );
             
             switch ( cmp ){
                 
@@ -809,11 +814,13 @@ namespace mongo {
                 const BSONObj& onDisk = loc.obj();
 
                 ModSet * useMods = mods.get();
+                bool forceRewrite = false;
 
                 auto_ptr<ModSet> mymodset;
                 if ( u->getMatchDetails().elemMatchKey && mods->hasDynamicArray() ){
                     useMods = mods->fixDynamicArray( u->getMatchDetails().elemMatchKey );
                     mymodset.reset( useMods );
+                    forceRewrite = true;
                 }
 
                      
@@ -850,7 +857,7 @@ namespace mongo {
                         pattern = patternBuilder.obj();                        
                     }
                     
-                    if ( mss->needOpLogRewrite() ){
+                    if ( forceRewrite || mss->needOpLogRewrite() ){
                         DEBUGUPDATE( "\t rewrite update: " << mss->getOpLogRewrite() );
                         logOp("u", ns, mss->getOpLogRewrite() , &pattern );
                     }
