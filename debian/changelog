@@ -1,3 +1,13 @@
+mongodb (1:1.4.2-1) unstable; urgency=low
+
+  * [4770a09] New upstream version 1.4.2
+  * changelog for 1.4.1
+    http://jira.mongodb.org/browse/SERVER/fixforversion/10144
+  * changelog for 1.4.2
+    http://jira.mongodb.org/browse/SERVER/fixforversion/10155
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Tue, 27 Apr 2010 19:55:04 +0200
+
 mongodb (1:1.4.0-2) unstable; urgency=low
 
   * added Roberto C. Sanchez as co-maintainer
