@@ -241,6 +241,8 @@ namespace mongo {
             if ( from.localhost() )
                 return true;
             
+            Client::GodScope gs;
+
             if ( db.findOne( "admin.system.users" , BSONObj() , 0 , QueryOption_SlaveOk ).isEmpty() )
                 return true;
             
@@ -315,6 +317,7 @@ namespace mongo {
                         responseMsg = "not allowed\n";
                         return;
                     }              
+                    headers.push_back( "Content-Type: application/json" );
                     generateServerStatus( url , responseMsg );
                     responseCode = 200;
                     return;
@@ -519,7 +522,7 @@ namespace mongo {
             BSONObj query = queryBuilder.obj();
 
             auto_ptr<DBClientCursor> cursor = db.query( ns.c_str() , query, num , skip );
-
+            uassert( 13085 , "query failed for dbwebserver" , cursor.get() );
             if ( one ) {
                 if ( cursor->more() ) {
                     BSONObj obj = cursor->next();

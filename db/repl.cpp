@@ -102,7 +102,7 @@ namespace mongo {
             return;
         info = _comment;
         if ( n != state && !cmdLine.quiet )
-            log() << "pair: setting master=" << n << " was " << state << '\n';
+            log() << "pair: setting master=" << n << " was " << state << endl;
         state = n;
     }
 
@@ -732,7 +732,7 @@ namespace mongo {
                 ( replPair && replSettings.fastsync ) ) {
                 DBDirectClient c;
                 if ( c.exists( "local.oplog.$main" ) ) {
-                    BSONObj op = c.findOne( "local.oplog.$main", Query().sort( BSON( "$natural" << -1 ) ) );
+                    BSONObj op = c.findOne( "local.oplog.$main", QUERY( "op" << NE << "n" ).sort( BSON( "$natural" << -1 ) ) );
                     if ( !op.isEmpty() ) {
                         tmp.syncedTo = op[ "ts" ].date();
                         tmp._lastSavedLocalTs = op[ "ts" ].date();
@@ -938,6 +938,7 @@ namespace mongo {
         }
         
         Client::Context ctx( ns );
+        ctx.getClient()->curop()->reset();
 
         bool empty = ctx.db()->isEmpty();
         bool incompleteClone = incompleteCloneDbs.count( clientName ) != 0;
@@ -1606,6 +1607,7 @@ namespace mongo {
             ReplInfo r("replMain load sources");
             dblock lk;
             ReplSource::loadAll(sources);
+            replSettings.fastsync = false; // only need this param for initial reset
         }
 
         if ( sources.empty() ) {
@@ -1860,6 +1862,9 @@ namespace mongo {
             createOplog();
             boost::thread t(replMasterThread);
         }
+        
+        while( replSettings.fastsync ) // don't allow writes until we've set up from log
+            sleepmillis( 50 );
     }
 
     /* called from main at server startup */
