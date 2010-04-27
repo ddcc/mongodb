@@ -71,6 +71,7 @@ clean:
 	rm -f buildinfo.cpp
 	rm -rf debian/tmp-test
 	rm -f debian/mongodb.upstart
+	rm -f debian/mongodb.manpages
 	dh_clean debian/files
 
 install: build
