@@ -22,7 +22,7 @@ endif
 configure: configure-stamp
 configure-stamp:
 	dh_testdir
-        # Add here commands to configure the package.
+	# Add here commands to configure the package.
 
 	touch configure-stamp
 
@@ -32,9 +32,9 @@ build: build-stamp
 build-stamp: configure-stamp  
 	dh_testdir
 
-        # Add here commands to compile the package.
+	# Add here commands to compile the package.
 	scons $(DEB_SCONS_FLAGS)
-        #docbook-to-man debian/mongodb.sgml > mongodb.1
+	#docbook-to-man debian/mongodb.sgml > mongodb.1
 
 	#run regression tests
 	scons --prefix=$(CURDIR)/debian/tmp-test smoke
@@ -90,9 +90,9 @@ install: build
 	install -m 644 $(CURDIR)/debian/mongodb.conf \
 		$(CURDIR)/debian/tmp/etc/mongodb.conf
 
-        mkdir -p $(CURDIR)/debian/tmp/usr/share/man/man1
-        install -m 644 $(CURDIR)/debian/*.1 \
-	        $(CURDIR)/debian/tmp/usr/share/man/man1
+	mkdir -p $(CURDIR)/debian/tmp/usr/share/man/man1
+	install -m 644 $(CURDIR)/debian/*.1 \
+		$(CURDIR)/debian/tmp/usr/share/man/man1
 
 # Build architecture-independent files here.
 binary-indep: build install
