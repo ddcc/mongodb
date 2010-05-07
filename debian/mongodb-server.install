@@ -1,0 +1,7 @@
+etc
+usr/bin/mongod
+usr/bin/mongos
+usr/share/lintian/overrides/mongodb-server
+usr/share/man/man1/mongod.1.gz
+usr/share/man/man1/mongos.1.gz
+var

@@ -48,9 +48,9 @@ clean:
 	dh_testroot
 	rm -f build-stamp configure-stamp
 
-	rm -rf $(CURDIR)/debian/mongodb
+	rm -rf $(CURDIR)/debian/tmp
 	# FIXME: scons freaks out at the presence of target files
-	# under debian/mongodb.
+	# under debian/tmp.
 	scons -c
 	rm -f config.log
 	rm -f mongo
@@ -80,15 +80,17 @@ install: build
 	dh_prep
 	dh_installdirs
 
-	scons --prefix=$(CURDIR)/debian/mongodb/usr install
+	scons --prefix=$(CURDIR)/debian/tmp/usr install
 
-	mkdir -p $(CURDIR)/debian/mongodb/usr/share/lintian/overrides/
-	install -m 644 $(CURDIR)/debian/lintian-overrides \
-		$(CURDIR)/debian/mongodb/usr/share/lintian/overrides/mongodb
+	mkdir -p $(CURDIR)/debian/tmp/usr/share/lintian/overrides/
+	install -m 644 $(CURDIR)/debian/mongodb-server.lintian \
+		$(CURDIR)/debian/tmp/usr/share/lintian/overrides/mongodb-server
+	install -m 644 $(CURDIR)/debian/mongodb-clients.lintian \
+		$(CURDIR)/debian/tmp/usr/share/lintian/overrides/mongodb-clients
 
-	mkdir -p $(CURDIR)/debian/mongodb/etc
+	mkdir -p $(CURDIR)/debian/tmp/etc
 	install -m 644 $(CURDIR)/debian/mongodb.conf \
-		$(CURDIR)/debian/mongodb/etc/mongodb.conf
+		$(CURDIR)/debian/tmp/etc/mongodb.conf
 
 # Build architecture-independent files here.
 binary-indep: build install
@@ -101,7 +103,7 @@ binary-arch: build install
 	dh_installchangelogs 
 	dh_installdocs
 	dh_installexamples
-#	dh_install
+	dh_install
 #	dh_installmenu
 #	dh_installdebconf	
 #	dh_installlogrotate

@@ -1,3 +1,10 @@
+mongodb (1:1.4.2-2) unstable; urgency=low
+
+  * Split single binary package into mongodb-server, mongodb-dev, and
+    mongodb-clients.
+
+ -- Roberto C. Sanchez <roberto@connexer.com>  Thu, 06 May 2010 21:20:52 -0400
+
 mongodb (1:1.4.2-1) unstable; urgency=low
 
   * [4770a09] New upstream version 1.4.2
