@@ -35,7 +35,6 @@ build-stamp: configure-stamp
         # Add here commands to compile the package.
 	scons $(DEB_SCONS_FLAGS)
         #docbook-to-man debian/mongodb.sgml > mongodb.1
-	ls debian/*.1 > debian/mongodb.manpages
 
 	#run regression tests
 	scons --prefix=$(CURDIR)/debian/tmp-test smoke
@@ -71,7 +70,6 @@ clean:
 	rm -f buildinfo.cpp
 	rm -rf debian/tmp-test
 	rm -f debian/mongodb.upstart
-	rm -f debian/mongodb.manpages
 	dh_clean debian/files
 
 install: build
@@ -91,6 +89,10 @@ install: build
 	mkdir -p $(CURDIR)/debian/tmp/etc
 	install -m 644 $(CURDIR)/debian/mongodb.conf \
 		$(CURDIR)/debian/tmp/etc/mongodb.conf
+
+        mkdir -p $(CURDIR)/debian/tmp/usr/share/man/man1
+        install -m 644 $(CURDIR)/debian/*.1 \
+	        $(CURDIR)/debian/tmp/usr/share/man/man1
 
 # Build architecture-independent files here.
 binary-indep: build install
