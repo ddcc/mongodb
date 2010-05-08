@@ -6,5 +6,4 @@ mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongoexport /usr/lib64/
 mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongofiles /usr/lib64/xulrunner-1.9.1
 mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongoimport /usr/lib64/xulrunner-1.9.1
 mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongorestore /usr/lib64/xulrunner-1.9.1
-mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongosniff /usr/lib64/xulrunner-1.9.1
 mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongostat /usr/lib64/xulrunner-1.9.1
