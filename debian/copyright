@@ -19,7 +19,7 @@ Debian Maintainers:
 
 Copyright:
 
-    2009 10gen
+    Copyright (c) 2009 10gen
 
 License:
 
@@ -31,7 +31,7 @@ License:
     AGPL 3.0
     http://www.fsf.org/licensing/licenses/agpl-3.0.html
 
-The Debian packaging is (C) 2009, 2010, Kristina Chodorow <kristina@10gen.com> and Antonin Kral <A.Kral@bobek.cz>. It is licensed under the AGPL, but will be relicensed under Apache License 2.0.
+The Debian packaging is Copyright (c) 2009, 2010, Kristina Chodorow <kristina@10gen.com>, Antonin Kral <A.Kral@bobek.cz> and Roberto C. Sanchez <roberto@connexer.com>. It is licensed under the AGPL, but will be relicensed under Apache License 2.0.
 
 Some parts of MongoDB are still licensed under AGPL but upstream is working on
 unification of licenses to Apache License 2.0.
