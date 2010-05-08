@@ -10,7 +10,7 @@ Homepage: http://www.mongodb.org
 Package: mongodb
 Architecture: i386 amd64
 Depends: mongodb-server, mongodb-dev, ${shlibs:Depends}, ${misc:Depends}
-Description: An object/document-oriented database (meta package)
+Description: An object/document-oriented database (metapackage)
  MongoDB is a high-performance, open source, schema-free 
  document-oriented  data store that's easy to deploy, manage
  and use. It's network accessible, written in C++ and offers
@@ -28,7 +28,7 @@ Description: An object/document-oriented database (meta package)
  High performance, scalability, and reasonable depth of
  functionality are the goals for the project.
  .
- This is a meta package that depends on all the mongodb parts.
+ This is a metapackage that depends on all the mongodb parts.
 
 Package: mongodb-server
 Architecture: i386 amd64
