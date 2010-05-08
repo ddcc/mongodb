@@ -1,5 +1,6 @@
-mongodb (1:1.4.2-3) unstable; urgency=low
+mongodb (1:1.4.2-3) UNRELEASED; urgency=low
 
+  * NOT RELEASED YET
   * Clean up debian/copyright
   * Fix various typos
   * Generally make lintian happy
