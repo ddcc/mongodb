@@ -4,8 +4,10 @@ mongodb (1:1.4.2-3) UNRELEASED; urgency=low
   * Clean up debian/copyright
   * Fix various typos
   * Generally make lintian happy
+  * Change section of mongodb-dev from database to libdevel (now matches
+    archive override file)
 
- -- Roberto C. Sanchez <roberto@connexer.com>  Sat, 08 May 2010 09:24:28 -0400
+ -- Roberto C. Sanchez <roberto@connexer.com>  Tue, 11 May 2010 15:53:21 -0400
 
 mongodb (1:1.4.2-2) unstable; urgency=low
 

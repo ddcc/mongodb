@@ -77,6 +77,7 @@ Description: An object/document-oriented database (client apps)
  This package contains the various client applications.
 
 Package: mongodb-dev
+Section: libdevel
 Architecture: i386 amd64
 Depends: mongodb-server, ${shlibs:Depends}, ${misc:Depends}
 Description: An object/document-oriented database (development)
