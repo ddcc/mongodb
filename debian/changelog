@@ -1,3 +1,13 @@
+mongodb (1:1.4.4-1) unstable; urgency=low
+
+  * [5c6a221] Imported Upstream version 1.4.4
+  * upstream change log is at 
+    http://jira.mongodb.org/browse/SERVER/fixforversion/10166
+  * [68c73c3] removed not needed files from upstream
+  * [c1546df] debian policy to 3.9.0
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Wed, 30 Jun 2010 09:32:45 +0200
+
 mongodb (1:1.4.3-2) unstable; urgency=low
 
   * [64bca3c] Updated copyright information as requested by Richard
