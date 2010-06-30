@@ -113,16 +113,26 @@ namespace mongo {
         bool atLeastReadLocked() { return _state.get() != 0; }
         void assertAtLeastReadLocked() { assert(atLeastReadLocked()); }
 
-        void lock() { 
+        bool _checkWriteLockAlready(){
             //DEV cout << "LOCK" << endl;
             DEV assert( haveClient() );
                 
             int s = _state.get();
             if( s > 0 ) {
                 _state.set(s+1);
-                return;
+                return true;
             }
+
             massert( 10293 , (string)"internal error: locks are not upgradeable: " + sayClientState() , s == 0 );
+
+            return false;
+        }
+
+        void lock() { 
+            
+            if ( _checkWriteLockAlready() )
+                return;
+            
             _state.set(1);
 
             curopWaitingForLock( 1 );
@@ -131,6 +141,26 @@ namespace mongo {
 
             _minfo.entered();
         }
+
+        bool lock_try() {
+            if ( _checkWriteLockAlready() )
+                return true;            
+            
+            curopWaitingForLock( 1 );
+
+            boost::system_time until = get_system_time();
+            until += boost::posix_time::milliseconds(0);
+            bool got = _m.timed_lock( until );
+            curopGotLock();
+            
+            if ( got ){
+                _minfo.entered();
+                _state.set(1);
+            }                
+            
+            return got;
+        }
+        
         void unlock() { 
             //DEV cout << "UNLOCK" << endl;
             int s = _state.get();
@@ -227,10 +257,16 @@ namespace mongo {
         void lock() { 
 #ifdef HAVE_READLOCK
             m.lock();
+#error this should be impossible?
 #else
             boost::detail::thread::lock_ops<boost::recursive_mutex>::lock(m);
 #endif
             _minfo.entered();
+        }
+
+        bool lock_try(){
+            lock();
+            return true;
         }
 
         void releaseEarly() {
@@ -326,6 +362,23 @@ namespace mongo {
         }
         bool _got;
     };
+
+    struct writelocktry {
+        writelocktry( const string&ns ){
+            _got = dbMutex.lock_try();
+        }
+        ~writelocktry() {
+            if ( _got ){
+                dbunlocking_write();
+                dbMutex.unlock();
+            }
+        }
+        bool got(){
+            return _got;
+        }
+        bool _got;
+    };
+
     
     struct atleastreadlock {
         atleastreadlock( const string& ns ){
