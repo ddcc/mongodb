@@ -1,3 +1,9 @@
+mongodb (1:1.4.4-2) unstable; urgency=low
+
+  * [3bd69dc] install libs to /usr/lib not /usr/lib64 (Closes: #588557)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Fri, 09 Jul 2010 21:26:05 +0200
+
 mongodb (1:1.4.4-1) unstable; urgency=low
 
   * [5c6a221] Imported Upstream version 1.4.4
