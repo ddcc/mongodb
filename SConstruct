@@ -510,7 +510,7 @@ elif "linux2" == os.sys.platform:
     if os.uname()[4] == "x86_64" and not force32:
         linux64 = True
         javaVersion = "amd64"
-        nixLibPrefix = "lib64"
+        nixLibPrefix = "lib"
         env.Append( LIBPATH=["/usr/lib64" , "/lib64" ] )
         env.Append( LIBS=["pthread"] )
 
