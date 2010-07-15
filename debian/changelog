@@ -1,3 +1,9 @@
+mongodb (1:1.4.4-3) unstable; urgency=low
+
+  * [1576744] added libreadline-dev to build-deps (Closes: #589163)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 15 Jul 2010 21:41:49 +0200
+
 mongodb (1:1.4.4-2) unstable; urgency=low
 
   * [3bd69dc] install libs to /usr/lib not /usr/lib64 (Closes: #588557)
