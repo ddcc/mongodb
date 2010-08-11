@@ -33,7 +33,7 @@ build-stamp: configure-stamp
 	dh_testdir
 
 	# Add here commands to compile the package.
-	scons --prefix=$(CURDIR)/debian/tmp $(DEB_SCONS_FLAGS)
+	scons $(DEB_SCONS_FLAGS)
 	#docbook-to-man debian/mongodb.sgml > mongodb.1
 
 	#run regression tests
@@ -78,7 +78,7 @@ install: build
 	dh_prep
 	dh_installdirs
 
-	scons --prefix=$(CURDIR)/debian/tmp/usr install
+	scons --prefix=$(CURDIR)/debian/tmp/usr --full install
 
 	mkdir -p $(CURDIR)/debian/tmp/usr/share/lintian/overrides/
 	install -m 644 $(CURDIR)/debian/mongodb-server.lintian \
