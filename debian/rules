@@ -11,7 +11,7 @@
 
 # debug and nostrip is effectively equivalent for current version of scons
 # build system in current mongodb revision
-DEB_SCONS_FLAGS :=
+DEB_SCONS_FLAGS := 
 ifneq (,$(findstring debug,$(DEB_BUILD_OPTIONS)))
 	DEB_SCONS_FLAGS := --d=DEBUGBUILD
 endif
@@ -33,11 +33,11 @@ build-stamp: configure-stamp
 	dh_testdir
 
 	# Add here commands to compile the package.
-	scons $(DEB_SCONS_FLAGS)
+	scons --prefix=$(CURDIR)/debian/tmp $(DEB_SCONS_FLAGS)
 	#docbook-to-man debian/mongodb.sgml > mongodb.1
 
 	#run regression tests
-	scons --prefix=$(CURDIR)/debian/tmp-test smoke
+	scons --smokedbprefix=$(CURDIR)/debian/tmp-test smoke
 	rm -rf $(CURDIR)/debian/tmp-test
 
 	touch $@
