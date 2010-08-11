@@ -15,7 +15,7 @@
  *    limitations under the License.
  */
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "processinfo.h"
 #include "log.h"
 
@@ -108,7 +108,7 @@ namespace mongo {
         start = start - ( (unsigned long long)start % pageSize );
         char x = 0;
         if ( mincore( start , 128 , &x ) ){
-            log() << "mincore failed: " << OUTPUT_ERRNO << endl;
+            log() << "mincore failed: " << errnoWithDescription() << endl;
             return 1;
         }
         return x & 0x1;

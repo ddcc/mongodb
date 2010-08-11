@@ -16,11 +16,12 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
+#include "../util/version.h"
 #include <boost/program_options.hpp>
 
 #undef assert
-#define assert xassert
+#define assert MONGO_assert
 
 #include "framework.h"
 #include "../util/file_allocator.h"
@@ -53,7 +54,7 @@ namespace mongo {
                 ss << result;
 
                 for ( list<string>::iterator i=_messages.begin(); i!=_messages.end(); i++ ){
-                    ss << "\t" << *i << "\n";
+                    ss << "\t" << *i << '\n';
                 }
                 
                 return ss.str();
@@ -76,7 +77,9 @@ namespace mongo {
 
         Result * Result::cur = 0;
 
-        Result * Suite::run(){
+        Result * Suite::run( const string& filter ){
+            tlogLevel = -1;
+
             log(1) << "\t about to setupTests" << endl;
             setupTests();
             log(1) << "\t done setupTests" << endl;
@@ -89,9 +92,13 @@ namespace mongo {
 
             for ( list<TestCase*>::iterator i=_tests.begin(); i!=_tests.end(); i++ ){
                 TestCase * tc = *i;
+                if ( filter.size() && tc->getName().find( filter ) == string::npos ){
+                    log(1) << "\t skipping test: " << tc->getName() << " because doesn't match filter" << endl;
+                    continue;
+                }
 
                 r->_tests++;
-
+                
                 bool passes = false;
                 
                 log(1) << "\t going to run test: " << tc->getName() << endl;
@@ -154,10 +161,11 @@ namespace mongo {
                  "directory will be overwritten if it already exists")
                 ("debug", "run tests with verbose output")
                 ("list,l", "list available test suites")
+                ("filter,f" , po::value<string>() , "string substring filter on test name" )
                 ("verbose,v", "verbose")
                 ("seed", po::value<unsigned long long>(&seed), "random number seed")
                 ;
-
+            
             hidden_options.add_options()
                 ("suites", po::value< vector<string> >(), "test suites to run")
                 ;
@@ -236,7 +244,13 @@ namespace mongo {
             if (params.count("suites")) {
                 suites = params["suites"].as< vector<string> >();
             }
-            int ret = run(suites);
+            
+            string filter = "";
+            if ( params.count( "filter" ) ){
+                filter = params["filter"].as<string>();
+            }
+
+            int ret = run(suites,filter);
 
 #if !defined(_WIN32) && !defined(__sunos__)
             flock( lockFile, LOCK_UN );
@@ -247,7 +261,7 @@ namespace mongo {
             return ret;
         }
 
-        int Suite::run( vector<string> suites ){
+        int Suite::run( vector<string> suites , const string& filter ){
             for ( unsigned int i = 0; i < suites.size(); i++ ) {
                 if ( _suites->find( suites[i] ) == _suites->end() ) {
                     cout << "invalid test [" << suites[i] << "], use --list to see valid names" << endl;
@@ -269,7 +283,7 @@ namespace mongo {
                 assert( s );
 
                 log() << "going to run suite: " << name << endl;
-                results.push_back( s->run() );
+                results.push_back( s->run( filter ) );
             }
 
             Logstream::get().flush();
@@ -327,22 +341,6 @@ namespace mongo {
 
         void fail( const char * exp , const char * file , unsigned line ){
             assert(0);
-        }
-
-        string demangleName( const type_info& typeinfo ){
-#ifdef _WIN32
-            return typeinfo.name();
-#else
-            int status;
-
-            char * niceName = abi::__cxa_demangle(typeinfo.name(), 0, 0, &status);
-            if ( ! niceName )
-                return typeinfo.name();
-
-            string s = niceName;
-            free(niceName);
-            return s;
-#endif
         }
 
         MyAssertionException * MyAsserts::getBase(){

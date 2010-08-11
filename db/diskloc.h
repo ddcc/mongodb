@@ -22,17 +22,18 @@
 
 #pragma once
 
+#include "jsobj.h"
+
 namespace mongo {
 
-#pragma pack(1)
 
     class Record;
     class DeletedRecord;
     class Extent;
     class BtreeBucket;
-    class BSONObj;
     class MongoDataFile;
 
+#pragma pack(1)
     class DiskLoc {
         int fileNo; /* this will be volume, file #, etc. */
         int ofs;
@@ -85,7 +86,10 @@ namespace mongo {
             ss << hex << fileNo << ':' << ofs;
             return ss.str();
         }
-        operator string() const { return toString(); }
+
+        BSONObj toBSONObj() const {
+            return BSON( "file" << fileNo << "offset" << ofs );
+        }
 
         int& GETOFS() {
             return ofs;
@@ -146,7 +150,6 @@ namespace mongo {
 
         MongoDataFile& pdf() const;
     };
-
 #pragma pack()
 
     const DiskLoc minDiskLoc(0, 1);

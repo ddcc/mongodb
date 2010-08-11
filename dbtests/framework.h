@@ -21,7 +21,7 @@
   simple portable regression system
  */
 
-#include "../stdafx.h"
+#include "../pch.h"
 
 #define ASSERT_EXCEPTION(a,b)                                       \
     try {                                                           \
@@ -34,6 +34,8 @@
 
 
 #define ASSERT_EQUALS(a,b) (mongo::regression::MyAsserts( #a , #b , __FILE__ , __LINE__ ) ).ae( (a) , (b) )
+#define ASSERT_NOT_EQUALS(a,b) (mongo::regression::MyAsserts( #a , #b , __FILE__ , __LINE__ ) ).nae( (a) , (b) )
+
 #define ASSERT(x) (void)( (!(!(x))) ? mongo::regression::assert_pass() : mongo::regression::assert_fail( #x , __FILE__ , __LINE__ ) )
 #define FAIL(x) mongo::regression::fail( #x , __FILE__ , __LINE__ )
 
@@ -44,8 +46,6 @@ namespace mongo {
     namespace regression {
 
         class Result;
-
-        string demangleName( const type_info& typeinfo );
 
         class TestCase {
         public:
@@ -112,9 +112,9 @@ namespace mongo {
                 _tests.push_back( new TestHolder1<T,A>(a) );
             }
 
-            Result * run();
+            Result * run( const string& filter );
 
-            static int run( vector<string> suites );
+            static int run( vector<string> suites , const string& filter );
             static int run( int argc , char ** argv , string default_dbpath );
 
 
@@ -166,6 +166,21 @@ namespace mongo {
                 throw e;
             }
             
+            template<typename A,typename B>
+            void nae( A a , B b ){
+                _gotAssert();
+                if ( a != b )
+                    return;
+                
+                printLocation();
+                    
+                MyAssertionException * e = getBase();
+                e->ss << a << " == " << b << endl;
+                log() << e->ss.str() << endl;
+                throw e;
+            }
+
+
             void printLocation();
             
         private:

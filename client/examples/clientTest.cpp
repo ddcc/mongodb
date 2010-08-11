@@ -137,10 +137,14 @@ int main( int argc, const char **argv ) {
         assert( conn.getLastError() == "" );
 
         // nonexistent index test
-        assert( conn.findOne(ns, Query("{name:\"eliot\"}").hint("{foo:1}")).hasElement("$err") );
-        assert( conn.getLastError() == "bad hint" );
-        conn.resetError();
-        assert( conn.getLastError() == "" );
+        bool asserted = false;
+        try {
+            conn.findOne(ns, Query("{name:\"eliot\"}").hint("{foo:1}"));
+        }
+        catch ( ... ){
+            asserted = true;
+        }
+        assert( asserted );
 
         //existing index
         assert( conn.findOne(ns, Query("{name:'eliot'}").hint("{name:1}")).hasElement("name") );
@@ -176,8 +180,9 @@ int main( int argc, const char **argv ) {
         }
 
         BSONObj found = conn.findOne( tsns , mongo::BSONObj() );
+        cout << "old: " << out << "\nnew: " << found << endl;
         assert( ( oldTime < found["ts"].timestampTime() ) ||
-               ( oldInc + 1 == found["ts"].timestampInc() ) );
+                ( oldTime == found["ts"].timestampTime() && oldInc < found["ts"].timestampInc() ) );
 
     }
     
@@ -185,9 +190,9 @@ int main( int argc, const char **argv ) {
         assert( conn.getLastError().empty() );
         
         BufBuilder b;
-        b.append( (int)0 ); // reserved
-        b.append( (int)-1 ); // invalid # of cursors triggers exception
-        b.append( (int)-1 ); // bogus cursor id
+        b.appendNum( (int)0 ); // reserved
+        b.appendNum( (int)-1 ); // invalid # of cursors triggers exception
+        b.appendNum( (int)-1 ); // bogus cursor id
         
         Message m;
         m.setData( dbKillCursors, b.buf(), b.len() );

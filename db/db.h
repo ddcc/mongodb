@@ -16,9 +16,8 @@
 
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "../util/message.h"
-#include "boost/version.hpp"
 #include "concurrency.h"
 #include "pdfile.h"
 #include "client.h"
@@ -64,7 +63,6 @@ namespace mongo {
             DBs::const_iterator it = m.find(db);
             return it != m.end();
         }
-
         
         Database * get( const string& ns , const string& path ) const {
             dbMutex.assertAtLeastReadLocked();
@@ -103,7 +101,13 @@ namespace mongo {
             }
             
             log(1) << "Accessing: " << dbname << " for the first time" << endl;
-            db = new Database( dbname.c_str() , justCreated , path );
+            try {
+                db = new Database( dbname.c_str() , justCreated , path );
+            }
+            catch ( ... ){
+                m.erase( dbname );
+                throw;
+            }
             _size++;
             return db;
         }
@@ -140,6 +144,12 @@ namespace mongo {
     private:
         
         string _todb( const string& ns ) const {
+            string d = __todb( ns );
+            uassert( 13280 , (string)"invalid db name: " + ns , Database::validDBName( d ) );            
+            return d;
+        }
+
+        string __todb( const string& ns ) const {
             size_t i = ns.find( '.' );
             if ( i == string::npos ){
                 uassert( 13074 , "db name can't be empty" , ns.size() );
@@ -190,7 +200,7 @@ namespace mongo {
             if ( _context ) _context->relocked();
         }
     };
-
+    
 
     /**
        only does a temp release if we're not nested and have a lock
@@ -213,9 +223,10 @@ namespace mongo {
             }
         }
         
+        bool unlocked(){
+            return real > 0;
+        }
     };
-
-    extern TicketHolder connTicketHolder;
 
 } // namespace mongo
 

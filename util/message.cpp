@@ -18,7 +18,7 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "message.h"
 #include <time.h>
 #include "../util/goodies.h"
@@ -26,10 +26,25 @@
 #include <fcntl.h>
 #include <errno.h>
 #include "../db/cmdline.h"
+#include "../client/dbclient.h"
+
+#ifndef _WIN32
+#include <sys/resource.h>
+#else
+
+// errno doesn't work for winsock.
+#undef errno
+#define errno WSAGetLastError()
+
+#endif
 
 namespace mongo {
 
+    bool noUnixSocket = false;
+
     bool objcheck = false;
+
+    void checkTicketNumbers();
     
 // if you want trace output:
 #define mmm(x)
@@ -42,52 +57,163 @@ namespace mongo {
     const int portRecvFlags = 0;
 #endif
 
-    /* listener ------------------------------------------------------------------- */
+    const Listener* Listener::_timeTracker;
 
-    bool Listener::init() {
-        SockAddr me;
-        if ( ip.empty() )
-            me = SockAddr( port );
-        else
-            me = SockAddr( ip.c_str(), port );
-        sock = ::socket(AF_INET, SOCK_STREAM, 0);
-        if ( sock == INVALID_SOCKET ) {
-            log() << "ERROR: listen(): invalid socket? " << OUTPUT_ERRNO << endl;
-            return false;
-        }
-        prebindOptions( sock );
-        if ( ::bind(sock, (sockaddr *) &me.sa, me.addressSize) != 0 ) {
-            log() << "listen(): bind() failed " << OUTPUT_ERRNO << " for port: " << port << endl;
-            closesocket(sock);
-            return false;
+    vector<SockAddr> ipToAddrs(const char* ips, int port){
+        vector<SockAddr> out;
+        if (*ips == '\0'){
+            out.push_back(SockAddr("0.0.0.0", port)); // IPv4 all
+
+            if (IPv6Enabled())
+                out.push_back(SockAddr("::", port)); // IPv6 all
+#ifndef _WIN32
+            if (!noUnixSocket)
+                out.push_back(SockAddr(makeUnixSockPath(port).c_str(), port)); // Unix socket
+#endif
+            return out;
         }
 
-        if ( ::listen(sock, 128) != 0 ) {
-            log() << "listen(): listen() failed " << OUTPUT_ERRNO << endl;
-            closesocket(sock);
-            return false;
+        while(*ips){
+            string ip;
+            const char * comma = strchr(ips, ',');
+            if (comma){
+                ip = string(ips, comma - ips);
+                ips = comma + 1;
+            }else{
+                ip = string(ips);
+                ips = "";
+            }
+
+            SockAddr sa(ip.c_str(), port);
+            out.push_back(sa);
+
+#ifndef _WIN32
+            if (!noUnixSocket && (sa.getAddr() == "127.0.0.1" || sa.getAddr() == "0.0.0.0")) // only IPv4
+                out.push_back(SockAddr(makeUnixSockPath(port).c_str(), port));
+#endif
         }
-        
-        return true;
+        return out;
+
     }
 
-    void Listener::listen() {
-        static long connNumber = 0;
-        SockAddr from;
-        while ( ! inShutdown() ) {
-            int s = accept(sock, (sockaddr *) &from.sa, &from.addressSize);
-            if ( s < 0 ) {
-                if ( errno == ECONNABORTED || errno == EBADF ) {
-                    log() << "Listener on port " << port << " aborted" << endl;
-                    return;
+    /* listener ------------------------------------------------------------------- */
+
+    void Listener::initAndListen() {
+        checkTicketNumbers();
+        vector<SockAddr> mine = ipToAddrs(_ip.c_str(), _port);
+        vector<int> socks;
+        SOCKET maxfd = 0; // needed for select()
+
+        for (vector<SockAddr>::iterator it=mine.begin(), end=mine.end(); it != end; ++it){
+            SockAddr& me = *it;
+
+            SOCKET sock = ::socket(me.getType(), SOCK_STREAM, 0);
+            if ( sock == INVALID_SOCKET ) {
+                log() << "ERROR: listen(): invalid socket? " << errnoWithDescription() << endl;
+            }
+
+            if (me.getType() == AF_UNIX){
+#if !defined(_WIN32)
+                if (unlink(me.getAddr().c_str()) == -1){
+                    int x = errno;
+                    if (x != ENOENT){
+                        log() << "couldn't unlink socket file " << me << errnoWithDescription(x) << " skipping" << endl;
+                        continue;
+                    }
                 }
-                log() << "Listener: accept() returns " << s << " " << OUTPUT_ERRNO << endl;
+#endif
+            } else if (me.getType() == AF_INET6) {
+                // IPv6 can also accept IPv4 connections as mapped addresses (::ffff:127.0.0.1)
+                // That causes a conflict if we don't do set it to IPV6_ONLY
+                const int one = 1;
+                setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, (const char*) &one, sizeof(one));
+            }
+
+            prebindOptions( sock );
+            
+            if ( ::bind(sock, me.raw(), me.addressSize) != 0 ) {
+                int x = errno;
+                log() << "listen(): bind() failed " << errnoWithDescription(x) << " for socket: " << me.toString() << endl;
+                if ( x == EADDRINUSE )
+                    log() << "  addr already in use" << endl;
+                closesocket(sock);
+                return;
+            }
+
+            if ( ::listen(sock, 128) != 0 ) {
+                log() << "listen(): listen() failed " << errnoWithDescription() << endl;
+                closesocket(sock);
+                return;
+            }
+
+            ListeningSockets::get()->add( sock );
+
+            socks.push_back(sock);
+            if (sock > maxfd)
+                maxfd = sock;
+        }
+
+        static long connNumber = 0;
+        struct timeval maxSelectTime;
+        while ( ! inShutdown() ) {
+            fd_set fds[1];
+            FD_ZERO(fds);
+
+            for (vector<int>::iterator it=socks.begin(), end=socks.end(); it != end; ++it){
+                FD_SET(*it, fds);
+            }
+
+            maxSelectTime.tv_sec = 0;
+            maxSelectTime.tv_usec = 10000;
+            const int ret = select(maxfd+1, fds, NULL, NULL, &maxSelectTime);
+            
+            if (ret == 0){
+                _elapsedTime += ( 10000 - maxSelectTime.tv_usec ) / 1000;
                 continue;
             }
-            disableNagle(s);
-            if ( ! cmdLine.quiet ) log() << "connection accepted from " << from.toString() << " #" << ++connNumber << endl;
-            accepted( new MessagingPort(s, from) );
+            _elapsedTime += ret; // assume 1ms to grab connection. very rough
+            
+            if (ret < 0){
+                int x = errno;
+#ifdef EINTR
+                if ( x == EINTR ){
+                    log() << "select() signal caught, continuing" << endl;
+                    continue;
+                }
+#endif
+                if ( ! inShutdown() )
+                    log() << "select() failure: ret=" << ret << " " << errnoWithDescription(x) << endl;
+                return;
+            }
+
+            for (vector<int>::iterator it=socks.begin(), end=socks.end(); it != end; ++it){
+                if (! (FD_ISSET(*it, fds)))
+                    continue;
+
+                SockAddr from;
+                int s = accept(*it, from.raw(), &from.addressSize);
+                if ( s < 0 ) {
+                    int x = errno; // so no global issues
+                    if ( x == ECONNABORTED || x == EBADF ) {
+                        log() << "Listener on port " << _port << " aborted" << endl;
+                        return;
+                    } if ( x == 0 && inShutdown() ){
+                        return;   // socket closed
+                    }
+                    log() << "Listener: accept() returns " << s << " " << errnoWithDescription(x) << endl;
+                    continue;
+                } 
+                if (from.getType() != AF_UNIX)
+                    disableNagle(s);
+                if ( _logConnect && ! cmdLine.quiet ) 
+                    log() << "connection accepted from " << from.toString() << " #" << ++connNumber << endl;
+                accepted(s, from);
+            }
         }
+    }
+
+    void Listener::accepted(int sock, const SockAddr& from){
+        accepted( new MessagingPort(sock, from) );
     }
 
     /* messagingport -------------------------------------------------------------- */
@@ -101,27 +227,28 @@ namespace mongo {
         }
 
         ~PiggyBackData() {
-            flush();
-            delete( _cur );
+            DESTRUCTOR_GUARD (
+                flush();
+                delete[]( _cur );
+            );
         }
 
         void append( Message& m ) {
-            assert( m.data->len <= 1300 );
+            assert( m.header()->len <= 1300 );
 
-            if ( len() + m.data->len > 1300 )
+            if ( len() + m.header()->len > 1300 )
                 flush();
 
-            memcpy( _cur , m.data , m.data->len );
-            _cur += m.data->len;
+            memcpy( _cur , m.singleData() , m.header()->len );
+            _cur += m.header()->len;
         }
 
-        int flush() {
+        void flush() {
             if ( _buf == _cur )
-                return 0;
+                return;
 
-            int x = _port->send( _buf , len() );
+            _port->send( _buf , len(), "flush" );
             _cur = _buf;
-            return x;
         }
 
         int len() {
@@ -137,12 +264,10 @@ namespace mongo {
     };
 
     class Ports { 
-        set<MessagingPort*>& ports;
+        set<MessagingPort*> ports;
         mongo::mutex m;
     public:
-        // we "new" this so it is still be around when other automatic global vars
-        // are being destructed during termination.
-        Ports() : ports( *(new set<MessagingPort*>()) ) {}
+        Ports() : ports(), m("Ports") {}
         void closeAll() { \
             scoped_lock bl(m);
             for ( set<MessagingPort*>::iterator i = ports.begin(); i != ports.end(); i++ )
@@ -156,7 +281,11 @@ namespace mongo {
             scoped_lock bl(m);
             ports.erase(p);
         }
-    } ports;
+    };
+
+    // we "new" this so it is still be around when other automatic global vars
+    // are being destructed during termination.
+    Ports& ports = *(new Ports());
 
 
 
@@ -164,14 +293,17 @@ namespace mongo {
         ports.closeAll();
     }
 
-    MessagingPort::MessagingPort(int _sock, SockAddr& _far) : sock(_sock), piggyBackData(0), farEnd(_far) {
+    MessagingPort::MessagingPort(int _sock, const SockAddr& _far) : sock(_sock), piggyBackData(0), farEnd(_far), _timeout() {
+        _logLevel = 0;
         ports.insert(this);
     }
 
-    MessagingPort::MessagingPort() {
+    MessagingPort::MessagingPort( int timeout, int ll ) {
+        _logLevel = ll;
         ports.insert(this);
         sock = -1;
         piggyBackData = 0;
+        _timeout = timeout;
     }
 
     void MessagingPort::shutdown() {
@@ -194,42 +326,30 @@ namespace mongo {
         int res;
         SockAddr farEnd;
         void run() {
-            res = ::connect(sock, (sockaddr *) &farEnd.sa, farEnd.addressSize);
+            res = ::connect(sock, farEnd.raw(), farEnd.addressSize);
         }
+        string name() { return "ConnectBG"; }
     };
 
     bool MessagingPort::connect(SockAddr& _far)
     {
         farEnd = _far;
 
-        sock = socket(AF_INET, SOCK_STREAM, 0);
+        sock = socket(farEnd.getType(), SOCK_STREAM, 0);
         if ( sock == INVALID_SOCKET ) {
-            log() << "ERROR: connect(): invalid socket? " << OUTPUT_ERRNO << endl;
+            log(_logLevel) << "ERROR: connect(): invalid socket? " << errnoWithDescription() << endl;
             return false;
         }
 
-#if 0
-        long fl = fcntl(sock, F_GETFL, 0);
-        assert( fl >= 0 );
-        fl |= O_NONBLOCK;
-        fcntl(sock, F_SETFL, fl);
-
-        int res = ::connect(sock, (sockaddr *) &farEnd.sa, farEnd.addressSize);
-        if ( res ) {
-            if ( errno == EINPROGRESS )
-                closesocket(sock);
-            sock = -1;
-            return false;
+        if ( _timeout > 0 ) {
+            setSockTimeouts( sock, _timeout );
         }
-
-#endif
-
+                
         ConnectBG bg;
         bg.sock = sock;
         bg.farEnd = farEnd;
         bg.go();
 
-        // int res = ::connect(sock, (sockaddr *) &farEnd.sa, farEnd.addressSize);
         if ( bg.wait(5000) ) {
             if ( bg.res ) {
                 closesocket(sock);
@@ -245,7 +365,8 @@ namespace mongo {
             return false;
         }
 
-        disableNagle(sock);
+        if (farEnd.getType() != AF_UNIX)
+            disableNagle(sock);
 
 #ifdef SO_NOSIGPIPE
         // osx
@@ -257,94 +378,65 @@ namespace mongo {
     }
 
     bool MessagingPort::recv(Message& m) {
-again:
-        mmm( out() << "*  recv() sock:" << this->sock << endl; )
-        int len = -1;
-
-        char *lenbuf = (char *) &len;
-        int lft = 4;
-        while ( 1 ) {
-            int x = recv( lenbuf, lft );
-            if ( x == 0 ) {
-                DEV out() << "MessagingPort recv() conn closed? " << farEnd.toString() << endl;
-                m.reset();
-                return false;
-            }
-            if ( x < 0 ) {
-                log() << "MessagingPort recv() " << OUTPUT_ERRNO << " " << farEnd.toString()<<endl;
-                m.reset();
-                return false;
-            }
-            lft -= x;
-            if ( lft == 0 )
-                break;
-            lenbuf += x;
-            log() << "MessagingPort recv() got " << x << " bytes wanted 4, lft=" << lft << endl;
-            assert( lft > 0 );
-        }
-
-        if ( len < 0 || len > 16000000 ) {
-            if ( len == -1 ) {
-                // Endian check from the database, after connecting, to see what mode server is running in.
-                unsigned foo = 0x10203040;
-                int x = send( (char *) &foo, 4 );
-                if ( x <= 0 ) {
-                    log() << "MessagingPort endian send() " << OUTPUT_ERRNO << ' ' << farEnd.toString() << endl;
+        try {
+        again:
+            mmm( log() << "*  recv() sock:" << this->sock << endl; )
+            int len = -1;
+            
+            char *lenbuf = (char *) &len;
+            int lft = 4;
+            recv( lenbuf, lft );
+            
+            if ( len < 16 || len > 16000000 ) { // messages must be large enough for headers
+                if ( len == -1 ) {
+                    // Endian check from the database, after connecting, to see what mode server is running in.
+                    unsigned foo = 0x10203040;
+                    send( (char *) &foo, 4, "endian" );
+                    goto again;
+                }
+                
+                if ( len == 542393671 ){
+                    // an http GET
+                    log(_logLevel) << "looks like you're trying to access db over http on native driver port.  please add 1000 for webserver" << endl;
+                    string msg = "You are trying to access MongoDB on the native driver port. For http diagnostic access, add 1000 to the port number\n";
+                    stringstream ss;
+                    ss << "HTTP/1.0 200 OK\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: " << msg.size() << "\r\n\r\n" << msg;
+                    string s = ss.str();
+                    send( s.c_str(), s.size(), "http" );
                     return false;
                 }
-                goto again;
-            }
-
-            if ( len == 542393671 ){
-                // an http GET
-                log() << "looks like you're trying to access db over http on native driver port.  please add 1000 for webserver" << endl;
-                string msg = "You are trying to access MongoDB on the native driver port. For http diagnostic access, add 1000 to the port number\n";
-                stringstream ss;
-                ss << "HTTP/1.0 200 OK\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: " << msg.size() << "\r\n\r\n" << msg;
-                string s = ss.str();
-                send( s.c_str(), s.size() );
+                log(_logLevel) << "bad recv() len: " << len << '\n';
                 return false;
             }
-            log() << "bad recv() len: " << len << '\n';
+            
+            int z = (len+1023)&0xfffffc00;
+            assert(z>=len);
+            MsgData *md = (MsgData *) malloc(z);
+            assert(md);
+            md->len = len;
+            
+            char *p = (char *) &md->id;
+            int left = len -4;
+
+            try {
+                recv( p, left );
+            } catch (...) {
+                free(md);
+                throw;
+            }
+            
+            m.setData(md, true);
+            return true;
+            
+        } catch ( const SocketException & e ) {
+            log(_logLevel + (e.shouldPrint() ? 0 : 1) ) << "SocketException: " << e << endl;
+            m.reset();
             return false;
         }
-
-        int z = (len+1023)&0xfffffc00;
-        assert(z>=len);
-        MsgData *md = (MsgData *) malloc(z);
-        md->len = len;
-
-        if ( len <= 0 ) {
-            out() << "got a length of " << len << ", something is wrong" << endl;
-            return false;
-        }
-
-        char *p = (char *) &md->id;
-        int left = len -4;
-        while ( 1 ) {
-            int x = recv( p, left );
-            if ( x == 0 ) {
-                DEV out() << "MessagingPort::recv(): conn closed? " << farEnd.toString() << endl;
-                m.reset();
-                return false;
-            }
-            if ( x < 0 ) {
-                log() << "MessagingPort recv() " << OUTPUT_ERRNO << ' ' << farEnd.toString() << endl;
-                m.reset();
-                return false;
-            }
-            left -= x;
-            p += x;
-            if ( left <= 0 )
-                break;
-        }
-
-        m.setData(md, true);
-        return true;
     }
-
+    
     void MessagingPort::reply(Message& received, Message& response) {
-        say(/*received.from, */response, received.data->id);
+        say(/*received.from, */response, received.header()->id);
     }
 
     void MessagingPort::reply(Message& received, Message& response, MSGID responseTo) {
@@ -352,79 +444,171 @@ again:
     }
 
     bool MessagingPort::call(Message& toSend, Message& response) {
-        mmm( out() << "*call()" << endl; )
-        MSGID old = toSend.data->id;
+        mmm( log() << "*call()" << endl; )
+        MSGID old = toSend.header()->id;
         say(/*to,*/ toSend);
         while ( 1 ) {
             bool ok = recv(response);
             if ( !ok )
                 return false;
-            //out() << "got response: " << response.data->responseTo << endl;
-            if ( response.data->responseTo == toSend.data->id )
+            //log() << "got response: " << response.data->responseTo << endl;
+            if ( response.header()->responseTo == toSend.header()->id )
                 break;
-            out() << "********************" << endl;
-            out() << "ERROR: MessagingPort::call() wrong id got:" << (unsigned)response.data->responseTo << " expect:" << (unsigned)toSend.data->id << endl;
-            out() << "  toSend op: " << toSend.data->operation() << " old id:" << (unsigned)old << endl;
-            out() << "  response msgid:" << (unsigned)response.data->id << endl;
-            out() << "  response len:  " << (unsigned)response.data->len << endl;
-            out() << "  response op:  " << response.data->operation() << endl;
-            out() << "  farEnd: " << farEnd << endl;
+            log() << "********************" << endl;
+            log() << "ERROR: MessagingPort::call() wrong id got:" << hex << (unsigned)response.header()->responseTo << " expect:" << (unsigned)toSend.header()->id << endl;
+            log() << "  toSend op: " << toSend.operation() << " old id:" << (unsigned)old << endl;
+            log() << "  response msgid:" << (unsigned)response.header()->id << endl;
+            log() << "  response len:  " << (unsigned)response.header()->len << endl;
+            log() << "  response op:  " << response.operation() << endl;
+            log() << "  farEnd: " << farEnd << endl;
             assert(false);
             response.reset();
         }
-        mmm( out() << "*call() end" << endl; )
+        mmm( log() << "*call() end" << endl; )
         return true;
     }
 
     void MessagingPort::say(Message& toSend, int responseTo) {
-        assert( toSend.data );
-        mmm( out() << "*  say() sock:" << this->sock << " thr:" << GetCurrentThreadId() << endl; )
-        toSend.data->id = nextMessageId();
-        toSend.data->responseTo = responseTo;
-
-        int x = -100;
+        assert( !toSend.empty() );
+        mmm( log() << "*  say() sock:" << this->sock << " thr:" << GetCurrentThreadId() << endl; )
+        toSend.header()->id = nextMessageId();
+        toSend.header()->responseTo = responseTo;
 
         if ( piggyBackData && piggyBackData->len() ) {
-            mmm( out() << "*     have piggy back" << endl; )
-            if ( ( piggyBackData->len() + toSend.data->len ) > 1300 ) {
+            mmm( log() << "*     have piggy back" << endl; )
+            if ( ( piggyBackData->len() + toSend.header()->len ) > 1300 ) {
                 // won't fit in a packet - so just send it off
                 piggyBackData->flush();
             }
             else {
                 piggyBackData->append( toSend );
-                x = piggyBackData->flush();
+                piggyBackData->flush();
+                return;
             }
         }
 
-        if ( x == -100 )
-            x = send( (char*)toSend.data, toSend.data->len );
-        
-        if ( x <= 0 ) {
-            log() << "MessagingPort say send() " << OUTPUT_ERRNO << ' ' << farEnd.toString() << endl;
-            throw SocketException();
-        }
-
+        toSend.send( *this, "say" );
     }
 
-    int MessagingPort::send( const char * data , const int len ){
-        return ::send( sock , data , len , portSendFlags );
+    // sends all data or throws an exception    
+    void MessagingPort::send( const char * data , int len, const char *context ) {
+        while( len > 0 ) {
+            int ret = ::send( sock , data , len , portSendFlags );
+            if ( ret == -1 ) {
+                if ( errno != EAGAIN || _timeout == 0 ) {
+                    log(_logLevel) << "MessagingPort " << context << " send() " << errnoWithDescription() << ' ' << farEnd.toString() << endl;
+                    throw SocketException( SocketException::SEND_ERROR );                    
+                } else {
+                    if ( !serverAlive( farEnd.toString() ) ) {
+                        log(_logLevel) << "MessagingPort " << context << " send() remote dead " << farEnd.toString() << endl;
+                        throw SocketException( SocketException::SEND_ERROR );                        
+                    }
+                }
+            } else {
+                assert( ret <= len );
+                len -= ret;
+                data += ret;
+            }
+        }        
     }
     
-    int MessagingPort::recv( char * buf , int max ){
-        return ::recv( sock , buf , max , portRecvFlags );
+    // sends all data or throws an exception
+    void MessagingPort::send( const vector< pair< char *, int > > &data, const char *context ){
+#if defined(_WIN32)
+        // TODO use scatter/gather api
+        for( vector< pair< char *, int > >::const_iterator i = data.begin(); i != data.end(); ++i ) {
+            char * data = i->first;
+            int len = i->second;
+            send( data, len, context );
+        }
+#else
+        vector< struct iovec > d( data.size() );
+        int i = 0;
+        for( vector< pair< char *, int > >::const_iterator j = data.begin(); j != data.end(); ++j ) {
+            if ( j->second > 0 ) {
+                d[ i ].iov_base = j->first;
+                d[ i ].iov_len = j->second;
+                ++i;
+            }
+        }
+        struct msghdr meta;
+        memset( &meta, 0, sizeof( meta ) );
+        meta.msg_iov = &d[ 0 ];
+        meta.msg_iovlen = d.size();
+    
+        while( meta.msg_iovlen > 0 ) {
+            int ret = ::sendmsg( sock , &meta , portSendFlags );
+            if ( ret == -1 ) {
+                if ( errno != EAGAIN || _timeout == 0 ) {
+                    log(_logLevel) << "MessagingPort " << context << " send() " << errnoWithDescription() << ' ' << farEnd.toString() << endl;
+                    throw SocketException( SocketException::SEND_ERROR );                    
+                } else {
+                    if ( !serverAlive( farEnd.toString() ) ) {
+                        log(_logLevel) << "MessagingPort " << context << " send() remote dead " << farEnd.toString() << endl;
+                        throw SocketException( SocketException::SEND_ERROR );                        
+                    }
+                }
+            } else {
+                struct iovec *& i = meta.msg_iov;
+                while( ret > 0 ) {
+                    if ( i->iov_len > unsigned( ret ) ) {
+                        i->iov_len -= ret;
+                        i->iov_base = (char*)(i->iov_base) + ret;
+                        ret = 0;
+                    } else {
+                        ret -= i->iov_len;
+                        ++i;
+                        --(meta.msg_iovlen);
+                    }
+                }
+            }
+        }
+#endif
     }
 
+    void MessagingPort::recv( char * buf , int len ){
+        while( len > 0 ) {
+            int ret = ::recv( sock , buf , len , portRecvFlags );
+            if ( ret == 0 ) {
+                log(3) << "MessagingPort recv() conn closed? " << farEnd.toString() << endl;
+                throw SocketException( SocketException::CLOSED );
+            }
+            if ( ret == -1 ) {
+                int e = errno;
+                if ( e != EAGAIN || _timeout == 0 ) {                
+                    log(_logLevel) << "MessagingPort recv() " << errnoWithDescription(e) << " " << farEnd.toString() <<endl;
+                    throw SocketException( SocketException::RECV_ERROR );
+                } else {
+                    if ( !serverAlive( farEnd.toString() ) ) {
+                        log(_logLevel) << "MessagingPort recv() remote dead " << farEnd.toString() << endl;
+                        throw SocketException( SocketException::RECV_ERROR );                        
+                    }
+                }
+            } else {
+                if ( len <= 4 && ret != len )
+                    log(_logLevel) << "MessagingPort recv() got " << ret << " bytes wanted len=" << len << endl;
+                assert( ret <= len );
+                len -= ret;
+                buf += ret;
+            }
+        }
+    }
+
+    int MessagingPort::unsafe_recv( char *buf, int max ) {
+        return ::recv( sock , buf , max , portRecvFlags );        
+    }
+    
     void MessagingPort::piggyBack( Message& toSend , int responseTo ) {
 
-        if ( toSend.data->len > 1300 ) {
+        if ( toSend.header()->len > 1300 ) {
             // not worth saving because its almost an entire packet
             say( toSend );
             return;
         }
 
         // we're going to be storing this, so need to set it up
-        toSend.data->id = nextMessageId();
-        toSend.data->responseTo = responseTo;
+        toSend.header()->id = nextMessageId();
+        toSend.header()->responseTo = responseTo;
 
         if ( ! piggyBackData )
             piggyBackData = new PiggyBackData( this );
@@ -432,9 +616,14 @@ again:
         piggyBackData->append( toSend );
     }
 
-    unsigned MessagingPort::remotePort(){
+    unsigned MessagingPort::remotePort() const {
         return farEnd.getPort();
     }
+
+    HostAndPort MessagingPort::remote() const {
+        return farEnd;
+    }
+
 
     MSGID NextMsgId;
     bool usingClientIds = 0;
@@ -473,4 +662,62 @@ again:
         return clientId.get();
     }
     
+    int getMaxConnections(){
+#ifdef _WIN32
+        return 20000;
+#else
+        struct rlimit limit;
+        assert( getrlimit(RLIMIT_NOFILE,&limit) == 0 );
+
+        int max = (int)(limit.rlim_cur * .8);
+
+        log(1) << "fd limit" 
+               << " hard:" << limit.rlim_max 
+               << " soft:" << limit.rlim_cur 
+               << " max conn: " << max
+               << endl;
+        
+        if ( max > 20000 )
+            max = 20000;
+
+        return max;
+#endif
+    }
+
+    void checkTicketNumbers(){
+        connTicketHolder.resize( getMaxConnections() );
+    }
+
+    TicketHolder connTicketHolder(20000);
+
+    namespace {
+        map<string, bool> isSelfCache; // host, isSelf
+    }
+    
+    bool HostAndPort::isSelf() const { 
+        int p = _port == -1 ? CmdLine::DefaultDBPort : _port;
+
+        if( p != cmdLine.port ){
+            return false;
+        } else if (sameHostname(getHostName(), _host) || isLocalHost()) {
+            return true;
+        } else {
+            map<string, bool>::const_iterator it = isSelfCache.find(_host);
+            if (it != isSelfCache.end()){
+                return it->second;
+            }
+
+            SockAddr addr (_host.c_str(), 0); // port 0 is dynamically assigned
+            SOCKET sock = ::socket(addr.getType(), SOCK_STREAM, 0);
+            assert(sock != INVALID_SOCKET);
+
+            bool ret = (::bind(sock, addr.raw(), addr.addressSize) == 0);
+            isSelfCache[_host] = ret;
+
+            closesocket(sock);
+
+            return ret;
+        }
+    }
+
 } // namespace mongo

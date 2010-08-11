@@ -16,13 +16,63 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "pdfile.h"
 #include "database.h"
+#include "instance.h"
 
 namespace mongo {
 
     bool Database::_openAllFiles = false;
+
+    Database::Database(const char *nm, bool& newDb, const string& _path )
+        : name(nm), path(_path), namespaceIndex( path, name ) {
+        
+        { // check db name is valid
+            size_t L = strlen(nm);
+            uassert( 10028 ,  "db name is empty", L > 0 );
+            uassert( 10029 ,  "bad db name [1]", *nm != '.' );
+            uassert( 10030 ,  "bad db name [2]", nm[L-1] != '.' );
+            uassert( 10031 ,  "bad char(s) in db name", strchr(nm, ' ') == 0 );
+            uassert( 10032 ,  "db name too long", L < 64 );
+        }
+        
+        newDb = namespaceIndex.exists();
+        profile = 0;
+        profileName = name + ".system.profile";
+
+        {
+            vector<string> others;
+            getDatabaseNames( others , path );
+            
+            for ( unsigned i=0; i<others.size(); i++ ){
+
+                if ( strcasecmp( others[i].c_str() , nm ) )
+                    continue;
+
+                if ( strcmp( others[i].c_str() , nm ) == 0 )
+                    continue;
+                
+                stringstream ss;
+                ss << "db already exists with different case other: [" << others[i] << "] me [" << nm << "]";
+                uasserted( DatabaseDifferCaseCode , ss.str() );
+            }
+        }
+
+        
+        // If already exists, open.  Otherwise behave as if empty until
+        // there's a write, then open.
+        if ( ! newDb || cmdLine.defaultProfile ) {
+            namespaceIndex.init();
+            if( _openAllFiles )
+                openAllFiles();
+            
+        }
+       
+
+        magic = 781231;
+    }
+
 
     bool Database::setProfilingLevel( int newLevel , string& errmsg ){
         if ( profile == newLevel )
@@ -59,6 +109,20 @@ namespace mongo {
         
         string errmsg;
         massert( 12506 , errmsg , setProfilingLevel( cmdLine.defaultProfile , errmsg ) );
+    }
+
+    bool Database::validDBName( const string& ns ){
+        if ( ns.size() == 0 || ns.size() > 64 )
+            return false;
+        size_t good = strcspn( ns.c_str() , "/\\. \"" );
+        return good == ns.size();
+    }
+
+    void Database::flushFiles( bool sync ){
+        dbMutex.assertAtLeastReadLocked();
+        for ( unsigned i=0; i<files.size(); i++ ){
+            files[i]->flush( sync );
+        }
     }
 
 } // namespace mongo

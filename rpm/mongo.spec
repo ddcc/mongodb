@@ -1,5 +1,5 @@
 Name: mongo
-Version: 1.4.4
+Version: 1.6.0
 Release: mongodb_1%{?dist}
 Summary: mongo client shell and tools
 License: AGPL 3.0
@@ -91,7 +91,7 @@ fi
 %postun server
 if test $1 -ge 1
 then
-  /sbin/service mongod stop >/dev/null 2>&1 || :
+  /sbin/service mongod condrestart >/dev/null 2>&1 || :
 fi
 
 %files
@@ -129,11 +129,6 @@ fi
 %attr(0755,mongod,mongod) %dir /var/lib/mongo
 %attr(0755,mongod,mongod) %dir /var/log/mongo
 %attr(0640,mongod,mongod) %config(noreplace) %verify(not md5 size mtime) /var/log/mongo/mongod.log
-
-%files devel
-/usr/include/mongo
-%{_libdir}/libmongoclient.a
-#%{_libdir}/libmongotestfiles.a
 
 %changelog
 * Thu Jan 28 2010 Richard M Kreuter <richard@10gen.com>

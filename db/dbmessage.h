@@ -20,6 +20,7 @@
 #include "jsobj.h"
 #include "namespace.h"
 #include "../util/message.h"
+#include "../client/constants.h"
 
 namespace mongo {
 
@@ -37,24 +38,6 @@ namespace mongo {
     
 #pragma pack(1)
     struct QueryResult : public MsgData {
-        enum ResultFlagType {
-            /* returned, with zero results, when getMore is called but the cursor id 
-               is not valid at the server. */
-            ResultFlag_CursorNotFound = 1,   
-
-            /* { $err : ... } is being returned */
-            ResultFlag_ErrSet = 2,           
-
-            /* Have to update config from the server, usually $err is also set */
-            ResultFlag_ShardConfigStale = 4,  
-
-            /* for backward compatability: this let's us know the server supports 
-               the QueryOption_AwaitData option. if it doesn't, a repl slave client should sleep 
-               a little between getMore's.
-            */
-            ResultFlag_AwaitCapable = 8
-        };
-
         long long cursorId;
         int startingFrom;
         int nReturned;
@@ -68,41 +51,57 @@ namespace mongo {
             return dataAsInt();
         }
         void setResultFlagsToOk() { 
-            _resultFlags() = 0; // ResultFlag_AwaitCapable
+            _resultFlags() = ResultFlag_AwaitCapable;
         }
     };
 #pragma pack()
 
     /* For the database/server protocol, these objects and functions encapsulate
        the various messages transmitted over the connection.
-    */
 
+       See http://www.mongodb.org/display/DOCS/Mongo+Wire+Protocol
+    */
     class DbMessage {
     public:
-        DbMessage(const Message& _m) : m(_m) {
-            theEnd = _m.data->_data + _m.data->dataLen();
-            int *r = (int *) _m.data->_data;
-            reserved = *r;
-            r++;
-            data = (const char *) r;
+        DbMessage(const Message& _m) : m(_m)
+        {
+            // for received messages, Message has only one buffer
+            theEnd = _m.singleData()->_data + _m.header()->dataLen();
+            char *r = _m.singleData()->_data;
+            reserved = (int *) r;
+            data = r + 4;
             nextjsobj = data;
         }
 
-        const char * getns() {
+        /** the 32 bit field before the ns */
+        int& reservedField() { return *reserved; }
+
+        const char * getns() const {
             return data;
         }
-        void getns(Namespace& ns) {
+        void getns(Namespace& ns) const {
             ns = data;
         }
-        
-        
-        void resetPull(){
-            nextjsobj = data;
+
+        const char * afterNS() const {
+            return data + strlen( data ) + 1;
         }
-        int pullInt() {
+        
+        int getInt( int num ) const {
+            const int * foo = (const int*)afterNS();
+            return foo[num];
+        }
+
+        int getQueryNToReturn() const {
+            return getInt( 1 );
+        }
+
+        void resetPull(){ nextjsobj = data; }
+        int pullInt() const { return pullInt(); }
+        int& pullInt() {
             if ( nextjsobj == data )
                 nextjsobj += strlen(data) + 1; // skip namespace
-            int i = *((int *)nextjsobj);
+            int& i = *((int *)nextjsobj);
             nextjsobj += 4;
             return i;
         }
@@ -117,7 +116,7 @@ namespace mongo {
             return i;
         }
 
-        OID* getOID() {
+        OID* getOID() const {
             return (OID *) (data + strlen(data) + 1); // skip namespace
         }
 
@@ -129,7 +128,7 @@ namespace mongo {
         }
 
         /* for insert and update msgs */
-        bool moreJSObjs() {
+        bool moreJSObjs() const {
             return nextjsobj != 0;
         }
         BSONObj nextJsObj() {
@@ -137,13 +136,13 @@ namespace mongo {
                 nextjsobj += strlen(data) + 1; // skip namespace
                 massert( 13066 ,  "Message contains no documents", theEnd > nextjsobj );
             }
-            massert( 10304 ,  "Remaining data too small for BSON object", theEnd - nextjsobj > 3 );
+            massert( 10304 ,  "Client Error: Remaining data too small for BSON object", theEnd - nextjsobj > 3 );
             BSONObj js(nextjsobj);
-            massert( 10305 ,  "Invalid object size", js.objsize() > 3 );
-            massert( 10306 ,  "Next object larger than available space",
+            massert( 10305 ,  "Client Error: Invalid object size", js.objsize() > 3 );
+            massert( 10306 ,  "Client Error: Next object larger than space left in message",
                     js.objsize() < ( theEnd - data ) );
             if ( objcheck && !js.valid() ) {
-                massert( 10307 , "bad object in message", false);
+                massert( 10307 , "Client Error: bad object in message", false);
             }            
             nextjsobj += js.objsize();
             if ( nextjsobj >= theEnd )
@@ -151,9 +150,7 @@ namespace mongo {
             return js;
         }
 
-        const Message& msg() {
-            return m;
-        }
+        const Message& msg() const { return m; }
 
         void markSet(){
             mark = nextjsobj;
@@ -165,7 +162,7 @@ namespace mongo {
 
     private:
         const Message& m;
-        int reserved;
+        int* reserved;
         const char *data;
         const char *nextjsobj;
         const char *theEnd;
@@ -193,7 +190,7 @@ namespace mongo {
             if ( d.moreJSObjs() ) {
                 fields = d.nextJsObj();
             }
-            queryOptions = d.msg().data->dataAsInt();
+            queryOptions = d.msg().header()->dataAsInt();
         }
     };
 
@@ -211,7 +208,7 @@ namespace mongo {
                             ) {
         BufBuilder b(32768);
         b.skip(sizeof(QueryResult));
-        b.append(data, size);
+        b.appendBuf(data, size);
         QueryResult *qr = (QueryResult *) b.buf();
         qr->_resultFlags() = queryResultFlags;
         qr->len = b.len();
@@ -221,12 +218,13 @@ namespace mongo {
         qr->nReturned = nReturned;
         b.decouple();
         Message resp(qr, true);
-        p->reply(requestMsg, resp, requestMsg.data->id);
+        p->reply(requestMsg, resp, requestMsg.header()->id);
     }
 
 } // namespace mongo
 
 //#include "bsonobj.h"
+
 #include "instance.h"
 
 namespace mongo {
@@ -245,7 +243,7 @@ namespace mongo {
     inline void replyToQuery(int queryResultFlags, Message &m, DbResponse &dbresponse, BSONObj obj) {
         BufBuilder b;
         b.skip(sizeof(QueryResult));
-        b.append((void*) obj.objdata(), obj.objsize());
+        b.appendBuf((void*) obj.objdata(), obj.objsize());
         QueryResult* msgdata = (QueryResult *) b.buf();
         b.decouple();
         QueryResult *qr = msgdata;
@@ -258,7 +256,9 @@ namespace mongo {
         Message *resp = new Message();
         resp->setData(msgdata, true); // transport will free
         dbresponse.response = resp;
-        dbresponse.responseTo = m.data->id;
+        dbresponse.responseTo = m.header()->id;
     }
+
+    string debugString( Message& m );
 
 } // namespace mongo

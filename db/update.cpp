@@ -16,13 +16,14 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "query.h"
 #include "pdfile.h"
 #include "jsobjmanipulator.h"
 #include "queryoptimizer.h"
 #include "repl.h"
 #include "update.h"
+#include "btree.h"
 
 //#define DEBUGUPDATE(x) cout << x << endl;
 #define DEBUGUPDATE(x)
@@ -236,7 +237,7 @@ namespace mongo {
                 }
 
                 while( i.more() ) {
-                    bb.appendAs( i.next() , bb.numStr( n - 1 ).c_str() );
+                    bb.appendAs( i.next() , bb.numStr( n - 1 ) );
                     n++;
                 }
             }
@@ -306,8 +307,10 @@ namespace mongo {
     }
 
     auto_ptr<ModSetState> ModSet::prepare(const BSONObj &obj) const {
+        DEBUGUPDATE( "\t start prepare" );
         ModSetState * mss = new ModSetState( obj );
-
+        
+        
         // Perform this check first, so that we don't leave a partially modified object on uassert.
         for ( ModHolder::const_iterator i = _mods.begin(); i != _mods.end(); ++i ) {
             DEBUGUPDATE( "\t\t prepare : " << i->first );
@@ -407,8 +410,40 @@ namespace mongo {
                 mss->amIInPlacePossible( false );
             }
         }
+
+        DEBUGUPDATE( "\t mss\n" << mss->toString() << "\t--" );
         
         return auto_ptr<ModSetState>( mss );
+    }
+
+    void ModState::appendForOpLog( BSONObjBuilder& b ) const {
+        if ( incType ){
+            DEBUGUPDATE( "\t\t\t\t\t appendForOpLog inc fieldname: " << m->fieldName << " short:" << m->shortFieldName );
+            BSONObjBuilder bb( b.subobjStart( "$set" ) );
+            appendIncValue( bb , true );
+            bb.done();
+            return;
+        }
+        
+        const char * name = fixedOpName ? fixedOpName : Mod::modNames[op()];
+
+        DEBUGUPDATE( "\t\t\t\t\t appendForOpLog name:" << name << " fixed: " << fixed << " fn: " << m->fieldName );
+
+        BSONObjBuilder bb( b.subobjStart( name ) );
+        if ( fixed )
+            bb.appendAs( *fixed , m->fieldName );
+        else
+            bb.appendAs( m->elt , m->fieldName );
+        bb.done();
+    }
+
+    string ModState::toString() const {
+        stringstream ss;
+        if ( fixedOpName )
+            ss << " fixedOpName: " << fixedOpName;
+        if ( fixed )
+            ss << " fixed: " << fixed;
+        return ss.str();
     }
     
     void ModSetState::applyModsInPlace() {
@@ -492,7 +527,7 @@ namespace mongo {
             string field = root + e.fieldName();
             FieldCompareResult cmp = compareDottedFieldNames( m->second.m->fieldName , field );
 
-            DEBUGUPDATE( "\t\t\t" << field << "\t" << m->second.m->fieldName << "\t" << cmp );
+            DEBUGUPDATE( "\t\t\t field:" << field << "\t mod:" << m->second.m->fieldName << "\t cmp:" << cmp );
             
             switch ( cmp ){
                 
@@ -518,15 +553,18 @@ namespace mongo {
                 continue;
             }
             case LEFT_BEFORE: // Mod on a field that doesn't exist
+                DEBUGUPDATE( "\t\t\t\t creating new field for: " << m->second.m->fieldName );
                 _appendNewFromMods( root , m->second , b , onedownseen );
                 m++;
                 continue;
             case SAME:
+                DEBUGUPDATE( "\t\t\t\t applying mod on: " << m->second.m->fieldName );
                 m->second.apply( b , e );
                 e = es.next();
                 m++;
                 continue;
             case RIGHT_BEFORE: // field that doesn't have a MOD
+                DEBUGUPDATE( "\t\t\t\t just copying" );
                 b.append( e ); // if array, ignore field name
                 e = es.next();
                 continue;
@@ -540,12 +578,14 @@ namespace mongo {
         
         // finished looping the mods, just adding the rest of the elements
         while ( e.type() ){
+            DEBUGUPDATE( "\t\t\t copying: " << e.fieldName() );
             b.append( e );  // if array, ignore field name
             e = es.next();
         }
         
         // do mods that don't have fields already
         for ( ; m != mend; m++ ){
+            DEBUGUPDATE( "\t\t\t\t appending from mod at end: " << m->second.m->fieldName );
             _appendNewFromMods( root , m->second , b , onedownseen );
         }
     }
@@ -554,6 +594,14 @@ namespace mongo {
         BSONObjBuilder b( (int)(_obj.objsize() * 1.1) );
         createNewFromMods( "" , b , _obj );
         return b.obj();
+    }
+
+    string ModSetState::toString() const {
+        stringstream ss;
+        for ( ModStateHolder::const_iterator i=_mods.begin(); i!=_mods.end(); ++i ){
+            ss << "\t\t" << i->first << "\t" << i->second.toString() << "\n";
+        }
+        return ss.str();
     }
 
     BSONObj ModSet::createNewFromQuery( const BSONObj& query ){
@@ -565,6 +613,8 @@ namespace mongo {
             BSONObjIteratorSorted i( query );
             while ( i.more() ){
                 BSONElement e = i.next();
+                if ( e.fieldName()[0] == '$' ) // for $atomic and anything else we add
+                    continue;
 
                 if ( e.type() == Object && e.embeddedObject().firstElement().fieldName()[0] == '$' ){
                     // this means this is a $gt type filter, so don't make part of the new object
@@ -610,6 +660,7 @@ namespace mongo {
             
             uassert( 10147 ,  "Invalid modifier specified" + string( fn ), e.type() == Object );
             BSONObj j = e.embeddedObject();
+            DEBUGUPDATE( "\t" << j );
             
             BSONObjIterator jt(j);
             Mod::Op op = opFromStr( fn );
@@ -622,7 +673,7 @@ namespace mongo {
                 uassert( 10148 ,  "Mod on _id not allowed", strcmp( fieldName, "_id" ) != 0 );
                 uassert( 10149 ,  "Invalid mod field name, may not end in a period", fieldName[ strlen( fieldName ) - 1 ] != '.' );
                 uassert( 10150 ,  "Field name duplication not allowed with modifiers", ! haveModForField( fieldName ) );
-                uassert( 10151 ,  "have conflict mod" , ! haveConflictingMod( fieldName ) );
+                uassert( 10151 ,  "have conflicting mods in update" , ! haveConflictingMod( fieldName ) );
                 uassert( 10152 ,  "Modifier $inc allowed for numbers only", f.isNumber() || op != Mod::INC );
                 uassert( 10153 ,  "Modifier $pushAll/pullAll allowed for arrays only", f.type() == Array || ( op != Mod::PUSH_ALL && op != Mod::PULL_ALL ) );
                 
@@ -639,7 +690,7 @@ namespace mongo {
 
                 _mods[m.fieldName] = m;
 
-                DEBUGUPDATE( "\t\t " << fieldName << "\t" << _hasDynamicArray );
+                DEBUGUPDATE( "\t\t " << fieldName << "\t" << m.fieldName << "\t" << _hasDynamicArray );
             }
         }
 
@@ -677,54 +728,152 @@ namespace mongo {
         }
     }
     
-    class UpdateOp : public QueryOp {
+    class UpdateOp : public MultiCursor::CursorOp {
     public:
-        UpdateOp() : _nscanned() {}
-        virtual void init() {
-            BSONObj pattern = qp().query();
-            _c.reset( qp().newCursor().release() );
-            if ( ! _c->ok() )
+        UpdateOp( bool hasPositionalField ) : _nscanned(), _hasPositionalField( hasPositionalField ){}
+        virtual void _init() {
+            _c = qp().newCursor();
+            if ( ! _c->ok() ) {
                 setComplete();
-            else
-                _matcher.reset( new CoveredIndexMatcher( pattern, qp().indexKey() ) );
+            }
         }
+        virtual bool prepareToYield() {
+            if ( ! _cc ) {
+                _cc.reset( new ClientCursor( QueryOption_NoCursorTimeout , _c , qp().ns() ) );
+            }
+            return _cc->prepareToYield( _yieldData );
+        }        
+        virtual void recoverFromYield() {
+            if ( !ClientCursor::recoverFromYield( _yieldData ) ) {
+                _c.reset();
+                _cc.reset();
+                massert( 13339, "cursor dropped during update", false );
+            }
+        }        
         virtual void next() {
             if ( ! _c->ok() ) {
                 setComplete();
                 return;
             }
             _nscanned++;
-            if ( _matcher->matches(_c->currKey(), _c->currLoc(), &_details ) ) {
+            if ( matcher()->matches(_c->currKey(), _c->currLoc(), &_details ) ) {
                 setComplete();
                 return;
             }
             _c->advance();
         }
-        bool curMatches(){
-            return _matcher->matches(_c->currKey(), _c->currLoc() , &_details );
-        }
+
         virtual bool mayRecordPlan() const { return false; }
-        virtual QueryOp *clone() const {
-            return new UpdateOp();
+        virtual QueryOp *_createChild() const {
+            return new UpdateOp( _hasPositionalField );
         }
-        shared_ptr< Cursor > c() { return _c; }
-        long long nscanned() const { return _nscanned; }
-        MatchDetails& getMatchDetails(){ return _details; }
+        // already scanned to the first match, so return _c
+        virtual shared_ptr< Cursor > newCursor() const { return _c; }
+        virtual bool alwaysUseRecord() const { return _hasPositionalField; }
     private:
         shared_ptr< Cursor > _c;
         long long _nscanned;
-        auto_ptr< CoveredIndexMatcher > _matcher;
+        bool _hasPositionalField;
         MatchDetails _details;
+        ClientCursor::CleanupPointer _cc;
+        ClientCursor::YieldData _yieldData;
     };
 
-    
-    UpdateResult updateObjects(const char *ns, const BSONObj& updateobj, BSONObj patternOrig, bool upsert, bool multi, bool logop , OpDebug& debug ) {
+    static void checkTooLarge(const BSONObj& newObj) {
+        uassert( 12522 , "$ operator made object too large" , newObj.objsize() <= ( 4 * 1024 * 1024 ) );
+    }
+
+    /* note: this is only (as-is) called for 
+
+             - not multi
+             - not mods is indexed
+             - not upsert
+    */
+    static UpdateResult _updateById(bool isOperatorUpdate, int idIdxNo, ModSet *mods, int profile, NamespaceDetails *d, 
+                                    NamespaceDetailsTransient *nsdt,
+                                    bool god, const char *ns, 
+                                    const BSONObj& updateobj, BSONObj patternOrig, bool logop, OpDebug& debug) 
+    {
+        DiskLoc loc;
+        {
+            IndexDetails& i = d->idx(idIdxNo);
+            BSONObj key = i.getKeyFromQuery( patternOrig );
+            loc = i.head.btree()->findSingle(i, i.head, key);
+            if( loc.isNull() ) { 
+                // no upsert support in _updateById yet, so we are done.
+                return UpdateResult(0, 0, 0);
+            }
+        }
+
+        Record *r = loc.rec();
+                
+        /* look for $inc etc.  note as listed here, all fields to inc must be this type, you can't set some
+           regular ones at the moment. */
+        if ( isOperatorUpdate ) {                   
+            const BSONObj& onDisk = loc.obj();                    
+            auto_ptr<ModSetState> mss = mods->prepare( onDisk );
+                    
+            if( mss->canApplyInPlace() ) {
+                mss->applyModsInPlace();                    
+                DEBUGUPDATE( "\t\t\t updateById doing in place update" );
+                /*if ( profile )
+                    ss << " fastmod "; */
+            } 
+            else {
+                BSONObj newObj = mss->createNewFromMods();
+                checkTooLarge(newObj);
+                bool changedId;
+                assert(nsdt);
+                DiskLoc newLoc = theDataFileMgr.updateRecord(ns, d, nsdt, r, loc , newObj.objdata(), newObj.objsize(), debug, changedId);                        
+            }
+                    
+            if ( logop ) {
+                DEV assert( mods->size() );
+                 
+                BSONObj pattern = patternOrig;
+                if ( mss->haveArrayDepMod() ) {
+                    BSONObjBuilder patternBuilder;
+                    patternBuilder.appendElements( pattern );
+                    mss->appendSizeSpecForArrayDepMods( patternBuilder );
+                    pattern = patternBuilder.obj();                        
+                }
+                        
+                if( mss->needOpLogRewrite() ) {
+                    DEBUGUPDATE( "\t rewrite update: " << mss->getOpLogRewrite() );
+                    logOp("u", ns, mss->getOpLogRewrite() , &pattern );
+                }
+                else {
+                    logOp("u", ns, updateobj, &pattern );
+                }
+            }
+            return UpdateResult( 1 , 1 , 1);
+        } // end $operator update
+                
+        // regular update
+        BSONElementManipulator::lookForTimestamps( updateobj );
+        checkNoMods( updateobj );
+        bool changedId = false;
+        assert(nsdt);
+        theDataFileMgr.updateRecord(ns, d, nsdt, r, loc , updateobj.objdata(), updateobj.objsize(), debug, changedId);
+        if ( logop ) {
+            if ( !changedId ) {
+                logOp("u", ns, updateobj, &patternOrig );
+            } else {
+                logOp("d", ns, patternOrig );
+                logOp("i", ns, updateobj );                    
+            }
+        }
+        return UpdateResult( 1 , 0 , 1 );
+    }
+ 
+    UpdateResult _updateObjects(bool god, const char *ns, const BSONObj& updateobj, BSONObj patternOrig, bool upsert, bool multi, bool logop , OpDebug& debug, RemoveSaver* rs ) {
         DEBUGUPDATE( "update: " << ns << " update: " << updateobj << " query: " << patternOrig << " upsert: " << upsert << " multi: " << multi );
-        int profile = cc().database()->profile;
+        Client& client = cc();
+        int profile = client.database()->profile;
         StringBuilder& ss = debug.str;
 
         if ( logLevel > 2 )
-            ss << " update: " << updateobj;
+            ss << " update: " << updateobj.toString();
         
         /* idea with these here it to make them loop invariant for multi updates, and thus be a bit faster for that case */
         /* NOTE: when yield() is added herein, these must be refreshed after each call to yield! */
@@ -732,12 +881,6 @@ namespace mongo {
         NamespaceDetailsTransient *nsdt = &NamespaceDetailsTransient::get_w(ns);
         /* end note */
         
-        uassert( 10155 , "cannot update reserved $ collection", strchr(ns, '$') == 0 );
-        if ( strstr(ns, ".system.") ) {
-            /* dm: it's very important that system.indexes is never updated as IndexDetails has pointers into it */
-            uassert( 10156 , "cannot update system collection", legalClientSystemNS( ns , true ) );
-        }
-
         auto_ptr<ModSet> mods;
         bool isOperatorUpdate = updateobj.firstElement().fieldName()[0] == '$';
         int modsIsIndexed = false; // really the # of indexes
@@ -753,31 +896,63 @@ namespace mongo {
             modsIsIndexed = mods->isIndexed();
         }
 
+        if( !upsert && !multi && isSimpleIdQuery(patternOrig) && d && !modsIsIndexed ) {
+            int idxNo = d->findIdIndex();
+            if( idxNo >= 0 ) {
+                ss << " byid ";
+                return _updateById(isOperatorUpdate, idxNo, mods.get(), profile, d, nsdt, god, ns, updateobj, patternOrig, logop, debug);
+            }
+        }
+
         set<DiskLoc> seenObjects;
         
-        QueryPlanSet qps( ns, patternOrig, BSONObj() );
-        UpdateOp original;
-        shared_ptr< UpdateOp > u = qps.runOp( original );
-        massert( 10401 ,  u->exceptionMessage(), u->complete() );
-        shared_ptr< Cursor > c = u->c();
         int numModded = 0;
+        long long nscanned = 0;
+        MatchDetails details;
+        shared_ptr< MultiCursor::CursorOp > opPtr( new UpdateOp( mods.get() && mods->hasDynamicArray() ) );
+        shared_ptr< MultiCursor > c( new MultiCursor( ns, patternOrig, BSONObj(), opPtr, true ) );
+        
+        auto_ptr<ClientCursor> cc;
+            
         while ( c->ok() ) {
-            if ( numModded > 0 && ! u->curMatches() ){
+            nscanned++;
+
+            bool atomic = c->matcher()->docMatcher().atomic();
+                
+            // May have already matched in UpdateOp, but do again to get details set correctly
+            if ( ! c->matcher()->matches( c->currKey(), c->currLoc(), &details ) ){
                 c->advance();
+                    
+                if ( nscanned % 256 == 0 && ! atomic ){
+                    if ( cc.get() == 0 ) {
+                        shared_ptr< Cursor > cPtr = c;
+                        cc.reset( new ClientCursor( QueryOption_NoCursorTimeout , cPtr , ns ) );
+                    }
+                    if ( ! cc->yield() ){
+                        cc.release();
+                        // TODO should we assert or something?
+                        break;
+                    }
+                    if ( !c->ok() ) {
+                        break;
+                    }
+                }
                 continue;
             }
+            
             Record *r = c->_current();
             DiskLoc loc = c->currLoc();
-
+                
+            // TODO Maybe this is unnecessary since we have seenObjects
             if ( c->getsetdup( loc ) ){
                 c->advance();
                 continue;
             }
-
+                
             BSONObj js(r);
-            
+                
             BSONObj pattern = patternOrig;
-
+                
             if ( logop ) {
                 BSONObjBuilder idPattern;
                 BSONElement id;
@@ -793,43 +968,47 @@ namespace mongo {
                     uassert( 10157 ,  "multi-update requires all modified objects to have an _id" , ! multi );
                 }
             }
-            
-            if ( profile )
-                ss << " nscanned:" << u->nscanned();
-            
-            /* look for $inc etc.  note as listed here, all fields to inc must be this type, you can't set some
-               regular ones at the moment. */
-            if ( isOperatorUpdate ) {
                 
+            if ( profile )
+                ss << " nscanned:" << nscanned;
+                
+            /* look for $inc etc.  note as listed here, all fields to inc must be this type, you can't set some
+                regular ones at the moment. */
+            if ( isOperatorUpdate ) {
+                    
                 if ( multi ){
                     c->advance(); // go to next record in case this one moves
                     if ( seenObjects.count( loc ) )
                         continue;
                 }
-                
+                    
                 const BSONObj& onDisk = loc.obj();
-                
+                    
                 ModSet * useMods = mods.get();
                 bool forceRewrite = false;
-
+                    
                 auto_ptr<ModSet> mymodset;
-                if ( u->getMatchDetails().elemMatchKey && mods->hasDynamicArray() ){
-                    useMods = mods->fixDynamicArray( u->getMatchDetails().elemMatchKey );
+                if ( details.elemMatchKey && mods->hasDynamicArray() ){
+                    useMods = mods->fixDynamicArray( details.elemMatchKey );
                     mymodset.reset( useMods );
                     forceRewrite = true;
                 }
-
-                     
+                    
                 auto_ptr<ModSetState> mss = useMods->prepare( onDisk );
-                
+                    
                 bool indexHack = multi && ( modsIsIndexed || ! mss->canApplyInPlace() );
-                
-                if ( indexHack )
-                    c->noteLocation();
-                
+                    
+                if ( indexHack ){
+                    if ( cc.get() )
+                        cc->updateLocation();
+                    else
+                        c->noteLocation();
+                }
+                    
                 if ( modsIsIndexed <= 0 && mss->canApplyInPlace() ){
                     mss->applyModsInPlace();// const_cast<BSONObj&>(onDisk) );
-
+                    
+                    DEBUGUPDATE( "\t\t\t doing in place update" );
                     if ( profile )
                         ss << " fastmod ";
                     
@@ -838,26 +1017,30 @@ namespace mongo {
                     }
                 } 
                 else {
+                    if ( rs )
+                        rs->goingToDelete( onDisk );
+
                     BSONObj newObj = mss->createNewFromMods();
-                    uassert( 12522 , "$ operator made object too large" , newObj.objsize() <= ( 4 * 1024 * 1024 ) );
-                    DiskLoc newLoc = theDataFileMgr.updateRecord(ns, d, nsdt, r, loc , newObj.objdata(), newObj.objsize(), debug);
+                    checkTooLarge(newObj);
+                    bool changedId;
+                    DiskLoc newLoc = theDataFileMgr.updateRecord(ns, d, nsdt, r, loc , newObj.objdata(), newObj.objsize(), debug, changedId);
                     if ( newLoc != loc || modsIsIndexed ) {
                         // object moved, need to make sure we don' get again
                         seenObjects.insert( newLoc );
                     }
                         
                 }
-                
+                    
                 if ( logop ) {
                     DEV assert( mods->size() );
-
+                        
                     if ( mss->haveArrayDepMod() ) {
                         BSONObjBuilder patternBuilder;
                         patternBuilder.appendElements( pattern );
                         mss->appendSizeSpecForArrayDepMods( patternBuilder );
                         pattern = patternBuilder.obj();                        
                     }
-                    
+                        
                     if ( forceRewrite || mss->needOpLogRewrite() ){
                         DEBUGUPDATE( "\t rewrite update: " << mss->getOpLogRewrite() );
                         logOp("u", ns, mss->getOpLogRewrite() , &pattern );
@@ -868,19 +1051,42 @@ namespace mongo {
                 }
                 numModded++;
                 if ( ! multi )
-                    break;
+                    return UpdateResult( 1 , 1 , numModded );
                 if ( indexHack )
                     c->checkLocation();
+                    
+                if ( nscanned % 64 == 0 && ! atomic ){
+                    if ( cc.get() == 0 ) {
+                        shared_ptr< Cursor > cPtr = c;
+                        cc.reset( new ClientCursor( QueryOption_NoCursorTimeout , cPtr , ns ) );
+                    }
+                    if ( ! cc->yield() ){
+                        cc.release();
+                        break;
+                    }
+                    if ( !c->ok() ) {
+                        break;
+                    }
+                }
+                
                 continue;
             } 
-            
+                
             uassert( 10158 ,  "multi update only works with $ operators" , ! multi );
-
+                
             BSONElementManipulator::lookForTimestamps( updateobj );
             checkNoMods( updateobj );
-            theDataFileMgr.updateRecord(ns, d, nsdt, r, loc , updateobj.objdata(), updateobj.objsize(), debug);
-            if ( logop )
-                logOp("u", ns, updateobj, &pattern );
+            bool changedId = false;
+            theDataFileMgr.updateRecord(ns, d, nsdt, r, loc , updateobj.objdata(), updateobj.objsize(), debug, changedId, god);
+            if ( logop ) {
+                DEV if( god ) log() << "REALLY??" << endl; // god doesn't get logged, this would be bad.
+                if ( !changedId ) {
+                    logOp("u", ns, updateobj, &pattern );
+                } else {
+                    logOp("d", ns, pattern );
+                    logOp("i", ns, updateobj );                    
+                }
+            }
             return UpdateResult( 1 , 0 , 1 );
         }
         
@@ -889,7 +1095,7 @@ namespace mongo {
 
         
         if ( profile )
-            ss << " nscanned:" << u->nscanned();
+            ss << " nscanned:" << nscanned;
         
         if ( upsert ) {
             if ( updateobj.firstElement().fieldName()[0] == '$' ) {
@@ -897,24 +1103,32 @@ namespace mongo {
                 BSONObj newObj = mods->createNewFromQuery( patternOrig );
                 if ( profile )
                     ss << " fastmodinsert ";
-                theDataFileMgr.insert(ns, newObj);
-                if ( profile )
-                    ss << " fastmodinsert ";
+                theDataFileMgr.insertWithObjMod(ns, newObj, god);
                 if ( logop )
                     logOp( "i", ns, newObj );
-                return UpdateResult( 0 , 1 , 1 );
+                
+                return UpdateResult( 0 , 1 , 1 , newObj );
             }
             uassert( 10159 ,  "multi update only works with $ operators" , ! multi );
             checkNoMods( updateobj );
             if ( profile )
                 ss << " upsert ";
             BSONObj no = updateobj;
-            theDataFileMgr.insert(ns, no);
+            theDataFileMgr.insertWithObjMod(ns, no, god);
             if ( logop )
                 logOp( "i", ns, no );
-            return UpdateResult( 0 , 0 , 1 );
+            return UpdateResult( 0 , 0 , 1 , no );
         }
         return UpdateResult( 0 , 0 , 0 );
     }
-    
+ 
+    UpdateResult updateObjects(const char *ns, const BSONObj& updateobj, BSONObj patternOrig, bool upsert, bool multi, bool logop , OpDebug& debug ) {
+        uassert( 10155 , "cannot update reserved $ collection", strchr(ns, '$') == 0 );
+        if ( strstr(ns, ".system.") ) {
+            /* dm: it's very important that system.indexes is never updated as IndexDetails has pointers into it */
+            uassert( 10156 , "cannot update system collection", legalClientSystemNS( ns , true ) );
+        }
+        return _updateObjects(false, ns, updateobj, patternOrig, upsert, multi, logop, debug);
+    }
+   
 }

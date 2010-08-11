@@ -9,25 +9,6 @@ s = rt.start( false );
 
 function block(){
     am.runCommand( { getlasterror : 1 , w : 2 , wtimeout : 3000 } )
-    sleep(3000); // 1.4 branch doesn't support w
-}
-
-function hash( db ){
-    var s = "";
-    var a = db.getCollectionNames();
-    a = a.sort();
-    a.forEach(
-        function(cn){
-            var c = db.getCollection( cn );
-            s += cn + "\t" + c.find().count() + "\n";
-            c.find().sort( { _id : 1 } ).forEach(
-                function(o){
-                    s += tojson( o , "" , true ) + "\n";
-                }
-            );
-        }
-    );
-    return s;
 }
 
 am = m.getDB( "foo" );
@@ -37,13 +18,13 @@ function check( note ){
     var start = new Date();
     var x,y;
     while ( (new Date()).getTime() - start.getTime() < 30000 ){
-        x = hash( am );
-        y = hash( as );
-        if ( x == y )
+        x = am.runCommand( "dbhash" );
+        y = as.runCommand( "dbhash" );
+        if ( x.md5 == y.md5 )
             return;
         sleep( 200 );
     }
-    assert.eq( x , y , note );
+    assert.eq( x.md5 , y.md5 , note );
 }
 
 am.a.save( { x : 1 } );
@@ -121,11 +102,11 @@ t.update( { "b" : 3} , { $set : { "b.$" : 17 } } )
 block();
 check( "after pos 4 " );
 
+
 printjson( am.rpos.findOne() )
 printjson( as.rpos.findOne() )
 
 //am.getSisterDB( "local" ).getCollection( "oplog.$main" ).find().limit(10).sort( { $natural : -1 } ).forEach( printjson )
-
 
 t = am.b;
 t.update( { "_id" : "fun"}, { $inc : {"a.b.c.x" : 6743} } , true, false)
@@ -143,6 +124,30 @@ assert.eq( { _id : "fun" , a : { b : { c : { x : 6848 , y : 911 } } } } , as.b.f
 //printjson( as.b.findOne() )
 //am.getSisterDB( "local" ).getCollection( "oplog.$main" ).find().sort( { $natural : -1 } ).limit(3).forEach( printjson )
 check( "b 4" );
+
+
+// lots of indexes
+
+am.lotOfIndexes.insert( { x : 1 } )
+for ( i=0; i<200; i++ ){
+    var idx = {}
+    idx["x"+i] = 1;
+    am.lotOfIndexes.ensureIndex( idx );
+    am.getLastError()
+}
+
+
+assert.soon( function(){ return am.lotOfIndexes.getIndexes().length == as.lotOfIndexes.getIndexes().length; } , "lots of indexes a" )
+
+assert.eq( am.lotOfIndexes.getIndexes().length , as.lotOfIndexes.getIndexes().length , "lots of indexes b" )
+
+// multi-update with $inc
+
+am.mu1.update( { _id : 1 , $atomic : 1 } , { $inc : { x : 1 } } , true , true )
+x = { _id : 1 , x : 1 }
+assert.eq( x , am.mu1.findOne() , "mu1" );
+assert.soon( function(){ z = as.mu1.findOne(); printjson( z ); return friendlyEqual( x , z ); } , "mu2" )
+
 
 
 rt.stop();

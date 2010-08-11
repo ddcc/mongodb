@@ -18,7 +18,7 @@
 
 #pragma once 
 
-#include "../stdafx.h"
+#include "../pch.h"
 
 #include "../db/jsobj.h"
 #include "../db/dbmessage.h"
@@ -29,12 +29,12 @@
 
 namespace mongo {
 
-    class ShardedClientCursor {
+    class ShardedClientCursor : boost::noncopyable {
     public:
         ShardedClientCursor( QueryMessage& q , ClusteredCursor * cursor );
         virtual ~ShardedClientCursor();
 
-        long long getId(){ return _id; }
+        long long getId();
         
         /**
          * @return whether there is more data left
@@ -42,6 +42,10 @@ namespace mongo {
         bool sendNextBatch( Request& r ){ return sendNextBatch( r , _ntoreturn ); }
         bool sendNextBatch( Request& r , int ntoreturn );
         
+        void accessed();
+        /** @return idle time in ms */
+        long long idleTime( long long now );
+
     protected:
         
         ClusteredCursor * _cursor;
@@ -53,19 +57,44 @@ namespace mongo {
         bool _done;
 
         long long _id;
+        long long _lastAccessMillis; // 0 means no timeout
+
     };
+
+    typedef boost::shared_ptr<ShardedClientCursor> ShardedClientCursorPtr;
     
     class CursorCache {
     public:
+        
+        static long long TIMEOUT;
+
+        typedef map<long long,ShardedClientCursorPtr> MapSharded;
+        typedef map<long long,string> MapNormal;
+
         CursorCache();
         ~CursorCache();
         
-        ShardedClientCursor * get( long long id );
-        void store( ShardedClientCursor* cursor );
+        ShardedClientCursorPtr get( long long id );
+        void store( ShardedClientCursorPtr cursor );
         void remove( long long id );
 
+        void storeRef( const string& server , long long id );
+
+        void gotKillCursors(Message& m );
+        
+        void appendInfo( BSONObjBuilder& result );
+        
+        long long genId();
+
+        void doTimeouts();
+        void startTimeoutThread();
     private:
-        map<long long,ShardedClientCursor*> _cursors;
+        mutex _mutex;
+
+        MapSharded _cursors;
+        MapNormal _refs;
+        
+        long long _shardedTotal;
     };
     
     extern CursorCache cursorCache;

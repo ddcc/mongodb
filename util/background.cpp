@@ -15,14 +15,15 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "goodies.h"
 #include "background.h"
+#include <list>
 
 namespace mongo {
 
     BackgroundJob *BackgroundJob::grab = 0;
-    mongo::mutex BackgroundJob::mutex;
+    mongo::mutex BackgroundJob::mutex("BackgroundJob");
 
     /* static */
     void BackgroundJob::thr() {
@@ -31,9 +32,25 @@ namespace mongo {
         assert( us->state == NotStarted );
         us->state = Running;
         grab = 0;
-        us->run();
+
+        {
+            string nm = us->name();
+            setThreadName(nm.c_str());
+        }
+
+        try {
+            us->run();
+        }
+        catch ( std::exception& e ){
+            log( LL_ERROR ) << "backgroundjob error: " << e.what() << endl;
+        }
+        catch(...) {
+            log( LL_ERROR ) << "uncaught exception in BackgroundJob" << endl;
+        }
         us->state = Done;
-        if ( us->deleteSelf )
+        bool delSelf = us->deleteSelf;
+        us->ending();
+        if( delSelf ) 
             delete us;
     }
 
@@ -47,18 +64,56 @@ namespace mongo {
         return *this;
     }
 
-    bool BackgroundJob::wait(int msMax) {
+    bool BackgroundJob::wait(int msMax, unsigned maxsleep) {
         assert( state != NotStarted );
-        int ms = 1;
+        unsigned ms = 0;
         Date_t start = jsTime();
         while ( state != Done ) {
             sleepmillis(ms);
-            if ( ms < 1000 )
-                ms = ms * 2;
+            if( ms*2<maxsleep ) ms*=2;
             if ( msMax && ( int( jsTime() - start ) > msMax) )
                 return false;
         }
         return true;
+    }
+
+    void BackgroundJob::go(list<BackgroundJob*>& L) {
+        for( list<BackgroundJob*>::iterator i = L.begin(); i != L.end(); i++ )
+            (*i)->go();
+    }
+
+    /* wait for several jobs to finish. */
+    void BackgroundJob::wait(list<BackgroundJob*>& L, unsigned maxsleep) {
+        unsigned ms = 0;
+        {
+            x:
+            sleepmillis(ms);
+            if( ms*2<maxsleep ) ms*=2;
+            for( list<BackgroundJob*>::iterator i = L.begin(); i != L.end(); i++ ) { 
+                assert( (*i)->state != NotStarted );
+                if( (*i)->state != Done )
+                    goto x;
+            }
+        }
+    }
+    
+    void PeriodicBackgroundJob::run(){
+        // want to handle first one differently so inShutdown is obeyed nicely
+        sleepmillis( _millis );
+        
+        while ( ! inShutdown() ){
+            try {
+                runLoop();
+            }
+            catch ( std::exception& e ){
+                log( LL_ERROR ) << "PeriodicBackgroundJob [" << name() << "] error: " << e.what() << endl;
+            }
+            catch ( ... ){
+                log( LL_ERROR ) << "PeriodicBackgroundJob [" << name() << "] unknown error" << endl;
+            }
+            
+            sleepmillis( _millis );
+        }
     }
 
 } // namespace mongo

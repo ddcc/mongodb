@@ -15,8 +15,9 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#pragma once
 
-#include "../../stdafx.h"
+#include "../../pch.h"
 #include "../jsobj.h"
 #include "../../util/message.h"
 #include "../../util/processinfo.h"
@@ -32,12 +33,12 @@ namespace mongo {
         
         OpCounters();
 
-        int * getInsert(){ return _insert; }
-        int * getQuery(){ return _query; }
-        int * getUpdate(){ return _update; }
-        int * getDelete(){ return _delete; }
-        int * getGetMore(){ return _getmore; }
-        int * getCommand(){ return _command; }
+        AtomicUInt * getInsert(){ return _insert; }
+        AtomicUInt * getQuery(){ return _query; }
+        AtomicUInt * getUpdate(){ return _update; }
+        AtomicUInt * getDelete(){ return _delete; }
+        AtomicUInt * getGetMore(){ return _getmore; }
+        AtomicUInt * getCommand(){ return _command; }
         
         void gotInsert(){ _insert[0]++; }
         void gotQuery(){ _query[0]++; }
@@ -51,12 +52,12 @@ namespace mongo {
         BSONObj& getObj(){ return _obj; }
     private:
         BSONObj _obj;
-        int * _insert;
-        int * _query;
-        int * _update;
-        int * _delete;
-        int * _getmore;
-        int * _command;
+        AtomicUInt * _insert;
+        AtomicUInt * _query;
+        AtomicUInt * _update;
+        AtomicUInt * _delete;
+        AtomicUInt * _getmore;
+        AtomicUInt * _command;
     };
     
     extern OpCounters globalOpCounters;
@@ -118,4 +119,15 @@ namespace mongo {
     };
 
     extern FlushCounters globalFlushCounters;
+
+
+    class GenericCounter {
+    public:
+        GenericCounter() : _mutex("GenericCounter") { }
+        void hit( const string& name , int count=0 );
+        BSONObj getObj();
+    private:
+        map<string,long long> _counts; // TODO: replace with thread safe map
+        mongo::mutex _mutex;
+    };
 }

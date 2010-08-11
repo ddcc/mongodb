@@ -17,7 +17,7 @@
 
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "../db/jsobj.h"
 
 extern const char * jsconcatcode; // TODO: change name to mongoJSCode
@@ -161,6 +161,8 @@ namespace mongo {
         void ( *_scopeInitCallback )( Scope & );
         static void ( *_connectCallback )( DBClientWithCommands & );
     };
+
+    bool hasJSReturn( const string& s );
 
     extern ScriptEngine * globalScriptEngine;
 }

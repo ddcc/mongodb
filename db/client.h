@@ -24,13 +24,16 @@
 
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "security.h"
 #include "namespace.h"
 #include "lasterror.h"
 #include "stats/top.h"
+//#include "repl/rs.h"
 
 namespace mongo { 
+
+    extern class ReplSet *theReplSet;
 
     class AuthenticationInfo;
     class Database;
@@ -45,7 +48,7 @@ namespace mongo {
         static mongo::mutex clientsMutex;
         static set<Client*> clients; // always be in clientsMutex when manipulating this
 
-        static int recommendedYieldMicros();
+        static int recommendedYieldMicros( int * writers = 0 , int * readers = 0 );
 
         class GodScope {
             bool _prev;
@@ -80,16 +83,16 @@ namespace mongo {
         public:
             Context(const string& ns, string path=dbpath, mongolock * lock = 0 , bool doauth=true ) 
                 : _client( currentClient.get() ) , _oldContext( _client->_context ) , 
-                  _path( path ) , _lock( lock ) ,
-                  _ns( ns ){
+                  _path( path ) , _lock( lock ) , 
+                  _ns( ns ), _db(0){
                 _finishInit( doauth );
             }
             
             /* this version saves the context but doesn't yet set the new one: */
-
+            
             Context() 
                 : _client( currentClient.get() ) , _oldContext( _client->_context ), 
-                  _path( dbpath ) , _lock(0) , _justCreated(false){
+                  _path( dbpath ) , _lock(0) , _justCreated(false), _db(0){
                 _client->_context = this;
                 clear();
             }
@@ -101,20 +104,11 @@ namespace mongo {
             Context( string ns , Database * db, bool doauth=true );
             
             ~Context();
-            
-            Client* getClient() const { return _client; }
-            
-            Database* db() const {
-                return _db;
-            }
 
-            const char * ns() const {
-                return _ns.c_str();
-            }
-            
-            bool justCreated() const {
-                return _justCreated;
-            }
+            Client* getClient() const { return _client; }            
+            Database* db() const { return _db; }
+            const char * ns() const { return _ns.c_str(); }            
+            bool justCreated() const { return _justCreated; }
 
             bool equals( const string& ns , const string& path=dbpath ) const {
                 return _ns == ns && _path == path;
@@ -160,29 +154,53 @@ namespace mongo {
         CurOp * _curOp;
         Context * _context;
         bool _shutdown;
-        list<string> _tempCollections;
+        set<string> _tempCollections;
         const char *_desc;
         bool _god;
         AuthenticationInfo _ai;
+        ReplTime _lastOp;
+        BSONObj _handshake;
+        BSONObj _remoteId;
+
+        void _dropns( const string& ns );
 
     public:
-        
+        string clientAddress() const;
         AuthenticationInfo * getAuthenticationInfo(){ return &_ai; }
         bool isAdmin() { return _ai.isAuthorized( "admin" ); }
-
-        CurOp* curop() { return _curOp; }
-        
+        CurOp* curop() { return _curOp; }        
         Context* getContext(){ return _context; }
         Database* database() {  return _context ? _context->db() : 0; }
-        const char *ns() { return _context->ns(); }
+        const char *ns() const { return _context->ns(); }
+        const char *desc() const { return _desc; }
         
         Client(const char *desc);
         ~Client();
 
-        const char *desc() const { return _desc; }
+        void addTempCollection( const string& ns );
+        
+        void _invalidateDB(const string& db);
+        static void invalidateDB(const string& db);
 
-        void addTempCollection( const string& ns ){
-            _tempCollections.push_back( ns );
+        static void invalidateNS( const string& ns );
+
+        void setLastOp( ReplTime op ) {
+            _lastOp = op;
+        }
+
+        ReplTime getLastOp() const {
+            return _lastOp;
+        }
+
+        void appendLastOp( BSONObjBuilder& b ) {
+            if( theReplSet ) { 
+                b.append("lastOp" , (long long) _lastOp);
+            }
+            else {
+                OpTime lo(_lastOp);
+                if ( ! lo.isNull() )
+                    b.appendTimestamp( "lastOp" , lo.asDate() );
+            }
         }
 
         /* each thread which does db operations has a Client object in TLS.  
@@ -196,23 +214,34 @@ namespace mongo {
          */
         bool shutdown();
 
+        
+        /* this is for map/reduce writes */
         bool isGod() const { return _god; }
 
         friend class CurOp;
 
         string toString() const;
+
+        void gotHandshake( const BSONObj& o );
+
+        BSONObj getRemoteID() const { return _remoteId; }
+        BSONObj getHandshake() const { return _handshake; }
     };
     
     inline Client& cc() { 
-        return *currentClient.get();
+        Client * c = currentClient.get();
+        assert( c );
+        return *c;
     }
 
     /* each thread which does db operations has a Client object in TLS.  
        call this when your thread starts. 
     */
     inline void Client::initThread(const char *desc) {
+        setThreadName(desc);
         assert( currentClient.get() == 0 );
         currentClient.reset( new Client(desc) );
+        mongo::lastError.initThread();
     }
 
     inline Client::GodScope::GodScope(){

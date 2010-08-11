@@ -1,4 +1,4 @@
-// log.h
+// @file log.h
 
 /*    Copyright 2009 10gen Inc.
  *
@@ -19,12 +19,33 @@
 
 #include <string.h>
 #include <errno.h>
+#include "../bson/util/builder.h"
+
+#ifndef _WIN32
+//#include <syslog.h>
+#endif
 
 namespace mongo {
 
-    using boost::shared_ptr;
-
-    // Utility interface for stringifying object only when val() called.
+    enum LogLevel {  LL_DEBUG , LL_INFO , LL_NOTICE , LL_WARNING , LL_ERROR , LL_SEVERE };
+    
+    inline const char * logLevelToString( LogLevel l ){
+        switch ( l ){
+        case LL_DEBUG:
+        case LL_INFO: 
+        case LL_NOTICE:
+            return "";
+        case LL_WARNING: 
+            return "warning" ; 
+        case LL_ERROR: 
+            return "ERROR";
+        case LL_SEVERE: 
+            return "SEVERE";
+        default:
+            return "UNKNOWN";
+        }
+    }
+    
     class LazyString {
     public:
         virtual ~LazyString() {}
@@ -36,15 +57,27 @@ namespace mongo {
     class LazyStringImpl : public LazyString {
     public:
         LazyStringImpl( const T &t ) : t_( t ) {}
-        virtual string val() const { return (string)t_; }
+        virtual string val() const { return t_.toString(); }
     private:
         const T& t_;
     };
 
+    class Tee { 
+    public:
+        virtual ~Tee(){}
+        virtual void write(LogLevel level , const string& str) = 0;
+    };
+
     class Nullstream {
     public:
+        virtual Nullstream& operator<< (Tee* tee) { 
+            return *this;
+        }
         virtual ~Nullstream() {}
         virtual Nullstream& operator<<(const char *) {
+            return *this;
+        }
+        virtual Nullstream& operator<<(const string& ) {
             return *this;
         }
         virtual Nullstream& operator<<(char *) {
@@ -111,50 +144,118 @@ namespace mongo {
         virtual Nullstream& operator<< (ios_base& (*hex)(ios_base&)) {
             return *this;
         }
-        virtual void flush(){}
+        virtual void flush(Tee *t = 0) {}
     };
     extern Nullstream nullstream;
     
-#define LOGIT { ss << x; return *this; }
-
     class Logstream : public Nullstream {
         static mongo::mutex mutex;
         static int doneSetup;
         stringstream ss;
+        LogLevel logLevel;
+        static FILE* logfile;
+        static boost::scoped_ptr<ostream> stream;
+        static vector<Tee*> * globalTees;
     public:
+
+        static void logLockless( const StringData& s ){
+            if ( doneSetup == 1717 ){
+                fwrite( s.data() , s.size() , 1 , logfile );
+                fflush( logfile );
+            }
+            else {
+                cout << s.data() << endl;
+            }
+        }
+        
+        static void setLogFile(FILE* f){
+            scoped_lock lk(mutex);
+            logfile = f;
+        }
+
         static int magicNumber(){
             return 1717;
         }
-        void flush() {
+
+        void flush(Tee *t = 0) {
             // this ensures things are sane
-            if ( doneSetup == 1717 ){
+            if ( doneSetup == 1717 ) {
+                string msg = ss.str();
+                string threadName = getThreadName();
+                const char * type = logLevelToString(logLevel);
+                
+                int spaceNeeded = msg.size() + 64 + threadName.size();
+                int bufSize = 128;
+                while ( bufSize < spaceNeeded )
+                    bufSize += 128;
+                
+                BufBuilder b(bufSize);
+                time_t_to_String( time(0) , b.grow(20) );
+                if (!threadName.empty()){
+                    b.appendChar( '[' );
+                    b.appendStr( threadName , false );
+                    b.appendChar( ']' );
+                    b.appendChar( ' ' );
+                }
+                if ( type[0] ){
+                    b.appendStr( type , false );
+                    b.appendStr( ": " , false );
+                }
+                b.appendStr( msg );
+                
+                string out( b.buf() , b.len() - 1);
+
                 scoped_lock lk(mutex);
-                cout << ss.str();
-                cout.flush();
+                
+                if( t ) t->write(logLevel,out);
+                if ( globalTees ){
+                    for ( unsigned i=0; i<globalTees->size(); i++ )
+                        (*globalTees)[i]->write(logLevel,out);
+                }
+                
+#ifndef _WIN32
+                //syslog( LOG_INFO , "%s" , cc );
+#endif
+                fwrite(out.data(), out.size(), 1, logfile);
+                fflush(logfile);
             }
-            ss.str("");
+            _init();
         }
-        Logstream& operator<<(const char *x) LOGIT
-        Logstream& operator<<(char *x) LOGIT
-        Logstream& operator<<(char x) LOGIT
-        Logstream& operator<<(int x) LOGIT
-        Logstream& operator<<(ExitCode x) LOGIT
-        Logstream& operator<<(long x) LOGIT
-        Logstream& operator<<(unsigned long x) LOGIT
-        Logstream& operator<<(unsigned x) LOGIT
-        Logstream& operator<<(double x) LOGIT
-        Logstream& operator<<(void *x) LOGIT
-        Logstream& operator<<(const void *x) LOGIT
-        Logstream& operator<<(long long x) LOGIT
-        Logstream& operator<<(unsigned long long x) LOGIT
-        Logstream& operator<<(bool x) LOGIT
+        
+        Nullstream& setLogLevel(LogLevel l){
+            logLevel = l;
+            return *this;
+        }
+
+        /** note these are virtual */
+        Logstream& operator<<(const char *x) { ss << x; return *this; }
+        Logstream& operator<<(const string& x) { ss << x; return *this; }
+        Logstream& operator<<(char *x)       { ss << x; return *this; }
+        Logstream& operator<<(char x)        { ss << x; return *this; }
+        Logstream& operator<<(int x)         { ss << x; return *this; }
+        Logstream& operator<<(ExitCode x)    { ss << x; return *this; }
+        Logstream& operator<<(long x)          { ss << x; return *this; }
+        Logstream& operator<<(unsigned long x) { ss << x; return *this; }
+        Logstream& operator<<(unsigned x)      { ss << x; return *this; }
+        Logstream& operator<<(double x)        { ss << x; return *this; }
+        Logstream& operator<<(void *x)         { ss << x; return *this; }
+        Logstream& operator<<(const void *x)   { ss << x; return *this; }
+        Logstream& operator<<(long long x)     { ss << x; return *this; }
+        Logstream& operator<<(unsigned long long x) { ss << x; return *this; }
+        Logstream& operator<<(bool x)               { ss << x; return *this; }
+
         Logstream& operator<<(const LazyString& x) {
             ss << x.val();
             return *this;
         }
+        Nullstream& operator<< (Tee* tee) { 
+            ss << '\n';
+            flush(tee);
+            return *this;
+        }
         Logstream& operator<< (ostream& ( *_endl )(ostream&)) {
             ss << '\n';
-            flush();
+            flush(0);
             return *this;
         }
         Logstream& operator<< (ios_base& (*_hex)(ios_base&)) {
@@ -168,20 +269,29 @@ namespace mongo {
             if ( ! t )
                 *this << "null";
             else 
-                *this << t;
+                *this << *t;
             return *this;
         }
 
         Logstream& prolog() {
-            char now[64];
-            time_t_to_String(time(0), now);
-            now[20] = 0;
-            ss << now;
             return *this;
+        }
+        
+        void addGlobalTee( Tee * t ){
+            if ( ! globalTees )
+                globalTees = new vector<Tee*>();
+            globalTees->push_back( t );
         }
 
     private:
         static thread_specific_ptr<Logstream> tsp;
+        Logstream(){
+            _init();
+        }
+        void _init(){
+            ss.str("");
+            logLevel = LL_INFO;
+        }
     public:
         static Logstream& get() {
             Logstream *p = tsp.get();
@@ -192,6 +302,7 @@ namespace mongo {
     };
 
     extern int logLevel;
+    extern int tlogLevel;
 
     inline Nullstream& out( int level = 0 ) {
         if ( level > logLevel )
@@ -203,7 +314,7 @@ namespace mongo {
        at the specified level or higher. */
     inline void logflush(int level = 0) { 
         if( level > logLevel )
-            Logstream::get().flush();
+            Logstream::get().flush(0);
     }
 
     /* without prolog */
@@ -213,9 +324,26 @@ namespace mongo {
         return Logstream::get();
     }
 
-    inline Nullstream& log( int level = 0 ) {
+    /** logging which we may not want during unit tests runs.
+        set tlogLevel to -1 to suppress tlog() output in a test program. */
+    inline Nullstream& tlog( int level = 0 ) {
+        if ( level > tlogLevel || level > logLevel )
+            return nullstream;
+        return Logstream::get().prolog();
+    }
+
+    inline Nullstream& log( int level ) {
         if ( level > logLevel )
             return nullstream;
+        return Logstream::get().prolog();
+    }
+
+    inline Nullstream& log( LogLevel l ) {
+        return Logstream::get().prolog().setLogLevel( l );
+    }
+
+
+    inline Nullstream& log() {
         return Logstream::get().prolog();
     }
 
@@ -242,9 +370,52 @@ namespace mongo {
     void initLogging( const string& logpath , bool append );
     void rotateLogs( int signal = 0 );
 
-#define OUTPUT_ERRNOX(x) "errno:" << x << " " << strerror(x) 
-#define OUTPUT_ERRNO OUTPUT_ERRNOX(errno)
+    std::string toUtf8String(const std::wstring& wide);
 
-    string errnostring( const char * prefix = 0 );
+    inline string errnoWithDescription(int x = errno) {
+        stringstream s;
+        s << "errno:" << x << ' ';
+
+#if defined(_WIN32)
+        LPTSTR errorText = NULL;
+        FormatMessage(
+            FORMAT_MESSAGE_FROM_SYSTEM
+            |FORMAT_MESSAGE_ALLOCATE_BUFFER
+            |FORMAT_MESSAGE_IGNORE_INSERTS,  
+            NULL,
+            x, 0,
+            (LPTSTR) &errorText,  // output
+            0, // minimum size for output buffer
+            NULL);
+        if( errorText ) {
+            string x = toUtf8String(errorText);
+            for( string::iterator i = x.begin(); i != x.end(); i++ ) {
+                if( *i == '\n' || *i == '\r' ) 
+                    break;
+                s << *i;
+            }
+            LocalFree(errorText);
+        }
+        else
+            s << strerror(x);
+        /*
+        DWORD n = FormatMessage( 
+            FORMAT_MESSAGE_ALLOCATE_BUFFER | 
+            FORMAT_MESSAGE_FROM_SYSTEM | 
+            FORMAT_MESSAGE_IGNORE_INSERTS,
+            NULL, x, 
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            (LPTSTR) &lpMsgBuf, 0, NULL);
+        */
+#else
+        s << strerror(x);
+#endif
+        return s.str();
+    }
+
+    /** output the error # and error message with prefix.  
+        handy for use as parm in uassert/massert.
+        */
+    string errnoWithPrefix( const char * prefix = 0 );
 
 } // namespace mongo

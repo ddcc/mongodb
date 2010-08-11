@@ -19,20 +19,30 @@
 
 #include <stack>
 #include "dbclient.h"
+#include "redef_macros.h"
 
 namespace mongo {
 
+    class Shard;
+    
     struct PoolForHost {
+        PoolForHost()
+            : created(0){}
+        PoolForHost( const PoolForHost& other ){
+            assert(other.pool.size() == 0);
+            created = other.created;
+            assert( created == 0 );
+        }
+            
         std::stack<DBClientBase*> pool;
+        long long created;
     };
     
     class DBConnectionHook {
     public:
         virtual ~DBConnectionHook(){}
-
         virtual void onCreate( DBClientBase * conn ){}
         virtual void onHandedOut( DBClientBase * conn ){}
-
     };
 
     /** Database connection pool.
@@ -51,33 +61,54 @@ namespace mongo {
         }
     */
     class DBConnectionPool {
-        mongo::mutex poolMutex;
-        map<string,PoolForHost*> pools; // servername -> pool
+        mongo::mutex _mutex;
+        map<string,PoolForHost> _pools; // servername -> pool
         list<DBConnectionHook*> _hooks;
+
+        DBClientBase* _get( const string& ident );
         
+        DBClientBase* _finishCreate( const string& ident , DBClientBase* conn );
+
+    public:        
+        DBConnectionPool() : _mutex("DBConnectionPool") { }
+        ~DBConnectionPool();
+
+
         void onCreate( DBClientBase * conn );
         void onHandedOut( DBClientBase * conn );
-    public:
+
         void flush();
+
         DBClientBase *get(const string& host);
+        DBClientBase *get(const ConnectionString& host);
+
         void release(const string& host, DBClientBase *c) {
             if ( c->isFailed() ){
                 delete c;
                 return;
             }
-            scoped_lock L(poolMutex);
-            pools[host]->pool.push(c);
+            scoped_lock L(_mutex);
+            _pools[host].pool.push(c);
         }
         void addHook( DBConnectionHook * hook );
+        void appendInfo( BSONObjBuilder& b );
     };
-
+    
     extern DBConnectionPool pool;
+
+    class AScopedConnection : boost::noncopyable {
+    public:
+        virtual ~AScopedConnection(){}
+        virtual DBClientBase* get() = 0;
+        virtual void done() = 0;
+        virtual string getHost() const = 0;
+    };
 
     /** Use to get a connection from the pool.  On exceptions things
        clean up nicely.
     */
-    class ScopedDbConnection {
-        const string host;
+    class ScopedDbConnection : public AScopedConnection {
+        const string _host;
         DBClientBase *_conn;
     public:
         /** get the associated connection object */
@@ -85,18 +116,41 @@ namespace mongo {
             uassert( 11004 ,  "did you call done already" , _conn );
             return _conn; 
         }
-
+        
         /** get the associated connection object */
         DBClientBase& conn() {
             uassert( 11005 ,  "did you call done already" , _conn );
             return *_conn;
         }
 
-        /** throws UserException if can't connect */
-        ScopedDbConnection(const string& _host) :
-                host(_host), _conn( pool.get(_host) ) {
-            //cout << " for: " << _host << " got conn: " << _conn << endl;
+        /** get the associated connection object */
+        DBClientBase* get() {
+            uassert( 13102 ,  "did you call done already" , _conn );
+            return _conn;
         }
+        
+        ScopedDbConnection()
+            : _host( "" ) , _conn(0) {
+        }
+
+        /** throws UserException if can't connect */
+        ScopedDbConnection(const string& host)
+            : _host(host), _conn( pool.get(host) ) {
+        }
+        
+        ScopedDbConnection(const string& host, DBClientBase* conn )
+            : _host( host ) , _conn( conn ){
+        }
+        
+        ScopedDbConnection(const Shard& shard );
+        ScopedDbConnection(const Shard* shard );
+
+        ScopedDbConnection(const ConnectionString& url )
+            : _host(url.toString()), _conn( pool.get(url) ) {
+        }
+
+
+        string getHost() const { return _host; }
 
         /** Force closure of the connection.  You should call this if you leave it in
             a bad state.  Destructor will do this too, but it is verbose.
@@ -121,12 +175,16 @@ namespace mongo {
                 kill();
             else
             */
-                pool.release(host, _conn);
+            pool.release(_host, _conn);
             _conn = 0;
         }
         
+        ScopedDbConnection * steal();
+
         ~ScopedDbConnection();
 
     };
 
 } // namespace mongo
+
+#include "undef_macros.h"

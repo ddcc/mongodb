@@ -18,7 +18,7 @@
 
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "jsobj.h"
 #include "queryutil.h"
 #include "diskloc.h"
@@ -26,10 +26,6 @@
 #include "../util/mmap.h"
 
 namespace mongo {
-
-    class Cursor;
-
-#pragma pack(1)
 
 	/* in the mongo source code, "client" means "database". */
 
@@ -54,6 +50,12 @@ namespace mongo {
         char buf[MaxDatabaseLen];
         nsToDatabase(ns, buf);
         return buf;
+    }
+    inline string nsToDatabase(const string& ns) {
+        size_t i = ns.find( '.' );
+        if ( i == string::npos )
+            return ns;
+        return ns.substr( 0 , i );
     }
 
 	/* e.g.
@@ -84,6 +86,7 @@ namespace mongo {
         }
     };
 
+#pragma pack(1)
 	/* This helper class is used to make the HashMap below in NamespaceDetails */
     class Namespace {
     public:
@@ -99,26 +102,21 @@ namespace mongo {
         }
 
         /* for more than 10 indexes -- see NamespaceDetails::Extra */
-        string extraName() { 
-            string s = string(buf) + "$extra";
-            massert( 10348 , "ns name too long", s.size() < MaxNsLen);
+        string extraName(int i) {
+            char ex[] = "$extra";
+            ex[5] += i;
+            string s = string(buf) + ex;
+            massert( 10348 , "$extra: ns name too long", s.size() < MaxNsLen);
             return s;
         }
         bool isExtra() const { 
-            const char *p = strstr(buf, "$extra");
-            return p && p[6] == 0; //==0 important in case an index uses name "$extra_1" for example
+            const char *p = strstr(buf, "$extr");
+            return p && p[5] && p[6] == 0; //==0 important in case an index uses name "$extra_1" for example
         }
-
-        void kill() {
-            buf[0] = 0x7f;
-        }
-
-        bool operator==(const char *r) {
-            return strcmp(buf, r) == 0;
-        }
-        bool operator==(const Namespace& r) {
-            return strcmp(buf, r.buf) == 0;
-        }
+        bool hasDollarSign() const { return strchr( buf , '$' ) > 0;  }
+        void kill() { buf[0] = 0x7f; }
+        bool operator==(const char *r) const { return strcmp(buf, r) == 0; }
+        bool operator==(const Namespace& r) const { return strcmp(buf, r.buf) == 0; }
         int hash() const {
             unsigned x = 0;
             const char *p = buf;
@@ -141,25 +139,27 @@ namespace mongo {
             return old + "." + local;
         }
 
+        string toString() const {
+            return (string)buf;
+        }
+
         operator string() const {
             return (string)buf;
         }
 
         char buf[MaxNsLen];
     };
+#pragma pack()
 
-}
+} // namespace mongo
 
 #include "index.h"
 
 namespace mongo {
 
-    /**
-       @return true if a client can modify this namespace
-       things like *.system.users
-     */
+    /** @return true if a client can modify this namespace
+        things like *.system.users */
     bool legalClientSystemNS( const string& ns , bool write );
-
 
     /* deleted lists -- linked lists of deleted records -- are placed in 'buckets' of various sizes
        so you can look for a deleterecord about the right size.
@@ -169,6 +169,7 @@ namespace mongo {
 
     extern int bucketSizes[];
 
+#pragma pack(1)
     /* this is the "header" for a collection that has all its details.  in the .ns file.
     */
     class NamespaceDetails {
@@ -176,75 +177,108 @@ namespace mongo {
         enum { NIndexesExtra = 30,
                NIndexesBase  = 10
         };
-        struct Extra { 
+    public:
+        struct ExtraOld {
             // note we could use this field for more chaining later, so don't waste it:
-            unsigned long long reserved1; 
+            unsigned long long reserved1;
             IndexDetails details[NIndexesExtra];
             unsigned reserved2;
             unsigned reserved3;
         };
+        class Extra { 
+            long long _next;
+		public:
+            IndexDetails details[NIndexesExtra];
+		private:
+            unsigned reserved2;
+            unsigned reserved3;
+			Extra(const Extra&) { assert(false); }
+			Extra& operator=(const Extra& r) { assert(false); return *this; }
+        public:
+            Extra() { }
+            long ofsFrom(NamespaceDetails *d) { 
+                return ((char *) this) - ((char *) d);
+            }
+            void init() { memset(this, 0, sizeof(Extra)); }
+            Extra* next(NamespaceDetails *d) { 
+                if( _next == 0 ) return 0;
+                return (Extra*) (((char *) d) + _next);
+            }
+            void setNext(long ofs) { _next = ofs;  }
+            void copy(NamespaceDetails *d, const Extra& e) { 
+                memcpy(this, &e, sizeof(Extra));
+                _next = 0;
+            }
+        }; // Extra
+
         Extra* extra() { 
-            assert( extraOffset );
+            if( extraOffset == 0 ) return 0;
             return (Extra *) (((char *) this) + extraOffset);
         }
+
     public:
+        /* add extra space for indexes when more than 10 */
+        Extra* allocExtra(const char *ns, int nindexessofar);
+
         void copyingFrom(const char *thisns, NamespaceDetails *src); // must be called when renaming a NS to fix up extra
 
-        enum { NIndexesMax = 40 };
+        enum { NIndexesMax = 64 };
 
-        BOOST_STATIC_ASSERT( NIndexesMax == NIndexesBase + NIndexesExtra );
+        BOOST_STATIC_ASSERT( NIndexesMax <= NIndexesBase + NIndexesExtra*2 );
+        BOOST_STATIC_ASSERT( NIndexesMax <= 64 ); // multiKey bits
+		BOOST_STATIC_ASSERT( sizeof(NamespaceDetails::ExtraOld) == 496 );
+		BOOST_STATIC_ASSERT( sizeof(NamespaceDetails::Extra) == 496 );
 
         /* called when loaded from disk */
         void onLoad(const Namespace& k);
 
-        NamespaceDetails( const DiskLoc &loc, bool _capped ) {
-            /* be sure to initialize new fields here -- doesn't default to zeroes the way we use it */
-            firstExtent = lastExtent = capExtent = loc;
-            datasize = nrecords = 0;
-            lastExtentSize = 0;
-            nIndexes = 0;
-            capped = _capped;
-            max = 0x7fffffff;
-            paddingFactor = 1.0;
-            flags = 0;
-            capFirstNewRecord = DiskLoc();
-            // Signal that we are on first allocation iteration through extents.
-            capFirstNewRecord.setInvalid();
-            // For capped case, signal that we are doing initial extent allocation.
-            if ( capped )
-                deletedList[ 1 ].setInvalid();
-			assert( sizeof(dataFileVersion) == 2 );
-			dataFileVersion = 0;
-			indexFileVersion = 0;
-            multiKeyIndexBits = 0;
-            reservedA = 0;
-            extraOffset = 0;
-            backgroundIndexBuildInProgress = 0;
-            memset(reserved, 0, sizeof(reserved));
-        }
+        NamespaceDetails( const DiskLoc &loc, bool _capped );
+
         DiskLoc firstExtent;
         DiskLoc lastExtent;
 
         /* NOTE: capped collections override the meaning of deleted list.  
                  deletedList[0] points to a list of free records (DeletedRecord's) for all extents in
-                 the namespace.
+                 the capped namespace.
                  deletedList[1] points to the last record in the prev extent.  When the "current extent" 
                  changes, this value is updated.  !deletedList[1].isValid() when this value is not 
                  yet computed.
         */
         DiskLoc deletedList[Buckets];
 
+        void dumpExtents();
+
         long long datasize;
         long long nrecords;
         int lastExtentSize;
         int nIndexes;
+
     private:
         IndexDetails _indexes[NIndexesBase];
+
+    private:
+        Extent *theCapExtent() const { return capExtent.ext(); }
+        void advanceCapExtent( const char *ns );
+        DiskLoc __capAlloc(int len);
+        DiskLoc cappedAlloc(const char *ns, int len);
+        DiskLoc &cappedFirstDeletedInCurExtent();
+        bool nextIsInCapExtent( const DiskLoc &dl ) const;
     public:
+        DiskLoc& cappedListOfAllDeletedRecords() { return deletedList[0]; }
+        DiskLoc& cappedLastDelRecLastExtent()    { return deletedList[1]; }
+        void cappedDumpDelInfo();
+        bool capLooped() const { return capped && capFirstNewRecord.isValid();  }
+        bool inCapExtent( const DiskLoc &dl ) const;
+        void cappedCheckMigrate();
+        void cappedTruncateAfter(const char *ns, DiskLoc after, bool inclusive); /** remove rest of the capped collection from this point onward */
+        void emptyCappedCollection(const char *ns);
+        
         int capped;
-        int max; // max # of objects for a capped table.
+
+        int max; // max # of objects for a capped table.  TODO: should this be 64 bit? 
         double paddingFactor; // 1.0 = no padding.
         int flags;
+
         DiskLoc capExtent;
         DiskLoc capFirstNewRecord;
 
@@ -265,22 +299,35 @@ namespace mongo {
         /* when a background index build is in progress, we don't count the index in nIndexes until 
            complete, yet need to still use it in _indexRecord() - thus we use this function for that.
         */
-        int nIndexesBeingBuilt() const {
-            return nIndexes + backgroundIndexBuildInProgress;
-        }
+        int nIndexesBeingBuilt() const { return nIndexes + backgroundIndexBuildInProgress; }
 
         /* NOTE: be careful with flags.  are we manipulating them in read locks?  if so, 
                  this isn't thread safe.  TODO
         */
         enum NamespaceFlags {
-            Flag_HaveIdIndex = 1 << 0, // set when we have _id index (ONLY if ensureIdIndex was called -- 0 if that has never been called)
-            Flag_CappedDisallowDelete = 1 << 1 // set when deletes not allowed during capped table allocation.
+            Flag_HaveIdIndex = 1 << 0 // set when we have _id index (ONLY if ensureIdIndex was called -- 0 if that has never been called)
         };
 
-        IndexDetails& idx(int idxNo) {
+        IndexDetails& idx(int idxNo, bool missingExpected = false ) {
             if( idxNo < NIndexesBase ) 
                 return _indexes[idxNo];
-            return extra()->details[idxNo-NIndexesBase];
+            Extra *e = extra();
+            if ( ! e ){
+                if ( missingExpected )
+                    throw MsgAssertionException( 13283 , "Missing Extra" );
+                massert(13282, "missing Extra", e);
+            }
+            int i = idxNo - NIndexesBase;
+            if( i >= NIndexesExtra ) {
+                e = e->next(this);
+                if ( ! e ){
+                    if ( missingExpected )
+                        throw MsgAssertionException( 13283 , "missing extra" );
+                    massert(13283, "missing Extra", e);
+                }
+                i -= NIndexesExtra;
+            }
+            return e->details[i];
         }
         IndexDetails& backgroundIdx() { 
             DEV assert(backgroundIndexBuildInProgress);
@@ -292,28 +339,18 @@ namespace mongo {
             int i;
             int n;
             NamespaceDetails *d;
-            Extra *e;
             IndexIterator(NamespaceDetails *_d) { 
                 d = _d;
                 i = 0;
                 n = d->nIndexes;
-                if( n > NIndexesBase )
-                    e = d->extra();
             }
         public:
             int pos() { return i; } // note this is the next one to come
             bool more() { return i < n; }
-            IndexDetails& next() { 
-                int k = i;
-                i++;
-                return k < NIndexesBase ? d->_indexes[k] : 
-                    e->details[k-10];
-            }
-        };
+            IndexDetails& next() { return d->idx(i++); }
+        }; // IndexIterator
 
-        IndexIterator ii() { 
-            return IndexIterator(this);
-        }
+        IndexIterator ii() { return IndexIterator(this); }
 
         /* hackish - find our index # in the indexes array
         */
@@ -348,14 +385,8 @@ namespace mongo {
          */
         IndexDetails& addIndex(const char *thisns, bool resetTransient=true);
 
-        void aboutToDeleteAnIndex() {
-            flags &= ~Flag_HaveIdIndex;
-        }
+        void aboutToDeleteAnIndex() { flags &= ~Flag_HaveIdIndex;  }
 
-        void cappedDisallowDelete() {
-            flags |= Flag_CappedDisallowDelete;
-        }
-        
         /* returns index of the first index in which the field is present. -1 if not present. */
         int fieldIsIndexed(const char *fieldName);
 
@@ -389,6 +420,14 @@ namespace mongo {
             }
             return -1;
         }
+        
+        void findIndexByType( const string& name , vector<int>& matches ) {
+            IndexIterator i = ii();
+            while ( i.more() ){
+                if ( i.next().getSpec().getTypeName() == name )
+                    matches.push_back( i.pos() - 1 );
+            }
+        }
 
         /* @return -1 = not found 
            generally id is first index, so not that expensive an operation (assuming present).
@@ -418,43 +457,25 @@ namespace mongo {
 
         void dumpDeleted(set<DiskLoc> *extents = 0);
 
-        bool capLooped() const {
-            return capped && capFirstNewRecord.isValid();
-        }
-
         // Start from firstExtent by default.
         DiskLoc firstRecord( const DiskLoc &startExtent = DiskLoc() ) const;
 
         // Start from lastExtent by default.
         DiskLoc lastRecord( const DiskLoc &startExtent = DiskLoc() ) const;
 
-        bool inCapExtent( const DiskLoc &dl ) const;
-
-        void checkMigrate();
-
         long long storageSize( int * numExtents = 0 );
-
+        
     private:
-        bool cappedMayDelete() const {
-            return !( flags & Flag_CappedDisallowDelete );
-        }
-        Extent *theCapExtent() const {
-            return capExtent.ext();
-        }
-        void advanceCapExtent( const char *ns );
+        DiskLoc _alloc(const char *ns, int len);
         void maybeComplain( const char *ns, int len ) const;
         DiskLoc __stdAlloc(int len);
-        DiskLoc __capAlloc(int len);
-        DiskLoc _alloc(const char *ns, int len);
         void compact(); // combine adjacent deleted records
-
-        DiskLoc &firstDeletedInCapExtent();
-        bool nextIsInCapExtent( const DiskLoc &dl ) const;
-    };
-
+    }; // NamespaceDetails
 #pragma pack()
 
-    /* these are things we know / compute about a namespace that are transient -- things
+    /* NamespaceDetailsTransient
+
+       these are things we know / compute about a namespace that are transient -- things
        we don't actually store in the .ns file.  so mainly caching of frequently used
        information.
 
@@ -465,13 +486,15 @@ namespace mongo {
        todo: cleanup code, need abstractions and separation
     */
     class NamespaceDetailsTransient : boost::noncopyable {
+		BOOST_STATIC_ASSERT( sizeof(NamespaceDetails) == 496 );
+
         /* general ------------------------------------------------------------- */
     private:
         string _ns;
         void reset();
         static std::map< string, shared_ptr< NamespaceDetailsTransient > > _map;
     public:
-        NamespaceDetailsTransient(const char *ns) : _ns(ns), _keysComputed(false), _qcWriteCount(), _cll_enabled() { }
+        NamespaceDetailsTransient(const char *ns) : _ns(ns), _keysComputed(false), _qcWriteCount(){ }
         /* _get() is not threadsafe -- see get_inlock() comments */
         static NamespaceDetailsTransient& _get(const char *ns);
         /* use get_w() when doing write operations */
@@ -551,19 +574,6 @@ namespace mongo {
             _qcCache[ pattern ] = make_pair( indexKey, nScanned );
         }
 
-        /* for collection-level logging -- see CmdLogCollection ----------------- */ 
-        /* assumed to be in write lock for this */
-    private:
-        string _cll_ns; // "local.temp.oplog." + _ns;
-        bool _cll_enabled;
-        void cllDrop(); // drop _cll_ns
-    public:
-        string cllNS() const { return _cll_ns; }
-        bool cllEnabled() const { return _cll_enabled; }
-        void cllStart( int logSizeMb = 256 ); // begin collection level logging
-        void cllInvalidate();
-        bool cllValidateComplete();
-
     }; /* NamespaceDetailsTransient */
 
     inline NamespaceDetailsTransient& NamespaceDetailsTransient::_get(const char *ns) {
@@ -578,23 +588,20 @@ namespace mongo {
     */
     class NamespaceIndex {
         friend class NamespaceCursor;
-        BOOST_STATIC_ASSERT( sizeof(NamespaceDetails::Extra) <= sizeof(NamespaceDetails) );
+
     public:
         NamespaceIndex(const string &dir, const string &database) :
-          ht( 0 ),
-          dir_( dir ),
-          database_( database ) {}
+          ht( 0 ), dir_( dir ), database_( database ) {}
 
         /* returns true if new db will be created if we init lazily */
         bool exists() const;
-        
+
         void init();
 
         void add_ns(const char *ns, DiskLoc& loc, bool capped) {
             NamespaceDetails details( loc, capped );
 			add_ns( ns, details );
         }
-
 		void add_ns( const char *ns, const NamespaceDetails &details ) {
             init();
             Namespace n(ns);
@@ -602,36 +609,19 @@ namespace mongo {
 		}
 
         /* just for diagnostics */
-        size_t detailsOffset(NamespaceDetails *d) {
+        /*size_t detailsOffset(NamespaceDetails *d) {
             if ( !ht )
                 return -1;
             return ((char *) d) -  (char *) ht->nodes;
-        }
-
-        /* extra space for indexes when more than 10 */
-        NamespaceDetails::Extra* allocExtra(const char *ns) { 
-            Namespace n(ns);
-            Namespace extra(n.extraName().c_str()); // throws userexception if ns name too long
-            NamespaceDetails *d = details(ns);
-            massert( 10350 ,  "allocExtra: base ns missing?", d );
-            assert( d->extraOffset == 0 );
-            massert( 10351 ,  "allocExtra: extra already exists", ht->get(extra) == 0 );
-            NamespaceDetails::Extra temp;
-            memset(&temp, 0, sizeof(temp));
-            uassert( 10082 ,  "allocExtra: too many namespaces/collections", ht->put(extra, (NamespaceDetails&) temp));
-            NamespaceDetails::Extra *e = (NamespaceDetails::Extra *) ht->get(extra);
-            d->extraOffset = ((char *) e) - ((char *) d);
-            assert( d->extra() == e );
-            return e;
-        }
+        }*/
 
         NamespaceDetails* details(const char *ns) {
             if ( !ht )
                 return 0;
             Namespace n(ns);
             NamespaceDetails *d = ht->get(n);
-            if ( d )
-                d->checkMigrate();
+            if ( d && d->capped )
+                d->cappedCheckMigrate();
             return d;
         }
 
@@ -641,11 +631,13 @@ namespace mongo {
             Namespace n(ns);
             ht->kill(n);
 
-            try {
-                Namespace extra(n.extraName().c_str());
-                ht->kill(extra);
+            for( int i = 0; i<=1; i++ ) {
+                try {
+                    Namespace extra(n.extraName(i).c_str());
+                    ht->kill(extra);
+                }
+                catch(DBException&) { }
             }
-            catch(DBException&) { }
         }
 
         bool find(const char *ns, DiskLoc& loc) {
@@ -661,12 +653,17 @@ namespace mongo {
             return ht != 0;
         }
 
-    private:
+        void getNamespaces( list<string>& tofill , bool onlyCollections = true ) const;
+
+        NamespaceDetails::Extra* newExtra(const char *ns, int n, NamespaceDetails *d);
+
         boost::filesystem::path path() const;
+    private:
+
         void maybeMkdir() const;
         
-        MemoryMappedFile f;
-        HashTable<Namespace,NamespaceDetails> *ht;
+        MMF f;
+        HashTable<Namespace,NamespaceDetails,MMF::Pointer> *ht;
         string dir_;
         string database_;
     };

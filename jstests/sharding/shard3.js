@@ -1,11 +1,13 @@
 // shard3.js
 
-s = new ShardingTest( "shard3" , 2 , 50 , 2 );
+s = new ShardingTest( "shard3" , 2 , 1 , 2 );
 
 s2 = s._mongos[1];
 
 s.adminCommand( { enablesharding : "test" } );
 s.adminCommand( { shardcollection : "test.foo" , key : { num : 1 } } );
+
+s.config.databases.find().forEach( printjson )
 
 a = s.getDB( "test" ).foo;
 b = s2.getDB( "test" ).foo;
@@ -35,6 +37,8 @@ assert.eq( 3 , primary.find().itcount() + secondary.find().itcount() , "blah 3" 
 assert.eq( 3 , a.find().toArray().length , "normal B" );
 assert.eq( 3 , b.find().toArray().length , "other B" );
 
+printjson( primary._db._adminCommand( "shardingState" ) );
+
 // --- filtering ---
 
 function doCounts( name , total ){
@@ -47,8 +51,8 @@ function doCounts( name , total ){
 }
 
 var total = doCounts( "before wrong save" )
-secondary.save( { num : -3 } );
-doCounts( "after wrong save" , total )
+//secondary.save( { num : -3 } );
+//doCounts( "after wrong save" , total )
 
 // --- move all to 1 ---
 print( "MOVE ALL TO 1" );
@@ -60,12 +64,16 @@ assert( a.findOne( { num : 1 } ) )
 assert( b.findOne( { num : 1 } ) )
 
 print( "GOING TO MOVE" );
+assert( a.findOne( { num : 1 } ) , "pre move 1" )
 s.printCollectionInfo( "test.foo" );
-s.adminCommand( { movechunk : "test.foo" , find : { num : 1 } , to : s.getOther( s.getServer( "test" ) ).name } );
+myto = s.getOther( s.getServer( "test" ) ).name
+print( "counts before move: " + tojson( s.shardCounts( "foo" ) ) );
+s.adminCommand( { movechunk : "test.foo" , find : { num : 1 } , to : myto } )
+print( "counts after move: " + tojson( s.shardCounts( "foo" ) ) );
 s.printCollectionInfo( "test.foo" );
 assert.eq( 1 , s.onNumShards( "foo" ) , "on 1 shard again" );
-assert( a.findOne( { num : 1 } ) )
-assert( b.findOne( { num : 1 } ) )
+assert( a.findOne( { num : 1 } ) , "post move 1" )
+assert( b.findOne( { num : 1 } ) , "post move 2" )
 
 print( "*** drop" );
 
@@ -126,5 +134,33 @@ assert.eq( 1 , res.ok , "dropDatabase failed : " + tojson( res ) );
 s.printShardingStatus();
 s.printCollectionInfo( "test.foo" , "after dropDatabase call 1" );
 assert.eq( 0 , doCounts( "after dropDatabase called" ) )
+
+// ---- retry commands SERVER-1471 ----
+
+s.adminCommand( { enablesharding : "test2" } );
+s.adminCommand( { shardcollection : "test2.foo" , key : { num : 1 } } );
+a = s.getDB( "test2" ).foo;
+b = s2.getDB( "test2" ).foo;
+a.save( { num : 1 } );
+a.save( { num : 2 } );
+a.save( { num : 3 } );
+
+
+assert.eq( 1 , s.onNumShards( "foo" , "test2" ) , "B on 1 shards" );
+assert.eq( 3 , a.count() , "Ba" );
+assert.eq( 3 , b.count() , "Bb" );
+
+s.adminCommand( { split : "test2.foo" , middle : { num : 2 } } );
+s.adminCommand( { movechunk : "test2.foo" , find : { num : 3 } , to : s.getOther( s.getServer( "test2" ) ).name } );
+
+assert.eq( 2 , s.onNumShards( "foo" , "test2" ) , "B on 2 shards" );
+
+x = a.stats()
+printjson( x )
+y = b.stats()
+printjson( y )
+
+
+
 
 s.stop();

@@ -16,14 +16,16 @@
 
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 
 #include "jsobj.h"
 #include "diskloc.h"
+#include "matcher.h"
 
 namespace mongo {
     
     class Record;
+    class CoveredIndexMatcher;
 
     /* Query cursors, base class.  This is for our internal cursors.  "ClientCursor" is a separate
        concept and is for the user's cursor.
@@ -31,13 +33,11 @@ namespace mongo {
        WARNING concurrency: the vfunctions below are called back from within a 
        ClientCursor::ccmutex.  Don't cause a deadlock, you've been warned.
     */
-    class Cursor {
+    class Cursor : boost::noncopyable {
     public:
         virtual ~Cursor() {}
         virtual bool ok() = 0;
-        bool eof() {
-            return !ok();
-        }
+        bool eof() { return !ok(); }
         virtual Record* _current() = 0;
         virtual BSONObj current() = 0;
         virtual DiskLoc currLoc() = 0;
@@ -78,10 +78,9 @@ namespace mongo {
         virtual void checkLocation() { }
         
         virtual bool supportGetMore() = 0;
-
-        virtual string toString() {
-            return "abstract?";
-        }
+        virtual bool supportYields() = 0;
+        
+        virtual string toString() { return "abstract?"; }
 
         /* used for multikey index traversal to avoid sending back dups. see Matcher::matches().
            if a multikey index traversal:
@@ -93,10 +92,21 @@ namespace mongo {
         */
         virtual bool getsetdup(DiskLoc loc) = 0;
 
-        virtual BSONObj prettyIndexBounds() const { return BSONObj(); }
+        virtual BSONObj prettyIndexBounds() const { return BSONArray(); }
 
         virtual bool capped() const { return false; }
 
+        // The implementation may return different matchers depending on the
+        // position of the cursor.  If matcher() is nonzero at the start,
+        // matcher() should be checked each time advance() is called.
+        virtual CoveredIndexMatcher *matcher() const { return 0; }
+        
+        // A convenience function for setting the value of matcher() manually
+        // so it may accessed later.  Implementations which must generate
+        // their own matcher() should assert here.
+        virtual void setMatcher( shared_ptr< CoveredIndexMatcher > matcher ) {
+            massert( 13285, "manual matcher config not allowed", false );
+        }
     };
 
     // strategy object implementing direction of traversal.
@@ -117,6 +127,7 @@ namespace mongo {
 
     private:
         bool tailable_;
+        shared_ptr< CoveredIndexMatcher > _matcher;
         void init() {
             tailable_ = false;
         }
@@ -161,6 +172,14 @@ namespace mongo {
         virtual bool getsetdup(DiskLoc loc) { return false; }
 
         virtual bool supportGetMore() { return true; }
+        virtual bool supportYields() { return true; }
+
+        virtual CoveredIndexMatcher *matcher() const { return _matcher.get(); }
+        
+        virtual void setMatcher( shared_ptr< CoveredIndexMatcher > matcher ) {
+            _matcher = matcher;
+        }
+        
     };
 
     /* used for order { $natural: -1 } */

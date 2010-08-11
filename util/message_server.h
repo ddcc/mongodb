@@ -22,7 +22,7 @@
 
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 
 namespace mongo {
     
@@ -30,20 +30,23 @@ namespace mongo {
     public:
         virtual ~MessageHandler(){}
         virtual void process( Message& m , AbstractMessagingPort* p ) = 0;
+        virtual void disconnected( AbstractMessagingPort* p ) = 0;
     };
-    
+
     class MessageServer {
     public:
-        MessageServer( int port , MessageHandler * handler ) : _port( port ) , _handler( handler ){}
-        virtual ~MessageServer(){}
+        struct Options {
+            int port;                   // port to bind to
+            string ipList;             // addresses to bind to
 
+            Options() : port(0), ipList(""){} 
+        };
+
+        virtual ~MessageServer(){}
         virtual void run() = 0;
-        
-    protected:
-        
-        int _port;
-        MessageHandler* _handler;
+        virtual void setAsTimeTracker() = 0;
     };
 
-    MessageServer * createServer( int port , MessageHandler * handler );
+    // TODO use a factory here to decide between port and asio variations 
+    MessageServer * createServer( const MessageServer::Options& opts , MessageHandler * handler );
 }

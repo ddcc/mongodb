@@ -1,4 +1,4 @@
-// mms.cpp
+// @file mms.cpp
 /*
  *    Copyright (C) 2010 10gen Inc.
  *
@@ -16,7 +16,7 @@
  */
 
 
-#include "stdafx.h"
+#include "pch.h"
 #include "../db.h"
 #include "../instance.h"
 #include "../module.h"

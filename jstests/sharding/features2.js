@@ -13,6 +13,7 @@ db = s.getDB( "test" );
 db.foo.save( { x : 1 } );
 db.foo.save( { x : 2 } );
 db.foo.save( { x : 3 } );
+db.foo.ensureIndex( { x : 1 } );
 
 assert.eq( "1,2,3" , db.foo.distinct( "x" ) , "distinct 1" );
 assert( a.foo.distinct("x").length == 3 || b.foo.distinct("x").length == 3 , "distinct 2" );
@@ -51,18 +52,19 @@ assert.eq( 0 , db.foo.count() , "D7" );
 
 // --- _id key ---
 
-db.foo2.insert( { _id : new ObjectId() } );
-db.foo2.insert( { _id : new ObjectId() } );
-db.foo2.insert( { _id : new ObjectId() } );
+db.foo2.save( { _id : new ObjectId() } );
+db.foo2.save( { _id : new ObjectId() } );
+db.foo2.save( { _id : new ObjectId() } );
+db.getLastError();
 
 assert.eq( 1 , s.onNumShards( "foo2" ) , "F1" );
 
+printjson( db.system.indexes.find( { ns : "test.foo2" } ).toArray() );
 s.adminCommand( { shardcollection : "test.foo2" , key : { _id : 1 } } );
 
 assert.eq( 3 , db.foo2.count() , "F2" )
 db.foo2.insert( {} );
 assert.eq( 4 , db.foo2.count() , "F3" )
-
 
 // --- map/reduce
 
@@ -70,6 +72,7 @@ db.mr.save( { x : 1 , tags : [ "a" , "b" ] } );
 db.mr.save( { x : 2 , tags : [ "b" , "c" ] } );
 db.mr.save( { x : 3 , tags : [ "c" , "a" ] } );
 db.mr.save( { x : 4 , tags : [ "b" , "c" ] } );
+db.mr.ensureIndex( { x : 1 } );
 
 m = function(){
     this.tags.forEach(
@@ -88,8 +91,12 @@ r = function( key , values ){
 };
 
 doMR = function( n ){
+    print(n);
+
     var res = db.mr.mapReduce( m , r );
     printjson( res );
+    assert.eq( new NumberLong(4) , res.counts.input , "MR T0 " + n );
+
     var x = db[res.result];
     assert.eq( 3 , x.find().count() , "MR T1 " + n );
     
@@ -110,5 +117,43 @@ s.shardGo( "mr" , { x : 1 } , { x : 2 } , { x : 3 } );
 assert.eq( 2 , s.onNumShards( "mr" ) , "E1" );
 
 doMR( "after" );
+
+s.adminCommand({split:'test.mr' , middle:{x:3}} );
+s.adminCommand({split:'test.mr' , middle:{x:4}} );
+s.adminCommand({movechunk:'test.mr', find:{x:3}, to: s.getServer('test').name } );
+
+doMR( "after extra split" );
+
+cmd = { mapreduce : "mr" , map : "emit( " , reduce : "fooz + " };
+
+x = db.runCommand( cmd );
+y = s._connections[0].getDB( "test" ).runCommand( cmd );
+
+printjson( x )
+printjson( y )
+
+// count
+
+db.countaa.save({"regex" : /foo/i})
+db.countaa.save({"regex" : /foo/i})
+db.countaa.save({"regex" : /foo/i})
+assert.eq( 3 , db.countaa.count() , "counta1" );
+assert.eq( 3 , db.countaa.find().itcount() , "counta1" );
+
+x = null; y = null;
+try {
+    x = db.runCommand( "forceerror" )
+}
+catch ( e ){
+    x = e;
+}
+try {
+    y = s._connections[0].getDB( "test" ).runCommand( "forceerror" );
+}
+catch ( e ){
+    y = e;
+}
+
+assert.eq( x , y , "assert format" )
 
 s.stop();

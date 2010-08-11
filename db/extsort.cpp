@@ -16,7 +16,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 
 #include "extsort.h"
 #include "namespace.h"
@@ -126,7 +126,7 @@ namespace mongo {
         
         ofstream out;
         out.open( file.c_str() , ios_base::out | ios_base::binary );
-        ASSERT_STREAM_GOOD( 10051 ,  (string)"couldn't open file: " + file , out );
+        assertStreamGood( 10051 ,  (string)"couldn't open file: " + file , out );
         
         int num = 0;
         for ( InMemory::iterator i=_cur->begin(); i != _cur->end(); ++i ){
@@ -221,7 +221,7 @@ namespace mongo {
         long length;
         _buf = (char*)_file.map( file.c_str() , length , MemoryMappedFile::SEQUENTIAL );
         massert( 10308 ,  "mmap failed" , _buf );
-        assert( (unsigned long)length == file_size( file ) );
+        assert( (unsigned long long)length == (unsigned long long)file_size( file ) );
         _end = _buf + length;
     }
     BSONObjExternalSorter::FileIterator::~FileIterator(){

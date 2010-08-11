@@ -16,7 +16,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "client/gridfs.h"
 #include "client/dbclient.h"
 
@@ -140,14 +140,14 @@ public:
             }
 
             conn().getLastError();
-            cout << "done!";
+            cout << "done!" << endl;
             return 0;
         }
 
         if ( cmd == "delete" ){
             g.removeFile(filename);
             conn().getLastError();
-            cout << "done!";
+            cout << "done!" << endl;
             return 0;
         }
 

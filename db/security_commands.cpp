@@ -19,7 +19,7 @@
 
 // security.cpp
 
-#include "stdafx.h"
+#include "pch.h"
 #include "security.h"
 #include "../util/md5.hpp"
 #include "json.h" 
@@ -52,12 +52,13 @@ namespace mongo {
         virtual bool logTheOp() {
             return false;
         }
-        virtual bool slaveOk() {
+        virtual bool slaveOk() const {
             return true;
         }
-        virtual LockType locktype(){ return NONE; }
+        void help(stringstream& h) const { h << "internal"; }
+        virtual LockType locktype() const { return NONE; }
         CmdGetNonce() : Command("getnonce") {}
-        bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        bool run(const string&, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             nonce *n = new nonce(security.getNonce());
             stringstream ss;
             ss << hex << *n;
@@ -72,15 +73,15 @@ namespace mongo {
         virtual bool logTheOp() {
             return false;
         }
-        virtual bool slaveOk() {
+        virtual bool slaveOk() const {
             return true;
         }
-        virtual LockType locktype(){ return NONE; }
+        void help(stringstream& h) const { h << "de-authenticate"; }
+        virtual LockType locktype() const { return NONE; }
         CmdLogout() : Command("logout") {}
-        bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            // database->name is the one we are logging out...
+        bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             AuthenticationInfo *ai = cc().getAuthenticationInfo();
-            ai->logout(nsToDatabase(ns));
+            ai->logout(dbname);
             return true;
         }
     } cmdLogout;
@@ -91,12 +92,13 @@ namespace mongo {
         virtual bool logTheOp() {
             return false;
         }
-        virtual bool slaveOk() {
+        virtual bool slaveOk() const {
             return true;
         }
-        virtual LockType locktype(){ return WRITE; } // TODO: make this READ
+        virtual LockType locktype() const { return WRITE; } // TODO: make this READ
+        virtual void help(stringstream& ss) const { ss << "internal"; }
         CmdAuthenticate() : Command("authenticate") {}
-        bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             log(1) << " authenticate: " << cmdObj << endl;
 
             string user = cmdObj.getStringField("user");
@@ -105,7 +107,7 @@ namespace mongo {
             
             if( user.empty() || key.empty() || received_nonce.empty() ) { 
                 log() << "field missing/wrong type in received authenticate command " 
-                    << cc().database()->name
+                    << dbname
                     << endl;               
                 errmsg = "auth fails";
                 sleepmillis(10);
@@ -119,9 +121,11 @@ namespace mongo {
                 nonce *ln = lastNonce.release();
                 if ( ln == 0 ) {
                     reject = true;
+                    log(1) << "auth: no lastNonce" << endl;
                 } else {
                     digestBuilder << hex << *ln;
                     reject = digestBuilder.str() != received_nonce;
+                    if ( reject ) log(1) << "auth: different lastNonce" << endl;
                 }
                     
                 if ( reject ) {
@@ -133,7 +137,7 @@ namespace mongo {
             }
 
             static BSONObj userPattern = fromjson("{\"user\":1}");
-            string systemUsers = cc().database()->name + ".system.users";
+            string systemUsers = dbname + ".system.users";
             OCCASIONALLY Helpers::ensureIndex(systemUsers.c_str(), userPattern, false, "user_1");
 
             BSONObj userObj;
@@ -164,7 +168,7 @@ namespace mongo {
             string computed = digestToString( d );
             
             if ( key != computed ){
-                log() << "auth: key mismatch " << user << ", ns:" << ns << endl;
+                log() << "auth: key mismatch " << user << ", ns:" << dbname << endl;
                 errmsg = "auth fails";
                 return false;
             }
@@ -172,13 +176,7 @@ namespace mongo {
             AuthenticationInfo *ai = cc().getAuthenticationInfo();
             
             if ( userObj[ "readOnly" ].isBoolean() && userObj[ "readOnly" ].boolean() ) {
-                if ( readLockSupported() ){
-                    ai->authorizeReadOnly( cc().database()->name.c_str() );
-                }
-                else {
-                    log() << "warning: old version of boost, read-only users not supported" << endl;
-                    ai->authorize( cc().database()->name.c_str() );
-                }
+                ai->authorizeReadOnly( cc().database()->name.c_str() );
             } else {
                 ai->authorize( cc().database()->name.c_str() );
             }

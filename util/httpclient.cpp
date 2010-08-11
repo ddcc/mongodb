@@ -15,11 +15,11 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "httpclient.h"
 #include "sock.h"
 #include "message.h"
-#include "builder.h"
+#include "../bson/util/builder.h"
 
 namespace mongo {
 
@@ -94,15 +94,11 @@ namespace mongo {
         { 
             const char * out = req.c_str();
             int toSend = req.size();
-            while ( toSend ){
-                int did = p.send( out , toSend );
-                toSend -= did;
-                out += did;
-            }
+            p.send( out , toSend, "_go" );
         }
         
         char buf[4096];
-        int got = p.recv( buf , 4096 );
+        int got = p.unsafe_recv( buf , 4096 );
         buf[got] = 0;
 
         int rc;
@@ -114,19 +110,41 @@ namespace mongo {
         if ( result )
             sb << buf;
         
-        while ( ( got = p.recv( buf , 4096 ) ) > 0){
+        while ( ( got = p.unsafe_recv( buf , 4096 ) ) > 0){
             if ( result )
                 sb << buf;
         }
 
         if ( result ){
-            result->_code = rc;
-            result->_entireResponse = sb.str();
+            result->_init( rc , sb.str() );
         }
 
         return rc;
     }
 
+    void HttpClient::Result::_init( int code , string entire ){
+        _code = code;
+        _entireResponse = entire;
+
+        while ( true ){
+            size_t i = entire.find( '\n' );
+            if ( i == string::npos ){
+                // invalid
+                break;
+            }
+            
+            string h = entire.substr( 0 , i );
+            entire = entire.substr( i + 1 );
+            
+            if ( h.size() && h[h.size()-1] == '\r' )
+                h = h.substr( 0 , h.size() - 1 );
+
+            if ( h.size() == 0 )
+                break;
+        }
+        
+        _body = entire;
+    }
 
     
 }

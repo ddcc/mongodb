@@ -18,6 +18,7 @@
 #pragma once
 
 namespace mongo {
+
     // utility class for assembling hierarchical objects
     class EmbeddedBuilder {
     public:
@@ -49,7 +50,7 @@ namespace mongo {
                 return;
             }
             prepareContext( name );
-            back()->appendAs( e, name.c_str() );
+            back()->appendAs( e, name );
         }
         BufBuilder &subarrayStartAs( string name ) {
             prepareContext( name );

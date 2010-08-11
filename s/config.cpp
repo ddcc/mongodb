@@ -16,8 +16,9 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "../util/message.h"
+#include "../util/stringutils.h"
 #include "../util/unittest.h"
 #include "../client/connpool.h"
 #include "../client/model.h"
@@ -27,146 +28,251 @@
 #include "server.h"
 #include "config.h"
 #include "chunk.h"
+#include "grid.h"
 
 namespace mongo {
 
-    int ConfigServer::VERSION = 2;
+    int ConfigServer::VERSION = 3;
+    Shard Shard::EMPTY;
+
+    string ShardNS::shard = "config.shards";    
+    string ShardNS::database = "config.databases";
+    string ShardNS::collection = "config.collections";
+    string ShardNS::chunk = "config.chunks";
+
+    string ShardNS::mongos = "config.mongos";
+    string ShardNS::settings = "config.settings";
+
+    BSONField<bool>      ShardFields::draining("draining");
+    BSONField<long long> ShardFields::maxSize ("maxSize");
+    BSONField<long long> ShardFields::currSize("currSize");
+
+    OID serverID;
 
     /* --- DBConfig --- */
 
-    string DBConfig::modelServer() {
-        return configServer.modelServer();
+    DBConfig::CollectionInfo::CollectionInfo( DBConfig * db , const BSONObj& in ){
+        _dirty = false;
+        _dropped = in["dropped"].trueValue();
+        if ( in["key"].isABSONObj() )
+            shard( db , in["_id"].String() , in["key"].Obj() , in["unique"].trueValue() );
+    }
+
+
+    void DBConfig::CollectionInfo::shard( DBConfig * db , const string& ns , const ShardKeyPattern& key , bool unique ){
+        _cm.reset( new ChunkManager( db, ns , key , unique ) );
+        _dirty = true;
+    }
+
+    void DBConfig::CollectionInfo::unshard(){
+        _cm.reset();
+        _dropped = true;
+        _dirty = true;
     }
     
+    void DBConfig::CollectionInfo::save( const string& ns , DBClientBase* conn ){
+        BSONObj key = BSON( "_id" << ns );
+        
+        BSONObjBuilder val;
+        val.append( "_id" , ns );
+        val.appendDate( "lastmod" , time(0) );
+        val.appendBool( "dropped" , _dropped );
+        if ( _cm )
+            _cm->getInfo( val );
+        
+        conn->update( ShardNS::collection , key , val.obj() , true );
+        _dirty = false;
+    }
+
+
     bool DBConfig::isSharded( const string& ns ){
         if ( ! _shardingEnabled )
             return false;
-        return _sharded.find( ns ) != _sharded.end();
+        scoped_lock lk( _lock );
+        return _isSharded( ns );
     }
 
-    string DBConfig::getShard( const string& ns ){
+    bool DBConfig::_isSharded( const string& ns ){
+        if ( ! _shardingEnabled )
+            return false;
+        Collections::iterator i = _collections.find( ns );
+        if ( i == _collections.end() )
+            return false;
+        return i->second.isSharded();
+    }
+
+
+    const Shard& DBConfig::getShard( const string& ns ){
         if ( isSharded( ns ) )
-            return "";
+            return Shard::EMPTY;
         
-        uassert( 10178 ,  "no primary!" , _primary.size() );
+        uassert( 10178 ,  "no primary!" , _primary.ok() );
         return _primary;
     }
     
     void DBConfig::enableSharding(){
+        if ( _shardingEnabled )
+            return;
+        scoped_lock lk( _lock );
         _shardingEnabled = true; 
+        _save();
     }
     
-    ChunkManager* DBConfig::shardCollection( const string& ns , ShardKeyPattern fieldsAndOrder , bool unique ){
-        if ( ! _shardingEnabled )
-            throw UserException( 8042 , "db doesn't have sharding enabled" );
+    ChunkManagerPtr DBConfig::shardCollection( const string& ns , ShardKeyPattern fieldsAndOrder , bool unique ){
+        uassert( 8042 , "db doesn't have sharding enabled" , _shardingEnabled );
         
-        ChunkManager * info = _shards[ns];
-        if ( info )
-            return info;
-        
-        if ( isSharded( ns ) )
-            throw UserException( 8043 , "already sharded" );
+        scoped_lock lk( _lock );
+
+        CollectionInfo& ci = _collections[ns];
+        uassert( 8043 , "already sharded" , ! ci.isSharded() );
 
         log() << "enable sharding on: " << ns << " with shard key: " << fieldsAndOrder << endl;
-        _sharded[ns] = CollectionInfo( fieldsAndOrder , unique );
 
-        info = new ChunkManager( this , ns , fieldsAndOrder , unique );
-        _shards[ns] = info;
-        return info;
+        ci.shard( this , ns , fieldsAndOrder , unique );
+        ci.getCM()->maybeChunkCollection();
 
+        _save();
+        return ci.getCM();
     }
 
     bool DBConfig::removeSharding( const string& ns ){
         if ( ! _shardingEnabled ){
-            cout << "AAAA" << endl;
             return false;
         }
         
-        ChunkManager * info = _shards[ns];
-        map<string,CollectionInfo>::iterator i = _sharded.find( ns );
+        scoped_lock lk( _lock );
+        
+        Collections::iterator i = _collections.find( ns );
 
-        if ( info == 0 && i == _sharded.end() ){
-            cout << "BBBB" << endl;
+        if ( i == _collections.end() )
             return false;
-        }
-        uassert( 10179 ,  "_sharded but no info" , info );
-        uassert( 10180 ,  "info but no sharded" , i != _sharded.end() );
         
-        _sharded.erase( i );
-        _shards.erase( ns ); // TODO: clean this up, maybe switch to shared_ptr
+        CollectionInfo& ci = _collections[ns];
+        if ( ! ci.isSharded() )
+            return false;
+        
+        ci.unshard();
+        _save();
+        return true;
+    }
+    
+    ChunkManagerPtr DBConfig::getChunkManager( const string& ns , bool shouldReload ){
+        scoped_lock lk( _lock );
+
+        if ( shouldReload )
+            _reload();
+
+        CollectionInfo& ci = _collections[ns];
+        massert( 10181 ,  (string)"not sharded:" + ns , ci.isSharded() || ci.wasDropped() );
+        return ci.getCM();
+    }
+
+    void DBConfig::setPrimary( string s ){
+        scoped_lock lk( _lock );
+        _primary.reset( s );
+        _save();
+    }
+    
+    void DBConfig::serialize(BSONObjBuilder& to){
+        to.append("_id", _name);
+        to.appendBool("partitioned", _shardingEnabled );
+        to.append("primary", _primary.getName() );
+    }
+    
+    bool DBConfig::unserialize(const BSONObj& from){
+        log(1) << "DBConfig unserialize: " << _name << " " << from << endl;
+        assert( _name == from["_id"].String() );
+
+        _shardingEnabled = from.getBoolField("partitioned");
+        _primary.reset( from.getStringField("primary") );
+
+        // this is a temporary migration thing
+        BSONObj sharded = from.getObjectField( "sharded" );
+        if ( sharded.isEmpty() )
+             return false;
+        
+        BSONObjIterator i(sharded);
+        while ( i.more() ){
+            BSONElement e = i.next();
+            uassert( 10182 ,  "sharded things have to be objects" , e.type() == Object );
+            
+            BSONObj c = e.embeddedObject();
+            uassert( 10183 ,  "key has to be an object" , c["key"].type() == Object );
+            
+            _collections[e.fieldName()].shard( this , e.fieldName() , c["key"].Obj() , c["unique"].trueValue() );
+        }
         return true;
     }
 
-    ChunkManager* DBConfig::getChunkManager( const string& ns , bool reload ){
-        ChunkManager* m = _shards[ns];
-        if ( m && ! reload )
-            return m;
-
-        uassert( 10181 ,  (string)"not sharded:" + ns , isSharded( ns ) );
-        if ( m && reload )
-            log() << "reloading shard info for: " << ns << endl;
-        m = new ChunkManager( this , ns , _sharded[ ns ].key , _sharded[ns].unique );
-        _shards[ns] = m;
-        return m;
+    bool DBConfig::load(){
+        scoped_lock lk( _lock );
+        return _load();
     }
 
-    void DBConfig::serialize(BSONObjBuilder& to){
-        to.append("name", _name);
-        to.appendBool("partitioned", _shardingEnabled );
-        to.append("primary", _primary );
+    bool DBConfig::_load(){
+        ScopedDbConnection conn( configServer.modelServer() );
         
-        if ( _sharded.size() > 0 ){
-            BSONObjBuilder a;
-            for ( map<string,CollectionInfo>::reverse_iterator i=_sharded.rbegin(); i != _sharded.rend(); i++){
-                BSONObjBuilder temp;
-                temp.append( "key" , i->second.key.key() );
-                temp.appendBool( "unique" , i->second.unique );
-                a.append( i->first.c_str() , temp.obj() );
-            }
-            to.append( "sharded" , a.obj() );
-        }
-    }
-    
-    void DBConfig::unserialize(const BSONObj& from){
-        _name = from.getStringField("name");
-        log(1) << "DBConfig unserialize: " << _name << " " << from << endl;
+        BSONObj o = conn->findOne( ShardNS::database , BSON( "_id" << _name ) );
 
-        _shardingEnabled = from.getBoolField("partitioned");
-        _primary = from.getStringField("primary");
+
+        if ( o.isEmpty() ){
+            conn.done();
+            return false;
+        }
         
-        _sharded.clear();
-        BSONObj sharded = from.getObjectField( "sharded" );
-        if ( ! sharded.isEmpty() ){
-            BSONObjIterator i(sharded);
-            while ( i.more() ){
-                BSONElement e = i.next();
-                uassert( 10182 ,  "sharded things have to be objects" , e.type() == Object );
-                BSONObj c = e.embeddedObject();
-                uassert( 10183 ,  "key has to be an object" , c["key"].type() == Object );
-                _sharded[e.fieldName()] = CollectionInfo( c["key"].embeddedObject() , 
-                                                          c["unique"].trueValue() );
-            }
-        }
-    }
-    
-    void DBConfig::save( bool check ){
-        Model::save( check );
-        for ( map<string,ChunkManager*>::iterator i=_shards.begin(); i != _shards.end(); i++)
-            i->second->save();
-    }
-
-    bool DBConfig::reload(){
-        // TODO: i don't think is 100% correct
-        return doload();
-    }
-    
-    bool DBConfig::doload(){
+        if ( unserialize( o ) )
+            _save();
+        
         BSONObjBuilder b;
-        b.append("name", _name.c_str());
-        BSONObj q = b.done();
-        return load(q);
+        b.appendRegex( "_id" , (string)"^" + _name + "." );
+        
+
+        auto_ptr<DBClientCursor> cursor = conn->query( ShardNS::collection ,b.obj() );
+        assert( cursor.get() );
+        while ( cursor->more() ){
+            BSONObj o = cursor->next();
+            _collections[o["_id"].String()] = CollectionInfo( this , o );
+        }
+        
+        conn.done();        
+
+        return true;
     }
 
+    void DBConfig::_save(){
+        ScopedDbConnection conn( configServer.modelServer() );
+        
+        BSONObj n;
+        {
+            BSONObjBuilder b;
+            serialize(b);
+            n = b.obj();
+        }
+        
+        conn->update( ShardNS::database , BSON( "_id" << _name ) , n , true );
+        string err = conn->getLastError();
+        uassert( 13396 , (string)"DBConfig save failed: " + err , err.size() == 0 );
+        
+        for ( Collections::iterator i=_collections.begin(); i!=_collections.end(); ++i ){
+            if ( ! i->second.isDirty() )
+                continue;
+            i->second.save( i->first , conn.get() );
+        }
+
+        conn.done();
+    }
+
+    
+    bool DBConfig::reload(){
+        scoped_lock lk( _lock );
+        return _reload();
+    }
+    
+    bool DBConfig::_reload(){
+        // TODO: i don't think is 100% correct
+        return _load();
+    }
+    
     bool DBConfig::dropDatabase( string& errmsg ){
         /**
          * 1) make sure everything is up
@@ -177,6 +283,7 @@ namespace mongo {
          */
 
         log() << "DBConfig::dropDatabase: " << _name << endl;
+        configServer.logChange( "dropDatabase.start" , _name , BSONObj() );
         
         // 1
         if ( ! configServer.allUp( errmsg ) ){
@@ -186,14 +293,19 @@ namespace mongo {
         
         // 2
         grid.removeDB( _name );
-        remove( true );
+        {
+            ScopedDbConnection conn( configServer.modelServer() );
+            conn->remove( ShardNS::database , BSON( "_id" << _name ) );
+            conn.done();
+        }
+
         if ( ! configServer.allUp( errmsg ) ){
             log() << "error removing from config server even after checking!" << endl;
             return 0;
         }
         log(1) << "\t removed entry from config server for: " << _name << endl;
         
-        set<string> allServers;
+        set<Shard> allServers;
 
         // 3
         while ( true ){
@@ -217,9 +329,8 @@ namespace mongo {
         }
         
         // 5
-        for ( set<string>::iterator i=allServers.begin(); i!=allServers.end(); i++ ){
-            string s = *i;
-            ScopedDbConnection conn( s );
+        for ( set<Shard>::iterator i=allServers.begin(); i!=allServers.end(); i++ ){
+            ScopedDbConnection conn( *i );
             BSONObj res;
             if ( ! conn->dropDatabase( _name , &res ) ){
                 errmsg = res.toString();
@@ -230,16 +341,21 @@ namespace mongo {
         
         log(1) << "\t dropped primary db for: " << _name << endl;
 
+        configServer.logChange( "dropDatabase" , _name , BSONObj() );
         return true;
     }
 
-    bool DBConfig::_dropShardedCollections( int& num, set<string>& allServers , string& errmsg ){
+    bool DBConfig::_dropShardedCollections( int& num, set<Shard>& allServers , string& errmsg ){
         num = 0;
         set<string> seen;
         while ( true ){
-            map<string,ChunkManager*>::iterator i = _shards.begin();
-
-            if ( i == _shards.end() )
+            Collections::iterator i = _collections.begin();
+            for ( ; i != _collections.end(); ++i ){
+                if ( i->second.isSharded() )
+                    break;
+            }
+            
+            if ( i == _collections.end() )
                 break;
 
             if ( seen.count( i->first ) ){
@@ -250,115 +366,39 @@ namespace mongo {
             seen.insert( i->first );
             log(1) << "\t dropping sharded collection: " << i->first << endl;
 
-            i->second->getAllServers( allServers );
-            i->second->drop();
+            i->second.getCM()->getAllShards( allServers );
+            i->second.getCM()->drop( i->second.getCM() );
             
             num++;
             uassert( 10184 ,  "_dropShardedCollections too many collections - bailing" , num < 100000 );
             log(2) << "\t\t dropped " << num << " so far" << endl;
         }
+        
         return true;
     }
     
-    /* --- Grid --- */
-    
-    string Grid::pickShardForNewDB(){
-        ScopedDbConnection conn( configServer.getPrimary() );
-        
-        // TODO: this is temporary
-        
-        vector<string> all;
-        auto_ptr<DBClientCursor> c = conn->query( "config.shards" , Query() );
-        while ( c->more() ){
-            BSONObj s = c->next();
-            all.push_back( s["host"].valuestrsafe() );
-            // look at s["maxSize"] if exists
+    void DBConfig::getAllShards(set<Shard>& shards) const{
+        shards.insert(getPrimary());
+        for (Collections::const_iterator it(_collections.begin()), end(_collections.end()); it != end; ++it){
+            if (it->second.isSharded()){
+                it->second.getCM()->getAllShards(shards);
+            } // TODO: handle collections on non-primary shard
         }
-        conn.done();
-        
-        if ( all.size() == 0 )
-            return "";
-        
-        return all[ rand() % all.size() ];
-    }
-
-    bool Grid::knowAboutShard( string name ) const{
-        ScopedDbConnection conn( configServer.getPrimary() );
-        BSONObj shard = conn->findOne( "config.shards" , BSON( "host" << name ) );
-        conn.done();
-        return ! shard.isEmpty();
-    }
-
-    DBConfig* Grid::getDBConfig( string database , bool create ){
-        {
-            string::size_type i = database.find( "." );
-            if ( i != string::npos )
-                database = database.substr( 0 , i );
-        }
-        
-        if ( database == "config" )
-            return &configServer;
-
-        scoped_lock l( _lock );
-
-        DBConfig*& cc = _databases[database];
-        if ( cc == 0 ){
-            cc = new DBConfig( database );
-            if ( ! cc->doload() ){
-                if ( create ){
-                    // note here that cc->primary == 0.
-                    log() << "couldn't find database [" << database << "] in config db" << endl;
-                    
-                    if ( database == "admin" )
-                        cc->_primary = configServer.getPrimary();
-                    else
-                        cc->_primary = pickShardForNewDB();
-                    
-                    if ( cc->_primary.size() ){
-                        cc->save();
-                        log() << "\t put [" << database << "] on: " << cc->_primary << endl;
-                    }
-                    else {
-                        log() << "\t can't find a shard to put new db on" << endl;
-                        uassert( 10185 ,  "can't find a shard to put new db on" , 0 );
-                    }
-                }
-                else {
-                    cc = 0;
-                }
-            }
-            
-        }
-        
-        return cc;
-    }
-
-    void Grid::removeDB( string database ){
-        uassert( 10186 ,  "removeDB expects db name" , database.find( '.' ) == string::npos );
-        scoped_lock l( _lock );
-        _databases.erase( database );
-        
-    }
-
-    unsigned long long Grid::getNextOpTime() const {
-        ScopedDbConnection conn( configServer.getPrimary() );
-        
-        BSONObj result;
-        massert( 10421 ,  "getoptime failed" , conn->simpleCommand( "admin" , &result , "getoptime" ) );
-        conn.done();
-
-        return result["optime"]._numberLong();
     }
 
     /* --- ConfigServer ---- */
 
-    ConfigServer::ConfigServer() {
+    ConfigServer::ConfigServer() : DBConfig( "config" ){
         _shardingEnabled = false;
-        _primary = "";
-        _name = "grid";
     }
     
     ConfigServer::~ConfigServer() {
+    }
+
+    bool ConfigServer::init( string s ){
+        vector<string> configdbs;
+        splitStringDelim( s, &configdbs, ',' );
+        return init( configdbs );
     }
 
     bool ConfigServer::init( vector<string> configHosts ){
@@ -369,18 +409,12 @@ namespace mongo {
             sleepsecs(5);
             dbexit( EXIT_BADOPTIONS );
         }
-        ourHostname = hn;
         
-        stringstream fullString;
-
         set<string> hosts;
         for ( size_t i=0; i<configHosts.size(); i++ ){
             string host = configHosts[i];
             hosts.insert( getHost( host , false ) );
             configHosts[i] = getHost( host , true );
-            if ( i > 0 )
-                fullString << ",";
-            fullString << configHosts[i];
         }
         
         for ( set<string>::iterator i=hosts.begin(); i!=hosts.end(); i++ ){
@@ -397,9 +431,97 @@ namespace mongo {
             if ( ! ok )
                 return false;
         }
+
+        _config = configHosts;
         
-        _primary = fullString.str();
-        log(1) << " config string : " << fullString.str() << endl;
+        string fullString;
+        joinStringDelim( configHosts, &fullString, ',' );
+        _primary.setAddress( fullString , true );
+        log(1) << " config string : " << fullString << endl;
+
+        return true;
+    }
+
+    bool ConfigServer::checkConfigServersConsistent( string& errmsg , int tries ) const {
+        if ( _config.size() == 1 )
+            return true;
+        
+        if ( tries <= 0 )
+            return false;
+        
+        unsigned firstGood = 0;
+        int up = 0;
+        vector<BSONObj> res;
+        for ( unsigned i=0; i<_config.size(); i++ ){
+            BSONObj x;
+            try {
+                ScopedDbConnection conn( _config[i] );
+                if ( ! conn->simpleCommand( "config" , &x , "dbhash" ) )
+                    x = BSONObj();
+                else {
+                    x = x.getOwned();
+                    if ( up == 0 )
+                        firstGood = i;
+                    up++;
+                }
+                conn.done();
+            }
+            catch ( std::exception&  ){
+                log(LL_WARNING) << " couldn't check on config server:" << _config[i] << " ok for now" << endl;
+            }
+            res.push_back(x);
+        }
+
+        if ( up == 0 ){
+            errmsg = "no config servers reachable";
+            return false;
+        }
+
+        if ( up == 1 ){
+            log( LL_WARNING ) << "only 1 config server reachable, continuing" << endl;
+            return true;
+        }
+
+        BSONObj base = res[firstGood];
+        for ( unsigned i=firstGood+1; i<res.size(); i++ ){
+            if ( res[i].isEmpty() )
+                continue;
+
+            string c1 = base.getFieldDotted( "collections.chunks" );
+            string c2 = res[i].getFieldDotted( "collections.chunks" );
+            
+            string d1 = base.getFieldDotted( "collections.databases" );
+            string d2 = res[i].getFieldDotted( "collections.databases" );
+
+            if ( c1 == c2 && d1 == d2 )
+                continue;
+            
+            stringstream ss;
+            ss << "config servers " << _config[firstGood] << " and " << _config[i] << " differ";
+            log( LL_WARNING ) << ss.str();
+            if ( tries <= 1 ){
+                ss << "\n" << c1 << "\t" << c2 << "\n" << d1 << "\t" << d2;
+                errmsg = ss.str();
+                return false;
+            }
+            
+            return checkConfigServersConsistent( errmsg , tries - 1 );
+        }
+        
+        return true;
+    }
+
+    bool ConfigServer::ok( bool checkConsistency ){
+        if ( ! _primary.ok() )
+            return false;
+        
+        if ( checkConsistency ){
+            string errmsg;
+            if ( ! checkConfigServersConsistent( errmsg ) ){
+                log( LL_ERROR ) << "config servers not in sync! " << errmsg << endl;
+                return false;
+            }
+        }
         
         return true;
     }
@@ -417,8 +539,8 @@ namespace mongo {
             return true;
         }
         catch ( DBException& ){
-            log() << "ConfigServer::allUp : " << _primary << " seems down!" << endl;
-            errmsg = _primary + " seems down";
+            log() << "ConfigServer::allUp : " << _primary.toString() << " seems down!" << endl;
+            errmsg = _primary.toString() + " seems down";
             return false;
         }
         
@@ -440,7 +562,7 @@ namespace mongo {
             uassert( 10189 ,  "should only have 1 thing in config.version" , ! c->more() );
         }
         else {
-            if ( conn.count( "config.shard" ) || conn.count( "config.databases" ) ){
+            if ( conn.count( ShardNS::shard ) || conn.count( ShardNS::database ) ){
                 version = 1;
             }
         }
@@ -448,29 +570,12 @@ namespace mongo {
         return version;
     }
     
-    int ConfigServer::checkConfigVersion(){
-        int cur = dbConfigVersion();
-        if ( cur == VERSION )
-            return 0;
-        
-        if ( cur == 0 ){
-            ScopedDbConnection conn( _primary );
-            conn->insert( "config.version" , BSON( "_id" << 1 << "version" << VERSION ) );
-            pool.flush();
-            assert( VERSION == dbConfigVersion( conn.conn() ) );
-            conn.done();
-            return 0;
-        }
-
-        log() << "don't know how to upgrade " << cur << " to " << VERSION << endl;
-        return -8;
-    }
-
     void ConfigServer::reloadSettings(){
         set<string> got;
         
         ScopedDbConnection conn( _primary );
-        auto_ptr<DBClientCursor> c = conn->query( "config.settings" , BSONObj() );
+        auto_ptr<DBClientCursor> c = conn->query( ShardNS::settings , BSONObj() );
+        assert( c.get() );
         while ( c->more() ){
             BSONObj o = c->next();
             string name = o["_id"].valuestrsafe();
@@ -479,21 +584,36 @@ namespace mongo {
                 log(1) << "MaxChunkSize: " << o["value"] << endl;
                 Chunk::MaxChunkSize = o["value"].numberInt() * 1024 * 1024;
             }
+            else if ( name == "balancer" ){
+                // ones we ignore here
+            }
             else {
                 log() << "warning: unknown setting [" << name << "]" << endl;
             }
         }
 
         if ( ! got.count( "chunksize" ) ){
-            conn->insert( "config.settings" , BSON( "_id" << "chunksize"  <<
+            conn->insert( ShardNS::settings , BSON( "_id" << "chunksize"  <<
                                                     "value" << (Chunk::MaxChunkSize / ( 1024 * 1024 ) ) ) );
+        }
+        
+        
+        // indexes
+        try {
+            conn->ensureIndex( ShardNS::chunk , BSON( "ns" << 1 << "min" << 1 ) , true );
+            conn->ensureIndex( ShardNS::chunk , BSON( "ns" << 1 << "shard" << 1 << "min" << 1 ) , true );
+            conn->ensureIndex( ShardNS::chunk , BSON( "ns" << 1 << "lastmod" << 1 ) , true );
+            conn->ensureIndex( ShardNS::shard , BSON( "host" << 1 ) , true );
+        }
+        catch ( std::exception& e ){
+            log( LL_WARNING ) << "couldn't create indexes on config db: " << e.what() << endl;
         }
 
         conn.done();
     }
 
     string ConfigServer::getHost( string name , bool withPort ){
-        if ( name.find( ":" ) ){
+        if ( name.find( ":" ) != string::npos ){
             if ( withPort )
                 return name;
             return name.substr( 0 , name.find( ":" ) );
@@ -508,61 +628,37 @@ namespace mongo {
         return name;
     }
 
-    ConfigServer configServer;    
-    Grid grid;
+    void ConfigServer::logChange( const string& what , const string& ns , const BSONObj& detail ){
+        assert( _primary.ok() );
 
-
-    class DBConfigUnitTest : public UnitTest {
-    public:
-        void testInOut( DBConfig& c , BSONObj o ){
-            c.unserialize( o );
-            BSONObjBuilder b;
-            c.serialize( b );
-
-            BSONObj out = b.obj();
-            
-            if ( o.toString() == out.toString() )
-                return;
-            
-            log() << "DBConfig serialization broken\n" 
-                  << "in  : " << o.toString()  << "\n"
-                  << "out : " << out.toString() 
-                  << endl;
-            assert(0);
-        }
-
-        void a(){
-            BSONObjBuilder b;
-            b << "name" << "abc";
-            b.appendBool( "partitioned" , true );
-            b << "primary" << "myserver";
-            
-            DBConfig c;
-            testInOut( c , b.obj() );
-        }
-
-        void b(){
-            BSONObjBuilder b;
-            b << "name" << "abc";
-            b.appendBool( "partitioned" , true );
-            b << "primary" << "myserver";
-            
-            BSONObjBuilder a;
-            a << "abc.foo" << fromjson( "{ 'key' : { 'a' : 1 } , 'unique' : false }" );
-            a << "abc.bar" << fromjson( "{ 'key' : { 'kb' : -1 } , 'unique' : true }" );
-            
-            b.appendArray( "sharded" , a.obj() );
-
-            DBConfig c;
-            testInOut( c , b.obj() );
-            assert( c.isSharded( "abc.foo" ) );
-            assert( ! c.isSharded( "abc.food" ) );
-        }
+        static bool createdCapped = false;
+        static AtomicUInt num;
         
-        void run(){
-            a();
-            b();
-        }
+        ScopedDbConnection conn( _primary );
         
-    } dbConfigUnitTest;
+        if ( ! createdCapped ){
+            try {
+                conn->createCollection( "config.changelog" , 1024 * 1024 * 10 , true );
+            }
+            catch ( UserException& e ){
+                log(1) << "couldn't create changelog (like race condition): " << e << endl;
+                // don't care
+            }
+            createdCapped = true;
+        }
+     
+        stringstream id;
+        id << getHostNameCached() << "-" << terseCurrentTime() << "-" << num++;
+
+        BSONObj msg = BSON( "_id" << id.str() << "server" << getHostNameCached() << "time" << DATENOW <<
+                            "what" << what << "ns" << ns << "details" << detail );
+        log() << "config change: " << msg << endl;
+        conn->insert( "config.changelog" , msg );
+        
+        conn.done();
+    }
+
+    DBConfigPtr configServerPtr (new ConfigServer());    
+    ConfigServer& configServer = dynamic_cast<ConfigServer&>(*configServerPtr);    
+
 } 

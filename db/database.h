@@ -22,7 +22,6 @@
 
 namespace mongo {
 
-
     /**
      * Database represents a database database
      * Each database database has its own set of files -- dbname.ns, dbname.0, dbname.1, ...
@@ -32,33 +31,7 @@ namespace mongo {
     public:
         static bool _openAllFiles;
         
-        Database(const char *nm, bool& newDb, const string& _path = dbpath)
-            : name(nm), path(_path), namespaceIndex( path, name ) {
-            
-            { // check db name is valid
-                size_t L = strlen(nm);
-                uassert( 10028 ,  "db name is empty", L > 0 );
-                uassert( 10029 ,  "bad db name [1]", *nm != '.' );
-                uassert( 10030 ,  "bad db name [2]", nm[L-1] != '.' );
-                uassert( 10031 ,  "bad char(s) in db name", strchr(nm, ' ') == 0 );
-                uassert( 10032 ,  "db name too long", L < 64 );
-            }
-
-            newDb = namespaceIndex.exists();
-            profile = 0;
-            profileName = name + ".system.profile";
-
-            // If already exists, open.  Otherwise behave as if empty until
-            // there's a write, then open.
-            if ( ! newDb || cmdLine.defaultProfile ) {
-                namespaceIndex.init();
-                if( _openAllFiles )
-                    openAllFiles();
-
-            }
-            
-            magic = 781231;
-        }
+        Database(const char *nm, bool& newDb, const string& _path = dbpath);
         
         ~Database() {
             magic = 0;
@@ -114,7 +87,7 @@ namespace mongo {
             namespaceIndex.init();
             if ( n < 0 || n >= DiskLoc::MaxFiles ) {
                 out() << "getFile(): n=" << n << endl;
-#if !defined(_RECSTORE)
+#if 0
                 if( n >= RecCache::Base && n <= RecCache::Base+1000 )
                     massert( 10294 , "getFile(): bad file number - using recstore db w/nonrecstore db build?", false);
 #endif
@@ -137,8 +110,8 @@ namespace mongo {
                 int minSize = 0;
                 if ( n != 0 && files[ n - 1 ] )
                     minSize = files[ n - 1 ]->getHeader()->fileLength;
-                if ( sizeNeeded + MDFHeader::headerSize() > minSize )
-                    minSize = sizeNeeded + MDFHeader::headerSize();
+                if ( sizeNeeded + DataFileHeader::HeaderSize > minSize )
+                    minSize = sizeNeeded + DataFileHeader::HeaderSize;
                 try {
                     p->open( fullNameString.c_str(), minSize, preallocateOnly );
                 }
@@ -205,6 +178,17 @@ namespace mongo {
         bool setProfilingLevel( int newLevel , string& errmsg );
 
         void finishInit();
+
+        static bool validDBName( const string& ns );
+
+        long long fileSize(){
+            long long size=0;
+            for (int n=0; exists(n); n++)
+                size += boost::filesystem::file_size( fileName(n) );
+            return size;
+        }
+
+        void flushFiles( bool sync );
         
         vector<MongoDataFile*> files;
         string name; // "alleyinsider"

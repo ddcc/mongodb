@@ -22,6 +22,11 @@
 
 namespace mongo {
 
+    enum CommonErrorCodes {
+        DatabaseDifferCaseCode = 13297 ,
+        StaleConfigInContextCode = 13388
+    };
+
 	/* these are manipulated outside of mutexes, so be careful */
     struct Assertion {
         Assertion() {
@@ -81,68 +86,84 @@ namespace mongo {
     };
     
     extern AssertionCount assertionCount;
+    
+    struct ExceptionInfo {
+        ExceptionInfo() : msg(""),code(-1){}
+        ExceptionInfo( const char * m , int c )
+            : msg( m ) , code( c ){
+        }
+        ExceptionInfo( const string& m , int c )
+            : msg( m ) , code( c ){
+        }
+
+        void append( BSONObjBuilder& b , const char * m = "$err" , const char * c = "code" ) const ;
+        
+        string toString() const { stringstream ss; ss << "exception: " << code << " " << msg; return ss.str(); }
+
+        bool empty() const { return msg.empty(); }
+                
+
+        string msg;
+        int code;
+    };
 
     class DBException : public std::exception {
     public:
-        virtual const char* what() const throw() = 0;
+        DBException( const ExceptionInfo& ei ) : _ei(ei){}
+        DBException( const char * msg , int code ) : _ei(msg,code){}
+        DBException( const string& msg , int code ) : _ei(msg,code){}
+        virtual ~DBException() throw() { }
+        
+        virtual const char* what() const throw(){ return _ei.msg.c_str(); }
+        virtual int getCode() const { return _ei.code; }
+        
+        virtual void appendPrefix( stringstream& ss ) const { }
+        
         virtual string toString() const {
-            return what();
+            stringstream ss; ss << getCode() << " " << what(); return ss.str();
+            return ss.str();
         }
-        virtual int getCode() = 0;
-        operator string() const { return toString(); }
+        
+        const ExceptionInfo& getInfo() const { return _ei; }
+
+    protected:
+        ExceptionInfo _ei;
     };
     
     class AssertionException : public DBException {
     public:
-        int code;
-        string msg;
-        AssertionException() { code = 0; }
+
+        AssertionException( const ExceptionInfo& ei ) : DBException(ei){}
+        AssertionException( const char * msg , int code ) : DBException(msg,code){}
+        AssertionException( const string& msg , int code ) : DBException(msg,code){}
+
         virtual ~AssertionException() throw() { }
-        virtual bool severe() {
-            return true;
-        }
-        virtual bool isUserAssertion() {
-            return false;
-        }
-        virtual int getCode(){ return code; }
-        virtual const char* what() const throw() { return msg.c_str(); }
+        
+        virtual bool severe() { return true; }
+        virtual bool isUserAssertion() { return false; }
 
         /* true if an interrupted exception - see KillCurrentOp */
         bool interrupted() { 
-            return code == 11600 || code == 11601;
+            return _ei.code == 11600 || _ei.code == 11601;
         }
     };
-
+    
     /* UserExceptions are valid errors that a user can cause, like out of disk space or duplicate key */
     class UserException : public AssertionException {
     public:
-        UserException(int c , const string& m) {
-            code = c;
-            msg = m;
-        }
-        virtual bool severe() {
-            return false;
-        }
-        virtual bool isUserAssertion() {
-            return true;
-        }
-        virtual string toString() const {
-            return "userassert:" + msg;
-        }
-    };
+        UserException(int c , const string& m) : AssertionException( m , c ){}
 
+        virtual bool severe() { return false; }
+        virtual bool isUserAssertion() { return true; }
+        virtual void appendPrefix( stringstream& ss ) const { ss << "userassert:"; }
+    };
+    
     class MsgAssertionException : public AssertionException {
     public:
-        MsgAssertionException(int c, const char *m) {
-            code = c;
-            msg = m;
-        }
-        virtual bool severe() {
-            return false;
-        }
-        virtual string toString() const {
-            return "massert:" + msg;
-        }
+        MsgAssertionException( const ExceptionInfo& ei ) : AssertionException( ei ){}
+        MsgAssertionException(int c, const string& m) : AssertionException( m , c ){}
+        virtual bool severe() { return false; }
+        virtual void appendPrefix( stringstream& ss ) const { ss << "massert:"; }
     };
 
     void asserted(const char *msg, const char *file, unsigned line);
@@ -150,6 +171,7 @@ namespace mongo {
     void uasserted(int msgid, const char *msg);
     inline void uasserted(int msgid , string msg) { uasserted(msgid, msg.c_str()); }
     void uassert_nothrow(const char *msg); // reported via lasterror, but don't throw exception
+    void msgassertedNoTrace(int msgid, const char *msg);
     void msgasserted(int msgid, const char *msg);
     inline void msgasserted(int msgid, string msg) { msgasserted(msgid, msg.c_str()); }
 
@@ -157,59 +179,67 @@ namespace mongo {
 #undef assert
 #endif
 
-#define assert(_Expression) (void)( (!!(_Expression)) || (mongo::asserted(#_Expression, __FILE__, __LINE__), 0) )
+#define MONGO_assert(_Expression) (void)( (!!(_Expression)) || (mongo::asserted(#_Expression, __FILE__, __LINE__), 0) )
+#define assert MONGO_assert
 
     /* "user assert".  if asserts, user did something wrong, not our code */
-//#define uassert( 10269 , _Expression) (void)( (!!(_Expression)) || (uasserted(#_Expression, __FILE__, __LINE__), 0) )
-#define uassert(msgid, msg,_Expression) (void)( (!!(_Expression)) || (mongo::uasserted(msgid, msg), 0) )
-
-#define xassert(_Expression) (void)( (!!(_Expression)) || (mongo::asserted(#_Expression, __FILE__, __LINE__), 0) )
-
-#define yassert 1
+#define MONGO_uassert(msgid, msg, expr) (void)( (!!(expr)) || (mongo::uasserted(msgid, msg), 0) )
+#define uassert MONGO_uassert
 
     /* warning only - keeps going */
-#define wassert(_Expression) (void)( (!!(_Expression)) || (mongo::wasserted(#_Expression, __FILE__, __LINE__), 0) )
+#define MONGO_wassert(_Expression) (void)( (!!(_Expression)) || (mongo::wasserted(#_Expression, __FILE__, __LINE__), 0) )
+#define wassert MONGO_wassert
 
     /* display a message, no context, and throw assertionexception
 
        easy way to throw an exception and log something without our stack trace
        display happening.
     */
-#define massert(msgid, msg,_Expression) (void)( (!!(_Expression)) || (mongo::msgasserted(msgid, msg), 0) )
+#define MONGO_massert(msgid, msg, expr) (void)( (!!(expr)) || (mongo::msgasserted(msgid, msg), 0) )
+#define massert MONGO_massert
 
     /* dassert is 'debug assert' -- might want to turn off for production as these
        could be slow.
     */
 #if defined(_DEBUG)
-#define dassert assert
+# define MONGO_dassert assert
 #else
-#define dassert(x) 
+# define MONGO_dassert(x) 
 #endif
+#define dassert MONGO_dassert
 
     // some special ids that we want to duplicate
     
     // > 10000 asserts
     // < 10000 UserException
     
-#define ASSERT_ID_DUPKEY 11000
+    enum { ASSERT_ID_DUPKEY = 11000 };
 
+    /* throws a uassertion with an appropriate msg */
     void streamNotGood( int code , string msg , std::ios& myios );
 
-#define ASSERT_STREAM_GOOD(msgid,msg,stream) (void)( (!!((stream).good())) || (mongo::streamNotGood(msgid, msg, stream), 0) )
+    inline void assertStreamGood(unsigned msgid, string msg, std::ios& myios) { 
+        if( !myios.good() ) streamNotGood(msgid, msg, myios);
+    }
+
+    string demangleName( const type_info& typeinfo );
 
 } // namespace mongo
 
-#define BOOST_CHECK_EXCEPTION( expression ) \
+#define BOOST_CHECK_EXCEPTION MONGO_BOOST_CHECK_EXCEPTION
+#define MONGO_BOOST_CHECK_EXCEPTION( expression ) \
 	try { \
 		expression; \
 	} catch ( const std::exception &e ) { \
-		problem() << "caught boost exception: " << e.what() << endl; \
-		assert( false ); \
+        stringstream ss; \
+		ss << "caught boost exception: " << e.what();   \
+        msgasserted( 13294 , ss.str() );        \
 	} catch ( ... ) { \
 		massert( 10437 ,  "unknown boost failed" , false );   \
 	}
 
-#define DESTRUCTOR_GUARD( expression ) \
+#define DESTRUCTOR_GUARD MONGO_DESTRUCTOR_GUARD
+#define MONGO_DESTRUCTOR_GUARD( expression ) \
     try { \
         expression; \
     } catch ( const std::exception &e ) { \

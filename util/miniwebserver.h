@@ -17,19 +17,16 @@
 
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "message.h"
 #include "../db/jsobj.h"
 
 namespace mongo {
 
-    class MiniWebServer {
+    class MiniWebServer : public Listener {
     public:
-        MiniWebServer();
+        MiniWebServer(const string &ip, int _port);
         virtual ~MiniWebServer() {}
-
-        bool init(const string &ip, int _port);
-        void run();
 
         virtual void doRequest(
             const char *rq, // the full request
@@ -41,13 +38,13 @@ namespace mongo {
             const SockAddr &from
         ) = 0;
 
-        int socket() const { return sock; }
+        // --- static helpers ----
+
+        static void parseParams( BSONObj & params , string query );
         
-    protected:
-        string parseURL( const char * buf );
-        string parseMethod( const char * headers );
-        string getHeader( const char * headers , string name );
-        void parseParams( BSONObj & params , string query );
+        static string parseURL( const char * buf );
+        static string parseMethod( const char * headers );
+        static string getHeader( const char * headers , string name );
         static const char *body( const char *buf );
 
         static string urlDecode(const char* s);
@@ -56,9 +53,6 @@ namespace mongo {
     private:
         void accepted(int s, const SockAddr &from);
         static bool fullReceive( const char *buf );
-
-        int port;
-        int sock;
     };
 
 } // namespace mongo

@@ -14,38 +14,50 @@ coll = db.foo;
 
 var i=0;
 
-for ( ; i<500; i++ ){
+for ( ; i<100; i++ ){
     coll.save( { num : i , s : bigString } );
 }
-
-s.adminCommand( "connpoolsync" );
+db.getLastError();
 
 primary = s.getServer( "test" ).getDB( "test" );
 
-assert.eq( 1 , s.config.chunks.count() );
-assert.eq( 500 , primary.foo.count() );
+counts = []
+
+s.printChunks();
+counts.push( s.config.chunks.count() );
+assert.eq( 100 , primary.foo.count() );
 
 print( "datasize: " + tojson( s.getServer( "test" ).getDB( "admin" ).runCommand( { datasize : "test.foo" } ) ) );
 
-for ( ; i<800; i++ ){
+for ( ; i<200; i++ ){
     coll.save( { num : i , s : bigString } );
 }
 
-assert.eq( 1 , s.config.chunks.count() );
+s.printChunks()
+counts.push( s.config.chunks.count() );
 
-for ( ; i<1500; i++ ){
+for ( ; i<400; i++ ){
     coll.save( { num : i , s : bigString } );
 }
 
-assert.eq( 3 , s.config.chunks.count() , "shard didn't split A " );
 s.printChunks();
+counts.push( s.config.chunks.count() );
 
-for ( ; i<3000; i++ ){
+for ( ; i<700; i++ ){
     coll.save( { num : i , s : bigString } );
 }
+db.getLastError();
 
-assert.eq( 4 , s.config.chunks.count() , "shard didn't split B " );
 s.printChunks();
+counts.push( s.config.chunks.count() );
 
+assert( counts[counts.length-1] > counts[0] , "counts 1 : " + tojson( counts ) )
+sorted = counts.slice(0)
+sorted.sort();
+assert.eq( counts , sorted , "counts 2 : " + tojson( counts ) )
+
+print( counts )
+
+printjson( db.stats() )
 
 s.stop();

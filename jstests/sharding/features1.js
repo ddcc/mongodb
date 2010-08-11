@@ -50,16 +50,27 @@ s.sync();
 assert.eq( 4 , a.foo.getIndexKeys().length , "a index 3" );
 assert.eq( 4 , b.foo.getIndexKeys().length , "b index 3" );
 
+db.foo.ensureIndex( { num : 1 , bar : 1 } , true );
+s.sync();
+assert.eq( 5 , b.foo.getIndexKeys().length , "c index 3" );
+
 // ---- can't shard thing with unique indexes
 
 db.foo2.ensureIndex( { a : 1 } );
 s.sync();
+printjson( db.system.indexes.find( { ns : "test.foo2" } ).toArray() );
 assert( s.admin.runCommand( { shardcollection : "test.foo2" , key : { num : 1 } } ).ok , "shard with index" );
 
 db.foo3.ensureIndex( { a : 1 } , true );
 s.sync();
 printjson( db.system.indexes.find( { ns : "test.foo3" } ).toArray() );
 assert( ! s.admin.runCommand( { shardcollection : "test.foo3" , key : { num : 1 } } ).ok , "shard with unique index" );
+
+db.foo7.ensureIndex( { num : 1 , a : 1 } , true );
+s.sync();
+printjson( db.system.indexes.find( { ns : "test.foo7" } ).toArray() );
+assert( s.admin.runCommand( { shardcollection : "test.foo7" , key : { num : 1 } } ).ok , "shard with ok unique index" );
+
 
 // ----- eval -----
 
@@ -83,6 +94,7 @@ s.adminCommand( { split : "test.foo4" , middle : { num : 10 } } );
 s.adminCommand( { movechunk : "test.foo4" , find : { num : 20 } , to : s.getOther( s.getServer( "test" ) ).name } );
 db.foo4.save( { num : 5 } );
 db.foo4.save( { num : 15 } );
+db.getLastError();
 s.sync();
 assert.eq( 1 , a.foo4.count() , "ua1" );
 assert.eq( 1 , b.foo4.count() , "ub1" );
@@ -120,13 +132,15 @@ assert( ! s.admin.runCommand( { shardcollection : "test.foo5" , key : { num : 1 
 db.foo6.save( { a : 1 } );
 db.foo6.save( { a : 3 } );
 db.foo6.save( { a : 3 } );
+db.foo6.ensureIndex( { a : 1 } );
 s.sync();
+printjson( db.system.indexes.find( { ns : "test.foo6" } ).toArray() );
 
 assert.eq( 2 , db.foo6.group( { key : { a : 1 } , initial : { count : 0 } , 
                                 reduce : function(z,prev){ prev.count++; } } ).length );
 
 assert.eq( 3 , db.foo6.find().count() );
-assert( s.admin.runCommand( { shardcollection : "test.foo6" , key : { a : 2 } } ).ok );
+assert( s.admin.runCommand( { shardcollection : "test.foo6" , key : { a : 1 } } ).ok );
 assert.eq( 3 , db.foo6.find().count() );
 
 s.adminCommand( { split : "test.foo6" , middle : { a : 2 } } );
@@ -134,6 +148,17 @@ s.adminCommand( { movechunk : "test.foo6" , find : { a : 3 } , to : s.getOther( 
 
 assert.throws( function(){ db.foo6.group( { key : { a : 1 } , initial : { count : 0 } , reduce : function(z,prev){ prev.count++; } } ); } );;
 
+
+// ---- can't shard non-empty collection without index -----
+
+db.foo8.save( { a : 1 } );
+assert( ! s.admin.runCommand( { shardcollection : "test.foo8" , key : { a : 1 } } ).ok , "non-empty collection" );
+
+// --- listDatabases ---
+
+r = db.getMongo().getDBs()
+assert.eq( 4 , r.databases.length , "listDatabases 1 : " + tojson( r ) )
+assert.lt( 10000 , r.totalSize , "listDatabases 2 : " + tojson( r ) );
 
 s.stop()
 

@@ -15,69 +15,14 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "mmap.h"
 #include "processinfo.h"
+#include "concurrency/rwlock.h"
 
 namespace mongo {
 
-    set<MemoryMappedFile*> mmfiles;
-    mongo::mutex mmmutex;
-
-    MemoryMappedFile::~MemoryMappedFile() {
-        close();
-        scoped_lock lk( mmmutex );
-        mmfiles.erase(this);
-    }
-
-    void MemoryMappedFile::created(){
-        scoped_lock lk( mmmutex );
-        mmfiles.insert(this);
-    }
-
-    /*static*/
-    int closingAllFiles = 0;
-    void MemoryMappedFile::closeAllFiles( stringstream &message ) {
-        if ( closingAllFiles ) {
-            message << "warning closingAllFiles=" << closingAllFiles << endl;
-            return;
-        }
-        ++closingAllFiles;
-        ProgressMeter pm( mmfiles.size() , 2 , 1 );
-        for ( set<MemoryMappedFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
-            (*i)->close();
-            pm.hit();
-        }
-        message << "    closeAllFiles() finished" << endl;
-        --closingAllFiles;
-    }
-
-    long long MemoryMappedFile::totalMappedLength(){
-        unsigned long long total = 0;
-        
-        scoped_lock lk( mmmutex );
-        for ( set<MemoryMappedFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ )
-            total += (*i)->length();
-
-        return total;
-    }
-
-    int MemoryMappedFile::flushAll( bool sync ){
-        int num = 0;
-
-        scoped_lock lk( mmmutex );
-        for ( set<MemoryMappedFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
-            num++;
-            MemoryMappedFile * mmf = *i;
-            if ( ! mmf )
-                continue;
-            mmf->flush( sync );
-        }
-        return num;
-    }
-
-
-    void MemoryMappedFile::updateLength( const char *filename, long &length ) {
+    /*static*/ void MemoryMappedFile::updateLength( const char *filename, long &length ) {
         if ( !boost::filesystem::exists( filename ) )
             return;
         // make sure we map full length if preexisting file.
@@ -106,5 +51,110 @@ namespace mongo {
         cout << "vsize: " << pi.getVirtualMemorySize() << " resident: " << pi.getResidentSize() << " mapped: " << ( MemoryMappedFile::totalMappedLength() / ( 1024 * 1024 ) ) << endl;
     }
 
+    /* --- MongoFile -------------------------------------------------
+       this is the administrative stuff 
+    */
+
+    static set<MongoFile*> mmfiles;
+    static RWLock mmmutex("rw:mmmutex");
+
+    void MongoFile::destroyed() {
+        rwlock lk( mmmutex , true );
+        mmfiles.erase(this);
+    }
+
+    /*static*/
+    void MongoFile::closeAllFiles( stringstream &message ) {
+        static int closingAllFiles = 0;
+        if ( closingAllFiles ) {
+            message << "warning closingAllFiles=" << closingAllFiles << endl;
+            return;
+        }
+        ++closingAllFiles;
+
+        rwlock lk( mmmutex , true );
+
+        ProgressMeter pm( mmfiles.size() , 2 , 1 );
+        for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
+            (*i)->close();
+            pm.hit();
+        }
+        message << "    closeAllFiles() finished" << endl;
+        --closingAllFiles;
+    }
+
+    /*static*/ long long MongoFile::totalMappedLength(){
+        unsigned long long total = 0;
+        
+        rwlock lk( mmmutex , false );
+        for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ )
+            total += (*i)->length();
+
+        return total;
+    }
+
+    /*static*/ int MongoFile::flushAll( bool sync ){
+        if ( ! sync ){
+            int num = 0;
+            rwlock lk( mmmutex , false );
+            for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
+                num++;
+                MongoFile * mmf = *i;
+                if ( ! mmf )
+                    continue;
+                
+                mmf->flush( sync );
+            }
+            return num;
+        }
+        
+        // want to do it sync
+        set<MongoFile*> seen;
+        while ( true ){
+            auto_ptr<Flushable> f;
+            {
+                rwlock lk( mmmutex , false );
+                for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
+                    MongoFile * mmf = *i;
+                    if ( ! mmf )
+                        continue;
+                    if ( seen.count( mmf ) )
+                        continue;
+                    f.reset( mmf->prepareFlush() );
+                    seen.insert( mmf );
+                    break;
+                }
+            }
+            if ( ! f.get() )
+                break;
+            
+            f->flush();
+        }
+        return seen.size();
+    }
+
+    void MongoFile::created(){
+        rwlock lk( mmmutex , true );
+        mmfiles.insert(this);
+    }
+
+#ifdef _DEBUG
+
+    void MongoFile::lockAll() {
+        rwlock lk( mmmutex , false );
+        for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
+            MongoFile * mmf = *i;
+            if (mmf) mmf->_lock();
+        }
+    }
+
+    void MongoFile::unlockAll() {
+        rwlock lk( mmmutex , false );
+        for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
+            MongoFile * mmf = *i;
+            if (mmf) mmf->_unlock();
+        }
+    }
+#endif
 
 } // namespace mongo

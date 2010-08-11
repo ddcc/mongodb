@@ -20,16 +20,21 @@
 
 #include "../client/dbclient.h"
 #include "../db/commands.h"
+#include "../db/replpair.h"
 
 class MockDBClientConnection : public DBClientConnection {
 public:
     MockDBClientConnection() : connect_() {}
     virtual
-    BSONObj findOne(const string &ns, Query query, const BSONObj *fieldsToReturn = 0, int queryOptions = 0) {
+    BSONObj findOne(const string &ns, const Query& query, const BSONObj *fieldsToReturn = 0, int queryOptions = 0) {
         return one_;
     }
     virtual
-    bool connect(const string &serverHostname, string& errmsg) {
+    bool connect(const char * serverHostname, string& errmsg) {
+        return connect_;
+    }
+    virtual
+    bool connect(const HostAndPort& , string& errmsg) {
         return connect_;
     }
     virtual
@@ -62,11 +67,12 @@ public:
             rp_( rp ),
             cc_( cc ) {
     }
-    virtual BSONObj findOne(const string &ns, Query query, const BSONObj *fieldsToReturn = 0, int queryOptions = 0) {
+    virtual BSONObj findOne(const string &ns, const Query& query, const BSONObj *fieldsToReturn = 0, int queryOptions = 0) {
+        BSONObj c = query.obj.copy();
         if ( cc_ ) cc_->beforeCommand();
         SetGlobalReplPair s( rp_ );
         BSONObjBuilder result;
-        result.append( "ok", Command::runAgainstRegistered( "admin.$cmd", query.obj, result ) ? 1.0 : 0.0 );
+        result.append( "ok", Command::runAgainstRegistered( "admin.$cmd", c, result ) ? 1.0 : 0.0 );
         if ( cc_ ) cc_->afterCommand();
         return result.obj();
     }

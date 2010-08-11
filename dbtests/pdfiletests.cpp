@@ -17,7 +17,7 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "../db/pdfile.h"
 
 #include "../db/db.h"
@@ -46,13 +46,13 @@ namespace PdfileTests {
                 ASSERT( userCreateNS( ns(), fromjson( spec.str() ), err, false ) );
                 prepare();
                 int j = 0;
-                for ( auto_ptr< Cursor > i = theDataFileMgr.findAll( ns() );
+                for ( boost::shared_ptr<Cursor> i = theDataFileMgr.findAll( ns() );
                         i->ok(); i->advance(), ++j )
                     ASSERT_EQUALS( j, i->current().firstElement().number() );
                 ASSERT_EQUALS( count(), j );
 
                 j = count() - 1;
-                for ( auto_ptr< Cursor > i =
+                for ( boost::shared_ptr<Cursor> i =
                             findTableScan( ns(), fromjson( "{\"$natural\":-1}" ) );
                         i->ok(); i->advance(), --j )
                     ASSERT_EQUALS( j, i->current().firstElement().number() );
@@ -73,7 +73,7 @@ namespace PdfileTests {
                 Extent *e = ext.ext();
                 int ofs;
                 if ( e->lastRecord.isNull() )
-                    ofs = ext.getOfs() + ( e->extentData - (char *)e );
+                    ofs = ext.getOfs() + ( e->_extentData - (char *)e );
                 else
                     ofs = e->lastRecord.getOfs() + e->lastRecord.rec()->lengthWithHeaders;
                 DiskLoc dl( ext.a(), ofs );
@@ -296,7 +296,7 @@ namespace PdfileTests {
                 b.appendTimestamp( "a" );
                 BSONObj o = b.done();
                 ASSERT( 0 == o.getField( "a" ).date() );
-                theDataFileMgr.insert( ns(), o );
+                theDataFileMgr.insertWithObjMod( ns(), o );
                 ASSERT( 0 != o.getField( "a" ).date() );
             }
         };

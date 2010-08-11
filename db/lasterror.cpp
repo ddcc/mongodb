@@ -15,7 +15,7 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 
 #include "../util/unittest.h"
 #include "../util/message.h"
@@ -28,8 +28,21 @@ namespace mongo {
 
     LastError LastError::noError;
     LastErrorHolder lastError;
-    mongo::mutex LastErrorHolder::_idsmutex;
+    mongo::mutex LastErrorHolder::_idsmutex("LastErrorHolder");
 
+    bool isShell = false;
+    void raiseError(int code , const char *msg) {
+        LastError *le = lastError.get();
+        if ( le == 0 ) {
+            /* might be intentional (non-user thread) */            
+            OCCASIONALLY DEV if( !isShell ) log() << "warning dev: lastError==0 won't report:" << msg << endl;
+        } else if ( le->disabled ) {
+            log() << "lastError disabled, can't report: " << code << ":" << msg << endl;
+        } else {
+            le->raiseError(code, msg);
+        }
+    }
+    
     void LastError::appendSelf( BSONObjBuilder &b ) {
         if ( !valid ) {
             b.appendNull( "err" );
@@ -44,7 +57,11 @@ namespace mongo {
             b.append( "code" , code );
         if ( updatedExisting != NotUpdate )
             b.appendBool( "updatedExisting", updatedExisting == True );
-        b.append( "n", nObjects );
+        if ( upsertedId.isSet() )
+            b.append( "upserted" , upsertedId );
+        if ( writebackId.isSet() )
+            b.append( "writeback" , writebackId );
+        b.appendNumber( "n", nObjects );
     }
 
     void LastErrorHolder::setID( int id ){
@@ -119,6 +136,13 @@ namespace mongo {
         
         remove( id );
     }
+
+    /** ok to call more than once. */
+    void LastErrorHolder::initThread() { 
+        if( _tl.get() ) return;
+        assert( _id.get() == 0 );
+        _tl.reset( new LastError() );
+    }
     
     void LastErrorHolder::reset( LastError * le ){
         int id = _id.get();
@@ -132,10 +156,10 @@ namespace mongo {
         status.time = time(0);
         status.lerr = le;
     }
-
+    
     void prepareErrForNewRequest( Message &m, LastError * err ) {
         // a killCursors message shouldn't affect last error
-        if ( m.data->operation() == dbKillCursors ) {
+        if ( m.operation() == dbKillCursors ) {
             err->disabled = true;
         } else {
             err->disabled = false;
@@ -143,11 +167,15 @@ namespace mongo {
         }        
     }
     
-    void LastErrorHolder::startRequest( Message& m ) {
-        int id = m.data->id & 0xFFFF0000;
-        setID( id );
+    LastError * LastErrorHolder::startRequest( Message& m , int clientId ) {
+
+        if ( clientId == 0 )
+            clientId = m.header()->id & 0xFFFF0000;
+        setID( clientId );
+
         LastError * le = _get( true );
         prepareErrForNewRequest( m, le );
+        return le;
     }
 
     void LastErrorHolder::startRequest( Message& m , LastError * connectionOwned ) {
@@ -156,6 +184,11 @@ namespace mongo {
             return;
         }
         startRequest(m);
+    }
+
+    void LastErrorHolder::disconnect( int clientId ){
+        if ( clientId )
+            remove(clientId);
     }
 
     struct LastErrorHolderTest : public UnitTest {

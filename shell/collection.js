@@ -1,5 +1,6 @@
-// collection.js
-
+// collection.js - DBCollection support in the mongo shell
+// db.colName is a DBCollection object
+// or db["colName"]
 
 if ( ( typeof  DBCollection ) == "undefined" ){
     DBCollection = function( mongo , db , shortName , fullName ){
@@ -26,39 +27,42 @@ DBCollection.prototype.getName = function(){
     return this._shortName;
 }
 
-DBCollection.prototype.help = function() {
+DBCollection.prototype.help = function () {
+    var shortName = this.getName();
     print("DBCollection help");
-    print("\tdb.foo.count()");
-    print("\tdb.foo.dataSize()");
-    print("\tdb.foo.distinct( key ) - eg. db.foo.distinct( 'x' )");
-    print("\tdb.foo.drop() drop the collection");
-    print("\tdb.foo.dropIndex(name)");
-    print("\tdb.foo.dropIndexes()");
-    print("\tdb.foo.ensureIndex(keypattern,options) - options should be an object with these possible fields: name, unique, dropDups");
-    print("\tdb.foo.reIndex()");
-    print("\tdb.foo.find( [query] , [fields]) - first parameter is an optional query filter. second parameter is optional set of fields to return.");
-    print("\t                                   e.g. db.foo.find( { x : 77 } , { name : 1 , x : 1 } )");
-    print("\tdb.foo.find(...).count()");
-    print("\tdb.foo.find(...).limit(n)");
-    print("\tdb.foo.find(...).skip(n)");
-    print("\tdb.foo.find(...).sort(...)");
-    print("\tdb.foo.findOne([query])");
-    print("\tdb.foo.findAndModify( { update : ... , remove : bool [, query: {}, sort: {}, 'new': false] } )");
-    print("\tdb.foo.getDB() get DB object associated with collection");
-    print("\tdb.foo.getIndexes()");
-    print("\tdb.foo.group( { key : ..., initial: ..., reduce : ...[, cond: ...] } )");
-    print("\tdb.foo.mapReduce( mapFunction , reduceFunction , <optional params> )");
-    print("\tdb.foo.remove(query)");
-    print("\tdb.foo.renameCollection( newName , <dropTarget> ) renames the collection.");
-    print("\tdb.foo.runCommand( name , <options> ) runs a db command with the given name where the 1st param is the colleciton name" );
-    print("\tdb.foo.save(obj)");
-    print("\tdb.foo.stats()");
-    print("\tdb.foo.storageSize() - includes free space allocated to this collection");
-    print("\tdb.foo.totalIndexSize() - size in bytes of all the indexes");
-    print("\tdb.foo.totalSize() - storage allocated for all data and indexes");
-    print("\tdb.foo.update(query, object[, upsert_bool, multi_bool])");
-    print("\tdb.foo.validate() - SLOW");
-    print("\tdb.foo.getShardVersion() - only for use with sharding");
+    print("\tdb." + shortName + ".find().help() - show DBCursor help");
+    print("\tdb." + shortName + ".count()");
+    print("\tdb." + shortName + ".dataSize()");
+    print("\tdb." + shortName + ".distinct( key ) - eg. db." + shortName + ".distinct( 'x' )");
+    print("\tdb." + shortName + ".drop() drop the collection");
+    print("\tdb." + shortName + ".dropIndex(name)");
+    print("\tdb." + shortName + ".dropIndexes()");
+    print("\tdb." + shortName + ".ensureIndex(keypattern,options) - options should be an object with these possible fields: name, unique, dropDups");
+    print("\tdb." + shortName + ".reIndex()");
+    print("\tdb." + shortName + ".find( [query] , [fields]) - first parameter is an optional query filter. second parameter is optional set of fields to return.");
+    print("\t                                   e.g. db." + shortName + ".find( { x : 77 } , { name : 1 , x : 1 } )");
+    print("\tdb." + shortName + ".find(...).count()");
+    print("\tdb." + shortName + ".find(...).limit(n)");
+    print("\tdb." + shortName + ".find(...).skip(n)");
+    print("\tdb." + shortName + ".find(...).sort(...)");
+    print("\tdb." + shortName + ".findOne([query])");
+    print("\tdb." + shortName + ".findAndModify( { update : ... , remove : bool [, query: {}, sort: {}, 'new': false] } )");
+    print("\tdb." + shortName + ".getDB() get DB object associated with collection");
+    print("\tdb." + shortName + ".getIndexes()");
+    print("\tdb." + shortName + ".group( { key : ..., initial: ..., reduce : ...[, cond: ...] } )");
+    print("\tdb." + shortName + ".mapReduce( mapFunction , reduceFunction , <optional params> )");
+    print("\tdb." + shortName + ".remove(query)");
+    print("\tdb." + shortName + ".renameCollection( newName , <dropTarget> ) renames the collection.");
+    print("\tdb." + shortName + ".runCommand( name , <options> ) runs a db command with the given name where the first param is the collection name");
+    print("\tdb." + shortName + ".save(obj)");
+    print("\tdb." + shortName + ".stats()");
+    print("\tdb." + shortName + ".storageSize() - includes free space allocated to this collection");
+    print("\tdb." + shortName + ".totalIndexSize() - size in bytes of all the indexes");
+    print("\tdb." + shortName + ".totalSize() - storage allocated for all data and indexes");
+    print("\tdb." + shortName + ".update(query, object[, upsert_bool, multi_bool])");
+    print("\tdb." + shortName + ".validate() - SLOW");
+    print("\tdb." + shortName + ".getShardVersion() - only for use with sharding");
+    return __magicNoPrint;
 }
 
 DBCollection.prototype.getFullName = function(){
@@ -333,7 +337,7 @@ DBCollection.prototype.findAndModify = function(args){
     var ret = this._db.runCommand( cmd );
     if ( ! ret.ok ){
         if (ret.errmsg == "No matching object found"){
-            return {};
+            return null;
         }
         throw "findAndModifyFailed failed: " + tojson( ret.errmsg );
     }
@@ -351,8 +355,10 @@ DBCollection.prototype.validate = function() {
 
     res.valid = false;
 
-    if ( res.result ){
-        var str = "-" + tojson( res.result );
+    var raw = res.result || res.raw;
+
+    if ( raw ){
+        var str = "-" + tojson( raw );
         res.valid = ! ( str.match( /exception/ ) || str.match( /corrupt/ ) );
 
         var p = /lastExtentSize:(\d+)/;
@@ -572,6 +578,3 @@ DBCollection.prototype.toString = function(){
 DBCollection.prototype.tojson = DBCollection.prototype.toString;
 
 DBCollection.prototype.shellPrint = DBCollection.prototype.toString;
-
-
-

@@ -18,7 +18,7 @@
 
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "jsobj.h"
 
 namespace mongo {
@@ -35,6 +35,7 @@ namespace mongo {
     */
     BSONObj fromjson(const string &str);
 
-    BSONObj fromjson(const char *str);
+    /** len will be size of JSON object in text chars. */
+    BSONObj fromjson(const char *str, int* len=NULL);
 
 } // namespace mongo

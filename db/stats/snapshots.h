@@ -17,7 +17,7 @@
 */
 
 #pragma once
-#include "../../stdafx.h"
+#include "../../pch.h"
 #include "../jsobj.h"
 #include "top.h"
 #include "../../util/background.h"
@@ -103,6 +103,7 @@ namespace mongo {
 
     class SnapshotThread : public BackgroundJob {
     public:
+        string name() { return "snapshot"; }
         void run();
     };
     

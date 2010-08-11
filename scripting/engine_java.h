@@ -19,10 +19,9 @@
 
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 
 #include <jni.h>
-#include <boost/thread/tss.hpp>
 #include <errno.h>
 #include <sys/types.h>
 
