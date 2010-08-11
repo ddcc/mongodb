@@ -1,5 +1,5 @@
-
 __quiet = false;
+__magicNoPrint = { __magicNoPrint : 1111 }
 
 chatty = function(s){
     if ( ! __quiet )
@@ -16,9 +16,11 @@ friendlyEqual = function( a , b ){
     return false;
 }
 
-
-doassert = function( msg ){
-    print( "assert: " + msg );
+doassert = function (msg) {
+    if (msg.indexOf("assert") == 0)
+        print(msg);
+    else
+        print("assert: " + msg);
     throw msg;
 }
 
@@ -28,7 +30,11 @@ assert = function( b , msg ){
     if ( b )
         return;
     
-    doassert( "assert failed : " + msg );
+    doassert( msg == undefined ? "assert failed" : "assert failed : " + msg );
+}
+
+assert.automsg = function( b ) {
+    assert( eval( b ), b );
 }
 
 assert._debug = false;
@@ -45,6 +51,10 @@ assert.eq = function( a , b , msg ){
     doassert( "[" + tojson( a ) + "] != [" + tojson( b ) + "] are not equal : " + msg );
 }
 
+assert.eq.automsg = function( a, b ) {
+    assert.eq( eval( a ), eval( b ), "[" + a + "] != [" + b + "]" );
+}
+
 assert.neq = function( a , b , msg ){
     if ( assert._debug && msg ) print( "in assert for: " + msg );
     if ( a != b )
@@ -53,6 +63,30 @@ assert.neq = function( a , b , msg ){
     doassert( "[" + a + "] != [" + b + "] are equal : " + msg );
 }
 
+assert.repeat = function( f, msg, timeout, interval ) {
+    if ( assert._debug && msg ) print( "in assert for: " + msg );
+
+    var start = new Date();
+    timeout = timeout || 30000;
+    interval = interval || 200;
+    var last;
+    while( 1 ) {
+        
+        if ( typeof( f ) == "string" ){
+            if ( eval( f ) )
+                return;
+        }
+        else {
+            if ( f() )
+                return;
+        }
+        
+        if ( ( new Date() ).getTime() - start.getTime() > timeout )
+            break;
+        sleep( interval );
+    }
+}
+    
 assert.soon = function( f, msg, timeout, interval ) {
     if ( assert._debug && msg ) print( "in assert for: " + msg );
 
@@ -87,6 +121,10 @@ assert.throws = function( func , params , msg ){
     }
 
     doassert( "did not throw exception: " + msg );
+}
+
+assert.throws.automsg = function( func, params ) {
+    assert.throws( func, params, func.toString() );
 }
 
 assert.commandWorked = function( res , msg ){
@@ -131,6 +169,23 @@ assert.gt = function( a , b , msg ){
         return;
     doassert( a + " is not greater than " + b + " : " + msg );
 }
+
+assert.lte = function( a , b , msg ){
+    if ( assert._debug && msg ) print( "in assert for: " + msg );
+
+    if ( a <= b )
+        return;
+    doassert( a + " is not less than or eq " + b + " : " + msg );
+}
+
+assert.gte = function( a , b , msg ){
+    if ( assert._debug && msg ) print( "in assert for: " + msg );
+
+    if ( a >= b )
+        return;
+    doassert( a + " is not greater than or eq " + b + " : " + msg );
+}
+
 
 assert.close = function( a , b , msg , places ){
     if (places === undefined) {
@@ -304,6 +359,14 @@ Object.keySet = function( o ) {
     return ret;
 }
 
+if ( ! NumberLong.prototype ) {
+    NumberLong.prototype = {}
+}
+
+NumberLong.prototype.tojson = function() {
+    return this.toString();
+}
+
 if ( ! ObjectId.prototype )
     ObjectId.prototype = {}
 
@@ -316,6 +379,14 @@ ObjectId.prototype.tojson = function(){
 }
 
 ObjectId.prototype.isObjectId = true;
+
+ObjectId.prototype.getTimestamp = function(){
+    return new Date(parseInt(this.toString().slice(0,8), 16)*1000);
+}
+
+ObjectId.prototype.equals = function( other){
+    return this.str == other.str;
+}
 
 if ( typeof( DBPointer ) != "undefined" ){
     DBPointer.prototype.fetch = function(){
@@ -366,12 +437,19 @@ else {
 }
 
 if ( typeof( BinData ) != "undefined" ){
-    BinData.prototype.tojson = function(){
-        return "BinData type: " + this.type + " len: " + this.len;
+    BinData.prototype.tojson = function () {
+        //return "BinData type: " + this.type + " len: " + this.len;
+        return this.toString();
     }
 }
 else {
-    print( "warning: no BinData" );
+    print( "warning: no BinData class" );
+}
+
+if ( typeof( UUID ) != "undefined" ){
+    UUID.prototype.tojson = function () {
+        return this.toString();
+    }
 }
 
 if ( typeof _threadInject != "undefined" ){
@@ -489,7 +567,9 @@ if ( typeof _threadInject != "undefined" ){
                                    "jstests/indexb.js",
                                    "jstests/profile1.js",
                                    "jstests/mr3.js",
-                                   "jstests/apitest_db.js"] );
+                                   "jstests/indexh.js",
+                                   "jstests/apitest_db.js",
+                                   "jstests/evalb.js"] );
         
         // some tests can't be run in parallel with each other
         var serialTestsArr = [ "jstests/fsync.js",
@@ -505,8 +585,8 @@ if ( typeof _threadInject != "undefined" ){
         files.forEach(
                       function(x) {
                       
-                      if ( /_runner/.test(x.name) ||
-                          /_lodeRunner/.test(x.name) ||
+                      if ( ( /[\/\\]_/.test(x.name) ) ||
+                          ( ! /\.js$/.test(x.name ) ) ||
                           ( x.name in skipTests ) ||
                           ( x.name in serialTests ) ||
                           ! /\.js$/.test(x.name ) ){ 
@@ -587,6 +667,10 @@ if ( typeof _threadInject != "undefined" ){
     }
 }
 
+tojsononeline = function( x ){
+    return tojson( x , " " , true );
+}
+
 tojson = function( x, indent , nolint ){
     if ( x === null )
         return "null";
@@ -597,24 +681,34 @@ tojson = function( x, indent , nolint ){
     if (!indent) 
         indent = "";
 
-    switch ( typeof x ){
-        
+    switch ( typeof x ) {
     case "string": {
         var s = "\"";
         for ( var i=0; i<x.length; i++ ){
-            if ( x[i] == '"' ){
-                s += "\\\"";
+            switch (x[i]){
+                case '"': s += '\\"'; break;
+                case '\\': s += '\\\\'; break;
+                case '\b': s += '\\b'; break;
+                case '\f': s += '\\f'; break;
+                case '\n': s += '\\n'; break;
+                case '\r': s += '\\r'; break;
+                case '\t': s += '\\t'; break;
+
+                default: {
+                    var code = x.charCodeAt(i);
+                    if (code < 0x20){
+                        s += (code < 0x10 ? '\\u000' : '\\u00') + code.toString(16);
+                    } else {
+                        s += x[i];
+                    }
+                }
             }
-            else
-                s += x[i];
         }
         return s + "\"";
     }
-        
     case "number": 
     case "boolean":
         return "" + x;
-            
     case "object":{
         var s = tojsonObject( x, indent , nolint );
         if ( ( nolint == null || nolint == true ) && s.length < 80 && ( indent == null || indent.length == 0 ) ){
@@ -622,11 +716,8 @@ tojson = function( x, indent , nolint ){
         }
         return s;
     }
-        
     case "function":
         return x.toString();
-        
-
     default:
         throw "tojson can't handle type " + ( typeof x );
     }
@@ -646,7 +737,7 @@ tojsonObject = function( x, indent , nolint ){
         return x.tojson(indent,nolint);
     }
     
-    if ( typeof( x.constructor.tojson ) == "function" && x.constructor.tojson != tojson ) {
+    if ( x.constructor && typeof( x.constructor.tojson ) == "function" && x.constructor.tojson != tojson ) {
         return x.constructor.tojson( x, indent , nolint );
     }
 
@@ -710,6 +801,10 @@ printjson = function(x){
     print( tojson( x ) );
 }
 
+printjsononeline = function(x){
+    print( tojsononeline( x ) );
+}
+
 shellPrintHelper = function( x ){
 
     if ( typeof( x ) == "undefined" ){
@@ -723,6 +818,9 @@ shellPrintHelper = function( x ){
         return;
     }
     
+    if ( x == __magicNoPrint )
+        return;
+
     if ( x == null ){
         print( "null" );
         return;
@@ -742,6 +840,13 @@ shellPrintHelper = function( x ){
         print( tojson( x ) );
 }
 
+shellAutocomplete = function( prefix ){
+    var a = [];
+    //a.push( prefix + "z" )
+    //a.push( prefix + "y" )
+    __autocomplete__ = a;
+}
+
 shellHelper = function( command , rest , shouldPrint ){
     command = command.trim();
     var args = rest.trim().replace(/;$/,"").split( "\s+" );
@@ -754,20 +859,6 @@ shellHelper = function( command , rest , shouldPrint ){
         shellPrintHelper( res );
     }
     return res;
-}
-
-help = shellHelper.help = function(){
-    print( "HELP" );
-    print( "\t" + "show dbs                     show database names");
-    print( "\t" + "show collections             show collections in current database");
-    print( "\t" + "show users                   show users in current database");
-    print( "\t" + "show profile                 show most recent system.profile entries with time >= 1ms");
-    print( "\t" + "use <db name>                set curent database to <db name>" );
-    print( "\t" + "db.help()                    help on DB methods");
-    print( "\t" + "db.foo.help()                help on collection methods");
-    print( "\t" + "db.foo.find()                list objects in collection foo" );
-    print( "\t" + "db.foo.find( { a : 1 } )     list objects in foo where a == 1" );
-    print( "\t" + "it                           result of the last line evaluated; use to further iterate");
 }
 
 shellHelper.use = function( dbname ){
@@ -884,6 +975,7 @@ Map.prototype.values = function(){
 
 if ( typeof( gc ) == "undefined" ){
     gc = function(){
+        print( "warning: using noop gc()" );
     }
 }
    
@@ -952,4 +1044,109 @@ Geo.distance = function( a , b ){
 
     return Math.sqrt( Math.pow( by - ay , 2 ) + 
                       Math.pow( bx - ax , 2 ) );
+}
+
+rs = function () { return "try rs.help()"; }
+
+rs.help = function () {
+    print("\trs.status()                     { replSetGetStatus : 1 } checks repl set status");
+    print("\trs.initiate()                   { replSetInitiate : null } initiates set with default settings");
+    print("\trs.initiate(cfg)                { replSetInitiate : cfg } initiates set with configuration cfg");
+    print("\trs.add(hostportstr)             add a new member to the set with default attributes");
+    print("\trs.add(membercfgobj)            add a new member to the set with extra attributes");
+    print("\trs.addArb(hostportstr)          add a new member which is arbiterOnly:true");
+    print("\trs.stepDown()                   step down as primary (momentarily)");
+    print("\trs.conf()                       return configuration from local.system.replset");
+    print("\trs.slaveOk()                    shorthand for db.getMongo().setSlaveOk()");
+    print();
+    print("\tdb.isMaster()                   check who is primary");
+    print();
+    print("\tsee also http://<mongod_host>:28017/_replSet for additional diagnostic info");
+}
+rs.slaveOk = function () { return db.getMongo().setSlaveOk(); }
+rs.status = function () { return db._adminCommand("replSetGetStatus"); }
+rs.isMaster = function () { return db.isMaster(); }
+rs.initiate = function (c) { return db._adminCommand({ replSetInitiate: c }); }
+rs.add = function (hostport, arb) {
+    var cfg = hostport;
+
+    var local = db.getSisterDB("local");
+    assert(local.system.replset.count() <= 1, "error: local.system.replset has unexpected contents");
+    var c = local.system.replset.findOne();
+    assert(c, "no config object retrievable from local.system.replset");
+    c.version++;
+    var max = 0;
+    for (var i in c.members)
+        if (c.members[i]._id > max) max = c.members[i]._id;
+    if (isString(hostport)) {
+        cfg = { _id: max + 1, host: hostport };
+        if (arb)
+            cfg.arbiterOnly = true;
+    }
+    c.members.push(cfg);
+    return db._adminCommand({ replSetReconfig: c });
+}
+rs.stepDown = function () { return db._adminCommand({ replSetStepDown:true}); }
+rs.addArb = function (hn) { return this.add(hn, true); }
+rs.conf = function () { return db.getSisterDB("local").system.replset.findOne(); }
+
+help = shellHelper.help = function (x) {
+    if (x == "connect") {
+        print("\nNormally one specifies the server on the mongo shell command line.  Run mongo --help to see those options.");
+        print("Additional connections may be opened:\n");
+        print("    var x = new Mongo('host[:port]');");
+        print("    var mydb = x.getDB('mydb');");
+        print("  or");
+        print("    var mydb = connect('host[:port]/mydb');");
+        print("\nNote: the REPL prompt only auto-reports getLastError() for the shell command line connection.\n");
+        return;
+    }
+    if (x == "misc") {
+        print("\tb = new BinData(subtype,base64str)  create a BSON BinData value");
+        print("\tb.subtype()                         the BinData subtype (0..255)");
+        print("\tb.length()                          length of the BinData data in bytes");
+        print("\tb.hex()                             the data as a hex encoded string");
+        print("\tb.base64()                          the data as a base 64 encoded string");
+        print("\tb.toString()");
+        return;
+    }
+    if (x == "admin") {
+        print("\tls([path])                      list files");
+        print("\tpwd()                           returns current directory");
+        print("\tlistFiles([path])               returns file list");
+        print("\thostname()                      returns name of this host");
+        print("\tcat(fname)                      returns contents of text file as a string");
+        print("\tremoveFile(f)                   delete a file");
+        print("\tload(jsfilename)                load and execute a .js file");
+        print("\trun(program[, args...])         spawn a program and wait for its completion");
+        print("\tsleep(m)                        sleep m milliseconds");
+        print("\tgetMemInfo()                    diagnostic");
+        return;
+    }
+    if (x == "test") {
+        print("\tstartMongodEmpty(args)        DELETES DATA DIR and then starts mongod");
+        print("\t                              returns a connection to the new server");
+        print("\tstartMongodTest()             DELETES DATA DIR");
+        print("\t                              automatically picks port #s starting at 27000 and increasing");
+        print("\t                              or you can specify the port as the first arg");
+        print("\t                              dir is /data/db/<port>/ if not specified as the 2nd arg");
+        print("\t                              returns a connection to the new server");
+        return;
+    }
+    print("\t" + "db.help()                    help on db methods");
+    print("\t" + "db.mycoll.help()             help on collection methods");
+    print("\t" + "rs.help()                    help on replica set methods");
+    print("\t" + "help connect                 connecting to a db help");
+    print("\t" + "help admin                   administrative help");
+    print("\t" + "help misc                    misc things to know");
+    print();
+    print("\t" + "show dbs                     show database names");
+    print("\t" + "show collections             show collections in current database");
+    print("\t" + "show users                   show users in current database");
+    print("\t" + "show profile                 show most recent system.profile entries with time >= 1ms");
+    print("\t" + "use <db_name>                set current database");
+    print("\t" + "db.foo.find()                list objects in collection foo");
+    print("\t" + "db.foo.find( { a : 1 } )     list objects in foo where a == 1");
+    print("\t" + "it                           result of the last line evaluated; use to further iterate");
+    print("\t" + "exit                         quit the mongo shell");
 }

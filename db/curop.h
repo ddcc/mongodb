@@ -20,11 +20,12 @@
 
 #include "namespace.h"
 #include "client.h"
-#include "../util/atomic_int.h"
+#include "../bson/util/atomic_int.h"
 #include "db.h"
 
 namespace mongo { 
 
+    /* lifespan is different than CurOp because of recursives with DBDirectClient */
     class OpDebug {
     public:
         StringBuilder str;
@@ -55,8 +56,7 @@ namespace mongo {
         int _dbprofile; // 0=off, 1=slow, 2=all
         AtomicUInt _opNum;
         char _ns[Namespace::MaxNsLen+2];
-        struct sockaddr_in _remote;
-        
+        struct SockAddr _remote;
         char _queryBuf[256];
         
         void resetQuery(int x=0) { *((int *)_queryBuf) = x; }
@@ -81,11 +81,12 @@ namespace mongo {
         }
 
     public:
-
-        bool haveQuery() const { return *((int *) _queryBuf) != 0; }
+        
+        int querySize() const { return *((int *) _queryBuf); }
+        bool haveQuery() const { return querySize() != 0; }
 
         BSONObj query() {
-            if( *((int *) _queryBuf) == 1 ) { 
+            if( querySize() == 1 ) { 
                 return _tooBig;
             }
             BSONObj o(_queryBuf);
@@ -119,7 +120,7 @@ namespace mongo {
             resetQuery();            
         }
         
-        void reset( const sockaddr_in & remote, int op ) { 
+        void reset( const SockAddr & remote, int op ) {
             reset();
             _remote = remote;
             _op = op;
@@ -206,6 +207,10 @@ namespace mongo {
             memcpy(_queryBuf, query.objdata(), query.objsize());
         }
 
+        Client * getClient() const { 
+            return _client;
+        }
+
         CurOp( Client * client , CurOp * wrapped = 0 ) { 
             _client = client;
             _wrapped = wrapped;
@@ -237,28 +242,32 @@ namespace mongo {
             return infoNoauth();
         }
         
-        BSONObj infoNoauth();
+        BSONObj infoNoauth( int attempt = 0 );
 
-        string getRemoteString(){
-            stringstream ss;
-            ss << inet_ntoa( _remote.sin_addr ) << ":" << ntohs( _remote.sin_port );
-            return ss.str();
+        string getRemoteString( bool includePort = true ){
+            return _remote.toString(includePort);
         }
 
         ProgressMeter& setMessage( const char * msg , long long progressMeterTotal = 0 , int secondsBetween = 3 ){
-            _message = msg;
+
             if ( progressMeterTotal ){
-                assert( ! _progressMeter.isActive() );
+                if ( _progressMeter.isActive() ){
+                    cout << "about to assert, old _message: " << _message << " new message:" << msg << endl;
+                    assert( ! _progressMeter.isActive() );
+                }
                 _progressMeter.reset( progressMeterTotal , secondsBetween );
             }
             else {
                 _progressMeter.finished();
             }
+            
+            _message = msg;
+            
             return _progressMeter;
         }
-
-        string getMessage() const { return _message; }
-        ProgressMeter getProgressMeter() { return _progressMeter; }
+        
+        string getMessage() const { return _message.toString(); }
+        ProgressMeter& getProgressMeter() { return _progressMeter; }
 
         friend class Client;
     };

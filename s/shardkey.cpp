@@ -16,219 +16,91 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "chunk.h"
 #include "../db/jsobj.h"
 #include "../util/unittest.h"
 
-/**
-   TODO: this only works with numbers right now
-         this is very temporary, need to make work with anything
-*/
-
 namespace mongo {
-    void minForPat(BSONObjBuilder& out, const BSONObj& pat){
-        BSONElement e = pat.firstElement();
-        if (e.type() == Object){
-            BSONObjBuilder sub;
-            minForPat(sub, e.embeddedObject());
-            out.append(e.fieldName(), sub.obj());
-        } else {
-            out.appendMinKey(e.fieldName());
-        }
-    }
-
-    void maxForPat(BSONObjBuilder& out, const BSONObj& pat){
-        BSONElement e = pat.firstElement();
-        if (e.type() == Object){
-            BSONObjBuilder sub;
-            maxForPat(sub, e.embeddedObject());
-            out.append(e.fieldName(), sub.obj());
-        } else {
-            out.appendMaxKey(e.fieldName());
-        }
-    }
 
     ShardKeyPattern::ShardKeyPattern( BSONObj p ) : pattern( p.getOwned() ) {
         pattern.getFieldNames(patternfields);
 
         BSONObjBuilder min;
-        minForPat(min, pattern);
-        gMin = min.obj();
-
         BSONObjBuilder max;
-        maxForPat(max, pattern);
+
+        BSONObjIterator it(p);
+        while (it.more()){
+            BSONElement e (it.next());
+            min.appendMinKey(e.fieldName());
+            max.appendMaxKey(e.fieldName());
+        }
+        
+        gMin = min.obj();
         gMax = max.obj();
     }
 
-    int ShardKeyPattern::compare( const BSONObj& lObject , const BSONObj& rObject ) {
+    int ShardKeyPattern::compare( const BSONObj& lObject , const BSONObj& rObject ) const {
         BSONObj L = extractKey(lObject);
-        uassert( 10198 , "left object doesn't have shard key", !L.isEmpty());
+        uassert( 10198 , "left object doesn't have full shard key", L.nFields() == (int)patternfields.size());
         BSONObj R = extractKey(rObject);
-        uassert( 10199 , "right object doesn't have shard key", !R.isEmpty());
+        uassert( 10199 , "right object doesn't have full shard key", R.nFields() == (int)patternfields.size());
         return L.woCompare(R);
     }
 
-    bool ShardKeyPattern::hasShardKey( const BSONObj& obj ) {
+    bool ShardKeyPattern::hasShardKey( const BSONObj& obj ) const {
         /* this is written s.t. if obj has lots of fields, if the shard key fields are early, 
            it is fast.  so a bit more work to try to be semi-fast.
            */
 
-        for(set<string>::iterator it = patternfields.begin(); it != patternfields.end(); ++it){
+        for(set<string>::const_iterator it = patternfields.begin(); it != patternfields.end(); ++it){
             if(obj.getFieldDotted(it->c_str()).eoo())
                 return false;
         }
         return true;
     }
 
-    /** @return true if shard s is relevant for query q.
-
-    Example:
-     q:     { x : 3 }
-     *this: { x : 1 }
-     s:     x:2..x:7
-       -> true
-    */
-
-    bool ShardKeyPattern::relevant(const BSONObj& query, const BSONObj& L, const BSONObj& R) { 
-        BSONObj q = extractKey( query );
-        if( q.isEmpty() )
-            return true;
-
-        BSONElement e = q.firstElement();
-        assert( !e.eoo() ) ;
-
-        if( e.type() == RegEx ) {
-            /* todo: if starts with ^, we could be smarter here */
-            return true;
+    bool ShardKeyPattern::isPrefixOf( const BSONObj& otherPattern ) const {
+        BSONObjIterator a( pattern );
+        BSONObjIterator b( otherPattern );
+        
+        while ( a.more() && b.more() ){
+            BSONElement x = a.next();
+            BSONElement y = b.next();
+            if ( strcmp( x.fieldName() , y.fieldName() ) )
+                return false;
         }
-
-        if( e.type() == Object ) { 
-            BSONObjIterator j(e.embeddedObject());
-            BSONElement LE = L.firstElement(); // todo compound keys
-            BSONElement RE = R.firstElement(); // todo compound keys
-            while( 1 ) { 
-                BSONElement f = j.next();
-                if( f.eoo() ) 
-                    break;
-                int op = f.getGtLtOp();
-                switch( op ) { 
-                    case BSONObj::LT:
-                        if( f.woCompare(LE, false) <= 0 )
-                            return false;
-                        break;
-                    case BSONObj::LTE:
-                        if( f.woCompare(LE, false) < 0 )
-                            return false;
-                        break;
-                    case BSONObj::GT:
-                    case BSONObj::GTE:
-                        if( f.woCompare(RE, false) >= 0 )
-                            return false;
-                        break;
-                    case BSONObj::opIN:
-                    case BSONObj::NE:
-                    case BSONObj::opSIZE:
-                        massert( 10423 , "not implemented yet relevant()", false);
-                    case BSONObj::Equality:
-                        goto normal;
-                    default:
-                        massert( 10424 , "bad operator in relevant()?", false);
-                }
-            }
-            return true;
-        }
-normal:
-        return L.woCompare(q) <= 0 && R.woCompare(q) > 0;
+        
+        return ! a.more();
     }
-
-    bool ShardKeyPattern::relevantForQuery( const BSONObj& query , Chunk * chunk ){
-        massert( 10425 , "not done for compound patterns", patternfields.size() == 1);
-
-        bool rel = relevant(query, chunk->getMin(), chunk->getMax());
-        if( ! hasShardKey( query ) )
-            assert(rel);
-
-        return rel;
-    }
-
-    /**
-      returns a query that filters results only for the range desired, i.e. returns 
-        { $gte : keyval(min), $lt : keyval(max) }
-    */
-    void ShardKeyPattern::getFilter( BSONObjBuilder& b , const BSONObj& min, const BSONObj& max ){
-        massert( 10426 , "not done for compound patterns", patternfields.size() == 1);
-        BSONObjBuilder temp;
-        temp.appendAs( extractKey(min).firstElement(), "$gte" );
-        temp.appendAs( extractKey(max).firstElement(), "$lt" );
-
-        b.append( patternfields.begin()->c_str(), temp.obj() );
-    }    
-
-    /**
-      Example
-      sort:   { ts: -1 }
-      *this:  { ts:1 }
-      -> -1
-
-      @return
-      0 if sort either doesn't have all the fields or has extra fields
-      < 0 if sort is descending
-      > 1 if sort is ascending
-    */
-    int ShardKeyPattern::canOrder( const BSONObj& sort ){
-        // e.g.:
-        //   sort { a : 1 , b : -1 }
-        //   pattern { a : -1, b : 1, c : 1 }
-        //     -> -1
-
-        int dir = 0;
-
-        BSONObjIterator s(sort);
-        BSONObjIterator p(pattern);
-        while( 1 ) {
-            BSONElement e = s.next();
-            if( e.eoo() )
-                break;
-            if( !p.moreWithEOO() ) 
-                return 0;
-            BSONElement ep = p.next();
-            bool same = e == ep;
-            if( !same ) {
-                if( strcmp(e.fieldName(), ep.fieldName()) != 0 )
-                    return 0;
-                // same name, but opposite direction
-                if( dir == -1 ) 
-                    ;  // ok
-                else if( dir == 1 )
-                    return 0; // wrong direction for a 2nd field
-                else // dir == 0, initial pass
-                    dir = -1;
-            }
-            else { 
-                // fields are the same
-                if( dir == -1 ) 
-                    return 0; // wrong direction
-                dir = 1;
-            }
-        }
-
-        return dir;
-    }
-
+    
     string ShardKeyPattern::toString() const {
         return pattern.toString();
     }
-
+    
     /* things to test for compound : 
-       x hasshardkey 
-       _ getFilter (hard?)
-       _ relevantForQuery
-       x canOrder
        \ middle (deprecating?)
     */
     class ShardKeyUnitTest : public UnitTest {
     public:
+        
+        void testIsPrefixOf(){
+            {
+                ShardKeyPattern k( BSON( "x" << 1 ) );
+                assert( ! k.isPrefixOf( BSON( "a" << 1 ) ) );
+                assert( k.isPrefixOf( BSON( "x" << 1 ) ) );
+                assert( k.isPrefixOf( BSON( "x" << 1 << "a" << 1 ) ) );
+                assert( ! k.isPrefixOf( BSON( "a" << 1 << "x" << 1 ) ) );
+            }
+            { 
+                ShardKeyPattern k( BSON( "x" << 1 << "y" << 1 ) );
+                assert( ! k.isPrefixOf( BSON( "x" << 1 ) ) );
+                assert( ! k.isPrefixOf( BSON( "x" << 1 << "z" << 1 ) ) );
+                assert( k.isPrefixOf( BSON( "x" << 1 << "y" << 1 ) ) );
+                assert( k.isPrefixOf( BSON( "x" << 1 << "y" << 1 << "z" << 1 ) ) );
+            }
+        }
+        
         void hasshardkeytest() { 
             BSONObj x = fromjson("{ zid : \"abcdefg\", num: 1.0, name: \"eliot\" }");
             ShardKeyPattern k( BSON( "num" << 1 ) );
@@ -244,40 +116,13 @@ normal:
             }
 
         }
-        void rfq() {
-            ShardKeyPattern k( BSON( "key" << 1 ) );
-            BSONObj q = BSON( "key" << 3 );
-            Chunk c(0);
-            BSONObj z = fromjson("{ ns : \"alleyinsider.fs.chunks\" , min : {key:2} , max : {key:20} , server : \"localhost:30001\" }");
-            c.unserialize(z);
-            assert( k.relevantForQuery(q, &c) );
-            assert( k.relevantForQuery(fromjson("{foo:9,key:4}"), &c) );
-            assert( !k.relevantForQuery(fromjson("{foo:9,key:43}"), &c) );
-            assert( k.relevantForQuery(fromjson("{foo:9,key:{$gt:10}}"), &c) );
-            assert( !k.relevantForQuery(fromjson("{foo:9,key:{$gt:22}}"), &c) );
-            assert( k.relevantForQuery(fromjson("{foo:9}"), &c) );
-        }
-        void getfilt() { 
-            ShardKeyPattern k( BSON( "key" << 1 ) );
-            BSONObjBuilder b;
-            k.getFilter(b, fromjson("{z:3,key:30}"), fromjson("{key:90}"));
-            BSONObj x = fromjson("{ key: { $gte: 30, $lt: 90 } }");
-            assert( x.woEqual(b.obj()) );
-        }
-        void testCanOrder() { 
-            ShardKeyPattern k( fromjson("{a:1,b:-1,c:1}") );
-            assert( k.canOrder( fromjson("{a:1}") ) == 1 );
-            assert( k.canOrder( fromjson("{a:-1}") ) == -1 );
-            assert( k.canOrder( fromjson("{a:1,b:-1,c:1}") ) == 1 );
-            assert( k.canOrder( fromjson("{a:1,b:1}") ) == 0 );
-            assert( k.canOrder( fromjson("{a:-1,b:1}") ) == -1 );
-        }
-        void extractkeytest() { 
-            ShardKeyPattern k( fromjson("{a:1,b:-1,c:1}") );
 
-            BSONObj x = fromjson("{a:1,b:2,c:3}");
-            assert( k.extractKey( fromjson("{a:1,b:2,c:3}") ).woEqual(x) );
-            assert( k.extractKey( fromjson("{b:2,c:3,a:1}") ).woEqual(x) );
+        void extractkeytest() { 
+            ShardKeyPattern k( fromjson("{a:1,'sub.b':-1,'sub.c':1}") );
+
+            BSONObj x = fromjson("{a:1,'sub.b':2,'sub.c':3}");
+            assert( k.extractKey( fromjson("{a:1,sub:{b:2,c:3}}") ).woEqual(x) );
+            assert( k.extractKey( fromjson("{sub:{b:2,c:3},a:1}") ).woEqual(x) );
         }
         void run(){
             extractkeytest();
@@ -305,15 +150,11 @@ normal:
             BSONObj b = BSON( "key" << 999 );
 
             assert( k.compare(a,b) < 0 );
-
-            assert( k.canOrder( fromjson("{key:1}") ) == 1 );
-            assert( k.canOrder( fromjson("{zz:1}") ) == 0 );
-            assert( k.canOrder( fromjson("{key:-1}") ) == -1 );
             
-            testCanOrder();
-            getfilt();
-            rfq();
+            testIsPrefixOf();
             // add middle multitype tests
+
+            log(1) << "shardKeyTest passed" << endl;
         }
     } shardKeyTest;
     

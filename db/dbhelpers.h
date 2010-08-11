@@ -1,4 +1,8 @@
-// dbhelpers.h
+/* @file dbhelpers.h
+
+   db helpers are helper functions and classes that let us easily manipulate the local
+   database instance in-proc.
+*/
 
 /**
 *    Copyright (C) 2008 10gen Inc.
@@ -16,31 +20,29 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-/* db helpers are helper functions and classes that let us easily manipulate the local
-   database instance.
-*/
-
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "client.h"
 #include "db.h"
 
 namespace mongo {
+
+    const BSONObj reverseNaturalObj = BSON( "$natural" << -1 );
 
     class Cursor;
     class CoveredIndexMatcher;
 
     class CursorIterator {
     public:
-        CursorIterator( auto_ptr<Cursor> c , BSONObj filter = BSONObj() );
+        CursorIterator( shared_ptr<Cursor> c , BSONObj filter = BSONObj() );
         BSONObj next();
         bool hasNext();
 
     private:
         void _advance();
 
-        auto_ptr<Cursor> _cursor;
+        shared_ptr<Cursor> _cursor;
         auto_ptr<CoveredIndexMatcher> _matcher;
         BSONObj _o;
     };
@@ -66,13 +68,16 @@ namespace mongo {
         /* fetch a single object from collection ns that matches query.
            set your db SavedContext first.
 
+           @param query - the query to perform.  note this is the low level portion of query so "orderby : ..." 
+                          won't work.
+
            @param requireIndex if true, complain if no index for the query.  a way to guard against
            writing a slow query.
 
            @return true if object found
         */
-        static bool findOne(const char *ns, BSONObj query, BSONObj& result, bool requireIndex = false);
-        
+        static bool findOne(const char *ns, const BSONObj &query, BSONObj& result, bool requireIndex = false);
+        static DiskLoc findOne(const char *ns, const BSONObj &query, bool requireIndex);        
 
         /**
          * @param foundIndex if passed in will be set to 1 if ns and index found
@@ -81,18 +86,47 @@ namespace mongo {
         static bool findById(Client&, const char *ns, BSONObj query, BSONObj& result , 
                              bool * nsFound = 0 , bool * indexFound = 0 );
 
+        /* uasserts if no _id index. 
+           @return null loc if not found */
+        static DiskLoc findById(NamespaceDetails *d, BSONObj query);
+
         static auto_ptr<CursorIterator> find( const char *ns , BSONObj query = BSONObj() , bool requireIndex = false );
 
-        /* Get/put the first object from a collection.  Generally only useful if the collection
-           only ever has a single object -- which is a "singleton collection".
+        /** Get/put the first (or last) object from a collection.  Generally only useful if the collection
+            only ever has a single object -- which is a "singleton collection".
 
-		   You do not need to set the database before calling.
-		   
-		   Returns: true if object exists.
+            You do not need to set the database (Context) before calling.
+
+            @return true if object exists.
         */
         static bool getSingleton(const char *ns, BSONObj& result);
         static void putSingleton(const char *ns, BSONObj obj);
+        static void putSingletonGod(const char *ns, BSONObj obj, bool logTheOp);
+        static bool getFirst(const char *ns, BSONObj& result) { return getSingleton(ns, result); }
+        static bool getLast(const char *ns, BSONObj& result); // get last object int he collection; e.g. {$natural : -1}        
 
+        /**
+         * you have to lock
+         * you do not have to have Context set
+         * o has to have an _id field or will assert
+         */
+        static void upsert( const string& ns , const BSONObj& o );
+
+        /** You do not need to set the database before calling.
+            @return true if collection is empty.
+        */
+        static bool isEmpty(const char *ns);
+
+        // TODO: this should be somewhere else probably
+        static BSONObj toKeyFormat( const BSONObj& o , BSONObj& key );
+
+        class RemoveCallback {
+        public:
+            virtual ~RemoveCallback(){}
+            virtual void goingToDelete( const BSONObj& o ) = 0;
+        };
+        /* removeRange: operation is oplog'd */
+        static long long removeRange( const string& ns , const BSONObj& min , const BSONObj& max , bool yield = false , bool maxInclusive = false , RemoveCallback * callback = 0 );
 
         /* Remove all objects from a collection.
         You do not need to set the database before calling.
@@ -118,5 +152,24 @@ namespace mongo {
         string name_;
         BSONObj key_;
     };
+
+
+    /**
+     * user for saving deletd bson objects to a flat file
+     */
+    class RemoveSaver : public Helpers::RemoveCallback , boost::noncopyable {
+    public:
+        RemoveSaver( const string& type , const string& ns , const string& why);
+        ~RemoveSaver();
+
+        void goingToDelete( const BSONObj& o );
+        
+    private:
+        path _root;
+        path _file;
+        ofstream* _out;
+        
+    };
+
     
 } // namespace mongo

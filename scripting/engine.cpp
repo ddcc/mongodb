@@ -15,7 +15,7 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "engine.h"
 #include "../util/file.h"
 #include "../client/dbclient.h"
@@ -73,6 +73,9 @@ namespace mongo {
             // TODO: make signed
             builder.appendDate( fieldName , Date_t((unsigned long long)getNumber( scopeName )) );
             break;
+        case Code:
+            builder.appendCode( fieldName , getString( scopeName ).c_str() );
+            break;
         default:
             stringstream temp;
             temp << "can't append type from:";
@@ -93,7 +96,7 @@ namespace mongo {
         path p( filename );
 
         if ( ! exists( p ) ){
-            cout << "file [" << filename << "] doesn't exist" << endl;
+            log() << "file [" << filename << "] doesn't exist" << endl;
             if ( assertOnError )
                 assert( 0 );
             return false;
@@ -113,7 +116,7 @@ namespace mongo {
             }
 
             if (empty){
-                cout << "directory [" << filename << "] doesn't have any *.js files" << endl;
+                log() << "directory [" << filename << "] doesn't have any *.js files" << endl;
                 if ( assertOnError )
                     assert( 0 );
                 return false;
@@ -167,6 +170,7 @@ namespace mongo {
         
         static DBClientBase * db = createDirectClient();
         auto_ptr<DBClientCursor> c = db->query( coll , Query() );
+        assert( c.get() );
         
         set<string> thisTime;
         
@@ -228,7 +232,7 @@ namespace mongo {
     class ScopeCache {
     public:
 
-        ScopeCache(){
+        ScopeCache() : _mutex("ScopeCache") {
             _magic = 17;
         }
         
@@ -421,5 +425,15 @@ namespace mongo {
     void ( *ScriptEngine::_connectCallback )( DBClientWithCommands & ) = 0;
     
     ScriptEngine * globalScriptEngine;
+
+    bool hasJSReturn( const string& code ){
+        size_t x = code.find( "return" );
+        if ( x == string::npos )
+            return false;
+
+        return 
+            ( x == 0 || ! isalpha( code[x-1] ) ) &&
+            ! isalpha( code[x+6] );
+    }
 }
     

@@ -19,6 +19,7 @@
 
 #pragma once
 
+
 #include "../client/dbclient.h"
 #include "curop.h"
 #include "security.h"
@@ -29,9 +30,6 @@ namespace mongo {
 
     extern string dbExecCommand;
 
-#define OPWRITE if( _diaglog.level & 1 ) _diaglog.write((char *) m.data, m.data->len);
-#define OPREAD if( _diaglog.level & 2 ) _diaglog.readop((char *) m.data, m.data->len);
-
     struct DiagLog {
         ofstream *f;
         /* 0 = off; 1 = writes, 2 = reads, 3 = both
@@ -40,7 +38,7 @@ namespace mongo {
         int level;
         mongo::mutex mutex;
 
-        DiagLog() : f(0) , level(0) { }
+        DiagLog() : f(0) , level(0), mutex("DiagLog") { }
         void init() {
             if ( ! f && level ){
                 log() << "diagLogging = " << level << endl;
@@ -96,21 +94,23 @@ namespace mongo {
     struct DbResponse {
         Message *response;
         MSGID responseTo;
-        DbResponse(Message *r, MSGID rt) : response(r), responseTo(rt) {
-        }
+        const char *exhaust; /* points to ns if exhaust mode. 0=normal mode*/
+        DbResponse(Message *r, MSGID rt) : response(r), responseTo(rt), exhaust(0) { }
         DbResponse() {
             response = 0;
+            exhaust = 0;
         }
-        ~DbResponse() {
-            delete response;
-        }
+        ~DbResponse() { delete response; }
     };
-
-    static SockAddr unknownAddress( "0.0.0.0", 0 );
     
-    bool assembleResponse( Message &m, DbResponse &dbresponse, const sockaddr_in &client = unknownAddress.sa );
+    bool assembleResponse( Message &m, DbResponse &dbresponse, const SockAddr &client = unknownAddress );
 
-    void getDatabaseNames( vector< string > &names );
+    void getDatabaseNames( vector< string > &names , const string& usePath = dbpath );
+
+    /* returns true if there is no data on this server.  useful when starting replication. 
+       local database does NOT count. 
+    */
+    bool replHasDatabases();
 
 // --- local client ---
     
@@ -119,7 +119,7 @@ namespace mongo {
     public:
         virtual auto_ptr<DBClientCursor> query(const string &ns, Query query, int nToReturn = 0, int nToSkip = 0,
                                                const BSONObj *fieldsToReturn = 0, int queryOptions = 0);
-
+        
         virtual bool isFailed() const {
             return false;
         }
@@ -135,9 +135,18 @@ namespace mongo {
             // don't need to piggy back when connected locally
             return say( toSend );
         }
+        
+        virtual void killCursor( long long cursorID );
+        
+        virtual bool callRead( Message& toSend , Message& response ){
+            return call( toSend , response );
+        }
+
+        virtual ConnectionString::ConnectionType type() const { return ConnectionString::MASTER; }  
     };
 
     extern int lockFile;
     void acquirePathLock();
+    void maybeCreatePidFile();
     
 } // namespace mongo

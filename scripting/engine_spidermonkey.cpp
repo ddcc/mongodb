@@ -15,15 +15,14 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "engine_spidermonkey.h"
-
 #include "../client/dbclient.h"
 
 #ifndef _WIN32
 #include <boost/date_time/posix_time/posix_time.hpp>
 #undef assert
-#define assert xassert
+#define assert MONGO_assert
 #endif
 
 #define smuassert( cx , msg , val ) \
@@ -38,6 +37,12 @@
     }
 
 namespace mongo {
+    
+    class InvalidUTF8Exception : public UserException {
+    public:
+        InvalidUTF8Exception() : UserException( 9006 , "invalid utf8" ){
+        }
+    };
 
     string trim( string s ){
         while ( s.size() && isspace( s[0] ) )
@@ -128,6 +133,54 @@ namespace mongo {
         return new BSONFieldIterator( this );
     }
 
+    class TraverseStack {
+    public:
+        TraverseStack(){
+            _o = 0;
+            _parent = 0;
+        }
+
+        TraverseStack( JSObject * o , const TraverseStack * parent ){
+            _o = o;
+            _parent = parent;
+        }
+
+        TraverseStack dive( JSObject * o ) const {
+            if ( o ){
+                uassert( 13076 , (string)"recursive toObject" , ! has( o ) );
+            }
+            return TraverseStack( o , this );
+        }
+
+        int depth() const {
+            int d = 0;
+            const TraverseStack * s = _parent;
+            while ( s ){
+                s = s->_parent;
+                d++;
+            }
+            return d;
+        }
+
+        bool isTop() const {
+            return _parent == 0;
+        }
+        
+        bool has( JSObject * o ) const {
+            if ( ! o )
+                return false;
+            const TraverseStack * s = this;
+            while ( s ){
+                if ( s->_o == o )
+                    return true;
+                s = s->_parent;
+            }
+            return false;
+        }
+
+        JSObject * _o;
+        const TraverseStack * _parent;
+    };
 
     class Convertor : boost::noncopyable {
     public:
@@ -171,7 +224,7 @@ namespace mongo {
                 ( (boost::uint64_t)(boost::uint32_t)getNumber( o , "top" ) << 32 ) +
                 ( boost::uint32_t)( getNumber( o , "bottom" ) );
             } else {
-                val = (boost::uint64_t) getNumber( o, "floatApprox" );
+                val = (boost::uint64_t)(boost::int64_t) getNumber( o, "floatApprox" );
             }
             return val;
         }
@@ -198,7 +251,7 @@ namespace mongo {
             return oid;
         }
 
-        BSONObj toObject( JSObject * o , int depth = 0){
+        BSONObj toObject( JSObject * o , const TraverseStack& stack=TraverseStack() ){
             if ( ! o )
                 return BSONObj();
 
@@ -222,10 +275,10 @@ namespace mongo {
 
             if ( ! appendSpecialDBObject( this , b , "value" , OBJECT_TO_JSVAL( o ) , o ) ){
 
-                if ( depth == 0 ){
+                if ( stack.isTop() ){
                     jsval theid = getProperty( o , "_id" );
                     if ( ! JSVAL_IS_VOID( theid ) ){
-                        append( b , "_id" , theid , EOO , depth + 1 );
+                        append( b , "_id" , theid , EOO , stack.dive( o ) );
                     }
                 }
                 
@@ -237,10 +290,10 @@ namespace mongo {
                     jsval nameval;
                     assert( JS_IdToValue( _context ,id , &nameval ) );
                     string name = toString( nameval );
-                    if ( depth == 0 && name == "_id" )
+                    if ( stack.isTop() && name == "_id" )
                         continue;
                     
-                    append( b , name , getProperty( o , name.c_str() ) , orig[name].type() , depth + 1 );
+                    append( b , name , getProperty( o , name.c_str() ) , orig[name].type() , stack.dive( o ) );
                 }
 
                 JS_DestroyIdArray( _context , properties );
@@ -271,39 +324,39 @@ namespace mongo {
             assert( s[0] == '/' );
             s = s.substr(1);
             string::size_type end = s.rfind( '/' );
-            b.appendRegex( name.c_str() , s.substr( 0 , end ).c_str() , s.substr( end + 1 ).c_str() );
+            b.appendRegex( name , s.substr( 0 , end ).c_str() , s.substr( end + 1 ).c_str() );
         }
 
-        void append( BSONObjBuilder& b , string name , jsval val , BSONType oldType = EOO , int depth=0 ){
+        void append( BSONObjBuilder& b , string name , jsval val , BSONType oldType = EOO , const TraverseStack& stack=TraverseStack() ){
             //cout << "name: " << name << "\t" << typeString( val ) << " oldType: " << oldType << endl;
             switch ( JS_TypeOfValue( _context , val ) ){
 
-            case JSTYPE_VOID: b.appendUndefined( name.c_str() ); break;
-            case JSTYPE_NULL: b.appendNull( name.c_str() ); break;
+            case JSTYPE_VOID: b.appendUndefined( name ); break;
+            case JSTYPE_NULL: b.appendNull( name ); break;
 
             case JSTYPE_NUMBER: {
                 double d = toNumber( val );
                 if ( oldType == NumberInt && ((int)d) == d )
-                    b.append( name.c_str() , (int)d );
+                    b.append( name , (int)d );
                 else
-                    b.append( name.c_str() , d );
+                    b.append( name , d );
                 break;
             }
-            case JSTYPE_STRING: b.append( name.c_str() , toString( val ) ); break;
-            case JSTYPE_BOOLEAN: b.appendBool( name.c_str() , toBoolean( val ) ); break;
+            case JSTYPE_STRING: b.append( name , toString( val ) ); break;
+            case JSTYPE_BOOLEAN: b.appendBool( name , toBoolean( val ) ); break;
 
             case JSTYPE_OBJECT: {
                 JSObject * o = JSVAL_TO_OBJECT( val );
                 if ( ! o || o == JSVAL_NULL ){
-                    b.appendNull( name.c_str() );
+                    b.appendNull( name );
                 }
                 else if ( ! appendSpecialDBObject( this , b , name , val , o ) ){
-                    BSONObj sub = toObject( o , depth );
+                    BSONObj sub = toObject( o , stack );
                     if ( JS_IsArrayObject( _context , o ) ){
-                        b.appendArray( name.c_str() , sub );
+                        b.appendArray( name , sub );
                     }
                     else {
-                        b.append( name.c_str() , sub );
+                        b.append( name , sub );
                     }
                 }
                 break;
@@ -315,7 +368,7 @@ namespace mongo {
                     appendRegex( b , name , s );
                 }
                 else {
-                    b.appendCode( name.c_str() , getFunctionCode( val ).c_str() );
+                    b.appendCode( name , getFunctionCode( val ).c_str() );
                 }
                 break;
             }
@@ -334,7 +387,7 @@ namespace mongo {
         }
 
         bool isSimpleStatement( const string& code ){
-            if ( code.find( "return" ) != string::npos )
+            if ( hasJSReturn( code ) )
                 return false;
 
             if ( code.find( ";" ) != string::npos &&
@@ -416,7 +469,7 @@ namespace mongo {
             JSFunction * func = JS_CompileFunction( _context , assoc , fname.str().c_str() , params.size() , paramArray.get() , code.c_str() , strlen( code.c_str() ) , "nofile_b" , 0 );
 
             if ( ! func ){
-                cout << "compile failed for: " << raw << endl;
+                log() << "compile failed for: " << raw << endl;
                 return 0;
             }
             gcName = "cf normal";
@@ -449,11 +502,11 @@ namespace mongo {
             free( dst );
 
             if ( ! res ){
-                cout << "decode failed. probably invalid utf-8 string [" << c << "]" << endl;
+                tlog() << "decode failed. probably invalid utf-8 string [" << c << "]" << endl;
                 jsval v;
                 if ( JS_GetPendingException( _context , &v ) )
-                    cout << "\t why: " << toString( v ) << endl;
-                throw UserException( 9006 , "invalid utf8" );
+                    tlog() << "\t why: " << toString( v ) << endl;
+                throw InvalidUTF8Exception();
             }
 
             assert( s );
@@ -479,6 +532,24 @@ namespace mongo {
             return OBJECT_TO_JSVAL( o );
         }
 
+        void makeLongObj( long long n, JSObject * o ) {
+            boost::uint64_t val = (boost::uint64_t)n;
+            CHECKNEWOBJECT(o,_context,"NumberLong1");
+            setProperty( o , "floatApprox" , toval( (double)(boost::int64_t)( val ) ) );                    
+            if ( (boost::int64_t)val != (boost::int64_t)(double)(boost::int64_t)( val ) ) {
+                // using 2 doubles here instead of a single double because certain double
+                // bit patterns represent undefined values and sm might trash them
+                setProperty( o , "top" , toval( (double)(boost::uint32_t)( val >> 32 ) ) );
+                setProperty( o , "bottom" , toval( (double)(boost::uint32_t)( val & 0x00000000ffffffff ) ) );
+            }
+        }
+        
+        jsval toval( long long n ) {
+            JSObject * o = JS_NewObject( _context , &numberlong_class , 0 , 0 );
+            makeLongObj( n, o );
+            return OBJECT_TO_JSVAL( o );
+        }
+        
         jsval toval( const BSONElement& e ){
 
             switch( e.type() ){
@@ -549,7 +620,9 @@ namespace mongo {
             }
             case Code:{
                 JSFunction * func = compileFunction( e.valuestr() );
-                return OBJECT_TO_JSVAL( JS_GetFunctionObject( func ) );
+                if ( func )
+                    return OBJECT_TO_JSVAL( JS_GetFunctionObject( func ) );
+                return JSVAL_NULL;
             }
             case CodeWScope:{
                 JSFunction * func = compileFunction( e.codeWScopeCode() );
@@ -578,17 +651,7 @@ namespace mongo {
                 return OBJECT_TO_JSVAL( o );
             }
             case NumberLong: {
-                boost::uint64_t val = (boost::uint64_t)e.numberLong();
-                JSObject * o = JS_NewObject( _context , &numberlong_class , 0 , 0 );
-                CHECKNEWOBJECT(o,_context,"NumberLong1");
-                setProperty( o , "floatApprox" , toval( (double)(boost::int64_t)( val ) ) );                    
-                if ( (boost::int64_t)val != (boost::int64_t)(double)(boost::int64_t)( val ) ) {
-                    // using 2 doubles here instead of a single double because certain double
-                    // bit patterns represent undefined values and sm might trash them
-                    setProperty( o , "top" , toval( (double)(boost::uint32_t)( val >> 32 ) ) );
-                    setProperty( o , "bottom" , toval( (double)(boost::uint32_t)( val & 0x00000000ffffffff ) ) );
-                }
-                return OBJECT_TO_JSVAL( o );                
+                return toval( e.numberLong() );
             }
             case DBRef: {
                 JSObject * o = JS_NewObject( _context , &dbpointer_class , 0 , 0 );
@@ -609,13 +672,13 @@ namespace mongo {
                 const char * data = e.binData( len );
                 assert( JS_SetPrivate( _context , o , new BinDataHolder( data ) ) );
 
-                setProperty( o , "len" , toval( len ) );
-                setProperty( o , "type" , toval( (int)e.binDataType() ) );
+                setProperty( o , "len" , toval( (double)len ) );
+                setProperty( o , "type" , toval( (double)e.binDataType() ) );
                 return OBJECT_TO_JSVAL( o );
             }
             }
 
-            cout << "toval: unknown type: " << e.type() << endl;
+            log() << "toval: unknown type: " << (int) e.type() << endl;
             uassert( 10218 ,  "not done: toval" , 0 );
             return 0;
         }
@@ -824,13 +887,15 @@ namespace mongo {
     // --- global helpers ---
 
     JSBool native_print( JSContext * cx , JSObject * obj , uintN argc, jsval *argv, jsval *rval ){
+        stringstream ss;
         Convertor c( cx );
         for ( uintN i=0; i<argc; i++ ){
             if ( i > 0 )
-                cout << " ";
-            cout << c.toString( argv[i] );
+                ss << " ";
+            ss << c.toString( argv[i] );
         }
-        cout << endl;
+        ss << "\n";
+        Logstream::logLockless( ss.str() );
         return JS_TRUE;
     }
 
@@ -894,14 +959,25 @@ namespace mongo {
             return JS_FALSE;
         }
         
-        BSONHolder * o = GETHOLDER( cx , JSVAL_TO_OBJECT( argv[ 0 ] ) );
-        double size = 0;
-        if ( o ){
-            size = o->_obj.objsize();
-        }
+        JSObject * o = JSVAL_TO_OBJECT( argv[0] );
+
         Convertor c(cx);
+        double size = 0;
+
+        if ( JS_InstanceOf( cx , o , &bson_ro_class , 0 ) ||
+             JS_InstanceOf( cx , o , &bson_class , 0 ) ){
+            BSONHolder * h = GETHOLDER( cx , o );
+            if ( h ){
+                size = h->_obj.objsize();
+            }
+        }
+        else {
+            BSONObj temp = c.toObject( o );
+            size = temp.objsize();
+        }
+        
         *rval = c.toval( size );
-        return JS_TRUE;
+        return JS_TRUE;        
     }
     
     JSFunctionSpec objectHelpers[] = {
@@ -934,7 +1010,15 @@ namespace mongo {
             return JS_TRUE;
         }
 
-        jsval val = c.toval( e );
+        jsval val;
+        try {
+            val = c.toval( e );
+        }
+        catch ( InvalidUTF8Exception& ) {
+            JS_LeaveLocalRootScope( cx );
+            JS_ReportError( cx , "invalid utf8" );
+            return JS_FALSE;
+        }
 
         assert( ! holder->_inResolve );
         holder->_inResolve = true;
@@ -1115,20 +1199,22 @@ namespace mongo {
         }
 
         void localConnect( const char * dbName ){
-            smlock;
-            uassert( 10225 ,  "already setup for external db" , ! _externalSetup );
-            if ( _localConnect ){
-                uassert( 10226 ,  "connected to different db" , _localDBName == dbName );
-                return;
+            {
+                smlock;
+                uassert( 10225 ,  "already setup for external db" , ! _externalSetup );
+                if ( _localConnect ){
+                    uassert( 10226 ,  "connected to different db" , _localDBName == dbName );
+                    return;
+                }
+                
+                initMongoJS( this , _context , _global , true );
+                
+                exec( "_mongo = new Mongo();" );
+                exec( ((string)"db = _mongo.getDB( \"" + dbName + "\" ); ").c_str() );
+                
+                _localConnect = true;
+                _localDBName = dbName;
             }
-            
-            initMongoJS( this , _context , _global , true );
-            
-            exec( "_mongo = new Mongo();" );
-            exec( ((string)"db = _mongo.getDB( \"" + dbName + "\" ); ").c_str() );
-            
-            _localConnect = true;
-            _localDBName = dbName;
             loadStored();
         }
 
@@ -1309,6 +1395,15 @@ namespace mongo {
             JSBool worked = JS_EvaluateScript( _context , _global , code.c_str() , strlen( code.c_str() ) , name.c_str() , 0 , &ret );
             uninstallCheckTimeout( timeoutMs );
 
+            if ( ! worked && _error.size() == 0 ){
+                jsval v;
+                if ( JS_GetPendingException( _context , &v ) ){
+                    _error = _convertor->toString( v );
+                    if ( reportError )
+                        cout << _error << endl;
+                }
+            }
+
             if ( assertOnError )
                 uassert( 10228 ,  name + " exec failed" , worked );
 
@@ -1387,7 +1482,6 @@ namespace mongo {
             code << field << "_" << " = { x : " << field << "_ }; ";
             code << field << " = function(){ return nativeHelper.apply( " << field << "_ , arguments ); }";
             exec( code.str().c_str() );
-
         }
 
         virtual void gc(){
@@ -1424,15 +1518,20 @@ namespace mongo {
         
     };
 
+    /* used to make the logging not overly chatty in the mongo shell. */
+    extern bool isShell;
+
     void errorReporter( JSContext *cx, const char *message, JSErrorReport *report ){
         stringstream ss;
-        ss << "JS Error: " << message;
+        if( !isShell ) 
+            ss << "JS Error: ";
+        ss << message;
 
         if ( report && report->filename ){
             ss << " " << report->filename << ":" << report->lineno;
         }
 
-        log() << ss.str() << endl;
+        tlog() << ss.str() << endl;
 
         if ( currentScope.get() ){
             currentScope->gotError( ss.str() );
@@ -1446,10 +1545,10 @@ namespace mongo {
 
         for ( uintN i=0; i<argc; i++ ){
             string filename = c.toString( argv[i] );
-            cout << "should load [" << filename << "]" << endl;
+            //cout << "load [" << filename << "]" << endl;
 
             if ( ! s->execFile( filename , false , true , false ) ){
-                JS_ReportError( cx , ((string)"error loading file: " + filename ).c_str() );
+                JS_ReportError( cx , ((string)"error loading js file: " + filename ).c_str() );
                 return JS_FALSE;
             }
         }

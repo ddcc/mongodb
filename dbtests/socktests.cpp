@@ -17,7 +17,7 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "../util/sock.h"
 
 #include "dbtests.h"
@@ -29,6 +29,7 @@ namespace SockTests {
         void run() {
             ASSERT_EQUALS( "127.0.0.1", hostbyname( "localhost" ) );
             ASSERT_EQUALS( "127.0.0.1", hostbyname( "127.0.0.1" ) );
+            // ASSERT_EQUALS( "::1", hostbyname( "::1" ) ); // IPv6 disabled at runtime by default.
         }
     };
     

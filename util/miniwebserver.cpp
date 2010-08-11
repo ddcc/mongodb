@@ -15,7 +15,7 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "miniwebserver.h"
 #include "hex.h"
 
@@ -23,52 +23,22 @@
 
 namespace mongo {
 
-    MiniWebServer::MiniWebServer() {
-        sock = 0;
-    }
-
-    bool MiniWebServer::init(const string &ip, int _port) {
-        port = _port;
-        SockAddr me;
-        if ( ip.empty() )
-            me = SockAddr( port );
-        else
-            me = SockAddr( ip.c_str(), port );
-        sock = ::socket(AF_INET, SOCK_STREAM, 0);
-        if ( sock == INVALID_SOCKET ) {
-            log() << "ERROR: MiniWebServer listen(): invalid socket? " << OUTPUT_ERRNO << endl;
-            return false;
-        }
-        prebindOptions( sock );
-        if ( ::bind(sock, (sockaddr *) &me.sa, me.addressSize) != 0 ) {
-            log() << "MiniWebServer: bind() failed port:" << port << " " << OUTPUT_ERRNO << endl;
-            if ( errno == EADDRINUSE )
-                log() << "  addr already in use" << endl;
-            closesocket(sock);
-            return false;
-        }
-
-        if ( ::listen(sock, 16) != 0 ) {
-            log() << "MiniWebServer: listen() failed " << OUTPUT_ERRNO << endl;
-            closesocket(sock);
-            return false;
-        }
-
-        return true;
-    }
+    MiniWebServer::MiniWebServer(const string &ip, int port)
+        : Listener(ip, port, false)
+    {}
 
     string MiniWebServer::parseURL( const char * buf ) {
-        const char * urlStart = strstr( buf , " " );
+        const char * urlStart = strchr( buf , ' ' );
         if ( ! urlStart )
             return "/";
 
         urlStart++;
 
-        const char * end = strstr( urlStart , " " );
+        const char * end = strchr( urlStart , ' ' );
         if ( ! end ) {
-            end = strstr( urlStart , "\r" );
+            end = strchr( urlStart , '\r' );
             if ( ! end ) {
-                end = strstr( urlStart , "\n" );
+                end = strchr( urlStart , '\n' );
             }
         }
 
@@ -105,14 +75,14 @@ namespace mongo {
             if ( eq == string::npos )
                 continue;
 
-            b.append( urlDecode(cur.substr(0,eq)).c_str() , urlDecode(cur.substr(eq+1) ) );
+            b.append( urlDecode(cur.substr(0,eq)) , urlDecode(cur.substr(eq+1) ) );
         }
         
         params = b.obj();
     }
 
     string MiniWebServer::parseMethod( const char * headers ) {
-        const char * end = strstr( headers , " " );
+        const char * end = strchr( headers , ' ' );
         if ( ! end )
             return "GET";
         return string( headers , (int)(end-headers) );
@@ -139,17 +109,23 @@ namespace mongo {
     }
 
     void MiniWebServer::accepted(int s, const SockAddr &from) {
+        setSockTimeouts(s, 8);
         char buf[4096];
         int len = 0;
         while ( 1 ) {
-            int x = ::recv(s, buf + len, sizeof(buf) - 1 - len, 0);
+            int left = sizeof(buf) - 1 - len;
+            if( left == 0 )
+                break;
+            int x = ::recv(s, buf + len, left, 0);
             if ( x <= 0 ) {
+                closesocket(s);
                 return;
             }
             len += x;
             buf[ len ] = 0;
-            if ( fullReceive( buf ) )
+            if ( fullReceive( buf ) ) {
                 break;
+            }
         }
         buf[len] = 0;
 
@@ -178,18 +154,23 @@ namespace mongo {
             ss << "Content-Type: text/html\r\n";
         }
         else {
-            for ( vector<string>::iterator i = headers.begin(); i != headers.end(); i++ )
+            for ( vector<string>::iterator i = headers.begin(); i != headers.end(); i++ ) {
+                assert( strncmp("Content-Length", i->c_str(), 14) );
                 ss << *i << "\r\n";
+            }
         }
+        ss << "Connection: close\r\n";
+        ss << "Content-Length: " << responseMsg.size() << "\r\n";
         ss << "\r\n";
         ss << responseMsg;
         string response = ss.str();
 
         ::send(s, response.c_str(), response.size(), 0);
+        closesocket(s);
     }
     
     string MiniWebServer::getHeader( const char * req , string wanted ){
-        const char * headers = strstr( req , "\n" );
+        const char * headers = strchr( req , '\n' );
         if ( ! headers )
             return "";
         pcrecpp::StringPiece input( headers + 1 );
@@ -202,26 +183,6 @@ namespace mongo {
                 return val;
         }
         return "";
-    }
-    
-    void MiniWebServer::run() {
-        SockAddr from;
-        while ( ! inShutdown() ) {
-            int s = accept(sock, (sockaddr *) &from.sa, &from.addressSize);
-            if ( s < 0 ) {
-                if ( errno == ECONNABORTED ) {
-                    log() << "Listener on port " << port << " aborted." << endl;
-                    return;
-                }
-                log() << "MiniWebServer: accept() returns " << s << " " << OUTPUT_ERRNO << endl;
-                sleepmillis(200);
-                continue;
-            }
-            disableNagle(s);
-            RARELY log() << "MiniWebServer: connection accepted from " << from.toString() << endl;
-            accepted( s, from );
-            closesocket(s);
-        }
     }
 
     string MiniWebServer::urlDecode(const char* s){

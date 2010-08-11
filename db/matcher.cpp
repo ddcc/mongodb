@@ -18,7 +18,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "matcher.h"
 #include "../util/goodies.h"
 #include "../util/unittest.h"
@@ -50,7 +50,9 @@ namespace {
 #define DEBUGMATCHER(x)
 
 namespace mongo {
-    
+
+    extern BSONObj staticNull;
+        
     class Where {
     public:
         Where() {
@@ -141,39 +143,6 @@ namespace mongo {
         
     }
     
-    CoveredIndexMatcher::CoveredIndexMatcher(const BSONObj &jsobj, const BSONObj &indexKeyPattern) :
-        _keyMatcher(jsobj.filterFieldsUndotted(indexKeyPattern, true), 
-        indexKeyPattern),
-        _docMatcher(jsobj) 
-    {
-        _needRecord = ! ( 
-                         _docMatcher.keyMatch() && 
-                         _keyMatcher.jsobj.nFields() == _docMatcher.jsobj.nFields() &&
-                         ! _keyMatcher.hasType( BSONObj::opEXISTS )
-                          );
-
-    }
-    
-    bool CoveredIndexMatcher::matches(const BSONObj &key, const DiskLoc &recLoc , MatchDetails * details ) {
-        if ( details )
-            details->reset();
-        
-        if ( _keyMatcher.keyMatch() ) {
-            if ( !_keyMatcher.matches(key, details ) ){
-                return false;
-            }
-        }
-        
-        if ( ! _needRecord ){
-            return true;
-        }
-
-        if ( details )
-            details->loadedObject = true;
-
-        return _docMatcher.matches(recLoc.rec() , details );
-    }
-    
     
     void Matcher::addRegex(const char *fieldName, const char *regex, const char *flags, bool isNot){
 
@@ -230,9 +199,11 @@ namespace mongo {
             case BSONObj::opALL:
                 all = true;
             case BSONObj::opIN:
+                uassert( 13276 , "$in needs an array" , fe.isABSONObj() );
                 basics.push_back( ElementMatcher( e , op , fe.embeddedObject(), isNot ) );
                 break;
             case BSONObj::NIN:
+                uassert( 13277 , "$nin needs an array" , fe.isABSONObj() );
                 haveNeg = true;
                 basics.push_back( ElementMatcher( e , op , fe.embeddedObject(), isNot ) );
                 break;
@@ -279,6 +250,7 @@ namespace mongo {
             }
             case BSONObj::opNEAR:
             case BSONObj::opWITHIN:
+            case BSONObj::opMAX_DISTANCE:
                 break;
             default:
                 uassert( 10069 ,  (string)"BUG - can't operator for: " + fn , 0 );
@@ -286,19 +258,50 @@ namespace mongo {
         return true;
     }
     
+    void Matcher::parseOr( const BSONElement &e, bool subMatcher, list< shared_ptr< Matcher > > &matchers ) {
+        uassert( 13090, "recursive $or/$nor not allowed", !subMatcher );
+        uassert( 13086, "$or/$nor must be a nonempty array", e.type() == Array && e.embeddedObject().nFields() > 0 );
+        BSONObjIterator j( e.embeddedObject() );
+        while( j.more() ) {
+            BSONElement f = j.next();
+            uassert( 13087, "$or/$nor match element must be an object", f.type() == Object );
+            // until SERVER-109 this is never a covered index match, so don't constrain index key for $or matchers
+            matchers.push_back( shared_ptr< Matcher >( new Matcher( f.embeddedObject(), true ) ) );
+        }
+    }
+
+    bool Matcher::parseOrNor( const BSONElement &e, bool subMatcher ) {
+        const char *ef = e.fieldName();
+        if ( ef[ 0 ] != '$' )
+            return false;
+        if ( ef[ 1 ] == 'o' && ef[ 2 ] == 'r' && ef[ 3 ] == 0 ) {
+            parseOr( e, subMatcher, _orMatchers );
+        } else if ( ef[ 1 ] == 'n' && ef[ 2 ] == 'o' && ef[ 3 ] == 'r' && ef[ 4 ] == 0 ) {
+            parseOr( e, subMatcher, _norMatchers );
+        } else {
+            return false;
+        }
+        return true;
+    }
+    
     /* _jsobj          - the query pattern
     */
-    Matcher::Matcher(const BSONObj &_jsobj, const BSONObj &constrainIndexKey) :
+    Matcher::Matcher(const BSONObj &_jsobj, bool subMatcher) :
         where(0), jsobj(_jsobj), haveSize(), all(), hasArray(0), haveNeg(), _atomic(false), nRegex(0) {
 
         BSONObjIterator i(jsobj);
         while ( i.more() ) {
             BSONElement e = i.next();
+            
+            if ( parseOrNor( e, subMatcher ) ) {
+                continue;
+            }
 
             if ( ( e.type() == CodeWScope || e.type() == Code || e.type() == String ) && strcmp(e.fieldName(), "$where")==0 ) {
                 // $where: function()...
-                uassert( 10066 ,  "$where occurs twice?", where == 0 );
-                uassert( 10067 ,  "$where query, but no script engine", globalScriptEngine );
+                uassert( 10066 , "$where occurs twice?", where == 0 );
+                uassert( 10067 , "$where query, but no script engine", globalScriptEngine );
+                massert( 13089 , "no current client needed for $where" , haveClient() ); 
                 where = new Where();
                 where->scope = globalScriptEngine->getPooledScope( cc().ns() );
                 where->scope->localConnect( cc().database()->name.c_str() );
@@ -348,7 +351,7 @@ namespace mongo {
                                     BSONObjIterator k( fe.embeddedObject() );
                                     uassert( 13030, "$not cannot be empty", k.more() );
                                     while( k.more() ) {
-                                        addOp( e, k.next(), true, regex, flags );
+                                        addOp( e, k.next(), true, regex, flags );   
                                     }
                                     break;
                                 }
@@ -388,8 +391,35 @@ namespace mongo {
             // normal, simple case e.g. { a : "foo" }
             addBasic(e, BSONObj::Equality, false);
         }
-        
-        constrainIndexKey_ = constrainIndexKey;
+    }
+    
+    Matcher::Matcher( const Matcher &other, const BSONObj &key ) :
+    where(0), constrainIndexKey_( key ), haveSize(), all(), hasArray(0), haveNeg(), _atomic(false), nRegex(0) {
+        // do not include fields which would make keyMatch() false
+        for( vector< ElementMatcher >::const_iterator i = other.basics.begin(); i != other.basics.end(); ++i ) {
+            if ( key.hasField( i->toMatch.fieldName() ) ) {
+                switch( i->compareOp ) {
+                    case BSONObj::opSIZE:
+                    case BSONObj::opALL:
+                    case BSONObj::NE:
+                    case BSONObj::NIN:
+                        break;
+                    default: {
+                        if ( !i->isNot && i->toMatch.type() != Array ) {
+                            basics.push_back( *i );                            
+                        }
+                    }
+                }
+            }
+        }
+        for( int i = 0; i < other.nRegex; ++i ) {
+            if ( !other.regexs[ i ].isNot && key.hasField( other.regexs[ i ].fieldName ) ) {
+                regexs[ nRegex++ ] = other.regexs[ i ];
+            }
+        }
+        for( list< shared_ptr< Matcher > >::const_iterator i = other._orMatchers.begin(); i != other._orMatchers.end(); ++i ) {
+            _orMatchers.push_back( shared_ptr< Matcher >( new Matcher( **i, key ) ) );
+        }
     }
     
     inline bool regexMatches(const RegexMatcher& rm, const BSONElement& e) {
@@ -711,7 +741,7 @@ namespace mongo {
                 return false;
             if ( cmp == 0 ) {
                 /* missing is ok iff we were looking for null */
-                if ( m.type() == jstNULL || m.type() == Undefined ) {
+                if ( m.type() == jstNULL || m.type() == Undefined || ( bm.compareOp == BSONObj::opIN && bm.myset->count( staticNull.firstElement() ) > 0 ) ) {
                     if ( ( bm.compareOp == BSONObj::NE ) ^ bm.isNot ) {
                         return false;
                     }
@@ -741,6 +771,42 @@ namespace mongo {
                 return false;
         }
         
+        if ( _orMatchers.size() > 0 ) {
+            bool match = false;
+            for( list< shared_ptr< Matcher > >::const_iterator i = _orMatchers.begin();
+                i != _orMatchers.end(); ++i ) {
+                // SERVER-205 don't submit details - we don't want to track field
+                // matched within $or, and at this point we've already loaded the
+                // whole document
+                if ( (*i)->matches( jsobj ) ) {
+                    match = true;
+                    break;
+                }
+            }
+            if ( !match ) {
+                return false;
+            }
+        }
+        
+        if ( _norMatchers.size() > 0 ) {
+            for( list< shared_ptr< Matcher > >::const_iterator i = _norMatchers.begin();
+                i != _norMatchers.end(); ++i ) {
+                // SERVER-205 don't submit details - we don't want to track field
+                // matched within $nor, and at this point we've already loaded the
+                // whole document
+                if ( (*i)->matches( jsobj ) ) {
+                    return false;
+                }
+            }            
+        }
+        
+        for( vector< shared_ptr< FieldRangeVector > >::const_iterator i = _orConstraints.begin();
+            i != _orConstraints.end(); ++i ) {
+            if ( (*i)->matches( jsobj ) ) {
+                return false;
+            }
+        }
+                
         if ( where ) {
             if ( where->func == 0 ) {
                 uassert( 10070 , "$where compile error", false);
@@ -769,7 +835,7 @@ namespace mongo {
             return where->scope->getBoolean( "return" ) != 0;
 
         }
-
+        
         return true;
     }
 
@@ -779,6 +845,72 @@ namespace mongo {
                 return true;
         return false;
     }
+
+    bool Matcher::sameCriteriaCount( const Matcher &other ) const {
+        if ( !( basics.size() == other.basics.size() && nRegex == other.nRegex && !where == !other.where ) ) {
+            return false;
+        }
+        if ( _norMatchers.size() != other._norMatchers.size() ) {
+            return false;
+        }
+        if ( _orMatchers.size() != other._orMatchers.size() ) {
+            return false;
+        }
+        if ( _orConstraints.size() != other._orConstraints.size() ) {
+            return false;
+        }
+        {
+            list< shared_ptr< Matcher > >::const_iterator i = _norMatchers.begin();
+            list< shared_ptr< Matcher > >::const_iterator j = other._norMatchers.begin();
+            while( i != _norMatchers.end() ) {
+                if ( !(*i)->sameCriteriaCount( **j ) ) {
+                    return false;
+                }
+                ++i; ++j;
+            }
+        }
+        {
+            list< shared_ptr< Matcher > >::const_iterator i = _orMatchers.begin();
+            list< shared_ptr< Matcher > >::const_iterator j = other._orMatchers.begin();
+            while( i != _orMatchers.end() ) {
+                if ( !(*i)->sameCriteriaCount( **j ) ) {
+                    return false;
+                }
+                ++i; ++j;
+            }
+        }
+        return true;
+    }        
+        
+    
+    /*- just for testing -- */
+#pragma pack(1)
+    struct JSObj1 {
+        JSObj1() {
+            totsize=sizeof(JSObj1);
+            n = NumberDouble;
+            strcpy_s(nname, 5, "abcd");
+            N = 3.1;
+            s = String;
+            strcpy_s(sname, 7, "abcdef");
+            slen = 10;
+            strcpy_s(sval, 10, "123456789");
+            eoo = EOO;
+        }
+        unsigned totsize;
+
+        char n;
+        char nname[5];
+        double N;
+
+        char s;
+        char sname[7];
+        unsigned slen;
+        char sval[10];
+
+        char eoo;
+    };
+#pragma pack()
 
     struct JSObj1 js1;
 

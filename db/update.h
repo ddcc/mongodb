@@ -16,7 +16,7 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "jsobj.h"
 #include "../util/embedded_builder.h"
 #include "matcher.h"
@@ -129,6 +129,15 @@ namespace mongo {
                 StringBuilder buf( fullName.size() + 1 );
                 for ( size_t i=0; i<fullName.size(); i++ ){
                     char c = fullName[i];
+                    
+                    if ( c == '$' && 
+                         i > 0 && fullName[i-1] == '.' &&
+                         i+1<fullName.size() && 
+                         fullName[i+1] == '.' ){
+                        i++;
+                        continue;
+                    }
+
                     buf << c;
 
                     if ( c != '.' )
@@ -410,23 +419,7 @@ namespace mongo {
             }
         }
         
-        void appendForOpLog( BSONObjBuilder& b ) const {
-            if ( incType ){
-                BSONObjBuilder bb( b.subobjStart( "$set" ) );
-                appendIncValue( bb , true );
-                bb.done();
-                return;
-            }
-            
-            const char * name = fixedOpName ? fixedOpName : Mod::modNames[op()];
-
-            BSONObjBuilder bb( b.subobjStart( name ) );
-            if ( fixed )
-                bb.appendAs( *fixed , m->fieldName );
-            else
-                bb.appendAs( m->elt , m->fieldName );
-            bb.done();
-        }
+        void appendForOpLog( BSONObjBuilder& b ) const;
 
         template< class Builder >
         void apply( Builder& b , BSONElement in ){
@@ -436,7 +429,7 @@ namespace mongo {
         template< class Builder >
         void appendIncValue( Builder& b , bool useFullName ) const {
             const char * n = useFullName ? m->fieldName : m->shortFieldName;
-            
+
             switch ( incType ){
             case NumberDouble:
                 b.append( n , incdouble ); break;
@@ -448,6 +441,8 @@ namespace mongo {
                 assert(0);
             }
         }
+
+        string toString() const;
     };
     
     /**
@@ -578,6 +573,7 @@ namespace mongo {
             }
         }
 
+        string toString() const;
 
         friend class ModSet;
     };

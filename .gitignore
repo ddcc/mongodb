@@ -2,8 +2,10 @@
 .dbshell
 .sconsign.dblite
 .sconf_temp
+perf.data
 
 *~
+*.swp
 *.o
 *.os
 *.obj
@@ -27,16 +29,22 @@
 *.idb
 *.pdb
 *.manifest
+*.user
 *.gch
+*.*sdf
+*.psess
 *#
 .#*
 shell/mongo.cpp
 shell/mongo-server.cpp
 
-db/Debug
-db/oplog*
+*/Debug/
+*/*/Debug/
+*/Release/
+*/*/Release/
 db/.gdb*
 db/makefile.local
+db/_ReSharper.db
 config.log
 settings.py
 buildinfo.cpp
@@ -49,6 +57,7 @@ log
 logs
 docs/html
 docs/latex
+docs/doxygen
 32bit
 scratch
 
@@ -68,16 +77,19 @@ mongoimport
 mongosniff
 mongobridge
 mongostat
+bsondump
 
 *.tgz
 *.zip
 *.tar.gz
 
 mongodb-*
+mongo-cxx-driver-*
 
 #libs
 libmongoclient.*
 libmongotestfiles.*
+libmongoshellfiles.*
 
 # examples
 firstExample

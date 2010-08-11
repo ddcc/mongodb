@@ -17,21 +17,27 @@ if ( typeof DBQuery == "undefined" ){
         this._cursor = null;
         this._numReturned = 0;
         this._special = false;
+        this._prettyShell = false;
     }
     print( "DBQuery probably won't have array access " );
 }
 
-DBQuery.prototype.help = function(){
-    print( "DBQuery help" );
-    print( "\t.sort( {...} )" )
-    print( "\t.limit( n )" )
-    print( "\t.skip( n )" )
-    print( "\t.count() - total # of objects matching query, ignores skip,limit" )
-    print( "\t.size() - total # of objects cursor would return skip,limit effect this" )
-    print( "\t.explain()" )
-    print( "\t.forEach( func )" )
-    print( "\t.map( func )" )
-    
+DBQuery.prototype.help = function () {
+    print("find() modifiers")
+    print("\t.sort( {...} )")
+    print("\t.limit( n )")
+    print("\t.skip( n )")
+    print("\t.count() - total # of objects matching query, ignores skip,limit")
+    print("\t.size() - total # of objects cursor would return, honors skip,limit")
+    print("\t.explain([verbose])")
+    print("\t.hint(...)")
+    print("\t.showDiskLoc() - adds a $diskLoc field to each returned object")
+    print("\nCursor methods");
+    print("\t.forEach( func )")
+    print("\t.print() - output to console in full pretty format")
+    print("\t.map( func )")
+    print("\t.hasNext()")
+    print("\t.next()")
 }
 
 DBQuery.prototype.clone = function(){
@@ -107,6 +113,16 @@ DBQuery.prototype.next = function(){
         throw "error: " + tojson( ret );
 
     this._numReturned++;
+    return ret;
+}
+
+DBQuery.prototype.objsLeftInBatch = function(){
+    this._exec();
+
+    var ret = this._cursor.objsLeftInBatch();
+    if ( ret.$err )
+        throw "error: " + tojson( ret );
+
     return ret;
 }
 
@@ -197,6 +213,10 @@ DBQuery.prototype.max = function( max ) {
     return this._addSpecial( "$max" , max );
 }
 
+DBQuery.prototype.showDiskLoc = function() {
+    return this._addSpecial( "$showDiskLoc" , true);
+}
+
 DBQuery.prototype.forEach = function( func ){
     while ( this.hasNext() )
         func( this.next() );
@@ -213,12 +233,32 @@ DBQuery.prototype.arrayAccess = function( idx ){
     return this.toArray()[idx];
 }
 
-DBQuery.prototype.explain = function(){
+DBQuery.prototype.explain = function (verbose) {
+    /* verbose=true --> include allPlans, oldPlan fields */
     var n = this.clone();
     n._ensureSpecial();
     n._query.$explain = true;
     n._limit = n._limit * -1;
-    return n.next();
+    var e = n.next();
+    if (!verbose) {
+        delete e.allPlans;
+        delete e.oldPlan;
+        if (e.shards){
+            for (var key in e.shards){
+                var s = e.shards[key];
+                if(s.length === undefined){
+                    delete s.allPlans;
+                    delete s.oldPlan;
+                } else {
+                    for (var i=0; i < s.length; i++){
+                        delete s[i].allPlans;
+                        delete s[i].oldPlan;
+                    }
+                }
+            }
+        }
+    }
+    return e;
 }
 
 DBQuery.prototype.snapshot = function(){
@@ -227,11 +267,16 @@ DBQuery.prototype.snapshot = function(){
     return this;
 }
 
+DBQuery.prototype.pretty = function(){
+    this._prettyShell = true;
+    return this;
+}
+
 DBQuery.prototype.shellPrint = function(){
     try {
         var n = 0;
-        while ( this.hasNext() && n < 20 ){
-            var s = tojson( this.next() , "" , true );
+        while ( this.hasNext() && n < DBQuery.shellBatchSize ){
+            var s = this._prettyShell ? tojson( this.next() ) : tojson( this.next() , "" , true );
             print( s );
             n++;
         }
@@ -252,3 +297,5 @@ DBQuery.prototype.shellPrint = function(){
 DBQuery.prototype.toString = function(){
     return "DBQuery: " + this._ns + " -> " + tojson( this.query );
 }
+
+DBQuery.shellBatchSize = 20;

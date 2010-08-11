@@ -3,11 +3,12 @@
 //
 var files = listFiles("jstests");
 
+var runnerStart = new Date()
+
 files.forEach(
     function(x) {
         
-        if ( /_runner/.test(x.name) ||
-             /_lodeRunner/.test(x.name) ||
+        if ( /[\/\\]_/.test(x.name) ||
              ! /\.js$/.test(x.name ) ){ 
             print(" >>>>>>>>>>>>>>> skipping " + x.name);
             return;
@@ -22,3 +23,6 @@ files.forEach(
 );
 
 
+var runnerEnd = new Date()
+
+print( "total runner time: " + ( ( runnerEnd.getTime() - runnerStart.getTime() ) / 1000 ) + "secs" )

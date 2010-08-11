@@ -22,12 +22,13 @@
    Cursor -- and its derived classes -- are our internal cursors.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "query.h"
 #include "introspect.h"
 #include <time.h>
 #include "db.h"
 #include "commands.h"
+#include "repl_block.h"
 
 namespace mongo {
 
@@ -128,7 +129,7 @@ namespace mongo {
 
         while ( 1 ) {
             toAdvance.push_back(j->second);
-            WIN assert( j->first == dl );
+            DEV assert( j->first == dl );
             ++j;
             if ( j == stop )
                 break;
@@ -155,8 +156,8 @@ namespace mongo {
             }
             c->advance();
             if ( c->eof() ) {
-                // advanced to end -- delete cursor
-                delete cc;
+                // advanced to end
+                // leave ClieneCursor in place so next getMore doesn't fail
             }
             else {
                 wassert( c->refLoc() != dl );
@@ -190,29 +191,67 @@ namespace mongo {
         DiskLoc cl = c->refLoc();
         if ( lastLoc() == cl ) {
             //log() << "info: lastloc==curloc " << ns << '\n';
-            return;
-        }
-        {
+        } else {
             recursive_scoped_lock lock(ccmutex);
             setLastLoc_inlock(cl);
-            c->noteLocation();
         }
+        // may be necessary for MultiCursor even when cl hasn't changed
+        c->noteLocation();
     }
     
-    bool ClientCursor::yield() {
-        // need to store on the stack in case this gets deleted
-        CursorId id = cursorid;
+    int ClientCursor::yieldSuggest() {
+        int writers = 0;
+        int readers = 0;
+        
+        int micros = Client::recommendedYieldMicros( &writers , &readers );
+        
+        if ( micros > 0 && writers == 0 && dbMutex.getState() <= 0 ){
+            // we have a read lock, and only reads are coming on, so why bother unlocking
+            micros = 0;
+        }
+        
+        return micros;
+    }
+    
+    bool ClientCursor::yieldSometimes(){
+        if ( ! _yieldSometimesTracker.ping() )
+            return true;
 
-        bool doingDeletes = _doingDeletes;
+        int micros = yieldSuggest();
+        return ( micros > 0 ) ? yield( micros ) : true;
+    }
+
+    void ClientCursor::staticYield( int micros ) {
+        {
+            dbtempreleasecond unlock;
+            if ( unlock.unlocked() ){
+                if ( micros == -1 )
+                    micros = Client::recommendedYieldMicros();
+                if ( micros > 0 )
+                    sleepmicros( micros ); 
+            }
+            else {
+                log( LL_WARNING ) << "ClientCursor::yield can't unlock b/c of recursive lock" << endl;
+            }
+        }        
+    }
+    
+    bool ClientCursor::prepareToYield( YieldData &data ) {
+        if ( ! c->supportYields() )
+            return false;
+        // need to store in case 'this' gets deleted
+        data._id = cursorid;
+        
+        data._doingDeletes = _doingDeletes;
         _doingDeletes = false;
-
+        
         updateLocation();
-
+        
         {
             /* a quick test that our temprelease is safe. 
-               todo: make a YieldingCursor class 
-               and then make the following code part of a unit test.
-            */
+             todo: make a YieldingCursor class 
+             and then make the following code part of a unit test.
+             */
             const int test = 0;
             static bool inEmpty = false;
             if( test && !inEmpty ) { 
@@ -228,20 +267,31 @@ namespace mongo {
                     dropDatabase(ns.c_str());
                 }
             }
-        }
-            
-        {
-            dbtempreleasecond unlock;
-            sleepmicros( Client::recommendedYieldMicros() );
-        }
-
-        if ( ClientCursor::find( id , false ) == 0 ){
-            // i was deleted
+        }        
+        return true;
+    }
+    
+    bool ClientCursor::recoverFromYield( const YieldData &data ) {
+        ClientCursor *cc = ClientCursor::find( data._id , false );
+        if ( cc == 0 ){
+            // id was deleted
             return false;
         }
+        
+        cc->_doingDeletes = data._doingDeletes;
+        cc->c->checkLocation();
+        return true;        
+    }
+    
+    bool ClientCursor::yield( int micros ) {
+        if ( ! c->supportYields() )
+            return true;
+        YieldData data; 
+        prepareToYield( data );
+        
+        staticYield( micros );
 
-        _doingDeletes = doingDeletes;
-        return true;
+        return ClientCursor::recoverFromYield( data );
     }
 
     int ctmLast = 0; // so we don't have to do find() which is a little slow very often.
@@ -255,26 +305,75 @@ namespace mongo {
                 break;
         }
         ctmLast = ctm;
-        DEV out() << "  alloccursorid " << x << endl;
+        //DEV tlog() << "  alloccursorid " << x << endl;
         return x;
     }
+
+    void ClientCursor::storeOpForSlave( DiskLoc last ){
+        if ( ! ( _queryOptions & QueryOption_OplogReplay ))
+            return;
+
+        if ( last.isNull() )
+            return;
+        
+        BSONElement e = last.obj()["ts"];
+        if ( e.type() == Date || e.type() == Timestamp )
+            _slaveReadTill = e._opTime();
+    }
+    
+    void ClientCursor::updateSlaveLocation( CurOp& curop ){
+        if ( _slaveReadTill.isNull() )
+            return;
+        mongo::updateSlaveLocation( curop , ns.c_str() , _slaveReadTill );
+    }
+
+
 
     // QUESTION: Restrict to the namespace from which this command was issued?
     // Alternatively, make this command admin-only?
     class CmdCursorInfo : public Command {
     public:
-        CmdCursorInfo() : Command( "cursorInfo" ) {}
-        virtual bool slaveOk() { return true; }
+        CmdCursorInfo() : Command( "cursorInfo", true ) {}
+        virtual bool slaveOk() const { return true; }
         virtual void help( stringstream& help ) const {
             help << " example: { cursorInfo : 1 }";
         }
-        virtual LockType locktype(){ return NONE; }
-        bool run(const char *dbname, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
+        virtual LockType locktype() const { return NONE; }
+        bool run(const string&, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
             recursive_scoped_lock lock(ClientCursor::ccmutex);
+            result.append("totalOpen", unsigned( ClientCursor::clientCursorsById.size() ) );
             result.append("byLocation_size", unsigned( ClientCursor::byLoc.size() ) );
             result.append("clientCursors_size", unsigned( ClientCursor::clientCursorsById.size() ) );
             return true;
         }
     } cmdCursorInfo;
+    
+    void ClientCursorMonitor::run(){
+        Client::initThread("clientcursormon");
+        Client& client = cc();
+        
+        unsigned old = curTimeMillis();
+
+        while ( ! inShutdown() ){
+            unsigned now = curTimeMillis();
+            ClientCursor::idleTimeReport( now - old );
+            old = now;
+            sleepsecs(4);
+        }
+
+        client.shutdown();
+    }
+
+    void ClientCursor::find( const string& ns , set<CursorId>& all ){
+        recursive_scoped_lock lock(ccmutex);
+        
+        for ( CCById::iterator i=clientCursorsById.begin(); i!=clientCursorsById.end(); ++i ){
+            if ( i->second->ns == ns )
+                all.insert( i->first );
+        }
+    }
+
+
+    ClientCursorMonitor clientCursorMonitor;
 
 } // namespace mongo

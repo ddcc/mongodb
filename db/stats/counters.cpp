@@ -16,7 +16,7 @@
  */
 
 
-#include "stdafx.h"
+#include "pch.h"
 #include "../jsobj.h"
 #include "counters.h"
 
@@ -34,17 +34,17 @@ namespace mongo {
         b.append( "command" , zero );
         _obj = b.obj();
 
-        _insert = (int*)_obj["insert"].value();
-        _query = (int*)_obj["query"].value();
-        _update = (int*)_obj["update"].value();
-        _delete = (int*)_obj["delete"].value();
-        _getmore = (int*)_obj["getmore"].value();
-        _command = (int*)_obj["command"].value();
+        _insert = (AtomicUInt*)_obj["insert"].value();
+        _query = (AtomicUInt*)_obj["query"].value();
+        _update = (AtomicUInt*)_obj["update"].value();
+        _delete = (AtomicUInt*)_obj["delete"].value();
+        _getmore = (AtomicUInt*)_obj["getmore"].value();
+        _command = (AtomicUInt*)_obj["command"].value();
     }
 
     void OpCounters::gotOp( int op , bool isCommand ){
         switch ( op ){
-        case dbInsert: gotInsert(); break;
+        case dbInsert: /*gotInsert();*/ break; // need to handle multi-insert
         case dbQuery: 
             if ( isCommand )
                 gotCommand();
@@ -123,6 +123,24 @@ namespace mongo {
         b.appendNumber( "last_ms" , _last_time );
         b.append("last_finished", _last);
     }
+
+
+    void GenericCounter::hit( const string& name , int count ){
+        scoped_lock lk( _mutex );
+        _counts[name]++;
+    }
+    
+    BSONObj GenericCounter::getObj() {
+        BSONObjBuilder b(128);
+        {
+            mongo::mutex::scoped_lock lk( _mutex );
+            for ( map<string,long long>::iterator i=_counts.begin(); i!=_counts.end(); i++ ){
+                b.appendNumber( i->first , i->second );
+            }
+        }
+        return b.obj();
+    }
+
     
 
     OpCounters globalOpCounters;

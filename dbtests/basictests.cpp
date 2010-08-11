@@ -17,11 +17,12 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 
 #include "dbtests.h"
 #include "../util/base64.h"
 #include "../util/array.h"
+#include "../util/text.h"
 
 namespace BasicTests {
 
@@ -186,6 +187,7 @@ namespace BasicTests {
 
     class sleeptest {
     public:
+
         void run(){
             Timer t;
             sleepsecs( 1 );
@@ -199,8 +201,45 @@ namespace BasicTests {
             t.reset();
             sleepmillis( 1727 );
             ASSERT( t.millis() >= 1000 );
-            ASSERT( t.millis() <= 2000 );
+            ASSERT( t.millis() <= 2500 );
+            
+            {
+                int total = 1200;
+                int ms = 2;
+                t.reset();
+                for ( int i=0; i<(total/ms); i++ ){
+                    sleepmillis( ms );
+                }
+                {
+                    int x = t.millis();
+                    if ( x < 1000 || x > 2500 ){
+                        cout << "sleeptest x: " << x << endl;
+                        ASSERT( x >= 1000 );
+                        ASSERT( x <= 20000 );
+                    }
+                }
+            }
 
+#ifdef __linux__
+            {
+                int total = 1200;
+                int micros = 100;
+                t.reset();
+                int numSleeps = 1000*(total/micros);
+                for ( int i=0; i<numSleeps; i++ ){
+                    sleepmicros( micros );
+                }
+                {
+                    int y = t.millis();
+                    if ( y < 1000 || y > 2500 ){
+                        cout << "sleeptest y: " << y << endl;
+                        ASSERT( y >= 1000 );
+                        ASSERT( y <= 100000 );
+                    }
+                }
+            }
+#endif
+            
         }
         
     };
@@ -220,7 +259,9 @@ namespace BasicTests {
         }
         void run(){
             uassert( -1 , foo() , 1 );
-            ASSERT_EQUALS( 0 , x );
+            if( x != 0 ) {
+                ASSERT_EQUALS( 0 , x );
+            }
             try {
                 uassert( -1 , foo() , 0 );
             }
@@ -268,7 +309,7 @@ namespace BasicTests {
                 {
                     ThreadSafeString bar;
                     bar = "eliot2";
-                    foo = bar;
+                    foo = bar.toString();
                 }
                 ASSERT_EQUALS( "eliot2" , foo );
             }
@@ -316,7 +357,111 @@ namespace BasicTests {
             ASSERT_EQUALS( -1 , lexNumCmp( "a.0.b" , "a.1" ) );
         }
     };
+
+    class DatabaseValidNames {
+    public:
+        void run(){
+            ASSERT( Database::validDBName( "foo" ) );
+            ASSERT( ! Database::validDBName( "foo/bar" ) );
+            ASSERT( ! Database::validDBName( "foo.bar" ) );
+
+            ASSERT( nsDollarCheck( "asdads" ) );
+            ASSERT( ! nsDollarCheck( "asda$ds" ) );
+            ASSERT( nsDollarCheck( "local.oplog.$main" ) );
+        }
+    };
     
+    class PtrTests {
+    public:
+        void run(){
+            scoped_ptr<int> p1 (new int(1));
+            boost::shared_ptr<int> p2 (new int(2));
+            scoped_ptr<const int> p3 (new int(3));
+            boost::shared_ptr<const int> p4 (new int(4));
+
+            //non-const
+            ASSERT_EQUALS( p1.get() , ptr<int>(p1) );
+            ASSERT_EQUALS( p2.get() , ptr<int>(p2) );
+            ASSERT_EQUALS( p2.get() , ptr<int>(p2.get()) ); // T* constructor
+            ASSERT_EQUALS( p2.get() , ptr<int>(ptr<int>(p2)) ); // copy constructor
+            ASSERT_EQUALS( *p2      , *ptr<int>(p2)); 
+            ASSERT_EQUALS( p2.get() , ptr<boost::shared_ptr<int> >(&p2)->get() ); // operator->
+
+            //const
+            ASSERT_EQUALS( p1.get() , ptr<const int>(p1) );
+            ASSERT_EQUALS( p2.get() , ptr<const int>(p2) );
+            ASSERT_EQUALS( p2.get() , ptr<const int>(p2.get()) );
+            ASSERT_EQUALS( p3.get() , ptr<const int>(p3) );
+            ASSERT_EQUALS( p4.get() , ptr<const int>(p4) );
+            ASSERT_EQUALS( p4.get() , ptr<const int>(p4.get()) );
+            ASSERT_EQUALS( p2.get() , ptr<const int>(ptr<const int>(p2)) );
+            ASSERT_EQUALS( p2.get() , ptr<const int>(ptr<int>(p2)) ); // constizing copy constructor
+            ASSERT_EQUALS( *p2      , *ptr<int>(p2)); 
+            ASSERT_EQUALS( p2.get() , ptr<const boost::shared_ptr<int> >(&p2)->get() );
+
+            //bool context
+            ASSERT( ptr<int>(p1) );
+            ASSERT( !ptr<int>(NULL) );
+            ASSERT( !ptr<int>() );
+            
+#if 0
+            // These shouldn't compile
+            ASSERT_EQUALS( p3.get() , ptr<int>(p3) );
+            ASSERT_EQUALS( p4.get() , ptr<int>(p4) );
+            ASSERT_EQUALS( p2.get() , ptr<int>(ptr<const int>(p2)) );
+#endif
+        }
+    };
+
+    struct StringSplitterTest {
+
+        void test( string s ){
+            vector<string> v = StringSplitter::split( s , "," );
+            ASSERT_EQUALS( s , StringSplitter::join( v , "," ) );
+        }
+
+        void run(){
+            test( "a" );
+            test( "a,b" );
+            test( "a,b,c" );
+        }
+    };
+
+    struct IsValidUTF8Test {
+// macros used to get valid line numbers
+#define good(s)  ASSERT(isValidUTF8(s));
+#define bad(s)   ASSERT(!isValidUTF8(s));
+
+        void run() {
+            good("A");
+            good("\xC2\xA2"); // cent: ¢
+            good("\xE2\x82\xAC"); // euro: €
+            good("\xF0\x9D\x90\x80"); // Blackboard A: 𝐀
+
+            //abrupt end
+            bad("\xC2");
+            bad("\xE2\x82");
+            bad("\xF0\x9D\x90");
+            bad("\xC2 ");
+            bad("\xE2\x82 ");
+            bad("\xF0\x9D\x90 ");
+
+            //too long
+            bad("\xF8\x80\x80\x80\x80");
+            bad("\xFC\x80\x80\x80\x80\x80");
+            bad("\xFE\x80\x80\x80\x80\x80\x80");
+            bad("\xFF\x80\x80\x80\x80\x80\x80\x80");
+
+            bad("\xF5\x80\x80\x80"); // U+140000 > U+10FFFF
+            bad("\x80"); //cant start with continuation byte
+            bad("\xC0\x80"); // 2-byte version of ASCII NUL
+#undef good
+#undef bad
+        }
+    };
+
+
+
     class All : public Suite {
     public:
         All() : Suite( "basic" ){
@@ -336,6 +481,13 @@ namespace BasicTests {
             
             add< ArrayTests::basic1 >();
             add< LexNumCmp >();
+
+            add< DatabaseValidNames >();
+
+            add< PtrTests >();
+
+            add< StringSplitterTest >();
+            add< IsValidUTF8Test >();
         }
     } myall;
     

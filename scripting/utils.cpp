@@ -16,9 +16,10 @@
  */
 
 
-#include "stdafx.h"
+#include "pch.h"
 #include "engine.h"
 #include "../util/md5.hpp"
+#include "../util/version.h"
 
 namespace mongo {
 

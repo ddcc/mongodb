@@ -17,7 +17,7 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "../db/query.h"
 
 #include "../db/db.h"
@@ -42,7 +42,7 @@ namespace QueryTests {
         }
         ~Base() {
             try {
-                auto_ptr< Cursor > c = theDataFileMgr.findAll( ns() );
+                boost::shared_ptr<Cursor> c = theDataFileMgr.findAll( ns() );
                 vector< DiskLoc > toDelete;
                 for(; c->ok(); c->advance() )
                     toDelete.push_back( c->currLoc() );
@@ -58,7 +58,7 @@ namespace QueryTests {
         }
         static void addIndex( const BSONObj &key ) {
             BSONObjBuilder b;
-            b.append( "name", "index" );
+            b.append( "name", key.firstElement().fieldName() );
             b.append( "ns", ns() );
             b.append( "key", key );
             BSONObj o = b.done();
@@ -127,6 +127,19 @@ namespace QueryTests {
             BSONObj cmd = fromjson( "{\"query\":{\"a\":/^b/}}" );
             string err;
             ASSERT_EQUALS( 1, runCount( ns(), cmd, err ) );
+        }
+    };
+    
+    class FindOne : public Base {
+    public:
+        void run() {
+            addIndex( BSON( "b" << 1 ) );
+            addIndex( BSON( "c" << 1 ) );
+            insert( BSON( "b" << 2 << "_id" << 0 ) );
+            insert( BSON( "c" << 3 << "_id" << 1 ) );
+            BSONObj ret;
+            ASSERT( Helpers::findOne( ns(), fromjson( "{$or:[{b:2},{c:3}]}" ), ret, true ) );
+            ASSERT_EQUALS( string( "b" ), ret.firstElement().fieldName() );
         }
     };
 
@@ -476,6 +489,20 @@ namespace QueryTests {
         }
     };
 
+    class EmbeddedNumericTypes : public ClientBase {
+    public:
+        ~EmbeddedNumericTypes() {
+            client().dropCollection( "unittests.querytests.NumericEmbedded" );
+        }
+        void run() {
+            const char *ns = "unittests.querytests.NumericEmbedded";
+            client().insert( ns, BSON( "a" << BSON ( "b" << 1 ) ) );
+            ASSERT( ! client().findOne( ns, BSON( "a" << BSON ( "b" << 1.0 ) ) ).isEmpty() );
+            client().ensureIndex( ns , BSON( "a" << 1 ) );
+            ASSERT( ! client().findOne( ns, BSON( "a" << BSON ( "b" << 1.0 ) ) ).isEmpty() );
+        }
+    };
+
     class AutoResetIndexCache : public ClientBase {
     public:
         ~AutoResetIndexCache() {
@@ -736,7 +763,8 @@ namespace QueryTests {
             auto_ptr< DBClientCursor > cursor = client().query( ns, Query().sort( "7" ) );
             while ( cursor->more() ){
                 BSONObj o = cursor->next();
-                cout << " foo " << o << endl;
+                assert( o.valid() );
+                //cout << " foo " << o << endl;
             }
 
         }
@@ -1059,6 +1087,45 @@ namespace QueryTests {
         };
     };
 
+    namespace queryobjecttests {
+        class names1 {
+        public:
+            void run(){
+                ASSERT_EQUALS( BSON( "x" << 1 ) , QUERY( "query" << BSON( "x" << 1 ) ).getFilter() );
+                ASSERT_EQUALS( BSON( "x" << 1 ) , QUERY( "$query" << BSON( "x" << 1 ) ).getFilter() );
+            }
+            
+        };
+    }
+
+    class OrderingTest {
+    public:
+        void run(){
+            {
+                Ordering o = Ordering::make( BSON( "a" << 1 << "b" << -1 << "c" << 1 ) );
+                ASSERT_EQUALS( 1 , o.get(0) );
+                ASSERT_EQUALS( -1 , o.get(1) );
+                ASSERT_EQUALS( 1 , o.get(2) );
+                
+                ASSERT( ! o.descending( 1 ) );
+                ASSERT( o.descending( 1 << 1 ) );
+                ASSERT( ! o.descending( 1 << 2 ) );
+            }
+
+            {
+                Ordering o = Ordering::make( BSON( "a.d" << 1 << "a" << 1 << "e" << -1 ) );
+                ASSERT_EQUALS( 1 , o.get(0) );
+                ASSERT_EQUALS( 1 , o.get(1) );
+                ASSERT_EQUALS( -1 , o.get(2) );
+                
+                ASSERT( ! o.descending( 1 ) );
+                ASSERT( ! o.descending( 1 << 1 ) );
+                ASSERT(  o.descending( 1 << 2 ) );
+            }
+
+        }
+    };
+
     class All : public Suite {
     public:
         All() : Suite( "query" ) {
@@ -1070,6 +1137,7 @@ namespace QueryTests {
             add< CountFields >();
             add< CountQueryFields >();
             add< CountIndexedRegex >();
+            add< FindOne >();
             add< BoundedKey >();
             add< GetMore >();
             add< PositiveLimit >();
@@ -1086,6 +1154,7 @@ namespace QueryTests {
             add< EmptyFieldSpec >();
             add< MultiNe >();
             add< EmbeddedNe >();
+            add< EmbeddedNumericTypes >();
             add< AutoResetIndexCache >();
             add< UniqueIndex >();
             add< UniqueIndexPreexistingData >();
@@ -1107,8 +1176,12 @@ namespace QueryTests {
             add< FindingStart >();
             add< FindingStartPartiallyFull >();
             add< WhatsMyUri >();
-
+            
             add< parsedtests::basic1 >();
+            
+            add< queryobjecttests::names1 >();
+
+            add< OrderingTest >();
         }
     } myall;
     

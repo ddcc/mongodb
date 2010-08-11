@@ -1,4 +1,4 @@
-// queue.h
+// @file queue.h
 
 /*    Copyright 2009 10gen Inc.
  *
@@ -17,7 +17,7 @@
 
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "../util/goodies.h"
 
 #include <queue>
@@ -29,6 +29,8 @@ namespace mongo {
      */
     template<typename T> class BlockingQueue : boost::noncopyable {
     public:
+        BlockingQueue() : _lock("BlockingQueue") { }
+
         void push(T const& t){
             scoped_lock l( _lock );
             _queue.push( t );

@@ -1,4 +1,4 @@
-//file_allocator.h
+// @file file_allocator.h
 
 /*    Copyright 2009 10gen Inc.
  *
@@ -15,10 +15,10 @@
  *    limitations under the License.
  */
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include <fcntl.h>
 #include <errno.h>
-#if defined(__freebsd__)
+#if defined(__freebsd__) || defined(__openbsd__)
 #include <sys/stat.h>
 #endif
 
@@ -38,7 +38,7 @@ namespace mongo {
         */
     public:
 #if !defined(_WIN32)
-        FileAllocator() : failed_() {}
+        FileAllocator() : pendingMutex_("FileAllocator"), failed_() {}
 #endif
         void start() {
 #if !defined(_WIN32)
@@ -106,6 +106,53 @@ namespace mongo {
 #endif
         }
         
+        static void ensureLength( int fd , long size ){
+
+#if defined(_WIN32)
+            // we don't zero on windows
+            // TODO : we should to avoid fragmentation
+#else
+
+#if defined(__linux__) 
+            int ret = posix_fallocate(fd,0,size);
+            if ( ret == 0 )
+                return;
+            
+            log() << "posix_fallocate failed: " << errnoWithDescription( ret ) << " falling back" << endl;
+#endif
+            
+            off_t filelen = lseek(fd, 0, SEEK_END);
+            if ( filelen < size ) {
+                if (filelen != 0) {
+                    stringstream ss;
+                    ss << "failure creating new datafile; lseek failed for fd " << fd << " with errno: " << errnoWithDescription();
+                    massert( 10440 ,  ss.str(), filelen == 0 );
+                }
+                // Check for end of disk.
+                massert( 10441 ,  "Unable to allocate file of desired size",
+                         size - 1 == lseek(fd, size - 1, SEEK_SET) );
+                massert( 10442 ,  "Unable to allocate file of desired size",
+                         1 == write(fd, "", 1) );
+                lseek(fd, 0, SEEK_SET);
+                
+                const long z = 256 * 1024;
+                const boost::scoped_array<char> buf_holder (new char[z]);
+                char* buf = buf_holder.get();
+                memset(buf, 0, z);
+                long left = size;
+                while ( left > 0 ) {
+                    long towrite = left;
+                    if ( towrite > z )
+                        towrite = z;
+                    
+                    int written = write( fd , buf , towrite );
+                    massert( 10443 , errnoWithPrefix("write failed" ), written > 0 );
+                    left -= written;
+                }
+            }
+#endif
+        }
+        
     private:
 #if !defined(_WIN32)
         void checkFailure() {
@@ -161,42 +208,26 @@ namespace mongo {
                             long fd = open(name.c_str(), O_CREAT | O_RDWR | O_NOATIME, S_IRUSR | S_IWUSR);
                             if ( fd <= 0 ) {
                                 stringstream ss;
-                                ss << "couldn't open " << name << ' ' << OUTPUT_ERRNO;
+                                ss << "couldn't open " << name << ' ' << errnoWithDescription();
                                 massert( 10439 ,  ss.str(), fd <= 0 );
                             }
 
 #if defined(POSIX_FADV_DONTNEED)
                             if( posix_fadvise(fd, 0, size, POSIX_FADV_DONTNEED) ) { 
-                                log() << "warning: posix_fadvise fails " << name << ' ' << OUTPUT_ERRNO << endl;
+                                log() << "warning: posix_fadvise fails " << name << ' ' << errnoWithDescription() << endl;
                             }
 #endif
-  
+                            
+                            Timer t;
+                            
                             /* make sure the file is the full desired length */
-                            off_t filelen = lseek(fd, 0, SEEK_END);
-                            if ( filelen < size ) {
-                                massert( 10440 ,  "failure creating new datafile", filelen == 0 );
-                                // Check for end of disk.
-                                massert( 10441 ,  "Unable to allocate file of desired size",
-                                        size - 1 == lseek(fd, size - 1, SEEK_SET) );
-                                massert( 10442 ,  "Unable to allocate file of desired size",
-                                        1 == write(fd, "", 1) );
-                                lseek(fd, 0, SEEK_SET);
-                                Timer t;
-                                long z = 256 * 1024;
-                                char buf[z];
-                                memset(buf, 0, z);
-                                long left = size;
-                                while ( left > 0 ) {
-                                    long towrite = left;
-                                    if ( towrite > z )
-                                        towrite = z;
-                                    
-                                    int written = write( fd , buf , towrite );
-                                    massert( 10443 , errnostring("write failed" ), written > 0 );
-                                    left -= written;
-                                }
-                                log() << "done allocating datafile " << name << ", size: " << size/1024/1024 << "MB, took " << ((double)t.millis())/1000.0 << " secs" << endl;
-                            }                            
+                            ensureLength( fd , size );
+
+                            log() << "done allocating datafile " << name << ", " 
+                                  << "size: " << size/1024/1024 << "MB, "
+                                  << " took " << ((double)t.millis())/1000.0 << " secs" 
+                                  << endl;
+
                             close( fd );
                             
                         } catch ( ... ) {

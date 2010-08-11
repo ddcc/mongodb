@@ -19,44 +19,30 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "../util/miniwebserver.h"
+#include "../util/mongoutils/html.h"
 #include "../util/md5.hpp"
 #include "db.h"
-#include "repl.h"
-#include "replset.h"
 #include "instance.h"
 #include "security.h"
 #include "stats/snapshots.h"
 #include "background.h"
 #include "commands.h"
-
+#include "../util/version.h"
+#include "../util/ramlog.h"
 #include <pcrecpp.h>
+#include "dbwebserver.h"
 #include <boost/date_time/posix_time/posix_time.hpp>
 #undef assert
-#define assert xassert
+#define assert MONGO_assert
 
 namespace mongo {
 
-    extern string bind_ip;
-    extern const char *replInfo;
-
-    bool getInitialSyncCompleted();
+    using namespace mongoutils::html;
+    using namespace bson;
 
     time_t started = time(0);
-
-    /*
-        string toString() {
-            stringstream ss;
-            unsigned long long dt = last - start;
-            ss << dt/1000;
-            ss << '\t';
-            ss << timeLocked/1000 << '\t';
-            if( dt )
-                ss << (timeLocked*100)/dt << '%';
-            return ss.str();
-        }
-    */
 
     struct Timing {
         Timing() {
@@ -65,187 +51,39 @@ namespace mongo {
         unsigned long long start, timeLocked;
     };
 
-    bool _bold;
-    string bold(bool x) {
-        _bold = x;
-        return x ? "<b>" : "";
-    }
-    string bold() {
-        return _bold ? "</b>" : "";
-    }
+    bool execCommand( Command * c ,
+                      Client& client , int queryOptions , 
+                      const char *ns, BSONObj& cmdObj , 
+                      BSONObjBuilder& result, 
+                      bool fromRepl );
 
     class DbWebServer : public MiniWebServer {
     public:
-        // caller locks
-        void doLockedStuff(stringstream& ss) {
-            ss << "# databases: " << dbHolder.size() << '\n';
-
-            ss << bold(ClientCursor::byLocSize()>10000) << "Cursors byLoc.size(): " << ClientCursor::byLocSize() << bold() << '\n';
-            ss << "\n<b>replication</b>\n";
-            ss << "master: " << replSettings.master << '\n';
-            ss << "slave:  " << replSettings.slave << '\n';
-            if ( replPair ) {
-                ss << "replpair:\n";
-                ss << replPair->getInfo();
-            }
-            bool seemCaughtUp = getInitialSyncCompleted();
-            if ( !seemCaughtUp ) ss << "<b>";
-            ss <<   "initialSyncCompleted: " << seemCaughtUp;
-            if ( !seemCaughtUp ) ss << "</b>";
-            ss << '\n';
-            
-            auto_ptr<SnapshotDelta> delta = statsSnapshots.computeDelta();
-            if ( delta.get() ){
-                ss << "\n<b>DBTOP  (occurences|percent of elapsed)</b>\n";
-                ss << "<table border=1>";
-                ss << "<tr align='left'>";
-                ss << "<th>NS</th>"
-                      "<th colspan=2>total</th>"
-                      "<th colspan=2>Reads</th>"
-                      "<th colspan=2>Writes</th>"
-                      "<th colspan=2>Queries</th>"
-                      "<th colspan=2>GetMores</th>"
-                      "<th colspan=2>Inserts</th>"
-                      "<th colspan=2>Updates</th>"
-                      "<th colspan=2>Removes</th>";
-                ss << "</tr>";
-                
-                display( ss , (double) delta->elapsed() , "GLOBAL" , delta->globalUsageDiff() );
-                
-                Top::UsageMap usage = delta->collectionUsageDiff();
-                for ( Top::UsageMap::iterator i=usage.begin(); i != usage.end(); i++ ){
-                    display( ss , (double) delta->elapsed() , i->first , i->second );
-                }
-                
-                ss << "</table>";
-            }
-
-            statsSnapshots.outputLockInfoHTML( ss );
-
-            BackgroundOperation::dump(ss);
+        DbWebServer(const string& ip, int port) : MiniWebServer(ip, port) {
+            WebStatusPlugin::initAll();
         }
 
-        void display( stringstream& ss , double elapsed , const Top::UsageData& usage ){
-            ss << "<td>";
-            ss << usage.count;
-            ss << "</td><td>";
-            double per = 100 * ((double)usage.time)/elapsed;
-            ss << setprecision(2) << fixed << per << "%";
-            ss << "</td>";
-        }
+    private:
 
-        void display( stringstream& ss , double elapsed , const string& ns , const Top::CollectionData& data ){
-            if ( ns != "GLOBAL" && data.total.count == 0 )
-                return;
-            ss << "<tr><th>" << ns << "</th>";
-            
-            display( ss , elapsed , data.total );
-
-            display( ss , elapsed , data.readLock );
-            display( ss , elapsed , data.writeLock );
-
-            display( ss , elapsed , data.queries );
-            display( ss , elapsed , data.getmore );
-            display( ss , elapsed , data.insert );
-            display( ss , elapsed , data.update );
-            display( ss , elapsed , data.remove );
-            
-            ss << "</tr>";
-        }
-
-        void tablecell( stringstream& ss , bool b ){
-            ss << "<td>" << (b ? "<b>X</b>" : "") << "</td>";
-        }
-        
-
-        template< typename T> 
-        void tablecell( stringstream& ss , const T& t ){
-            ss << "<td>" << t << "</td>";
-        }
-        
         void doUnlockedStuff(stringstream& ss) {
             /* this is in the header already ss << "port:      " << port << '\n'; */
-            ss << mongodVersion() << "\n";
-            ss << "git hash: " << gitVersion() << "\n";
-            ss << "sys info: " << sysInfo() << "\n";
-            ss << "\n";
-            ss << "dbwritelocked:  " << dbMutex.info().isLocked() << " (initial)\n";
-            ss << "uptime:    " << time(0)-started << " seconds\n";
-            if ( replAllDead )
-                ss << "<b>replication replAllDead=" << replAllDead << "</b>\n";
-            ss << "\nassertions:\n";
-            for ( int i = 0; i < 4; i++ ) {
-                if ( lastAssert[i].isSet() ) {
-                    ss << "<b>";
-                    if ( i == 3 ) ss << "usererr";
-                    else ss << i;
-                    ss << "</b>" << ' ' << lastAssert[i].toString();
-                }
-            }
-
-            ss << "\nreplInfo:  " << replInfo << "\n\n";
-
-            ss << "Clients:\n";
-            ss << "<table border=1>";
-            ss << "<tr align='left'>"
-               << "<th>Thread</th>" 
-             
-               << "<th>OpId</th>" 
-               << "<th>Active</th>" 
-               << "<th>LockType</th>"
-               << "<th>Waiting</th>"
-               << "<th>SecsRunning</th>"
-               << "<th>Op</th>"
-               << "<th>NameSpace</th>"
-               << "<th>Query</th>"
-               << "<th>client</th>"
-               << "<th>msg</th>"
-               << "<th>progress</th>"
-
-               << "</tr>\n";
-            {
-                scoped_lock bl(Client::clientsMutex);
-                for( set<Client*>::iterator i = Client::clients.begin(); i != Client::clients.end(); i++ ) { 
-                    Client *c = *i;
-                    CurOp& co = *(c->curop());
-                    ss << "<tr><td>" << c->desc() << "</td>";
-                    
-                    tablecell( ss , co.opNum() );
-                    tablecell( ss , co.active() );
-                    tablecell( ss , co.getLockType() );
-                    tablecell( ss , co.isWaitingForLock() );
-                    if ( co.active() )
-                        tablecell( ss , co.elapsedSeconds() );
-                    else
-                        tablecell( ss , "" );
-                    tablecell( ss , co.getOp() );
-                    tablecell( ss , co.getNS() );
-                    if ( co.haveQuery() )
-                        tablecell( ss , co.query() );
-                    else
-                        tablecell( ss , "" );
-                    tablecell( ss , co.getRemoteString() );
-
-                    tablecell( ss , co.getMessage() );
-                    tablecell( ss , co.getProgressMeter().toString() );
-
-
-                    ss << "</tr>";
-                }
-            }
-            ss << "</table>\n";
+            ss << "<pre>";
+            ss << mongodVersion() << '\n';
+            ss << "git hash: " << gitVersion() << '\n';
+            ss << "sys info: " << sysInfo() << '\n';
+            ss << "uptime: " << time(0)-started << " seconds\n";
+            ss << "</pre>";
         }
-        
-        bool allowed( const char * rq , vector<string>& headers, const SockAddr &from ){
-            
-            if ( from.localhost() )
-                return true;
-            
-            Client::GodScope gs;
 
-            if ( db.findOne( "admin.system.users" , BSONObj() , 0 , QueryOption_SlaveOk ).isEmpty() )
+    private:
+        
+        bool allowed( const char * rq , vector<string>& headers, const SockAddr &from ) {
+            if ( from.isLocalHost() )
                 return true;
-            
+
+            if ( ! webHaveAdminUsers() )
+                return true;
+
             string auth = getHeader( rq , "Authorization" );
 
             if ( auth.size() > 0 && auth.find( "Digest " ) == 0 ){
@@ -260,25 +98,26 @@ namespace mongo {
                     parms[name] = val;
                 }
 
-                BSONObj user = db.findOne( "admin.system.users" , BSON( "user" << parms["username"] ) );
+                BSONObj user = webGetAdminUser( parms["username"] );
                 if ( ! user.isEmpty() ){
                     string ha1 = user["pwd"].str();
                     string ha2 = md5simpledigest( (string)"GET" + ":" + parms["uri"] );
                     
-                    string r = ha1 + ":" + parms["nonce"];
+                    stringstream r;
+                    r << ha1 << ':' << parms["nonce"];
                     if ( parms["nc"].size() && parms["cnonce"].size() && parms["qop"].size() ){
-                        r += ":";
-                        r += parms["nc"];
-                        r += ":";
-                        r += parms["cnonce"];
-                        r += ":";
-                        r += parms["qop"];
+                        r << ':';
+                        r << parms["nc"];
+                        r << ':';
+                        r << parms["cnonce"];
+                        r << ':';
+                        r << parms["qop"];
                     }
-                    r += ":";
-                    r += ha2;
-                    r = md5simpledigest( r );
+                    r << ':';
+                    r << ha2;
+                    string r1 = md5simpledigest( r.str() );
                     
-                    if ( r == parms["response"] )
+                    if ( r1 == parms["response"] )
                         return true;
                 }
 
@@ -307,85 +146,239 @@ namespace mongo {
             const SockAddr &from
         )
         {
-            //out() << "url [" << url << "]" << endl;
-            
             if ( url.size() > 1 ) {
                 
-                if ( url.find( "/_status" ) == 0 ){
-                    if ( ! allowed( rq , headers, from ) ){
-                        responseCode = 401;
-                        responseMsg = "not allowed\n";
-                        return;
-                    }              
-                    headers.push_back( "Content-Type: application/json" );
-                    generateServerStatus( url , responseMsg );
-                    responseCode = 200;
-                    return;
-                }
-
-                if ( ! cmdLine.rest ){
-                    responseCode = 403;
-                    responseMsg = "rest is not enabled.  use --rest to turn on";
-                    return;
-                }
-                if ( ! allowed( rq , headers, from ) ){
+                if ( ! allowed( rq , headers, from ) ) {
                     responseCode = 401;
+                    headers.push_back( "Content-Type: text/plain" );
                     responseMsg = "not allowed\n";
                     return;
-                }                
-                handleRESTRequest( rq , url , responseMsg , responseCode , headers );
+                }              
+
+                {
+                    DbWebHandler * handler = DbWebHandler::findHandler( url );
+                    if ( handler ){
+                        if ( handler->requiresREST( url ) && ! cmdLine.rest )
+                            _rejectREST( responseMsg , responseCode , headers );
+                        else
+                            handler->handle( rq , url , responseMsg , responseCode , headers , from );
+                        return;
+                    }
+                }
+
+
+                if ( ! cmdLine.rest ) {
+                    _rejectREST( responseMsg , responseCode , headers );
+                    return;
+                }
+                
+                responseCode = 404;
+                headers.push_back( "Content-Type: text/html" );
+                responseMsg = "<html><body>unknown url</body></html>\n";
                 return;
             }
-
-
-            responseCode = 200;
-            stringstream ss;
-            ss << "<html><head><title>";
-
-            string dbname;
-            {
-                stringstream z;
-                z << "mongodb " << getHostName() << ':' << mongo::cmdLine.port << ' ';
-                dbname = z.str();
-            }
-            ss << dbname << "</title></head><body><h2>" << dbname << "</h2><p>\n<pre>";
-
-            doUnlockedStuff(ss);
-
-            {
-                Timer t;
-                readlocktry lk( "" , 2000 );
-                if ( lk.got() ){
-                    ss << "time to get dblock: " << t.millis() << "ms\n";
-                    doLockedStuff(ss);
-                }
-                else {
-                    ss << "\n<b>timed out getting dblock</b>\n";
-                }
-            }
             
+            // generate home page
 
-            ss << "</pre></body></html>";
-            responseMsg = ss.str();
-
-            // we want to return SavedContext from before the authentication was performed
             if ( ! allowed( rq , headers, from ) ){
                 responseCode = 401;
                 responseMsg = "not allowed\n";
                 return;
             }            
+
+            responseCode = 200;
+            stringstream ss;
+            string dbname;
+            {
+                stringstream z;
+                z << "mongod " << prettyHostName();
+                dbname = z.str();
+            }
+            ss << start(dbname) << h2(dbname);
+            ss << "<p><a href=\"/_commands\">List all commands</a> | \n";
+            ss << "<a href=\"/_replSet\">Replica set status</a></p>\n";
+
+            //ss << "<a href=\"/_status\">_status</a>";
+            {
+                const map<string, Command*> *m = Command::webCommands();
+                if( m ) {
+                    ss << a("", "These read-only context-less commands can be executed from the web interface.  Results are json format, unless ?text is appended in which case the result is output as text for easier human viewing", "Commands") << ": ";
+                    for( map<string, Command*>::const_iterator i = m->begin(); i != m->end(); i++ ) { 
+                        stringstream h;
+                        i->second->help(h);
+                        string help = h.str();
+                        ss << "<a href=\"/" << i->first << "?text\"";
+                        if( help != "no help defined" )
+                            ss << " title=\"" << help << '"';
+                        ss << ">" << i->first << "</a> ";
+                    }
+                    ss << '\n';
+                }
+            }
+            ss << '\n';
+	    /*
+            ss << "HTTP <a "
+                "title=\"click for documentation on this http interface\""
+                "href=\"http://www.mongodb.org/display/DOCS/Http+Interface\">admin port</a>:" << _port << "<p>\n";
+	    */
+
+            doUnlockedStuff(ss);
+
+            WebStatusPlugin::runAll( ss );
+            
+            ss << "</body></html>\n";
+            responseMsg = ss.str();
+
+
         }
 
-        void generateServerStatus( string url , string& responseMsg ){
+        void _rejectREST( string& responseMsg , int& responseCode, vector<string>& headers ){
+                                responseCode = 403;
+                    stringstream ss;
+                    ss << "REST is not enabled.  use --rest to turn on.\n";
+                    ss << "check that port " << _port << " is secured for the network too.\n";
+                    responseMsg = ss.str();
+                    headers.push_back( "Content-Type: text/plain" );
+        }
+
+    };
+    // ---
+    
+    bool prisort( const Prioritizable * a , const Prioritizable * b ){
+        return a->priority() < b->priority();
+    }
+
+    // -- status framework ---
+    WebStatusPlugin::WebStatusPlugin( const string& secionName , double priority , const string& subheader ) 
+        : Prioritizable(priority), _name( secionName ) , _subHeading( subheader ) {
+        if ( ! _plugins )
+            _plugins = new vector<WebStatusPlugin*>();
+        _plugins->push_back( this );
+    }
+
+    void WebStatusPlugin::initAll(){
+        if ( ! _plugins )
+            return;
+        
+        sort( _plugins->begin(), _plugins->end() , prisort );
+        
+        for ( unsigned i=0; i<_plugins->size(); i++ )
+            (*_plugins)[i]->init();
+    }
+
+    void WebStatusPlugin::runAll( stringstream& ss ){
+        if ( ! _plugins )
+            return;
+        
+        for ( unsigned i=0; i<_plugins->size(); i++ ){
+            WebStatusPlugin * p = (*_plugins)[i];
+            ss << "<hr>\n" 
+               << "<b>" << p->_name << "</b>";
+            
+            ss << " " << p->_subHeading;
+
+            ss << "<br>\n";
+            
+            p->run(ss);
+        }
+
+    }
+
+    vector<WebStatusPlugin*> * WebStatusPlugin::_plugins = 0;
+
+    // -- basic statuc plugins --
+
+    class LogPlugin : public WebStatusPlugin {
+    public:
+        LogPlugin() : WebStatusPlugin( "Log" , 100 ), _log(0){
+        }
+        
+        virtual void init(){
+            assert( ! _log );
+            _log = new RamLog();
+            Logstream::get().addGlobalTee( _log );
+        }
+
+        virtual void run( stringstream& ss ){
+            _log->toHTML( ss );
+        }
+        RamLog * _log;
+    };
+      
+    LogPlugin * logPlugin = new LogPlugin();
+
+    // -- handler framework ---
+
+    DbWebHandler::DbWebHandler( const string& name , double priority , bool requiresREST )
+        : Prioritizable(priority), _name(name) , _requiresREST(requiresREST){
+
+        { // setup strings
+            _defaultUrl = "/";
+            _defaultUrl += name;
+
+            stringstream ss;
+            ss << name << " priority: " << priority << " rest: " << requiresREST;
+            _toString = ss.str();
+        }
+        
+        { // add to handler list
+            if ( ! _handlers )
+                _handlers = new vector<DbWebHandler*>();
+            _handlers->push_back( this );
+            sort( _handlers->begin() , _handlers->end() , prisort );
+        }
+    }
+
+    DbWebHandler * DbWebHandler::findHandler( const string& url ){
+        if ( ! _handlers )
+            return 0;
+        
+        for ( unsigned i=0; i<_handlers->size(); i++ ){
+            DbWebHandler * h = (*_handlers)[i];
+            if ( h->handles( url ) )
+                return h;
+        }
+
+        return 0;
+    }
+    
+    vector<DbWebHandler*> * DbWebHandler::_handlers = 0;
+
+    // --- basic handlers ---
+
+    class FavIconHandler : public DbWebHandler {
+    public:
+        FavIconHandler() : DbWebHandler( "favicon.ico" , 0 , false ){}
+
+        virtual void handle( const char *rq, string url, 
+                             string& responseMsg, int& responseCode,
+                             vector<string>& headers,  const SockAddr &from ){
+            responseCode = 404;
+            headers.push_back( "Content-Type: text/plain" );
+            responseMsg = "no favicon\n";
+        }
+
+    } faviconHandler;
+    
+    class StatusHandler : public DbWebHandler {
+    public:
+        StatusHandler() : DbWebHandler( "_status" , 1 , false ){}
+        
+        virtual void handle( const char *rq, string url, 
+                             string& responseMsg, int& responseCode,
+                             vector<string>& headers,  const SockAddr &from ){
+            headers.push_back( "Content-Type: application/json" );
+            responseCode = 200;
+            
             static vector<string> commands;
             if ( commands.size() == 0 ){
                 commands.push_back( "serverStatus" );
                 commands.push_back( "buildinfo" );
             }
-
+            
             BSONObj params;
             if ( url.find( "?" ) != string::npos ) {
-                parseParams( params , url.substr( url.find( "?" ) + 1 ) );
+                MiniWebServer::parseParams( params , url.substr( url.find( "?" ) + 1 ) );
             }
             
             BSONObjBuilder buf(1024);
@@ -400,7 +393,7 @@ namespace mongo {
                 BSONObj co;
                 {
                     BSONObjBuilder b;
-                    b.append( cmd.c_str() , 1 );
+                    b.append( cmd , 1 );
                     
                     if ( cmd == "serverStatus" && params["repl"].type() ){
                         b.append( "repl" , atoi( params["repl"].valuestr() ) );
@@ -413,188 +406,143 @@ namespace mongo {
                 
                 BSONObjBuilder sub;
                 if ( ! c->run( "admin.$cmd" , co , errmsg , sub , false ) )
-                    buf.append( cmd.c_str() , errmsg );
+                    buf.append( cmd , errmsg );
                 else
-                    buf.append( cmd.c_str() , sub.obj() );
+                    buf.append( cmd , sub.obj() );
             }
             
             responseMsg = buf.obj().jsonString();
+
         }
 
-        void handleRESTRequest( const char *rq, // the full request
-                                string url,
-                                string& responseMsg,
-                                int& responseCode,
-                                vector<string>& headers // if completely empty, content-type: text/html will be added
-                              ) {
+    } statusHandler;
 
-            string::size_type first = url.find( "/" , 1 );
-            if ( first == string::npos ) {
-                responseCode = 400;
-                return;
-            }
-
-            string method = parseMethod( rq );
-            string dbname = url.substr( 1 , first - 1 );
-            string coll = url.substr( first + 1 );
-            string action = "";
-
-            BSONObj params;
-            if ( coll.find( "?" ) != string::npos ) {
-                parseParams( params , coll.substr( coll.find( "?" ) + 1 ) );
-                coll = coll.substr( 0 , coll.find( "?" ) );
-            }
-
-            string::size_type last = coll.find_last_of( "/" );
-            if ( last == string::npos ) {
-                action = coll;
-                coll = "_defaultCollection";
-            }
-            else {
-                action = coll.substr( last + 1 );
-                coll = coll.substr( 0 , last );
-            }
-
-            for ( string::size_type i=0; i<coll.size(); i++ )
-                if ( coll[i] == '/' )
-                    coll[i] = '.';
-
-            string fullns = urlDecode(dbname + "." + coll);
-
-            headers.push_back( (string)"x-action: " + action );
-            headers.push_back( (string)"x-ns: " + fullns );
-            headers.push_back( "Content-Type: text/plain;charset=utf-8" );
-
+    class CommandListHandler : public DbWebHandler {
+    public:
+        CommandListHandler() : DbWebHandler( "_commands" , 1 , true ){}
+        
+        virtual void handle( const char *rq, string url, 
+                             string& responseMsg, int& responseCode,
+                             vector<string>& headers,  const SockAddr &from ){
+            headers.push_back( "Content-Type: text/html" );
+            responseCode = 200;
+            
             stringstream ss;
-
-            if ( method == "GET" ) {
-                responseCode = 200;
-                handleRESTQuery( fullns , action , params , responseCode , ss  );
-            }
-            else if ( method == "POST" ) {
-                responseCode = 201;
-                handlePost( fullns , body( rq ) , params , responseCode , ss  );
-            }
-            else {
-                responseCode = 400;
-                headers.push_back( "X_err: bad request" );
-                ss << "don't know how to handle a [" << method << "]";
-                out() << "don't know how to handle a [" << method << "]" << endl;
-            }
-
+            ss << start("Commands List");
+            ss << p( a("/", "back", "Home") );
+            ss << p( "<b>MongoDB List of <a href=\"http://www.mongodb.org/display/DOCS/Commands\">Commands</a></b>\n" );
+            const map<string, Command*> *m = Command::commandsByBestName();
+            ss << "S:slave-only  N:no-lock  R:read-lock  W:write-lock  A:admin-only<br>\n";
+            ss << table();
+            ss << "<tr><th>Command</th><th>Attributes</th><th>Help</th></tr>\n";
+            for( map<string, Command*>::const_iterator i = m->begin(); i != m->end(); i++ ) 
+                i->second->htmlHelp(ss);
+            ss << _table() << _end();
+            
             responseMsg = ss.str();
         }
+    } commandListHandler;
 
-        void handleRESTQuery( string ns , string action , BSONObj & params , int & responseCode , stringstream & out ) {
-            Timer t;
-
-            int skip = _getOption( params["skip"] , 0 );
-            int num = _getOption( params["limit"] , _getOption( params["count" ] , 1000 ) ); // count is old, limit is new
-
-            int one = 0;
-            if ( params["one"].type() == String && tolower( params["one"].valuestr()[0] ) == 't' ) {
-                num = 1;
-                one = 1;
+    class CommandsHandler : public DbWebHandler {
+    public:
+        CommandsHandler() : DbWebHandler( "DUMMY COMMANDS" , 2 , true ){}
+        
+        bool _cmd( const string& url , string& cmd , bool& text ) const {
+            const char * x = url.c_str();
+            
+            if ( x[0] != '/' ){
+                // this should never happen
+                return false;
             }
+            
+            if ( strchr( x + 1 , '/' ) )
+                return false;
+            
+            x++;
 
-            BSONObjBuilder queryBuilder;
-
-            BSONObjIterator i(params);
-            while ( i.more() ){
-                BSONElement e = i.next();
-                string name = e.fieldName();
-                if ( ! name.find( "filter_" ) == 0 )
-                    continue;
-
-                const char * field = name.substr( 7 ).c_str();
-                const char * val = e.valuestr();
-
-                char * temp;
-
-                // TODO: this is how i guess if something is a number.  pretty lame right now
-                double number = strtod( val , &temp );
-                if ( temp != val )
-                    queryBuilder.append( field , number );
-                else
-                    queryBuilder.append( field , val );
+            const char * end = strstr( x , "?text" );
+            if ( end ){
+                text = true;
+                cmd = string( x , end - x );
             }
-
-            BSONObj query = queryBuilder.obj();
-
-            auto_ptr<DBClientCursor> cursor = db.query( ns.c_str() , query, num , skip );
-            uassert( 13085 , "query failed for dbwebserver" , cursor.get() );
-            if ( one ) {
-                if ( cursor->more() ) {
-                    BSONObj obj = cursor->next();
-                    out << obj.jsonString() << "\n";
-                }
-                else {
-                    responseCode = 404;
-                }
-                return;
+            else {
+                text = false;
+                cmd = string(x);
             }
-
-            out << "{\n";
-            out << "  \"offset\" : " << skip << ",\n";
-            out << "  \"rows\": [\n";
-
-            int howMany = 0;
-            while ( cursor->more() ) {
-                if ( howMany++ )
-                    out << " ,\n";
-                BSONObj obj = cursor->next();
-                out << "    " << obj.jsonString();
-
-            }
-            out << "\n  ],\n\n";
-
-            out << "  \"total_rows\" : " << howMany << " ,\n";
-            out << "  \"query\" : " << query.jsonString() << " ,\n";
-            out << "  \"millis\" : " << t.millis() << "\n";
-            out << "}\n";
+             
+            return true;
         }
 
-        // TODO Generate id and revision per couch POST spec
-        void handlePost( string ns, const char *body, BSONObj& params, int & responseCode, stringstream & out ) {
-            try {
-                BSONObj obj = fromjson( body );
-                db.insert( ns.c_str(), obj );
-            } catch ( ... ) {
-                responseCode = 400; // Bad Request.  Seems reasonable for now.
-                out << "{ \"ok\" : false }";
-                return;
+        Command * _cmd( const string& cmd ) const {
+            const map<string,Command*> *m = Command::webCommands();
+            if( ! m )
+                return 0;
+            
+            map<string,Command*>::const_iterator i = m->find(cmd);
+            if ( i == m->end() )
+                return 0;
+            
+            return i->second;
+        }
+
+        virtual bool handles( const string& url ) const { 
+            string cmd;
+            bool text;
+            if ( ! _cmd( url , cmd , text ) )
+                return false;
+
+            return _cmd( cmd );
+        }
+        
+        virtual void handle( const char *rq, string url, 
+                             string& responseMsg, int& responseCode,
+                             vector<string>& headers,  const SockAddr &from ){
+            
+            string cmd;
+            bool text = false;
+            assert( _cmd( url , cmd , text ) );
+            Command * c = _cmd( cmd );
+            assert( c );
+
+            BSONObj cmdObj = BSON( cmd << 1 );
+            Client& client = cc();
+            
+            BSONObjBuilder result;
+            execCommand(c, client, 0, "admin.", cmdObj , result, false);
+            
+            responseCode = 200;
+            
+            string j = result.done().jsonString(JS, text );
+            responseMsg = j;
+            
+            if( text ){
+                headers.push_back( "Content-Type: text/plain" );
+                responseMsg += '\n';
+            }
+            else {
+                headers.push_back( "Content-Type: application/json" );
             }
 
-            responseCode = 201;
-            out << "{ \"ok\" : true }";
         }
+        
+    } commandsHandler;
 
-        int _getOption( BSONElement e , int def ) {
-            if ( e.isNumber() )
-                return e.numberInt();
-            if ( e.type() == String )
-                return atoi( e.valuestr() );
-            return def;
-        }
+    // --- external ----
 
-    private:
-        static DBDirectClient db;
-    };
-
-    DBDirectClient DbWebServer::db;
+    string prettyHostName() { 
+        stringstream s;
+        s << getHostName();
+        if( mongo::cmdLine.port != CmdLine::DefaultDBPort ) 
+            s << ':' << mongo::cmdLine.port;
+        return s.str();
+    }
 
     void webServerThread() {
         Client::initThread("websvr");
-        DbWebServer mini;
-        int p = cmdLine.port + 1000;
-        if ( mini.init(bind_ip, p) ) {
-            ListeningSockets::get()->add( mini.socket() );
-            log() << "web admin interface listening on port " << p << endl;
-            mini.run();
-        }
-        else { 
-            log() << "warning: web admin interface failed to initialize on port " << p << endl;
-        }
+        const int p = cmdLine.port + 1000;
+        DbWebServer mini(cmdLine.bind_ip, p);
+        log() << "web admin interface listening on port " << p << endl;
+        mini.initAndListen();
         cc().shutdown();
     }
 

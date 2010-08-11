@@ -18,7 +18,7 @@
  */
 
 // Where IndexDetails defined.
-#include "stdafx.h"
+#include "pch.h"
 #include "../db/namespace.h"
 
 #include "../db/db.h"
@@ -548,13 +548,13 @@ namespace NamespaceTests {
                 keys.clear();
 
                 id().getKeysFromObject( fromjson( "{a:1,b:null}" ), keys );
-                cout << "YO : " << *(keys.begin()) << endl;
+                //cout << "YO : " << *(keys.begin()) << endl;
                 checkSize(1, keys );
                 keys.clear();
                 
                 id().getKeysFromObject( fromjson( "{a:1,b:[]}" ), keys );
                 checkSize(1, keys );
-                cout << "YO : " << *(keys.begin()) << endl;
+                //cout << "YO : " << *(keys.begin()) << endl;
                 ASSERT_EQUALS( NumberInt , keys.begin()->firstElement().type() );
                 keys.clear();
             }
@@ -591,7 +591,7 @@ namespace NamespaceTests {
                 ASSERT( userCreateNS( ns(), fromjson( spec() ), err, false ) );
             }
             virtual string spec() const {
-                return "{\"capped\":true,\"size\":512}";
+                return "{\"capped\":true,\"size\":512,\"$nExtents\":1}";
             }
             int nRecords() const {
                 int count = 0;
@@ -675,6 +675,7 @@ namespace NamespaceTests {
             void run() {
                 create();
                 ASSERT_EQUALS( 2, nExtents() );
+
                 BSONObj b = bigObj();
 
                 DiskLoc l[ 8 ];
@@ -699,13 +700,78 @@ namespace NamespaceTests {
             }
         };
 
+        /* test  NamespaceDetails::cappedTruncateAfter(const char *ns, DiskLoc loc) 
+        */
+        class TruncateCapped : public Base {
+            virtual string spec() const {
+                return "{\"capped\":true,\"size\":512,\"$nExtents\":2}";
+            }
+            void pass(int p) {
+                create();
+                ASSERT_EQUALS( 2, nExtents() );
+
+                BSONObj b = bigObj();
+
+                DiskLoc l[ 8 ];
+                for ( int i = 0; i < 8; ++i ) {
+                    l[ i ] = theDataFileMgr.insert( ns(), b.objdata(), b.objsize() );
+                    ASSERT( !l[ i ].isNull() );
+                    ASSERT_EQUALS( i < 2 ? i + 1 : 3 + i % 2, nRecords() );
+                    if ( i > 3 )
+                        ASSERT( l[ i ] == l[ i - 4 ] );
+                }
+
+                NamespaceDetails *nsd = nsdetails(ns());
+
+                DiskLoc last, first;
+                {
+                    ReverseCappedCursor c(nsd);
+                    last = c.currLoc();
+                    ASSERT( !last.isNull() );
+                }
+                {
+                    ForwardCappedCursor c(nsd);
+                    first = c.currLoc();
+                    ASSERT( !first.isNull() );
+                    ASSERT( first != last ) ;
+                }
+
+                DiskLoc d = l[6];
+                long long n = nsd->nrecords;
+                nsd->cappedTruncateAfter(ns(), d, false);
+                ASSERT_EQUALS( nsd->nrecords , n-1 );
+
+                {
+                    ForwardCappedCursor c(nsd);
+                    ASSERT( first == c.currLoc() );
+                }
+                {
+                    ReverseCappedCursor c(nsd);
+                    ASSERT( last != c.currLoc() ); // old last should be deleted
+                    ASSERT( !last.isNull() );
+                }
+
+                // Too big
+                BSONObjBuilder bob;
+                bob.append( "a", string( 787, 'a' ) );
+                BSONObj bigger = bob.done();
+                ASSERT( theDataFileMgr.insert( ns(), bigger.objdata(), bigger.objsize() ).isNull() );
+                ASSERT_EQUALS( 0, nRecords() );
+            }
+        public:
+            void run() {
+//                log() << "******** NOT RUNNING TruncateCapped test yet ************" << endl;
+                pass(0);
+            }
+        };
+
         class Migrate : public Base {
         public:
             void run() {
                 create();
-                nsd()->deletedList[ 2 ] = nsd()->deletedList[ 0 ].drec()->nextDeleted.drec()->nextDeleted;
-                nsd()->deletedList[ 0 ].drec()->nextDeleted.drec()->nextDeleted = DiskLoc();
-                nsd()->deletedList[ 1 ].Null();
+                nsd()->deletedList[ 2 ] = nsd()->cappedListOfAllDeletedRecords().drec()->nextDeleted.drec()->nextDeleted;
+                nsd()->cappedListOfAllDeletedRecords().drec()->nextDeleted.drec()->nextDeleted = DiskLoc();
+                nsd()->cappedLastDelRecLastExtent().Null();
                 NamespaceDetails *d = nsd();
                 zero( &d->capExtent );
                 zero( &d->capFirstNewRecord );
@@ -716,9 +782,9 @@ namespace NamespaceTests {
                 ASSERT( nsd()->capExtent.getOfs() != 0 );
                 ASSERT( !nsd()->capFirstNewRecord.isValid() );
                 int nDeleted = 0;
-                for ( DiskLoc i = nsd()->deletedList[ 0 ]; !i.isNull(); i = i.drec()->nextDeleted, ++nDeleted );
+                for ( DiskLoc i = nsd()->cappedListOfAllDeletedRecords(); !i.isNull(); i = i.drec()->nextDeleted, ++nDeleted );
                 ASSERT_EQUALS( 10, nDeleted );
-                ASSERT( nsd()->deletedList[ 1 ].isNull() );
+                ASSERT( nsd()->cappedLastDelRecLastExtent().isNull() );
             }
         private:
             static void zero( DiskLoc *d ) {
@@ -741,7 +807,7 @@ namespace NamespaceTests {
         //        private:
         //            virtual string spec() const {
         //                // NOTE 256 added to size in _userCreateNS()
-        //                long long big = MongoDataFile::maxSize() - MDFHeader::headerSize();
+        //                long long big = MongoDataFile::maxSize() - DataFileHeader::HeaderSize;
         //                stringstream ss;
         //                ss << "{\"capped\":true,\"size\":" << big << "}";
         //                return ss.str();
@@ -788,6 +854,7 @@ namespace NamespaceTests {
             add< NamespaceDetailsTests::SingleAlloc >();
             add< NamespaceDetailsTests::Realloc >();
             add< NamespaceDetailsTests::TwoExtent >();
+            add< NamespaceDetailsTests::TruncateCapped >();
             add< NamespaceDetailsTests::Migrate >();
             //            add< NamespaceDetailsTests::BigCollection >();
             add< NamespaceDetailsTests::Size >();

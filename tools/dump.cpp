@@ -16,7 +16,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "../client/dbclient.h"
 #include "tool.h"
 
@@ -31,6 +31,7 @@ public:
     Dump() : Tool( "dump" , true , "*" ){
         add_options()
             ("out,o", po::value<string>()->default_value("dump"), "output directory")
+            ("query,q", po::value<string>() , "json query" )
             ;
     }
 
@@ -39,11 +40,17 @@ public:
         
         ofstream out;
         out.open( outputFile.string().c_str() , ios_base::out | ios_base::binary  );
-        ASSERT_STREAM_GOOD( 10262 ,  "couldn't open file" , out );
+        assertStreamGood( 10262 ,  "couldn't open file" , out );
 
         ProgressMeter m( conn( true ).count( coll.c_str() , BSONObj() , QueryOption_SlaveOk ) );
 
-        auto_ptr<DBClientCursor> cursor = conn( true ).query( coll.c_str() , Query().snapshot() , 0 , 0 , 0 , QueryOption_SlaveOk | QueryOption_NoCursorTimeout );
+        Query q;
+        if ( _query.isEmpty() )
+            q.snapshot();
+        else
+            q = _query;
+
+        auto_ptr<DBClientCursor> cursor = conn( true ).query( coll.c_str() , q , 0 , 0 , 0 , QueryOption_SlaveOk | QueryOption_NoCursorTimeout );
 
         while ( cursor->more() ) {
             BSONObj obj = cursor->next();
@@ -80,8 +87,14 @@ public:
         }
 
     }
-
+    
     int run(){
+        
+        {
+            string q = getParam("query");
+            if ( q.size() )
+                _query = fromjson( q );
+        }
 
         path root( getParam("out") );
         string db = _db;
@@ -113,6 +126,7 @@ public:
         return 0;
     }
 
+    BSONObj _query;
 };
 
 int main( int argc , char ** argv ) {

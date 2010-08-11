@@ -56,8 +56,9 @@ Mongo.prototype.getCollection = function(ns){
 }
 
 Mongo.prototype.toString = function(){
-    return "mongo connection to " + this.host;
+    return "connection to " + this.host;
 }
+Mongo.prototype.tojson = Mongo.prototype.toString;
 
 connect = function( url , user , pass ){
     chatty( "connecting to: " + url )
@@ -65,7 +66,7 @@ connect = function( url , user , pass ){
     if ( user && ! pass )
         throw "you specified a user and not a password.  either you need a password, or you're using the old connect api";
 
-    var idx = url.indexOf( "/" );
+    var idx = url.lastIndexOf( "/" );
     
     var db;
     

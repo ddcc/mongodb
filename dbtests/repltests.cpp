@@ -17,7 +17,7 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "../db/repl.h"
 
 #include "../db/db.h"
@@ -89,7 +89,7 @@ namespace ReplTests {
             int count = 0;
             dblock lk;
             Client::Context ctx( ns() );
-            auto_ptr< Cursor > c = theDataFileMgr.findAll( ns() );
+            boost::shared_ptr<Cursor> c = theDataFileMgr.findAll( ns() );
             for(; c->ok(); c->advance(), ++count ) {
 //                cout << "obj: " << c->current().toString() << endl;
             }
@@ -99,7 +99,7 @@ namespace ReplTests {
             dblock lk;
             Client::Context ctx( cllNS() );
             int count = 0;
-            for( auto_ptr< Cursor > c = theDataFileMgr.findAll( cllNS() ); c->ok(); c->advance() )
+            for( boost::shared_ptr<Cursor> c = theDataFileMgr.findAll( cllNS() ); c->ok(); c->advance() )
                 ++count;
             return count;
         }
@@ -114,7 +114,7 @@ namespace ReplTests {
             vector< BSONObj > ops;
             {
                 Client::Context ctx( cllNS() );
-                for( auto_ptr< Cursor > c = theDataFileMgr.findAll( cllNS() ); c->ok(); c->advance() )
+                for( boost::shared_ptr<Cursor> c = theDataFileMgr.findAll( cllNS() ); c->ok(); c->advance() )
                     ops.push_back( c->current() );
             }
             {
@@ -126,7 +126,7 @@ namespace ReplTests {
         static void printAll( const char *ns ) {
             dblock lk;
             Client::Context ctx( ns );
-            auto_ptr< Cursor > c = theDataFileMgr.findAll( ns );
+            boost::shared_ptr<Cursor> c = theDataFileMgr.findAll( ns );
             vector< DiskLoc > toDelete;
             out() << "all for " << ns << endl;
             for(; c->ok(); c->advance() ) {
@@ -137,7 +137,7 @@ namespace ReplTests {
         static void deleteAll( const char *ns ) {
             dblock lk;
             Client::Context ctx( ns );
-            auto_ptr< Cursor > c = theDataFileMgr.findAll( ns );
+            boost::shared_ptr<Cursor> c = theDataFileMgr.findAll( ns );
             vector< DiskLoc > toDelete;
             for(; c->ok(); c->advance() ) {
                 toDelete.push_back( c->currLoc() );
@@ -387,6 +387,29 @@ namespace ReplTests {
             }
         };
         
+        class UpdateId2 : public ReplTests::Base {
+        public:
+            UpdateId2() :
+            o_( fromjson( "{'_id':1}" ) ),
+            u_( fromjson( "{'_id':2}" ) ){}
+            void run() {
+                deleteAll( ns() );
+                insert( o_ );
+                client()->update( ns(), o_, u_ );
+                ASSERT_EQUALS( 1, count() );
+                checkOne( u_ );
+                
+                deleteAll( ns() );
+                insert( o_ );
+                insert( u_ ); // simulate non snapshot replication, then op application
+                applyAllOperations();
+                ASSERT_EQUALS( 1, count() );
+                checkOne( u_ );
+            }
+        protected:
+            BSONObj o_, u_;            
+        };
+
         class UpdateDifferentFieldExplicitId : public Base {
         public:
             UpdateDifferentFieldExplicitId() :
@@ -1085,6 +1108,7 @@ namespace ReplTests {
             add< Idempotence::UpdateSameFieldWithId >();
             add< Idempotence::UpdateSameFieldExplicitId >();
             add< Idempotence::UpdateId >();
+            add< Idempotence::UpdateId2 >();
             add< Idempotence::UpdateDifferentFieldExplicitId >();
             add< Idempotence::UpsertUpdateNoMods >();
             add< Idempotence::UpsertInsertNoMods >();

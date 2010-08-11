@@ -24,19 +24,22 @@
 
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "cursor.h"
 #include "jsobj.h"
 #include "../util/message.h"
+#include "../util/background.h"
 #include "diskloc.h"
 #include "dbhelpers.h"
 #include "matcher.h"
+#include "../client/dbclient.h"
 
 namespace mongo {
 
     typedef long long CursorId; /* passed to the client so it can send back on getMore */
     class Cursor; /* internal server cursor base class */
     class ClientCursor;
+    class ParsedQuery;
 
     /* todo: make this map be per connection.  this will prevent cursor hijacking security attacks perhaps.
     */
@@ -58,6 +61,7 @@ namespace mongo {
         unsigned _pinValue;
 
         bool _doingDeletes;
+        ElapsedTracker _yieldSometimesTracker;
 
         static CCById clientCursorsById;
         static CCByLoc byLoc;
@@ -65,6 +69,8 @@ namespace mongo {
         
         static CursorId allocCursorId_inlock();
 
+
+        
     public:
         /* use this to assure we don't in the background time out cursor while it is under use.
            if you are using noTimeout() already, there is no risk anyway.
@@ -97,21 +103,56 @@ namespace mongo {
                 release();
             }
         }; 
+        
+        // This object assures safe and reliable cleanup of the ClientCursor.
+        // The implementation assumes that there will be no duplicate ids among cursors
+        // (which is assured if cursors must last longer than 1 second).
+        class CleanupPointer : boost::noncopyable {
+        public:
+            CleanupPointer() : _c( 0 ), _id( -1 ) {}
+            void reset( ClientCursor *c = 0 ) {
+                if ( c == _c ) {
+                    return;
+                }
+
+                if ( _c ) {
+                    // be careful in case cursor was deleted by someone else
+                    ClientCursor::erase( _id );
+                }
+                
+                if ( c ) {
+                    _c = c;
+                    _id = c->cursorid;
+                } else {
+                    _c = 0;
+                    _id = -1;
+                }
+            }
+            ~CleanupPointer() {
+                DESTRUCTOR_GUARD ( reset(); );
+            }
+            operator bool() { return _c; }
+            ClientCursor * operator-> () { return _c; }
+        private:
+            ClientCursor *_c;
+            CursorId _id;
+        };
 
         /*const*/ CursorId cursorid;
         string ns;
-        auto_ptr<CoveredIndexMatcher> matcher;
-        auto_ptr<Cursor> c;
-        int pos;                                 // # objects into the cursor so far 
+        shared_ptr<Cursor> c;
+        int pos;                  // # objects into the cursor so far 
         BSONObj query;
+        int _queryOptions;        // see enum QueryOptions dbclient.h
+        OpTime _slaveReadTill;
 
-        ClientCursor(auto_ptr<Cursor>& _c, const char *_ns, bool okToTimeout) : 
+        ClientCursor(int queryOptions, shared_ptr<Cursor>& _c, const string& _ns) :
             _idleAgeMillis(0), _pinValue(0), 
-            _doingDeletes(false), 
+            _doingDeletes(false), _yieldSometimesTracker(128,10),
             ns(_ns), c(_c), 
-            pos(0) 
+            pos(0), _queryOptions(queryOptions)
         {
-            if( !okToTimeout )
+            if( queryOptions & QueryOption_NoCursorTimeout )
                 noTimeout();
             recursive_scoped_lock lock(ccmutex);
             cursorid = allocCursorId_inlock();
@@ -123,6 +164,7 @@ namespace mongo {
             return _lastLoc;
         }
 
+        shared_ptr< ParsedQuery > pq;
         shared_ptr< FieldMatcher > fields; // which fields query wants returned
         Message originalMessage; // this is effectively an auto ptr for data the matcher points to
 
@@ -132,6 +174,8 @@ namespace mongo {
         static void invalidate(const char *nsPrefix);
 
         /**
+         * @param microsToSleep -1 : ask client 
+         *                     >=0 : sleep for that amount
          * do a dbtemprelease 
          * note: caller should check matcher.docMatcher().atomic() first and not yield if atomic - 
          *       we don't do herein as this->matcher (above) is only initialized for true queries/getmore.
@@ -140,7 +184,80 @@ namespace mongo {
          *         if false is returned, then this ClientCursor should be considered deleted - 
          *         in fact, the whole database could be gone.
          */
-        bool yield();
+        bool yield( int microsToSleep = -1 );
+
+        /**
+         * @return same as yield()
+         */
+        bool yieldSometimes();
+        
+        static int yieldSuggest();
+        static void staticYield( int micros );
+        
+        struct YieldData { CursorId _id; bool _doingDeletes; };
+        bool prepareToYield( YieldData &data );
+        static bool recoverFromYield( const YieldData &data );
+
+        struct YieldLock : boost::noncopyable {
+            explicit YieldLock( ptr<ClientCursor> cc )
+                : _canYield(cc->c->supportYields()) {
+                if ( _canYield ){
+                    cc->prepareToYield( _data );
+                    _unlock.reset(new dbtempreleasecond());
+                }
+            }
+            ~YieldLock(){
+                if ( _unlock ){
+                    log( LL_WARNING ) << "ClientCursor::YieldLock not closed properly" << endl;
+                    relock();
+                }
+            }
+
+            bool stillOk(){
+                if ( ! _canYield )
+                    return true;
+
+                relock();
+                
+                return ClientCursor::recoverFromYield( _data );
+            }
+
+            void relock(){
+                _unlock.reset();
+            }
+            
+        private:
+            bool _canYield;
+            YieldData _data;
+            
+            scoped_ptr<dbtempreleasecond> _unlock;
+
+        };
+
+        // --- some pass through helpers for Cursor ---
+
+        BSONObj indexKeyPattern() {
+            return c->indexKeyPattern();
+        }
+
+        bool ok(){
+            return c->ok();
+        }
+
+        bool advance(){
+            return c->advance();
+        }
+
+        bool currentMatches(){
+            if ( ! c->matcher() )
+                return true;
+            return c->matcher()->matchesCurrent( c.get() );
+        }
+
+        BSONObj current(){
+            return c->current();
+        }
+
     private:
         void setLastLoc_inlock(DiskLoc);
 
@@ -180,8 +297,6 @@ namespace mongo {
            */
         void updateLocation();
 
-        void cleanupByLocation(DiskLoc loc);
-        
         void mayUpgradeStorage() {
             /* if ( !ids_.get() )
                 return;
@@ -197,6 +312,9 @@ namespace mongo {
             _idleAgeMillis += millis;
             return _idleAgeMillis > 600000 && _pinValue == 0;
         }
+
+        void storeOpForSlave( DiskLoc last );
+        void updateSlaveLocation( CurOp& curop );
         
         unsigned idleTime(){
             return _idleAgeMillis;
@@ -218,7 +336,16 @@ public:
 
         static void informAboutToDeleteBucket(const DiskLoc& b);
         static void aboutToDelete(const DiskLoc& dl);
+
+        static void find( const string& ns , set<CursorId>& all );
     };
 
+    class ClientCursorMonitor : public BackgroundJob {
+    public:
+        void run();
+        string name() { return "ClientCursorMonitor"; }
+    };
+
+    extern ClientCursorMonitor clientCursorMonitor;
     
 } // namespace mongo

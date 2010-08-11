@@ -40,11 +40,10 @@ namespace mongo {
             FILE * f = fopen( name , "r");
             if ( ! f ){
                 stringstream ss;
-                ss << "couldn't open [" << name << "] " << OUTPUT_ERRNO;
+                ss << "couldn't open [" << name << "] " << errnoWithDescription();
                 string s = ss.str();
-                msgasserted( 13276 , s.c_str() );
+                msgassertedNoTrace( 13276 , s.c_str() );
             }
-
             int found = fscanf(f,
                    "%d %s %c "
                    "%d %d %d %d %d "
@@ -232,7 +231,7 @@ namespace mongo {
         start = start - ( (unsigned long long)start % pageSize );
         unsigned char x = 0;
         if ( mincore( start , 128 , &x ) ){
-            log() << "mincore failed: " << OUTPUT_ERRNO << endl;
+            log() << "mincore failed: " << errnoWithDescription() << endl;
             return 1;
         }
         return x & 0x1;

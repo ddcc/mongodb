@@ -1,4 +1,4 @@
-// util.cpp
+// @file util.cpp
 
 /*    Copyright 2009 10gen Inc.
  *
@@ -15,7 +15,7 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "goodies.h"
 #include "unittest.h"
 #include "file_allocator.h"
@@ -23,18 +23,71 @@
 
 namespace mongo {
 
+    boost::thread_specific_ptr<string> _threadName;
+    
+    void _setThreadName( const char * name ){
+        static int N = 0;
+        if ( strcmp( name , "conn" ) == 0 ){
+            stringstream ss;
+            ss << name << ++N;
+            _threadName.reset( new string( ss.str() ) );
+        }
+        else {
+            _threadName.reset( new string(name) );        
+        }
+    }
+
+#if defined(_WIN32)
+#define MS_VC_EXCEPTION 0x406D1388
+#pragma pack(push,8)
+    typedef struct tagTHREADNAME_INFO
+    {
+        DWORD dwType; // Must be 0x1000.
+        LPCSTR szName; // Pointer to name (in user addr space).
+        DWORD dwThreadID; // Thread ID (-1=caller thread).
+        DWORD dwFlags; // Reserved for future use, must be zero.
+    } THREADNAME_INFO;
+#pragma pack(pop)
+
+    void setThreadName(const char *name)
+    {
+        _setThreadName( name );
+        Sleep(10);
+        THREADNAME_INFO info;
+        info.dwType = 0x1000;
+        info.szName = name;
+        info.dwThreadID = -1;
+        info.dwFlags = 0;
+        __try
+            {
+                RaiseException( MS_VC_EXCEPTION, 0, sizeof(info)/sizeof(ULONG_PTR), (ULONG_PTR*)&info );
+            }
+        __except(EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+    }
+#else
+    void setThreadName(const char * name ) { 
+        _setThreadName( name );
+    }
+#endif
+
+    string getThreadName(){
+        string * s = _threadName.get();
+        if ( s )
+            return *s;
+        return "";
+    }
+
     vector<UnitTest*> *UnitTest::tests = 0;
     bool UnitTest::running = false;
-
-    Nullstream nullstream;
-
-    thread_specific_ptr<Logstream> Logstream::tsp;
 
     const char *default_getcurns() { return ""; }
     const char * (*getcurns)() = default_getcurns;
 
     int logLevel = 0;
-    mongo::mutex Logstream::mutex;
+    int tlogLevel = 0;
+    mongo::mutex Logstream::mutex("Logstream");
     int Logstream::doneSetup = Logstream::magicNumber();
     
     bool goingAway = false;
@@ -106,35 +159,21 @@ namespace mongo {
     
     void rawOut( const string &s ) {
         if( s.empty() ) return;
-        char now[64];
-        time_t_to_String(time(0), now);
-        now[20] = 0;        
-#if defined(_WIN32)
-        (std::cout << now << " " << s).flush();
-#else
-        write( STDOUT_FILENO, now, 20 );
-		write( STDOUT_FILENO, " ", 1 );
-        write( STDOUT_FILENO, s.c_str(), s.length() );
-        fsync( STDOUT_FILENO );        
-#endif
-    }
 
-#ifndef _SCONS
-    // only works in scons
-    const char * gitVersion(){ return ""; }
-    const char * sysInfo(){ return ""; }
-#endif
+        boost::scoped_array<char> buf_holder(new char[32 + s.size()]);
+        char * buf = buf_holder.get();
 
-    void printGitVersion() { log() << "git version: " << gitVersion() << endl; }
-    void printSysInfo() { log() << "sys info: " << sysInfo() << endl; }
-    string mongodVersion() {
-        stringstream ss;
-        ss << "db version v" << versionString << ", pdfile version " << VERSION << "." << VERSION_MINOR;
-        return ss.str();
+        time_t_to_String( time(0) , buf );
+        buf[20] = ' ';
+        strncpy( buf + 21 , s.c_str() , s.size() );
+        buf[21+s.size()] = '\n';
+        buf[21+s.size()+1] = 0;
+
+        Logstream::logLockless( buf );
     }
 
     ostream& operator<<( ostream &s, const ThreadSafeString &o ){
-        s << (string)o;
+        s << o.toString();
         return s;
     }
 

@@ -27,6 +27,7 @@ t.save( {i:"a"} );
 t.save( {i:"b"} );
 
 fail( {i:{$not:"a"}} );
+fail( {i:{$not:{$not:"a"}}} );
 fail( {i:{$not:{$not:{$gt:"a"}}}} );
 fail( {i:{$not:{$ref:"foo"}}} );
 fail( {i:{$not:{}}} );
@@ -87,21 +88,21 @@ t.save( {i:"b"} );
 t.ensureIndex( {i:1} );
 
 indexed = function( query, min, max ) {
-    exp = t.find( query ).explain();
+    exp = t.find( query ).explain( true );
 //    printjson( exp );
     assert( exp.cursor.match( /Btree/ ), tojson( query ) );    
     assert( exp.allPlans.length == 1, tojson( query ) );    
     // just expecting one element per key
-    for( i in exp.indexBounds[0][0] ) {
-        assert.eq( exp.indexBounds[0][0][ i ], min );        
+    for( i in exp.indexBounds ) {
+        assert.eq( exp.indexBounds[ i ][0][0], min );        
     }
-    for( i in exp.indexBounds[0][1] ) {
-        assert.eq( exp.indexBounds[0][1][ i ], max );
+    for( i in exp.indexBounds ) {
+        assert.eq( exp.indexBounds[ i ][0][1], max );
     }
 }
 
 not = function( query ) {
-    exp = t.find( query ).explain();
+    exp = t.find( query ).explain( true );
 //    printjson( exp );
     assert( !exp.cursor.match( /Btree/ ), tojson( query ) );    
     assert( exp.allPlans.length == 1, tojson( query ) );    
@@ -124,6 +125,8 @@ indexed( {i:{$not:{$lt:"b"}}}, "b", {} );
 
 indexed( {i:{$lte:"b"}}, "", "b" );
 indexed( {i:{$not:{$lte:"b"}}}, "b", {} );
+
+indexed( {i:{$not:{$lte:"b",$gte:"f"}}}, "b", "f" );
 
 not( {i:{$not:{$all:["a"]}}} );
 not( {i:{$not:{$mod:[2,1]}}} );

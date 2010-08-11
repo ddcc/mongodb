@@ -19,7 +19,7 @@
 
 #include <boost/date_time/posix_time/posix_time.hpp>
 #undef assert
-#define assert xassert
+#define assert MONGO_assert
 
 namespace mongo {
 
@@ -29,6 +29,8 @@ namespace mongo {
     class Top {
 
     public:
+        Top() : _lock("Top") { }
+
         class UsageData {
         public:
             UsageData() : time(0) , count(0){}

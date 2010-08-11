@@ -16,7 +16,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "../client/dbclient.h"
 #include "../util/mmap.h"
 #include "tool.h"
@@ -29,16 +29,17 @@ using namespace mongo;
 
 namespace po = boost::program_options;
 
-class Restore : public Tool {
+class Restore : public BSONTool {
 public:
     
     bool _drop;
-    bool _objcheck;
-    
-    Restore() : Tool( "restore" , true , "" , "" ) , _drop(false),_objcheck(false){
+    bool _indexesLast;
+    const char * _curns;
+
+    Restore() : BSONTool( "restore" ) , _drop(false){
         add_options()
             ("drop" , "drop each collection before import" )
-            ("objcheck" , "validate object before inserting" )
+            ("indexesLast" , "wait to add indexes (faster if data isn't inserted in index order)" )
             ;
         add_hidden_options()
             ("dir", po::value<string>()->default_value("dump"), "directory to restore from")
@@ -50,11 +51,11 @@ public:
         out << "usage: " << _name << " [options] [directory or filename to restore from]" << endl;
     }
 
-    int run(){
+    virtual int doRun(){
         auth();
         path root = getParam("dir");
         _drop = hasParam( "drop" );
-        _objcheck = hasParam( "objcheck" );
+        _indexesLast = hasParam("indexesLast");
 
         /* If _db is not "" then the user specified a db name to restore as.
          *
@@ -76,6 +77,7 @@ public:
         if ( is_directory( root ) ) {
             directory_iterator end;
             directory_iterator i(root);
+            path indexes;
             while ( i != end ) {
                 path p = *i;
                 i++;
@@ -98,8 +100,15 @@ public:
                     }
                 }
 
-                drillDown(p, use_db, use_coll);
+                if ( _indexesLast && p.leaf() == "system.indexes.bson" )
+                    indexes = p;
+                else
+                    drillDown(p, use_db, use_coll);
             }
+
+            if (!indexes.empty())
+                drillDown(indexes, use_db, use_coll);
+
             return;
         }
 
@@ -109,18 +118,29 @@ public:
             return;
         }
 
-        out() << root.string() << endl;
+        log() << root.string() << endl;
+
+        if ( root.leaf() == "system.profile.bson" ){
+            log() << "\t skipping" << endl;
+            return;
+        }
 
         string ns;
         if (use_db) {
             ns += _db;
-        } else {
+        } 
+        else {
             string dir = root.branch_path().string();
             if ( dir.find( "/" ) == string::npos )
                 ns += dir;
             else
                 ns += dir.substr( dir.find_last_of( "/" ) + 1 );
+            
+            if ( ns.size() == 0 )
+                ns = "test";
         }
+        
+        assert( ns.size() );
 
         if (use_coll) {
             ns += "." + _coll;
@@ -130,76 +150,22 @@ public:
             ns += "." + l;
         }
 
-        long long fileLength = file_size( root );
-
-        if ( fileLength == 0 ) {
-            out() << "file " + root.native_file_string() + " empty, skipping" << endl;
-            return;
-        }
-
         out() << "\t going into namespace [" << ns << "]" << endl;
 
         if ( _drop ){
             out() << "\t dropping" << endl;
             conn().dropCollection( ns );
         }
-
-        string fileString = root.string();
-        ifstream file( fileString.c_str() , ios_base::in | ios_base::binary);
-        if ( ! file.is_open() ){
-            log() << "error opening file: " << fileString << endl;
-            return;
-        }
-
-        log(1) << "\t file size: " << fileLength << endl;
-
-        long long read = 0;
-        long long num = 0;
-
-        const int BUF_SIZE = 1024 * 1024 * 5;
-        boost::scoped_array<char> buf_holder(new char[BUF_SIZE]);
-        char * buf = buf_holder.get();
-
-        ProgressMeter m( fileLength );
-
-        while ( read < fileLength ) {
-            file.read( buf , 4 );
-            int size = ((int*)buf)[0];
-            if ( size >= BUF_SIZE ){
-                cerr << "got an object of size: " << size << "  terminating..." << endl;
-            }
-            uassert( 10264 ,  "invalid object size" , size < BUF_SIZE );
-
-            file.read( buf + 4 , size - 4 );
-
-            BSONObj o( buf );
-            if ( _objcheck && ! o.valid() ){
-                cerr << "INVALID OBJECT - going try and pring out " << endl;
-                cerr << "size: " << size << endl;
-                BSONObjIterator i(o);
-                while ( i.more() ){
-                    BSONElement e = i.next();
-                    try {
-                        e.validate();
-                    }
-                    catch ( ... ){
-                        cerr << "\t\t NEXT ONE IS INVALID" << endl;
-                    }
-                    cerr << "\t name : " << e.fieldName() << " " << e.type() << endl;
-                    cerr << "\t " << e << endl;
-                }
-            }
-            conn().insert( ns.c_str() , o );
-
-            read += o.objsize();
-            num++;
-
-            m.hit( o.objsize() );
-        }
-
-        uassert( 10265 ,  "counts don't match" , m.done() == fileLength );
-        out() << "\t "  << m.hits() << " objects" << endl;
+        
+        _curns = ns.c_str();
+        processFile( root );
     }
+
+    virtual void gotObject( const BSONObj& obj ){
+        conn().insert( _curns , obj );
+    }
+
+    
 };
 
 int main( int argc , char ** argv ) {

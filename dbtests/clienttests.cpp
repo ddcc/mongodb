@@ -16,7 +16,7 @@
 
 // client.cpp
 
-#include "stdafx.h"
+#include "pch.h"
 #include "../client/dbclient.h"
 #include "dbtests.h"
 #include "../db/concurrency.h"
@@ -119,12 +119,17 @@ namespace ClientTests {
             for( int i = 0; i < 10; ++i )
                 db.insert( ns(), BSON( "i" << i ) );
             auto_ptr< DBClientCursor > c = db.query( ns(), Query().sort( BSON( "i" << 1 ) ) );
+
             BSONObj o = c->next();
             ASSERT( c->more() );
+            ASSERT_EQUALS( 9 , c->objsLeftInBatch() );
             ASSERT( c->moreInCurrentBatch() );
+
             c->putBack( o );
             ASSERT( c->more() );
+            ASSERT_EQUALS( 10, c->objsLeftInBatch() );
             ASSERT( c->moreInCurrentBatch() );
+
             o = c->next();
             BSONObj o2 = c->next();
             BSONObj o3 = c->next();
@@ -136,9 +141,12 @@ namespace ClientTests {
                 ASSERT_EQUALS( i, o[ "i" ].number() );
             }
             ASSERT( !c->more() );
+            ASSERT_EQUALS( 0, c->objsLeftInBatch() );
             ASSERT( !c->moreInCurrentBatch() );
+
             c->putBack( o );
             ASSERT( c->more() );
+            ASSERT_EQUALS( 1, c->objsLeftInBatch() );
             ASSERT( c->moreInCurrentBatch() );
             ASSERT_EQUALS( 1, c->itcount() );
         }
@@ -153,7 +161,7 @@ namespace ClientTests {
             ASSERT( db.runCommand( "unittests", BSON( "collstats" << "clienttests.create" ), info ) );
         }
     };
-    
+
     class All : public Suite {
     public:
         All() : Suite( "client" ){

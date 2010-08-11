@@ -16,9 +16,9 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "introspect.h"
-#include "../util/builder.h"
+#include "../bson/util/builder.h"
 #include "../util/goodies.h"
 #include "pdfile.h"
 #include "jsobj.h"

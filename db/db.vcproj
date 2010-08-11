@@ -43,12 +43,13 @@
 			<Tool
 				Name="VCCLCompilerTool"
 				Optimization="0"
-				AdditionalIncludeDirectories="..\..\js\src;&quot;..\pcre-7.4&quot;;&quot;c:\Program Files\boost\boost_1_35_0&quot;"
-				PreprocessorDefinitions="OLDJS;STATIC_JS_API;XP_WIN;WIN32;_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC"
+				AdditionalIncludeDirectories="&quot;c:\program files\boost\latest&quot;;..\..\js\src;&quot;..\pcre-7.4&quot;;c:\boost;\boost"
+				PreprocessorDefinitions="MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;WIN32;_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC"
 				MinimalRebuild="true"
 				BasicRuntimeChecks="3"
 				RuntimeLibrary="3"
 				UsePrecompiledHeader="2"
+				PrecompiledHeaderThrough="pch.h"
 				WarningLevel="3"
 				Detect64BitPortabilityProblems="false"
 				DebugInformationFormat="4"
@@ -67,7 +68,7 @@
 				Name="VCLinkerTool"
 				AdditionalDependencies="ws2_32.lib Psapi.lib"
 				LinkIncremental="2"
-				AdditionalLibraryDirectories="&quot;c:\Program Files\boost\boost_1_35_0\lib&quot;"
+				AdditionalLibraryDirectories="&quot;c:\program files\boost\latest\lib&quot;;c:\boost\lib;\boost\lib"
 				IgnoreAllDefaultLibraries="false"
 				IgnoreDefaultLibraryNames=""
 				GenerateDebugInformation="true"
@@ -123,12 +124,12 @@
 				Name="VCCLCompilerTool"
 				Optimization="2"
 				EnableIntrinsicFunctions="true"
-				AdditionalIncludeDirectories="..\..\js\src;&quot;..\pcre-7.4&quot;;&quot;c:\Program Files\boost\boost_1_35_0&quot;"
-				PreprocessorDefinitions="OLDJS;STATIC_JS_API;XP_WIN;WIN32;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC"
+				AdditionalIncludeDirectories="&quot;c:\program files\boost\latest&quot;;..\..\js\src;&quot;..\pcre-7.4&quot;;c:\boost;\boost"
+				PreprocessorDefinitions="MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;WIN32;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC"
 				RuntimeLibrary="0"
 				EnableFunctionLevelLinking="true"
 				UsePrecompiledHeader="2"
-				PrecompiledHeaderThrough="stdafx.h"
+				PrecompiledHeaderThrough="pch.h"
 				WarningLevel="3"
 				DebugInformationFormat="3"
 				DisableSpecificWarnings="4355;4800"
@@ -146,170 +147,11 @@
 				Name="VCLinkerTool"
 				AdditionalDependencies="ws2_32.lib psapi.lib"
 				LinkIncremental="1"
-				AdditionalLibraryDirectories="&quot;c:\program files\boost\boost_1_35_0\lib&quot;"
+				AdditionalLibraryDirectories="&quot;c:\program files\boost\latest\lib&quot;;c:\boost\lib;\boost\lib"
 				GenerateDebugInformation="true"
 				SubSystem="1"
 				OptimizeReferences="2"
 				EnableCOMDATFolding="2"
-				TargetMachine="1"
-			/>
-			<Tool
-				Name="VCALinkTool"
-			/>
-			<Tool
-				Name="VCManifestTool"
-			/>
-			<Tool
-				Name="VCXDCMakeTool"
-			/>
-			<Tool
-				Name="VCBscMakeTool"
-			/>
-			<Tool
-				Name="VCFxCopTool"
-			/>
-			<Tool
-				Name="VCAppVerifierTool"
-			/>
-			<Tool
-				Name="VCPostBuildEventTool"
-			/>
-		</Configuration>
-		<Configuration
-			Name="release_nojni|Win32"
-			OutputDirectory="$(SolutionDir)$(ConfigurationName)"
-			IntermediateDirectory="$(ConfigurationName)"
-			ConfigurationType="1"
-			CharacterSet="1"
-			WholeProgramOptimization="1"
-			>
-			<Tool
-				Name="VCPreBuildEventTool"
-			/>
-			<Tool
-				Name="VCCustomBuildTool"
-			/>
-			<Tool
-				Name="VCXMLDataGeneratorTool"
-			/>
-			<Tool
-				Name="VCWebServiceProxyGeneratorTool"
-			/>
-			<Tool
-				Name="VCMIDLTool"
-			/>
-			<Tool
-				Name="VCCLCompilerTool"
-				Optimization="2"
-				EnableIntrinsicFunctions="true"
-				AdditionalIncludeDirectories="&quot;..\pcre-7.4&quot;;&quot;c:\Program Files\boost\boost_1_35_0&quot;;&quot;c:\program files\java\jdk\include&quot;;&quot;c:\program files\java\jdk\include\win32&quot;"
-				PreprocessorDefinitions="NOJNI;WIN32;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC"
-				RuntimeLibrary="2"
-				EnableFunctionLevelLinking="true"
-				UsePrecompiledHeader="2"
-				PrecompiledHeaderThrough="stdafx.h"
-				WarningLevel="3"
-				DebugInformationFormat="3"
-				DisableSpecificWarnings="4355;4800"
-			/>
-			<Tool
-				Name="VCManagedResourceCompilerTool"
-			/>
-			<Tool
-				Name="VCResourceCompilerTool"
-			/>
-			<Tool
-				Name="VCPreLinkEventTool"
-			/>
-			<Tool
-				Name="VCLinkerTool"
-				AdditionalDependencies="ws2_32.lib"
-				LinkIncremental="1"
-				AdditionalLibraryDirectories="&quot;c:\program files\boost\boost_1_35_0\lib&quot;"
-				GenerateDebugInformation="true"
-				SubSystem="1"
-				OptimizeReferences="2"
-				EnableCOMDATFolding="2"
-				TargetMachine="1"
-			/>
-			<Tool
-				Name="VCALinkTool"
-			/>
-			<Tool
-				Name="VCManifestTool"
-			/>
-			<Tool
-				Name="VCXDCMakeTool"
-			/>
-			<Tool
-				Name="VCBscMakeTool"
-			/>
-			<Tool
-				Name="VCFxCopTool"
-			/>
-			<Tool
-				Name="VCAppVerifierTool"
-			/>
-			<Tool
-				Name="VCPostBuildEventTool"
-			/>
-		</Configuration>
-		<Configuration
-			Name="Debug Recstore|Win32"
-			OutputDirectory="$(SolutionDir)$(ConfigurationName)"
-			IntermediateDirectory="$(ConfigurationName)"
-			ConfigurationType="1"
-			UseOfMFC="0"
-			UseOfATL="0"
-			CharacterSet="1"
-			>
-			<Tool
-				Name="VCPreBuildEventTool"
-			/>
-			<Tool
-				Name="VCCustomBuildTool"
-			/>
-			<Tool
-				Name="VCXMLDataGeneratorTool"
-			/>
-			<Tool
-				Name="VCWebServiceProxyGeneratorTool"
-			/>
-			<Tool
-				Name="VCMIDLTool"
-			/>
-			<Tool
-				Name="VCCLCompilerTool"
-				Optimization="0"
-				AdditionalIncludeDirectories="..\..\js\src;&quot;..\pcre-7.4&quot;;&quot;c:\Program Files\boost\boost_1_35_0&quot;"
-				PreprocessorDefinitions="_RECSTORE;OLDJS;STATIC_JS_API;XP_WIN;WIN32;_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC"
-				MinimalRebuild="true"
-				BasicRuntimeChecks="3"
-				RuntimeLibrary="3"
-				UsePrecompiledHeader="2"
-				WarningLevel="3"
-				Detect64BitPortabilityProblems="false"
-				DebugInformationFormat="4"
-				DisableSpecificWarnings="4355;4800"
-			/>
-			<Tool
-				Name="VCManagedResourceCompilerTool"
-			/>
-			<Tool
-				Name="VCResourceCompilerTool"
-			/>
-			<Tool
-				Name="VCPreLinkEventTool"
-			/>
-			<Tool
-				Name="VCLinkerTool"
-				AdditionalDependencies="ws2_32.lib"
-				LinkIncremental="2"
-				AdditionalLibraryDirectories="&quot;c:\Program Files\boost\boost_1_35_0\lib&quot;"
-				IgnoreAllDefaultLibraries="false"
-				IgnoreDefaultLibraryNames=""
-				GenerateDebugInformation="true"
-				SubSystem="1"
 				TargetMachine="1"
 			/>
 			<Tool
@@ -339,12 +181,8 @@
 	</References>
 	<Files>
 		<Filter
-			Name="misc and third party"
+			Name="libs"
 			>
-			<File
-				RelativePath="..\..\boostw\boost_1_34_1\boost\config\auto_link.hpp"
-				>
-			</File>
 			<File
 				RelativePath=".\db.rc"
 				>
@@ -380,18 +218,6 @@
 						UsePrecompiledHeader="0"
 					/>
 				</FileConfiguration>
-				<FileConfiguration
-					Name="Debug Recstore|Win32"
-					>
-					<Tool
-						Name="VCCLCompilerTool"
-						UsePrecompiledHeader="0"
-					/>
-				</FileConfiguration>
-			</File>
-			<File
-				RelativePath="..\pcre-7.4\pcrecpp.h"
-				>
 			</File>
 			<File
 				RelativePath="..\SConstruct"
@@ -399,10 +225,6 @@
 			</File>
 			<File
 				RelativePath="..\targetver.h"
-				>
-			</File>
-			<File
-				RelativePath="..\..\boostw\boost_1_34_1\boost\version.hpp"
 				>
 			</File>
 			<Filter
@@ -443,14 +265,6 @@
 							UsePrecompiledHeader="0"
 						/>
 					</FileConfiguration>
-					<FileConfiguration
-						Name="Debug Recstore|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="0"
-						/>
-					</FileConfiguration>
 				</File>
 				<File
 					RelativePath="..\pcre-7.4\pcre_compile.c"
@@ -473,14 +287,6 @@
 					</FileConfiguration>
 					<FileConfiguration
 						Name="release_nojni|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="0"
-						/>
-					</FileConfiguration>
-					<FileConfiguration
-						Name="Debug Recstore|Win32"
 						>
 						<Tool
 							Name="VCCLCompilerTool"
@@ -515,14 +321,6 @@
 							UsePrecompiledHeader="0"
 						/>
 					</FileConfiguration>
-					<FileConfiguration
-						Name="Debug Recstore|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="0"
-						/>
-					</FileConfiguration>
 				</File>
 				<File
 					RelativePath="..\pcre-7.4\pcre_dfa_exec.c"
@@ -545,14 +343,6 @@
 					</FileConfiguration>
 					<FileConfiguration
 						Name="release_nojni|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="0"
-						/>
-					</FileConfiguration>
-					<FileConfiguration
-						Name="Debug Recstore|Win32"
 						>
 						<Tool
 							Name="VCCLCompilerTool"
@@ -587,14 +377,6 @@
 							UsePrecompiledHeader="0"
 						/>
 					</FileConfiguration>
-					<FileConfiguration
-						Name="Debug Recstore|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="0"
-						/>
-					</FileConfiguration>
 				</File>
 				<File
 					RelativePath="..\pcre-7.4\pcre_fullinfo.c"
@@ -617,14 +399,6 @@
 					</FileConfiguration>
 					<FileConfiguration
 						Name="release_nojni|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="0"
-						/>
-					</FileConfiguration>
-					<FileConfiguration
-						Name="Debug Recstore|Win32"
 						>
 						<Tool
 							Name="VCCLCompilerTool"
@@ -659,14 +433,6 @@
 							UsePrecompiledHeader="0"
 						/>
 					</FileConfiguration>
-					<FileConfiguration
-						Name="Debug Recstore|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="0"
-						/>
-					</FileConfiguration>
 				</File>
 				<File
 					RelativePath="..\pcre-7.4\pcre_globals.c"
@@ -689,14 +455,6 @@
 					</FileConfiguration>
 					<FileConfiguration
 						Name="release_nojni|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="0"
-						/>
-					</FileConfiguration>
-					<FileConfiguration
-						Name="Debug Recstore|Win32"
 						>
 						<Tool
 							Name="VCCLCompilerTool"
@@ -731,14 +489,6 @@
 							UsePrecompiledHeader="0"
 						/>
 					</FileConfiguration>
-					<FileConfiguration
-						Name="Debug Recstore|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="0"
-						/>
-					</FileConfiguration>
 				</File>
 				<File
 					RelativePath="..\pcre-7.4\pcre_maketables.c"
@@ -761,14 +511,6 @@
 					</FileConfiguration>
 					<FileConfiguration
 						Name="release_nojni|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="0"
-						/>
-					</FileConfiguration>
-					<FileConfiguration
-						Name="Debug Recstore|Win32"
 						>
 						<Tool
 							Name="VCCLCompilerTool"
@@ -803,14 +545,6 @@
 							UsePrecompiledHeader="0"
 						/>
 					</FileConfiguration>
-					<FileConfiguration
-						Name="Debug Recstore|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="0"
-						/>
-					</FileConfiguration>
 				</File>
 				<File
 					RelativePath="..\pcre-7.4\pcre_ord2utf8.c"
@@ -833,14 +567,6 @@
 					</FileConfiguration>
 					<FileConfiguration
 						Name="release_nojni|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="0"
-						/>
-					</FileConfiguration>
-					<FileConfiguration
-						Name="Debug Recstore|Win32"
 						>
 						<Tool
 							Name="VCCLCompilerTool"
@@ -875,14 +601,6 @@
 							UsePrecompiledHeader="0"
 						/>
 					</FileConfiguration>
-					<FileConfiguration
-						Name="Debug Recstore|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="0"
-						/>
-					</FileConfiguration>
 				</File>
 				<File
 					RelativePath="..\pcre-7.4\pcre_scanner.cc"
@@ -911,14 +629,6 @@
 							UsePrecompiledHeader="0"
 						/>
 					</FileConfiguration>
-					<FileConfiguration
-						Name="Debug Recstore|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="0"
-						/>
-					</FileConfiguration>
 				</File>
 				<File
 					RelativePath="..\pcre-7.4\pcre_stringpiece.cc"
@@ -941,14 +651,6 @@
 					</FileConfiguration>
 					<FileConfiguration
 						Name="release_nojni|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="0"
-						/>
-					</FileConfiguration>
-					<FileConfiguration
-						Name="Debug Recstore|Win32"
 						>
 						<Tool
 							Name="VCCLCompilerTool"
@@ -1245,16 +947,36 @@
 					</FileConfiguration>
 				</File>
 			</Filter>
+			<Filter
+				Name="old_repl"
+				>
+				<File
+					RelativePath=".\oplog.cpp"
+					>
+				</File>
+				<File
+					RelativePath=".\repl.cpp"
+					>
+				</File>
+				<File
+					RelativePath=".\repl.h"
+					>
+				</File>
+				<File
+					RelativePath=".\repl_block.cpp"
+					>
+				</File>
+				<File
+					RelativePath=".\replpair.h"
+					>
+				</File>
+			</Filter>
 		</Filter>
 		<Filter
 			Name="storage related"
 			>
 			<File
 				RelativePath=".\rec.h"
-				>
-			</File>
-			<File
-				RelativePath=".\reccache.cpp"
 				>
 			</File>
 			<File
@@ -1298,11 +1020,27 @@
 				>
 			</File>
 			<File
+				RelativePath="..\client\dbclientcursor.cpp"
+				>
+			</File>
+			<File
 				RelativePath="..\client\model.h"
 				>
 			</File>
 			<File
+				RelativePath="..\client\redef_macros.h"
+				>
+			</File>
+			<File
 				RelativePath="..\client\syncclusterconnection.cpp"
+				>
+			</File>
+			<File
+				RelativePath="..\client\syncclusterconnection.h"
+				>
+			</File>
+			<File
+				RelativePath="..\client\undef_macros.h"
 				>
 			</File>
 		</Filter>
@@ -1310,144 +1048,24 @@
 			Name="db"
 			>
 			<File
-				RelativePath=".\background.h"
+				RelativePath="..\pch.cpp"
 				>
-			</File>
-			<File
-				RelativePath=".\client.h"
-				>
-			</File>
-			<File
-				RelativePath=".\clientcursor.h"
-				>
-			</File>
-			<File
-				RelativePath=".\cmdline.cpp"
-				>
-			</File>
-			<File
-				RelativePath=".\cmdline.h"
-				>
-			</File>
-			<File
-				RelativePath=".\commands.h"
-				>
-			</File>
-			<File
-				RelativePath=".\concurrency.h"
-				>
-			</File>
-			<File
-				RelativePath=".\curop.h"
-				>
-			</File>
-			<File
-				RelativePath=".\cursor.h"
-				>
-			</File>
-			<File
-				RelativePath=".\database.h"
-				>
-			</File>
-			<File
-				RelativePath=".\db.h"
-				>
-			</File>
-			<File
-				RelativePath=".\dbhelpers.h"
-				>
-			</File>
-			<File
-				RelativePath=".\dbinfo.h"
-				>
-			</File>
-			<File
-				RelativePath=".\dbmessage.h"
-				>
-			</File>
-			<File
-				RelativePath=".\diskloc.h"
-				>
-			</File>
-			<File
-				RelativePath=".\index.h"
-				>
-			</File>
-			<File
-				RelativePath=".\introspect.h"
-				>
-			</File>
-			<File
-				RelativePath=".\jsobj.h"
-				>
-			</File>
-			<File
-				RelativePath=".\json.h"
-				>
-			</File>
-			<File
-				RelativePath=".\matcher.h"
-				>
-			</File>
-			<File
-				RelativePath="..\grid\message.h"
-				>
-			</File>
-			<File
-				RelativePath=".\minilex.h"
-				>
-			</File>
-			<File
-				RelativePath=".\namespace.h"
-				>
-			</File>
-			<File
-				RelativePath=".\pdfile.h"
-				>
-			</File>
-			<File
-				RelativePath="..\grid\protocol.h"
-				>
-			</File>
-			<File
-				RelativePath=".\query.h"
-				>
-			</File>
-			<File
-				RelativePath=".\queryoptimizer.h"
-				>
-			</File>
-			<File
-				RelativePath=".\queryutil.cpp"
-				>
-			</File>
-			<File
-				RelativePath=".\repl.h"
-				>
-			</File>
-			<File
-				RelativePath=".\replset.h"
-				>
-			</File>
-			<File
-				RelativePath=".\resource.h"
-				>
-			</File>
-			<File
-				RelativePath=".\scanandorder.h"
-				>
-			</File>
-			<File
-				RelativePath=".\security.h"
-				>
-			</File>
-			<File
-				RelativePath="..\stdafx.h"
-				>
-			</File>
-			<File
-				RelativePath=".\update.h"
-				>
+				<FileConfiguration
+					Name="Debug|Win32"
+					>
+					<Tool
+						Name="VCCLCompilerTool"
+						UsePrecompiledHeader="1"
+					/>
+				</FileConfiguration>
+				<FileConfiguration
+					Name="Release|Win32"
+					>
+					<Tool
+						Name="VCCLCompilerTool"
+						UsePrecompiledHeader="1"
+					/>
+				</FileConfiguration>
 			</File>
 			<Filter
 				Name="cpp"
@@ -1523,6 +1141,10 @@
 					>
 				</File>
 				<File
+					RelativePath=".\indexkey.cpp"
+					>
+				</File>
+				<File
 					RelativePath=".\instance.cpp"
 					>
 				</File>
@@ -1544,6 +1166,10 @@
 				</File>
 				<File
 					RelativePath=".\matcher.cpp"
+					>
+				</File>
+				<File
+					RelativePath=".\matcher_covered.cpp"
 					>
 				</File>
 				<File
@@ -1587,7 +1213,7 @@
 					>
 				</File>
 				<File
-					RelativePath=".\repl.cpp"
+					RelativePath="..\util\ramstore.cpp"
 					>
 				</File>
 				<File
@@ -1599,42 +1225,6 @@
 					>
 				</File>
 				<File
-					RelativePath="..\stdafx.cpp"
-					>
-					<FileConfiguration
-						Name="Debug|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="1"
-						/>
-					</FileConfiguration>
-					<FileConfiguration
-						Name="Release|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="1"
-						/>
-					</FileConfiguration>
-					<FileConfiguration
-						Name="release_nojni|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="1"
-						/>
-					</FileConfiguration>
-					<FileConfiguration
-						Name="Debug Recstore|Win32"
-						>
-						<Tool
-							Name="VCCLCompilerTool"
-							UsePrecompiledHeader="1"
-						/>
-					</FileConfiguration>
-				</File>
-				<File
 					RelativePath=".\tests.cpp"
 					>
 				</File>
@@ -1643,12 +1233,176 @@
 					>
 				</File>
 			</Filter>
+			<Filter
+				Name="h"
+				>
+				<File
+					RelativePath=".\background.h"
+					>
+				</File>
+				<File
+					RelativePath=".\client.h"
+					>
+				</File>
+				<File
+					RelativePath=".\clientcursor.h"
+					>
+				</File>
+				<File
+					RelativePath=".\cmdline.cpp"
+					>
+				</File>
+				<File
+					RelativePath=".\cmdline.h"
+					>
+				</File>
+				<File
+					RelativePath=".\commands.h"
+					>
+				</File>
+				<File
+					RelativePath=".\concurrency.h"
+					>
+				</File>
+				<File
+					RelativePath=".\curop.h"
+					>
+				</File>
+				<File
+					RelativePath=".\cursor.h"
+					>
+				</File>
+				<File
+					RelativePath=".\database.h"
+					>
+				</File>
+				<File
+					RelativePath=".\db.h"
+					>
+				</File>
+				<File
+					RelativePath=".\dbhelpers.h"
+					>
+				</File>
+				<File
+					RelativePath=".\dbinfo.h"
+					>
+				</File>
+				<File
+					RelativePath=".\dbmessage.h"
+					>
+				</File>
+				<File
+					RelativePath=".\diskloc.h"
+					>
+				</File>
+				<File
+					RelativePath=".\index.h"
+					>
+				</File>
+				<File
+					RelativePath=".\indexkey.h"
+					>
+				</File>
+				<File
+					RelativePath=".\introspect.h"
+					>
+				</File>
+				<File
+					RelativePath=".\json.h"
+					>
+				</File>
+				<File
+					RelativePath=".\matcher.h"
+					>
+				</File>
+				<File
+					RelativePath="..\grid\message.h"
+					>
+				</File>
+				<File
+					RelativePath=".\minilex.h"
+					>
+				</File>
+				<File
+					RelativePath=".\namespace.h"
+					>
+				</File>
+				<File
+					RelativePath="..\pch.h"
+					>
+				</File>
+				<File
+					RelativePath=".\pdfile.h"
+					>
+				</File>
+				<File
+					RelativePath="..\grid\protocol.h"
+					>
+				</File>
+				<File
+					RelativePath=".\query.h"
+					>
+				</File>
+				<File
+					RelativePath=".\queryoptimizer.h"
+					>
+				</File>
+				<File
+					RelativePath=".\queryutil.cpp"
+					>
+				</File>
+				<File
+					RelativePath=".\resource.h"
+					>
+				</File>
+				<File
+					RelativePath=".\scanandorder.h"
+					>
+				</File>
+				<File
+					RelativePath=".\security.h"
+					>
+				</File>
+				<File
+					RelativePath=".\update.h"
+					>
+				</File>
+			</Filter>
 		</Filter>
 		<Filter
 			Name="util"
 			>
 			<File
+				RelativePath="..\util\allocator.h"
+				>
+			</File>
+			<File
+				RelativePath="..\util\array.h"
+				>
+			</File>
+			<File
+				RelativePath="..\util\assert_util.cpp"
+				>
+			</File>
+			<File
 				RelativePath="..\util\assert_util.h"
+				>
+			</File>
+			<File
+				RelativePath="..\util\background.cpp"
+				>
+			</File>
+			<File
+				RelativePath="..\util\background.h"
+				>
+			</File>
+			<File
+				RelativePath="..\util\base64.cpp"
+				>
+			</File>
+			<File
+				RelativePath="..\util\base64.h"
 				>
 			</File>
 			<File
@@ -1656,7 +1410,19 @@
 				>
 			</File>
 			<File
+				RelativePath="..\util\debug_util.h"
+				>
+			</File>
+			<File
+				RelativePath="..\util\embedded_builder.h"
+				>
+			</File>
+			<File
 				RelativePath="..\util\file.h"
+				>
+			</File>
+			<File
+				RelativePath="..\util\file_allocator.h"
 				>
 			</File>
 			<File
@@ -1668,7 +1434,19 @@
 				>
 			</File>
 			<File
+				RelativePath="..\util\hex.h"
+				>
+			</File>
+			<File
+				RelativePath="..\util\interlocked.h"
+				>
+			</File>
+			<File
 				RelativePath=".\lasterror.h"
+				>
+			</File>
+			<File
+				RelativePath="..\util\rwlock.h"
 				>
 			</File>
 			<File
@@ -1680,15 +1458,7 @@
 				>
 			</File>
 			<File
-				RelativePath="..\util\md5.h"
-				>
-			</File>
-			<File
-				RelativePath="..\util\md5.hpp"
-				>
-			</File>
-			<File
-				RelativePath="..\util\miniwebserver.h"
+				RelativePath="..\util\mmap.cpp"
 				>
 			</File>
 			<File
@@ -1696,32 +1466,112 @@
 				>
 			</File>
 			<File
-				RelativePath="..\util\sock.h"
+				RelativePath="..\util\mvar.h"
+				>
+			</File>
+			<File
+				RelativePath="..\util\ntservice.cpp"
+				>
+			</File>
+			<File
+				RelativePath="..\util\ntservice.h"
+				>
+			</File>
+			<File
+				RelativePath="..\util\optime.h"
+				>
+			</File>
+			<File
+				RelativePath="..\util\processinfo.h"
+				>
+			</File>
+			<File
+				RelativePath="..\util\processinfo_win32.cpp"
+				>
+			</File>
+			<File
+				RelativePath="..\util\queue.h"
+				>
+			</File>
+			<File
+				RelativePath="..\util\ramstore.h"
+				>
+			</File>
+			<File
+				RelativePath="..\util\thread_pool.h"
+				>
+			</File>
+			<File
+				RelativePath="..\util\text.cpp"
+				>
+			</File>
+			<File
+				RelativePath="..\util\text.h"
 				>
 			</File>
 			<File
 				RelativePath="..\util\unittest.h"
 				>
 			</File>
+			<File
+				RelativePath="..\util\util.cpp"
+				>
+			</File>
 			<Filter
-				Name="cpp"
+				Name="concurrency"
 				>
 				<File
-					RelativePath="..\util\assert_util.cpp"
+					RelativePath="..\util\concurrency\list.h"
 					>
 				</File>
 				<File
-					RelativePath="..\util\background.cpp"
+					RelativePath="..\util\concurrency\msg.h"
 					>
 				</File>
 				<File
-					RelativePath="..\util\base64.cpp"
+					RelativePath="..\util\concurrency\task.cpp"
+					>
+				</File>
+				<File
+					RelativePath="..\util\concurrency\task.h"
+					>
+				</File>
+				<File
+					RelativePath="..\util\concurrency\value.h"
+					>
+				</File>
+				<File
+					RelativePath="..\util\concurrency\vars.cpp"
+					>
+				</File>
+			</Filter>
+			<Filter
+				Name="web"
+				>
+				<File
+					RelativePath="..\util\web\html.h"
 					>
 				</File>
 				<File
 					RelativePath="..\util\httpclient.cpp"
 					>
 				</File>
+				<File
+					RelativePath="..\util\httpclient.h"
+					>
+				</File>
+				<File
+					RelativePath="..\util\miniwebserver.cpp"
+					>
+				</File>
+				<File
+					RelativePath="..\util\miniwebserver.h"
+					>
+				</File>
+			</Filter>
+			<Filter
+				Name="md5"
+				>
 				<File
 					RelativePath="..\util\md5.c"
 					>
@@ -1760,6 +1610,14 @@
 					</FileConfiguration>
 				</File>
 				<File
+					RelativePath="..\util\md5.h"
+					>
+				</File>
+				<File
+					RelativePath="..\util\md5.hpp"
+					>
+				</File>
+				<File
 					RelativePath="..\util\md5main.cpp"
 					>
 					<FileConfiguration
@@ -1771,24 +1629,24 @@
 						/>
 					</FileConfiguration>
 				</File>
+			</Filter>
+			<Filter
+				Name="net"
+				>
 				<File
 					RelativePath="..\util\message.cpp"
 					>
 				</File>
 				<File
-					RelativePath="..\util\miniwebserver.cpp"
+					RelativePath="..\util\message.h"
 					>
 				</File>
 				<File
-					RelativePath="..\util\mmap.cpp"
+					RelativePath="..\util\message_server.h"
 					>
 				</File>
 				<File
-					RelativePath="..\util\ntservice.cpp"
-					>
-				</File>
-				<File
-					RelativePath="..\util\processinfo_win32.cpp"
+					RelativePath="..\util\message_server_port.cpp"
 					>
 				</File>
 				<File
@@ -1796,7 +1654,7 @@
 					>
 				</File>
 				<File
-					RelativePath="..\util\util.cpp"
+					RelativePath="..\util\sock.h"
 					>
 				</File>
 			</Filter>
@@ -1808,6 +1666,10 @@
 				RelativePath="..\s\d_logic.cpp"
 				>
 			</File>
+			<File
+				RelativePath="..\s\shardconnection.cpp"
+				>
+			</File>
 		</Filter>
 		<Filter
 			Name="scripting"
@@ -1817,7 +1679,23 @@
 				>
 			</File>
 			<File
+				RelativePath="..\scripting\engine.h"
+				>
+			</File>
+			<File
+				RelativePath="..\scripting\engine_java.h"
+				>
+			</File>
+			<File
 				RelativePath="..\scripting\engine_spidermonkey.cpp"
+				>
+			</File>
+			<File
+				RelativePath="..\scripting\engine_spidermonkey.h"
+				>
+			</File>
+			<File
+				RelativePath="..\scripting\engine_v8.h"
 				>
 			</File>
 			<File
@@ -1852,6 +1730,18 @@
 				RelativePath="..\scripting\utils.cpp"
 				>
 			</File>
+			<File
+				RelativePath="..\scripting\v8_db.h"
+				>
+			</File>
+			<File
+				RelativePath="..\scripting\v8_utils.h"
+				>
+			</File>
+			<File
+				RelativePath="..\scripting\v8_wrapper.h"
+				>
+			</File>
 		</Filter>
 		<Filter
 			Name="stats"
@@ -1870,7 +1760,7 @@
 			</File>
 		</Filter>
 		<Filter
-			Name="btree related"
+			Name="btree"
 			>
 			<File
 				RelativePath=".\btree.cpp"
@@ -1882,6 +1772,110 @@
 			</File>
 			<File
 				RelativePath=".\btreecursor.cpp"
+				>
+			</File>
+		</Filter>
+		<Filter
+			Name="replsets"
+			>
+			<File
+				RelativePath=".\repl\connections.h"
+				>
+			</File>
+			<File
+				RelativePath=".\repl\consensus.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\repl\health.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\repl\health.h"
+				>
+			</File>
+			<File
+				RelativePath=".\repl\heartbeat.cpp"
+				>
+			</File>
+			<File
+				RelativePath="..\util\hostandport.h"
+				>
+			</File>
+			<File
+				RelativePath=".\repl\manager.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\repl\replset.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\repl\replset.h"
+				>
+			</File>
+			<File
+				RelativePath=".\repl\replset_commands.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\repl\rs_config.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\repl\rs_sync.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\repl\rs_config.h"
+				>
+			</File>
+			<File
+				RelativePath=".\repl\rs_initiate.cpp"
+				>
+			</File>
+		</Filter>
+		<Filter
+			Name="bson"
+			>
+			<File
+				RelativePath="..\bson\bsonelement.h"
+				>
+			</File>
+			<File
+				RelativePath="..\bson\bsoninlines.h"
+				>
+			</File>
+			<File
+				RelativePath="..\bson\bsonmisc.h"
+				>
+			</File>
+			<File
+				RelativePath="..\bson\bsonobj.h"
+				>
+			</File>
+			<File
+				RelativePath="..\bson\bsonobjbuilder.h"
+				>
+			</File>
+			<File
+				RelativePath="..\bson\bsonobjiterator.h"
+				>
+			</File>
+			<File
+				RelativePath="..\bson\bsontypes.h"
+				>
+			</File>
+			<File
+				RelativePath=".\jsobj.h"
+				>
+			</File>
+			<File
+				RelativePath="..\bson\oid.h"
+				>
+			</File>
+			<File
+				RelativePath="..\bson\ordering.h"
 				>
 			</File>
 		</Filter>

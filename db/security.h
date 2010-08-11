@@ -18,10 +18,6 @@
 
 #pragma once
 
-#include <boost/thread/tss.hpp>
-#undef assert
-#define assert xassert
-
 #include "nonce.h"
 #include "concurrency.h"
 
@@ -42,7 +38,7 @@ namespace mongo {
 		static int warned;
     public:
 		bool isLocalHost;
-        AuthenticationInfo() { isLocalHost = false; }
+        AuthenticationInfo() : _lock("AuthenticationInfo") { isLocalHost = false; }
         ~AuthenticationInfo() {
         }
         void logout(const string& dbname ) { 

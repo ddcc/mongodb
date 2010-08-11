@@ -19,6 +19,15 @@
 
 #include "../client/syncclusterconnection.h"
 #include "../util/base64.h"
+#include "../util/text.h"
+#include "../util/hex.h"
+
+#if( BOOST_VERSION >= 104200 )
+//#include <boost/uuid/uuid.hpp>
+#define HAVE_UUID 1
+#else
+;
+#endif
 
 namespace mongo {
 
@@ -90,6 +99,13 @@ namespace mongo {
         return JS_TRUE;
     }
 
+    JSBool internal_cursor_objsLeftInBatch(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){
+        DBClientCursor *cursor = getCursor( cx, obj );
+        Convertor c(cx);
+        *rval = c.toval((double) cursor->objsLeftInBatch() );
+        return JS_TRUE;
+    }
+
     JSBool internal_cursor_next(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){
         DBClientCursor *cursor = getCursor( cx, obj );
         if ( ! cursor->more() ){
@@ -105,6 +121,7 @@ namespace mongo {
 
     JSFunctionSpec internal_cursor_functions[] = {
         { "hasNext" , internal_cursor_hasNext , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
+        { "objsLeftInBatch" , internal_cursor_objsLeftInBatch , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
         { "next" , internal_cursor_next , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
         { 0 }
     };
@@ -145,37 +162,22 @@ namespace mongo {
         if ( argc > 0 )
             host = c.toString( argv[0] );
         
-        int numCommas = DBClientBase::countCommas( host );
-
-        shared_ptr< DBClientWithCommands > conn;
-        
         string errmsg;
-        if ( numCommas == 0 ){
-            DBClientConnection * c = new DBClientConnection( true );
-            conn.reset( c );
-            if ( ! c->connect( host , errmsg ) ){
-                JS_ReportError( cx , ((string)"couldn't connect: " + errmsg).c_str() );
-                return JS_FALSE;
-            }
-            ScriptEngine::runConnectCallback( *c );
+
+        ConnectionString cs = ConnectionString::parse( host , errmsg );
+        if ( ! cs.isValid() ){
+            JS_ReportError( cx , errmsg.c_str() );
+            return JS_FALSE;
         }
-        else if ( numCommas == 1 ){ // paired
-            DBClientPaired * c = new DBClientPaired();
-            conn.reset( c );
-            if ( ! c->connect( host ) ){
-                JS_ReportError( cx , "couldn't connect to pair" );
-                    return JS_FALSE;
-            }
-        }
-        else if ( numCommas == 2 ){
-            conn.reset( new SyncClusterConnection( host ) );
-        }
-        else {
-            JS_ReportError( cx , "1 (paired) or 2(quorum) commas are allowed" );
+
+        shared_ptr< DBClientWithCommands > conn( cs.connect( errmsg ) );
+        if ( ! conn ){
+            JS_ReportError( cx , errmsg.c_str() );
             return JS_FALSE;
         }
         
-        
+        ScriptEngine::runConnectCallback( *conn );
+
         assert( JS_SetPrivate( cx , obj , (void*)( new shared_ptr< DBClientWithCommands >( conn ) ) ) );
         jsval host_val = c.toval( host.c_str() );
         assert( JS_SetProperty( cx , obj , "host" , &host_val ) );
@@ -341,7 +343,6 @@ namespace mongo {
         { "remove" , mongo_remove , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
         { 0 }
     };
-
 
      // -------------  db_collection -------------
 
@@ -516,14 +517,13 @@ namespace mongo {
 
     JSBool object_id_tostring(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){    
         Convertor c(cx);
-        return *rval = c.getProperty( obj , "str" );
+        return (JSBool) (*rval = c.getProperty( obj , "str" ));
     }
 
     JSFunctionSpec object_id_functions[] = {
         { "toString" , object_id_tostring , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
         { 0 }
     };
-
 
     // dbpointer
 
@@ -580,8 +580,78 @@ namespace mongo {
  
     JSClass dbref_class = bson_class; // name will be fixed later
 
-    // BinData
+    // UUID **************************
 
+    JSBool uuid_constructor( JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval ){
+        Convertor c( cx );
+        
+        if( argc == 0 ) { 
+#if defined(HAVE_UUID)
+            //uuids::uuid
+#else
+#endif
+            JS_ReportError( cx , "UUID needs 1 argument -- UUID(hexstr)" );
+            return JS_FALSE;            
+        }
+        else if ( argc == 1 ) {
+
+            string encoded = c.toString( argv[ 0 ] );
+	    if( encoded.size() != 32 ) { 
+	      JS_ReportError( cx, "expect 32 char hex string to UUID()" );
+	      return JS_FALSE;
+	    }
+
+	    char buf[16];
+	    for( int i = 0; i < 16; i++ ) {
+	      buf[i] = fromHex(encoded.c_str() + i * 2);
+	    }
+
+            assert( JS_SetPrivate( cx, obj, new BinDataHolder( buf, 16 ) ) );
+            c.setProperty( obj, "len", c.toval( (double)16 ) );
+            c.setProperty( obj, "type", c.toval( (double)3 ) );
+
+            return JS_TRUE;
+        }
+        else {
+            JS_ReportError( cx , "UUID needs 1 argument -- UUID(hexstr)" );
+            return JS_FALSE;            
+        }
+    }
+ 
+  JSBool uuid_tostring(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){    
+        Convertor c(cx);
+        void *holder = JS_GetPrivate( cx, obj );
+        assert( holder );
+        const char *data = ( ( BinDataHolder* )( holder ) )->c_;
+        stringstream ss;
+        ss << "UUID(\"" << toHex(data, 16);
+        ss << "\")";
+        string ret = ss.str();
+        return *rval = c.toval( ret.c_str() );
+    }
+
+    void uuid_finalize( JSContext * cx , JSObject * obj ){
+        Convertor c(cx);
+        void *holder = JS_GetPrivate( cx, obj );
+        if ( holder ){
+            delete ( BinDataHolder* )holder;
+            assert( JS_SetPrivate( cx , obj , 0 ) );
+        }
+    }    
+    
+    JSClass uuid_class = {
+        "UUID" , JSCLASS_HAS_PRIVATE ,
+        JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_PropertyStub,
+        JS_EnumerateStub, JS_ResolveStub , JS_ConvertStub, uuid_finalize,
+        JSCLASS_NO_OPTIONAL_MEMBERS
+    };
+
+    JSFunctionSpec uuid_functions[] = {
+        { "toString" , uuid_tostring , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
+        { 0 }
+    };
+    
+    // BinData **************************
 
     JSBool bindata_constructor( JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval ){
         Convertor c( cx );
@@ -589,17 +659,28 @@ namespace mongo {
         if ( argc == 2 ){
 
             int type = (int)c.toNumber( argv[ 0 ] );
+            if( type < 0 || type > 255 ) { 
+                JS_ReportError( cx , "invalid BinData subtype -- range is 0..255 see bsonspec.org" );
+                return JS_FALSE;            
+            }
             string encoded = c.toString( argv[ 1 ] );
-            string decoded = base64::decode( encoded );
+            string decoded;
+            try {
+                decoded = base64::decode( encoded );
+            }
+            catch(...) { 
+                JS_ReportError(cx, "BinData could not decode base64 parameter");
+                return JS_FALSE;
+            }
 
             assert( JS_SetPrivate( cx, obj, new BinDataHolder( decoded.data(), decoded.length() ) ) );
-            c.setProperty( obj, "len", c.toval( decoded.length() ) );
-            c.setProperty( obj, "type", c.toval( type ) );
+            c.setProperty( obj, "len", c.toval( (double)decoded.length() ) );
+            c.setProperty( obj, "type", c.toval( (double)type ) );
 
             return JS_TRUE;
         }
         else {
-            JS_ReportError( cx , "BinData needs 2 arguments" );
+            JS_ReportError( cx , "BinData needs 2 arguments -- BinData(subtype,data)" );
             return JS_FALSE;            
         }
     }
@@ -612,11 +693,51 @@ namespace mongo {
         assert( holder );
         const char *data = ( ( BinDataHolder* )( holder ) )->c_;
         stringstream ss;
-        ss << "BinData( type: " << type << ", base64: \"";
+        ss << "BinData(" << type << ",\"";
         base64::encode( ss, (const char *)data, len );
-        ss << "\" )";
+        ss << "\")";
         string ret = ss.str();
         return *rval = c.toval( ret.c_str() );
+    }
+
+    JSBool bindataBase64(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){    
+        Convertor c(cx);
+        int len = (int)c.getNumber( obj, "len" );
+        void *holder = JS_GetPrivate( cx, obj );
+        assert( holder );
+        const char *data = ( ( BinDataHolder* )( holder ) )->c_;
+        stringstream ss;
+        base64::encode( ss, (const char *)data, len );
+        string ret = ss.str();
+        return *rval = c.toval( ret.c_str() );
+    }
+
+    JSBool bindataAsHex(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){    
+        Convertor c(cx);
+        int len = (int)c.getNumber( obj, "len" );
+        void *holder = JS_GetPrivate( cx, obj );
+        assert( holder );
+        const char *data = ( ( BinDataHolder* )( holder ) )->c_;
+        stringstream ss;
+        ss << hex;
+        for( int i = 0; i < len; i++ ) {
+            unsigned v = (unsigned char) data[i];
+            ss << v;
+        }
+        string ret = ss.str();
+        return *rval = c.toval( ret.c_str() );
+    }
+
+    JSBool bindataLength(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){    
+        Convertor c(cx);
+        int len = (int)c.getNumber( obj, "len" );
+        return *rval = c.toval((double) len);
+    }
+
+    JSBool bindataSubtype(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){    
+        Convertor c(cx);
+        int t = (int)c.getNumber( obj, "type" );
+        return *rval = c.toval((double) t);
     }
 
     void bindata_finalize( JSContext * cx , JSObject * obj ){
@@ -637,6 +758,10 @@ namespace mongo {
 
     JSFunctionSpec bindata_functions[] = {
         { "toString" , bindata_tostring , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
+        { "hex", bindataAsHex, 0, JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
+        { "base64", bindataBase64, 0, JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
+        { "length", bindataLength, 0, JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
+        { "subtype", bindataSubtype, 0, JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
         { 0 }
     };
     
@@ -699,6 +824,31 @@ namespace mongo {
         JSCLASS_NO_OPTIONAL_MEMBERS
     };
     
+    JSBool numberlong_constructor( JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval ){
+        smuassert( cx , "NumberLong needs 0 or 1 args" , argc == 0 || argc == 1 );
+        
+        Convertor c( cx );
+        if ( argc == 0 ) {
+            c.setProperty( obj, "floatApprox", c.toval( 0.0 ) );
+        } else if ( JSVAL_IS_NUMBER( argv[ 0 ] ) ) {
+            c.setProperty( obj, "floatApprox", argv[ 0 ] );
+        } else {
+            string num = c.toString( argv[ 0 ] );
+            //PRINT(num);
+            const char *numStr = num.c_str();
+            long long n;
+            try {
+                n = parseLL( numStr );
+                //PRINT(n);
+            } catch ( const AssertionException & ) {
+                smuassert( cx , "could not convert string to long long" , false );                
+            }
+            c.makeLongObj( n, obj );
+        }
+        
+        return JS_TRUE;
+    }
+    
     JSBool numberlong_valueof(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){    
         Convertor c(cx);
         return *rval = c.toval( double( c.toNumberLongUnsafe( obj ) ) );        
@@ -711,7 +861,12 @@ namespace mongo {
     JSBool numberlong_tostring(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){    
         Convertor c(cx);
         stringstream ss;
-        ss <<  c.toNumberLongUnsafe( obj );
+        if ( c.hasProperty( obj, "top" ) ) {
+            long long val = c.toNumberLongUnsafe( obj );
+            ss << "NumberLong( \"" << val << "\" )";            
+        } else {
+            ss << "NumberLong( " << c.getNumber( obj, "floatApprox" ) << " )";            
+        }
         string ret = ss.str();
         return *rval = c.toval( ret.c_str() );
     }
@@ -819,9 +974,10 @@ namespace mongo {
         assert( JS_InitClass( cx , global , 0 , &dbquery_class , dbquery_constructor , 0 , 0 , 0 , 0 , 0 ) );
         assert( JS_InitClass( cx , global , 0 , &dbpointer_class , dbpointer_constructor , 0 , 0 , dbpointer_functions , 0 , 0 ) );
         assert( JS_InitClass( cx , global , 0 , &bindata_class , bindata_constructor , 0 , 0 , bindata_functions , 0 , 0 ) );
+        assert( JS_InitClass( cx , global , 0 , &uuid_class , uuid_constructor , 0 , 0 , uuid_functions , 0 , 0 ) );
 
         assert( JS_InitClass( cx , global , 0 , &timestamp_class , 0 , 0 , 0 , 0 , 0 , 0 ) );
-        assert( JS_InitClass( cx , global , 0 , &numberlong_class , 0 , 0 , 0 , numberlong_functions , 0 , 0 ) );
+        assert( JS_InitClass( cx , global , 0 , &numberlong_class , numberlong_constructor , 0 , 0 , numberlong_functions , 0 , 0 ) );
         assert( JS_InitClass( cx , global , 0 , &minkey_class , 0 , 0 , 0 , 0 , 0 , 0 ) );
         assert( JS_InitClass( cx , global , 0 , &maxkey_class , 0 , 0 , 0 , 0 , 0 , 0 ) );
 
@@ -842,39 +998,39 @@ namespace mongo {
         if ( JS_InstanceOf( c->_context , o , &object_id_class , 0 ) ){
             OID oid;
             oid.init( c->getString( o , "str" ) );
-            b.append( name.c_str() , oid );
+            b.append( name , oid );
             return true;
         }
 
         if ( JS_InstanceOf( c->_context , o , &minkey_class , 0 ) ){
-            b.appendMinKey( name.c_str() );
+            b.appendMinKey( name );
             return true;
         }
 
         if ( JS_InstanceOf( c->_context , o , &maxkey_class , 0 ) ){
-            b.appendMaxKey( name.c_str() );
+            b.appendMaxKey( name );
             return true;
         }
         
         if ( JS_InstanceOf( c->_context , o , &timestamp_class , 0 ) ){
-            b.appendTimestamp( name.c_str() , (unsigned long long)c->getNumber( o , "t" ) , (unsigned int )c->getNumber( o , "i" ) );
+            b.appendTimestamp( name , (unsigned long long)c->getNumber( o , "t" ) , (unsigned int )c->getNumber( o , "i" ) );
             return true;
         }
 
         if ( JS_InstanceOf( c->_context , o , &numberlong_class , 0 ) ){
-            b.append( name.c_str() , c->toNumberLongUnsafe( o ) );
+            b.append( name , c->toNumberLongUnsafe( o ) );
             return true;
         }
         
         if ( JS_InstanceOf( c->_context , o , &dbpointer_class , 0 ) ){
-            b.appendDBRef( name.c_str() , c->getString( o , "ns" ).c_str() , c->toOID( c->getProperty( o , "id" ) ) );
+            b.appendDBRef( name , c->getString( o , "ns" ).c_str() , c->toOID( c->getProperty( o , "id" ) ) );
             return true;
         }
         
         if ( JS_InstanceOf( c->_context , o , &bindata_class , 0 ) ){
             void *holder = JS_GetPrivate( c->_context , o );
             const char *data = ( ( BinDataHolder * )( holder ) )->c_;
-            b.appendBinData( name.c_str() , 
+            b.appendBinData( name , 
                              (int)(c->getNumber( o , "len" )) , (BinDataType)((char)(c->getNumber( o , "type" ) ) ) , 
                              data
                              );
@@ -886,21 +1042,21 @@ namespace mongo {
         {
             jsdouble d = js_DateGetMsecSinceEpoch( c->_context , o );
             if ( d ){
-                b.appendDate( name.c_str() , Date_t(d) );
+                b.appendDate( name , Date_t(d) );
                 return true;
             }
         }
 #elif defined( XULRUNNER )
         if ( JS_InstanceOf( c->_context , o, globalSMEngine->_dateClass , 0 ) ){
             jsdouble d = js_DateGetMsecSinceEpoch( c->_context , o );
-            b.appendDate( name.c_str() , Date_t(d) );
+            b.appendDate( name , Date_t(d) );
             return true;
         }
 #else
         if ( JS_InstanceOf( c->_context , o, &js_DateClass , 0 ) ){
             jsdouble d = js_DateGetMsecSinceEpoch( c->_context , o );
             //TODO: make signed
-            b.appendDate( name.c_str() , Date_t((unsigned long long)d) );
+            b.appendDate( name , Date_t((unsigned long long)d) );
             return true;
         }
 #endif
@@ -909,7 +1065,7 @@ namespace mongo {
         if ( JS_InstanceOf( c->_context , o , &dbquery_class , 0 ) ||
              JS_InstanceOf( c->_context , o , &mongo_class , 0 ) || 
              JS_InstanceOf( c->_context , o , &db_collection_class , 0 ) ){
-            b.append( name.c_str() , c->toString( val ) );
+            b.append( name , c->toString( val ) );
             return true;
         }
 

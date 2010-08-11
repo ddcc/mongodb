@@ -16,7 +16,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "pdfile.h"
 #include "db.h"
 #include "../util/mmap.h"
@@ -42,8 +42,34 @@ namespace mongo {
         0x400000, 0x800000
     };
 
+    NamespaceDetails::NamespaceDetails( const DiskLoc &loc, bool _capped ) {
+        /* be sure to initialize new fields here -- doesn't default to zeroes the way we use it */
+        firstExtent = lastExtent = capExtent = loc;
+        datasize = nrecords = 0;
+        lastExtentSize = 0;
+        nIndexes = 0;
+        capped = _capped;
+        max = 0x7fffffff;
+        paddingFactor = 1.0;
+        flags = 0;
+        capFirstNewRecord = DiskLoc();
+        // Signal that we are on first allocation iteration through extents.
+        capFirstNewRecord.setInvalid();
+        // For capped case, signal that we are doing initial extent allocation.
+        if ( capped )
+            cappedLastDelRecLastExtent().setInvalid();
+		assert( sizeof(dataFileVersion) == 2 );
+		dataFileVersion = 0;
+		indexFileVersion = 0;
+        multiKeyIndexBits = 0;
+        reservedA = 0;
+        extraOffset = 0;
+        backgroundIndexBuildInProgress = 0;
+        memset(reserved, 0, sizeof(reserved));
+    }
+
     bool NamespaceIndex::exists() const {
-        return !boost::filesystem::exists(path());
+        return !MMF::exists(path());
     }
     
     boost::filesystem::path NamespaceIndex::path() const {
@@ -78,7 +104,7 @@ namespace mongo {
         }
     }
 
-    static void callback(const Namespace& k, NamespaceDetails& v) { 
+    static void namespaceOnLoadCallback(const Namespace& k, NamespaceDetails& v) { 
         v.onLoad(k);
     }
 
@@ -100,10 +126,10 @@ namespace mongo {
 		int len = -1;
         boost::filesystem::path nsPath = path();
         string pathString = nsPath.string();
-		void *p;
-        if( boost::filesystem::exists(nsPath) ) { 
+        MMF::Pointer p;
+        if( MMF::exists(nsPath) ) { 
 			p = f.map(pathString.c_str());
-            if( p ) {
+            if( !p.isNull() ) {
                 len = f.length();
                 if ( len % (1024*1024) != 0 ){
                     log() << "bad .ns file: " << pathString << endl;
@@ -117,22 +143,38 @@ namespace mongo {
             maybeMkdir();
 			long l = lenForNewNsFiles;
 			p = f.map(pathString.c_str(), l);
-            if( p ) { 
+            if( !p.isNull() ) {
                 len = (int) l;
                 assert( len == lenForNewNsFiles );
             }
 		}
 
-        if ( p == 0 ) {
+        if ( p.isNull() ) {
             problem() << "couldn't open file " << pathString << " terminating" << endl;
             dbexit( EXIT_FS );
         }
-        ht = new HashTable<Namespace,NamespaceDetails>(p, len, "namespace index");
+
+        ht = new HashTable<Namespace,NamespaceDetails,MMF::Pointer>(p, len, "namespace index");
         if( checkNsFilesOnLoad )
-            ht->iterAll(callback);
+            ht->iterAll(namespaceOnLoadCallback);
+    }
+    
+    static void namespaceGetNamespacesCallback( const Namespace& k , NamespaceDetails& v , void * extra ) {
+        list<string> * l = (list<string>*)extra;
+        if ( ! k.hasDollarSign() )
+            l->push_back( (string)k );
+    }
+
+    void NamespaceIndex::getNamespaces( list<string>& tofill , bool onlyCollections ) const {
+        assert( onlyCollections ); // TODO: need to implement this
+        //                                  need boost::bind or something to make this less ugly
+        
+        if ( ht )
+            ht->iterAll( namespaceGetNamespacesCallback , (void*)&tofill );
     }
 
     void NamespaceDetails::addDeletedRec(DeletedRecord *d, DiskLoc dloc) {
+		BOOST_STATIC_ASSERT( sizeof(NamespaceDetails::Extra) <= sizeof(NamespaceDetails) );
         {
             // defensive code: try to make us notice if we reference a deleted record
             (unsigned&) (((Record *) d)->data) = 0xeeeeeeee;
@@ -140,19 +182,20 @@ namespace mongo {
         dassert( dloc.drec() == d );
         DEBUGGING out() << "TEMP: add deleted rec " << dloc.toString() << ' ' << hex << d->extentOfs << endl;
         if ( capped ) {
-            if ( !deletedList[ 1 ].isValid() ) {
+            if ( !cappedLastDelRecLastExtent().isValid() ) {
                 // Initial extent allocation.  Insert at end.
                 d->nextDeleted = DiskLoc();
-                if ( deletedList[ 0 ].isNull() )
-                    deletedList[ 0 ] = dloc;
+                if ( cappedListOfAllDeletedRecords().isNull() )
+                    cappedListOfAllDeletedRecords() = dloc;
                 else {
-                    DiskLoc i = deletedList[ 0 ];
+                    DiskLoc i = cappedListOfAllDeletedRecords();
                     for (; !i.drec()->nextDeleted.isNull(); i = i.drec()->nextDeleted );
                     i.drec()->nextDeleted = dloc;
                 }
             } else {
-                d->nextDeleted = firstDeletedInCapExtent();
-                firstDeletedInCapExtent() = dloc;
+                d->nextDeleted = cappedFirstDeletedInCurExtent();
+                cappedFirstDeletedInCurExtent() = dloc;
+                // always compact() after this so order doesn't matter
             }
         } else {
             int b = bucket(d->lengthWithHeaders);
@@ -186,15 +229,17 @@ namespace mongo {
         if ( capped == 0 ) {
             if ( left < 24 || left < (lenToAlloc >> 3) ) {
                 // you get the whole thing.
+				DataFileMgr::grow(loc, regionlen);
                 return loc;
             }
         }
 
         /* split off some for further use. */
         r->lengthWithHeaders = lenToAlloc;
+		DataFileMgr::grow(loc, lenToAlloc);
         DiskLoc newDelLoc = loc;
         newDelLoc.inc(lenToAlloc);
-        DeletedRecord *newDel = newDelLoc.drec();
+        DeletedRecord *newDel = DataFileMgr::makeDeletedRecord(newDelLoc, left);
         newDel->extentOfs = r->extentOfs;
         newDel->lengthWithHeaders = left;
         newDel->nextDeleted.Null();
@@ -298,53 +343,6 @@ namespace mongo {
         }
     }
 
-    /* combine adjacent deleted records
-
-       this is O(n^2) but we call it for capped tables where typically n==1 or 2!
-       (or 3...there will be a little unused sliver at the end of the extent.)
-    */
-    void NamespaceDetails::compact() {
-        assert(capped);
-
-        list<DiskLoc> drecs;
-
-        // Pull out capExtent's DRs from deletedList
-        DiskLoc i = firstDeletedInCapExtent();
-        for (; !i.isNull() && inCapExtent( i ); i = i.drec()->nextDeleted )
-            drecs.push_back( i );
-        firstDeletedInCapExtent() = i;
-
-        // This is the O(n^2) part.
-        drecs.sort();
-
-        list<DiskLoc>::iterator j = drecs.begin();
-        assert( j != drecs.end() );
-        DiskLoc a = *j;
-        while ( 1 ) {
-            j++;
-            if ( j == drecs.end() ) {
-                DEBUGGING out() << "TEMP: compact adddelrec\n";
-                addDeletedRec(a.drec(), a);
-                break;
-            }
-            DiskLoc b = *j;
-            while ( a.a() == b.a() && a.getOfs() + a.drec()->lengthWithHeaders == b.getOfs() ) {
-                // a & b are adjacent.  merge.
-                a.drec()->lengthWithHeaders += b.drec()->lengthWithHeaders;
-                j++;
-                if ( j == drecs.end() ) {
-                    DEBUGGING out() << "temp: compact adddelrec2\n";
-                    addDeletedRec(a.drec(), a);
-                    return;
-                }
-                b = *j;
-            }
-            DEBUGGING out() << "temp: compact adddelrec3\n";
-            addDeletedRec(a.drec(), a);
-            a = b;
-        }
-    }
-
     DiskLoc NamespaceDetails::firstRecord( const DiskLoc &startExtent ) const {
         for (DiskLoc i = startExtent.isNull() ? firstExtent : startExtent;
                 !i.isNull(); i = i.ext()->xnext ) {
@@ -361,47 +359,6 @@ namespace mongo {
                 return i.ext()->lastRecord;
         }
         return DiskLoc();
-    }
-
-    DiskLoc &NamespaceDetails::firstDeletedInCapExtent() {
-        if ( deletedList[ 1 ].isNull() )
-            return deletedList[ 0 ];
-        else
-            return deletedList[ 1 ].drec()->nextDeleted;
-    }
-
-    bool NamespaceDetails::inCapExtent( const DiskLoc &dl ) const {
-        assert( !dl.isNull() );
-        // We could have a rec or drec, doesn't matter.
-        return dl.drec()->myExtent( dl ) == capExtent.ext();
-    }
-
-    bool NamespaceDetails::nextIsInCapExtent( const DiskLoc &dl ) const {
-        assert( !dl.isNull() );
-        DiskLoc next = dl.drec()->nextDeleted;
-        if ( next.isNull() )
-            return false;
-        return inCapExtent( next );
-    }
-
-    void NamespaceDetails::advanceCapExtent( const char *ns ) {
-        // We want deletedList[ 1 ] to be the last DeletedRecord of the prev cap extent
-        // (or DiskLoc() if new capExtent == firstExtent)
-        if ( capExtent == lastExtent )
-            deletedList[ 1 ] = DiskLoc();
-        else {
-            DiskLoc i = firstDeletedInCapExtent();
-            for (; !i.isNull() && nextIsInCapExtent( i ); i = i.drec()->nextDeleted );
-            deletedList[ 1 ] = i;
-        }
-
-        capExtent = theCapExtent()->xnext.isNull() ? firstExtent : theCapExtent()->xnext;
-
-        /* this isn't true if a collection has been renamed...that is ok just used for diagnostics */
-        //dassert( theCapExtent()->ns == ns );
-
-        theCapExtent()->assertOk();
-        capFirstNewRecord = DiskLoc();
     }
 
     int n_complaints_cap = 0;
@@ -422,157 +379,84 @@ namespace mongo {
         }
     }
 
-    DiskLoc NamespaceDetails::__capAlloc( int len ) {
-        DiskLoc prev = deletedList[ 1 ];
-        DiskLoc i = firstDeletedInCapExtent();
-        DiskLoc ret;
-        for (; !i.isNull() && inCapExtent( i ); prev = i, i = i.drec()->nextDeleted ) {
-            // We need to keep at least one DR per extent in deletedList[ 0 ],
-            // so make sure there's space to create a DR at the end.
-            if ( i.drec()->lengthWithHeaders >= len + 24 ) {
-                ret = i;
-                break;
-            }
-        }
-
-        /* unlink ourself from the deleted list */
-        if ( !ret.isNull() ) {
-            if ( prev.isNull() )
-                deletedList[ 0 ] = ret.drec()->nextDeleted;
-            else
-                prev.drec()->nextDeleted = ret.drec()->nextDeleted;
-            ret.drec()->nextDeleted.setInvalid(); // defensive.
-            assert( ret.drec()->extentOfs < ret.getOfs() );
-        }
-
-        return ret;
-    }
-
-    void NamespaceDetails::checkMigrate() {
-        // migrate old NamespaceDetails format
-        if ( capped && capExtent.a() == 0 && capExtent.getOfs() == 0 ) {
-            capFirstNewRecord = DiskLoc();
-            capFirstNewRecord.setInvalid();
-            // put all the DeletedRecords in deletedList[ 0 ]
-            for ( int i = 1; i < Buckets; ++i ) {
-                DiskLoc first = deletedList[ i ];
-                if ( first.isNull() )
-                    continue;
-                DiskLoc last = first;
-                for (; !last.drec()->nextDeleted.isNull(); last = last.drec()->nextDeleted );
-                last.drec()->nextDeleted = deletedList[ 0 ];
-                deletedList[ 0 ] = first;
-                deletedList[ i ] = DiskLoc();
-            }
-            // NOTE deletedList[ 1 ] set to DiskLoc() in above
-
-            // Last, in case we're killed before getting here
-            capExtent = firstExtent;
-        }
-    }
-
     /* alloc with capped table handling. */
     DiskLoc NamespaceDetails::_alloc(const char *ns, int len) {
         if ( !capped )
             return __stdAlloc(len);
 
-        // capped.
+        return cappedAlloc(ns,len);
+    }
 
-        // signal done allocating new extents.
-        if ( !deletedList[ 1 ].isValid() )
-            deletedList[ 1 ] = DiskLoc();
+    /* extra space for indexes when more than 10 */
+    NamespaceDetails::Extra* NamespaceIndex::newExtra(const char *ns, int i, NamespaceDetails *d) {
+        assert( i >= 0 && i <= 1 );
+        Namespace n(ns);
+        Namespace extra(n.extraName(i).c_str()); // throws userexception if ns name too long
         
-        assert( len < 400000000 );
-        int passes = 0;
-        int maxPasses = ( len / 30 ) + 2; // 30 is about the smallest entry that could go in the oplog
-        if ( maxPasses < 5000 ){
-            // this is for bacwards safety since 5000 was the old value
-            maxPasses = 5000;
+        massert( 10350 ,  "allocExtra: base ns missing?", d );
+        massert( 10351 ,  "allocExtra: extra already exists", ht->get(extra) == 0 );
+
+        NamespaceDetails::Extra temp;
+        temp.init();
+        uassert( 10082 ,  "allocExtra: too many namespaces/collections", ht->put(extra, (NamespaceDetails&) temp));
+        NamespaceDetails::Extra *e = (NamespaceDetails::Extra *) ht->get(extra);
+        return e;
+    }
+    NamespaceDetails::Extra* NamespaceDetails::allocExtra(const char *ns, int nindexessofar) {
+        NamespaceIndex *ni = nsindex(ns);
+        int i = (nindexessofar - NIndexesBase) / NIndexesExtra;
+        Extra *e = ni->newExtra(ns, i, this);
+        long ofs = e->ofsFrom(this);
+        if( i == 0 ) {
+            assert( extraOffset == 0 );
+            extraOffset = ofs;
+            assert( extra() == e );
         }
-        DiskLoc loc;
-
-        // delete records until we have room and the max # objects limit achieved.
-
-        /* this fails on a rename -- that is ok but must keep commented out */
-        //assert( theCapExtent()->ns == ns );
-
-        theCapExtent()->assertOk();
-        DiskLoc firstEmptyExtent;
-        while ( 1 ) {
-            if ( nrecords < max ) {
-                loc = __capAlloc( len );
-                if ( !loc.isNull() )
-                    break;
-            }
-
-            // If on first iteration through extents, don't delete anything.
-            if ( !capFirstNewRecord.isValid() ) {
-                advanceCapExtent( ns );
-                if ( capExtent != firstExtent )
-                    capFirstNewRecord.setInvalid();
-                // else signal done with first iteration through extents.
-                continue;
-            }
-
-            if ( !capFirstNewRecord.isNull() &&
-                    theCapExtent()->firstRecord == capFirstNewRecord ) {
-                // We've deleted all records that were allocated on the previous
-                // iteration through this extent.
-                advanceCapExtent( ns );
-                continue;
-            }
-
-            if ( theCapExtent()->firstRecord.isNull() ) {
-                if ( firstEmptyExtent.isNull() )
-                    firstEmptyExtent = capExtent;
-                advanceCapExtent( ns );
-                if ( firstEmptyExtent == capExtent ) {
-                    maybeComplain( ns, len );
-                    return DiskLoc();
-                }
-                continue;
-            }
-
-            massert( 10344 ,  "Capped collection full and delete not allowed", cappedMayDelete() );
-            DiskLoc fr = theCapExtent()->firstRecord;
-            theDataFileMgr.deleteRecord(ns, fr.rec(), fr, true);
-            compact();
-            if( ++passes > maxPasses ) {
-                log() << "passes ns:" << ns << " len:" << len << " maxPasses: " << maxPasses << '\n';
-                log() << "passes max:" << max << " nrecords:" << nrecords << " datasize: " << datasize << endl;
-                massert( 10345 ,  "passes >= maxPasses in capped collection alloc", false );
-            }
+        else { 
+            Extra *hd = extra();
+            assert( hd->next(this) == 0 );
+            hd->setNext(ofs);
         }
-
-        // Remember first record allocated on this iteration through capExtent.
-        if ( capFirstNewRecord.isValid() && capFirstNewRecord.isNull() )
-            capFirstNewRecord = loc;
-
-        return loc;
+        return e;
     }
 
     /* you MUST call when adding an index.  see pdfile.cpp */
     IndexDetails& NamespaceDetails::addIndex(const char *thisns, bool resetTransient) {
         assert( nsdetails(thisns) == this );
 
-        if( nIndexes == NIndexesBase && extraOffset == 0 ) { 
-            nsindex(thisns)->allocExtra(thisns);
+        IndexDetails *id;
+        try {
+            id = &idx(nIndexes,true);
+        }
+        catch(DBException&) { 
+            allocExtra(thisns, nIndexes);
+            id = &idx(nIndexes,false);
         }
 
-        IndexDetails& id = idx(nIndexes);
         nIndexes++;
         if ( resetTransient )
             NamespaceDetailsTransient::get_w(thisns).addedIndex();
-        return id;
+        return *id;
     }
 
     // must be called when renaming a NS to fix up extra
     void NamespaceDetails::copyingFrom(const char *thisns, NamespaceDetails *src) { 
-        if( extraOffset ) {
-            extraOffset = 0; // so allocExtra() doesn't assert.
-            Extra *e = nsindex(thisns)->allocExtra(thisns);
-            memcpy(e, src->extra(), sizeof(Extra));
-        } 
+        extraOffset = 0; // we are a copy -- the old value is wrong.  fixing it up below.
+        Extra *se = src->extra();
+        int n = NIndexesBase;
+        if( se ) {
+            Extra *e = allocExtra(thisns, n);
+            while( 1 ) {
+                n += NIndexesExtra;
+                e->copy(this, *se);
+                se = se->next(src);
+                if( se == 0 ) break;
+                Extra *nxt = allocExtra(thisns, n);
+                e->setNext( nxt->ofsFrom(this) );
+                e = nxt;
+            } 
+            assert( extraOffset );
+        }
     }
 
     /* returns index of the first index in which the field is present. -1 if not present.
@@ -610,8 +494,8 @@ namespace mongo {
     
     /* ------------------------------------------------------------------------- */
 
-    mongo::mutex NamespaceDetailsTransient::_qcMutex;
-    mongo::mutex NamespaceDetailsTransient::_isMutex;
+    mongo::mutex NamespaceDetailsTransient::_qcMutex("qc");
+    mongo::mutex NamespaceDetailsTransient::_isMutex("is");
     map< string, shared_ptr< NamespaceDetailsTransient > > NamespaceDetailsTransient::_map;
     typedef map< string, shared_ptr< NamespaceDetailsTransient > >::iterator ouriter;
 
@@ -651,42 +535,6 @@ namespace mongo {
             i.next().keyPattern().getFieldNames(_indexKeys);
     }
 
-    void NamespaceDetailsTransient::cllStart( int logSizeMb ) {
-        assertInWriteLock();
-        _cll_ns = "local.temp.oplog." + _ns;
-        _cll_enabled = true;
-        stringstream spec;
-        // 128MB
-        spec << "{size:" << logSizeMb * 1024 * 1024 << ",capped:true,autoIndexId:false}";
-        Client::Context ct( _cll_ns );
-        string err;
-        massert( 10347 ,  "Could not create log ns", userCreateNS( _cll_ns.c_str(), fromjson( spec.str() ), err, false ) );
-        NamespaceDetails *d = nsdetails( _cll_ns.c_str() );
-        d->cappedDisallowDelete();
-    }
-
-    void NamespaceDetailsTransient::cllInvalidate() {
-        assertInWriteLock();
-        cllDrop();
-        _cll_enabled = false;
-    }
-    
-    bool NamespaceDetailsTransient::cllValidateComplete() {
-        assertInWriteLock();
-        cllDrop();
-        bool ret = _cll_enabled;
-        _cll_enabled = false;
-        _cll_ns = "";
-        return ret;
-    }
-    
-    void NamespaceDetailsTransient::cllDrop() {
-        assertInWriteLock();
-        if ( !_cll_enabled )
-            return;
-        Client::Context ctx( _cll_ns );
-        dropNS( _cll_ns );
-    }
 
     /* ------------------------------------------------------------------------- */
 

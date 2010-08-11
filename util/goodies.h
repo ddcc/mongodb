@@ -1,4 +1,4 @@
-// goodies.h
+// @file goodies.h
 // miscellaneous junk
 
 /*    Copyright 2009 10gen Inc.
@@ -18,13 +18,22 @@
 
 #pragma once
 
-#if defined(_WIN32)
-#  include <windows.h>
-#endif
+#include "../bson/util/misc.h"
+#include "concurrency/mutex.h"
 
 namespace mongo {
 
-#if !defined(_WIN32) && !defined(NOEXECINFO) && !defined(__freebsd__) && !defined(__sun__)
+    void setThreadName(const char * name);
+    string getThreadName();
+    
+    template<class T>
+    inline string ToString(const T& t) { 
+        stringstream s;
+        s << t;
+        return s.str();
+    }
+
+#if !defined(_WIN32) && !defined(NOEXECINFO) && !defined(__freebsd__) && !defined(__openbsd__) && !defined(__sun__)
 
 } // namespace mongo
 
@@ -105,15 +114,14 @@ namespace mongo {
     }
 
 // PRINT(2+2);  prints "2+2: 4"
-#define PRINT(x) cout << #x ": " << (x) << endl
+#define MONGO_PRINT(x) cout << #x ": " << (x) << endl
+#define PRINT MONGO_PRINT
 // PRINTFL; prints file:line
-#define PRINTFL cout << __FILE__ ":" << __LINE__ << endl
-
-#undef yassert
+#define MONGO_PRINTFL cout << __FILE__ ":" << __LINE__ << endl
+#define PRINTFL MONGO_PRINTFL
 
 #undef assert
-#define assert xassert
-#define yassert 1
+#define assert MONGO_assert
 
     struct WrappingInt {
         WrappingInt() {
@@ -139,22 +147,6 @@ namespace mongo {
         }
     };
 
-} // namespace mongo
-
-#include <ctime>
-
-namespace mongo {
-
-    inline void time_t_to_String(time_t t, char *buf) {
-#if defined(_WIN32)
-        ctime_s(buf, 64, &t);
-#else
-        ctime_r(&t, buf);
-#endif
-        buf[24] = 0; // don't want the \n
-    }
-
-
     inline void time_t_to_Struct(time_t t, struct tm * buf , bool local = false ) {
 #if defined(_WIN32)
         if ( local )
@@ -169,12 +161,26 @@ namespace mongo {
 #endif
     }
 
+    // uses ISO 8601 dates without trailing Z
+    // colonsOk should be false when creating filenames
+    inline string terseCurrentTime(bool colonsOk=true){
+        struct tm t;
+        time_t_to_Struct( time(0) , &t );
 
+        const char* fmt = (colonsOk ? "%Y-%m-%dT%H:%M:%S" : "%Y-%m-%dT%H-%M-%S");
+        char buf[32];
+        assert(strftime(buf, sizeof(buf), fmt, &t) == 19);
+        return buf;
+    }
 
-#define asctime _asctime_not_threadsafe_
-#define gmtime _gmtime_not_threadsafe_
-#define localtime _localtime_not_threadsafe_
-#define ctime _ctime_is_not_threadsafe_
+#define MONGO_asctime _asctime_not_threadsafe_
+#define asctime MONGO_asctime
+#define MONGO_gmtime _gmtime_not_threadsafe_
+#define gmtime MONGO_gmtime
+#define MONGO_localtime _localtime_not_threadsafe_
+#define localtime MONGO_localtime
+#define MONGO_ctime _ctime_is_not_threadsafe_
+#define ctime MONGO_ctime
 
 #if defined(_WIN32) || defined(__sunos__)
     inline void sleepsecs(int s) {
@@ -183,24 +189,24 @@ namespace mongo {
         xt.sec += s;
         boost::thread::sleep(xt);
     }
-    inline void sleepmillis(int s) {
+    inline void sleepmillis(long long s) {
         boost::xtime xt;
         boost::xtime_get(&xt, boost::TIME_UTC);
-        xt.sec += ( s / 1000 );
-        xt.nsec += ( s % 1000 ) * 1000000;
+        xt.sec += (int)( s / 1000 );
+        xt.nsec += (int)(( s % 1000 ) * 1000000);
         if ( xt.nsec >= 1000000000 ) {
             xt.nsec -= 1000000000;
             xt.sec++;
         }        
         boost::thread::sleep(xt);
     }
-    inline void sleepmicros(int s) {
+    inline void sleepmicros(long long s) {
         if ( s <= 0 )
             return;
         boost::xtime xt;
         boost::xtime_get(&xt, boost::TIME_UTC);
-        xt.sec += ( s / 1000000 );
-        xt.nsec += ( s % 1000000 ) * 1000;
+        xt.sec += (int)( s / 1000000 );
+        xt.nsec += (int)(( s % 1000000 ) * 1000);
         if ( xt.nsec >= 1000000000 ) {
             xt.nsec -= 1000000000;
             xt.sec++;
@@ -216,22 +222,23 @@ namespace mongo {
             cout << "nanosleep failed" << endl;
         }
     }
-    inline void sleepmicros(int s) {
+    inline void sleepmicros(long long s) {
         if ( s <= 0 )
             return;
         struct timespec t;
         t.tv_sec = (int)(s / 1000000);
-        t.tv_nsec = s % 1000000;
-        if ( nanosleep( &t , 0 ) ){
+        t.tv_nsec = 1000 * ( s % 1000000 );
+        struct timespec out;
+        if ( nanosleep( &t , &out ) ){
             cout << "nanosleep failed" << endl;
         }
     }
-    inline void sleepmillis(int s) {
+    inline void sleepmillis(long long s) {
         sleepmicros( s * 1000 );
     }
 #endif
 
-// note this wraps
+    // note this wraps
     inline int tdiff(unsigned told, unsigned tnew) {
         return WrappingInt::diff(tnew, told);
     }
@@ -241,15 +248,6 @@ namespace mongo {
         unsigned t = xt.nsec / 1000000;
         return (xt.sec & 0xfffff) * 1000 + t;
     }
-
-    struct Date_t {
-        // TODO: make signed (and look for related TODO's)
-        unsigned long long millis;
-        Date_t(): millis(0) {}
-        Date_t(unsigned long long m): millis(m) {}
-        operator unsigned long long&() { return millis; }
-        operator const unsigned long long&() const { return millis; }
-    };
 
     inline Date_t jsTime() {
         boost::xtime xt;
@@ -273,44 +271,7 @@ namespace mongo {
         unsigned secs = xt.sec % 1024;
         return secs*1000000 + t;
     }
-    using namespace boost;
     
-    extern bool __destroyingStatics;
-    
-    // If you create a local static instance of this class, that instance will be destroyed
-    // before all global static objects are destroyed, so __destroyingStatics will be set
-    // to true before the global static variables are destroyed.
-    class StaticObserver : boost::noncopyable {
-    public:
-        ~StaticObserver() { __destroyingStatics = true; }
-    };
-    
-    // On pthread systems, it is an error to destroy a mutex while held.  Static global
-    // mutexes may be held upon shutdown in our implementation, and this way we avoid
-    // destroying them.
-    class mutex : boost::noncopyable {
-    public:
-        mutex() { new (_buf) boost::mutex(); }
-        ~mutex() {
-            if( !__destroyingStatics ) {
-                boost().boost::mutex::~mutex();
-            }
-        }
-        class scoped_lock : boost::noncopyable {
-        public:
-            scoped_lock( mongo::mutex &m ) : _l( m.boost() ) {}
-            boost::mutex::scoped_lock &boost() { return _l; }
-        private:
-            boost::mutex::scoped_lock _l;
-        };
-    private:
-        boost::mutex &boost() { return *( boost::mutex * )( _buf ); }
-        char _buf[ sizeof( boost::mutex ) ];
-    };
-    
-    typedef mongo::mutex::scoped_lock scoped_lock;
-    typedef boost::recursive_mutex::scoped_lock recursive_scoped_lock;
-
 // simple scoped timer
     class Timer {
     public:
@@ -320,17 +281,17 @@ namespace mongo {
         Timer( unsigned long long start ) {
             old = start;
         }
-        int seconds(){
+        int seconds() const {
             return (int)(micros() / 1000000);
         }
-        int millis() {
+        int millis() const {
             return (long)(micros() / 1000);
         }
-        unsigned long long micros() {
+        unsigned long long micros() const {
             unsigned long long n = curTimeMicros64();
             return n - old;
         }
-        unsigned long long micros(unsigned long long & n) { // returns cur time in addition to timer result
+        unsigned long long micros(unsigned long long & n) const { // returns cur time in addition to timer result
             n = curTimeMicros64();
             return n - old;
         }
@@ -364,6 +325,7 @@ namespace mongo {
         if ( strlen(str) < l ) return false;
         return strncmp(str, prefix, l) == 0;
     }
+    inline bool startsWith(string s, string p) { return startsWith(s.c_str(), p.c_str()); }
 
     inline bool endsWith(const char *p, const char *suffix) {
         size_t a = strlen(p);
@@ -371,12 +333,6 @@ namespace mongo {
         if ( b > a ) return false;
         return strcmp(p + a - b, suffix) == 0;
     }
-
-} // namespace mongo
-
-#include "boost/detail/endian.hpp"
-
-namespace mongo {
 
     inline unsigned long swapEndian(unsigned long x) {
         return
@@ -395,15 +351,6 @@ namespace mongo {
         return swapEndian(x);
     }
 #endif
-
-    // Like strlen, but only scans up to n bytes.
-    // Returns -1 if no '0' found.
-    inline int strnlen( const char *s, int n ) {
-        for( int i = 0; i < n; ++i )
-            if ( !s[ i ] )
-                return i;
-        return -1;
-    }
     
 #if !defined(_WIN32)
     typedef int HANDLE;
@@ -446,7 +393,7 @@ namespace mongo {
         boost::thread_specific_ptr<T> _val;
     };
 
-    class ProgressMeter {
+    class ProgressMeter : boost::noncopyable {
     public:
         ProgressMeter( long long total , int secondsBetween = 3 , int checkInterval = 100 ){
             reset( total , secondsBetween , checkInterval );
@@ -513,6 +460,10 @@ namespace mongo {
             buf << _done << "/" << _total << " " << (_done*100)/_total << "%";
             return buf.str();
         }
+
+        bool operator==( const ProgressMeter& other ) const {
+            return this == &other;
+        }
     private:
 
         bool _active;
@@ -526,9 +477,39 @@ namespace mongo {
         int _lastTime;
     };
 
+    class ProgressMeterHolder : boost::noncopyable {
+    public:
+        ProgressMeterHolder( ProgressMeter& pm )
+            : _pm( pm ){
+        }
+        
+        ~ProgressMeterHolder(){
+            _pm.finished();
+        }
+
+        ProgressMeter* operator->(){
+            return &_pm;
+        }
+
+        bool hit( int n = 1 ){
+            return _pm.hit( n );
+        }
+
+        void finished(){
+            _pm.finished();
+        }
+        
+        bool operator==( const ProgressMeter& other ){
+            return _pm == other;
+        }
+        
+    private:
+        ProgressMeter& _pm;
+    };
+
     class TicketHolder {
     public:
-        TicketHolder( int num ){
+        TicketHolder( int num ) : _mutex("TicketHolder") {
             _outof = num;
             _num = num;
         }
@@ -611,7 +592,7 @@ namespace mongo {
             _buf = 0;
         }
         
-        operator string() const {
+        string toString() const {
             string s = _buf;
             return s;
         }
@@ -634,11 +615,11 @@ namespace mongo {
         }
 
         bool operator!=( const char * str ) const {
-            return strcmp( _buf , str );
+            return strcmp( _buf , str ) != 0;
         }
 
         bool empty() const {
-            return _buf[0] == 0;
+            return _buf == 0 || _buf[0] == 0;
         }
 
     private:
@@ -650,6 +631,20 @@ namespace mongo {
 
     inline bool isNumber( char c ) {
         return c >= '0' && c <= '9';
+    }
+
+    inline unsigned stringToNum(const char *str) {
+        unsigned x = 0;
+        const char *p = str;
+        while( 1 ) {
+            if( !isNumber(*p) ) {
+                if( *p == 0 && p != str )
+                    break;
+                throw 0;
+            }
+            x = x * 10 + *p++ - '0';
+        }
+        return x;
     }
     
     // for convenience, '{' is greater than anything and stops number parsing
@@ -703,5 +698,46 @@ namespace mongo {
             return -1;
         return 0;
     }
-    
+
+    /** A generic pointer type for function arguments.
+     *  It will convert from any pointer type except auto_ptr.
+     *  Semantics are the same as passing the pointer returned from get()
+     *  const ptr<T>  =>  T * const
+     *  ptr<const T>  =>  T const *  or  const T*
+     */
+    template <typename T>
+    struct ptr{
+        
+        ptr() : _p(NULL) {}
+
+        // convert to ptr<T>
+        ptr(T* p) : _p(p) {} // needed for NULL
+        template<typename U> ptr(U* p) : _p(p) {}
+        template<typename U> ptr(const ptr<U>& p) : _p(p) {}
+        template<typename U> ptr(const boost::shared_ptr<U>& p) : _p(p.get()) {}
+        template<typename U> ptr(const boost::scoped_ptr<U>& p) : _p(p.get()) {}
+        //template<typename U> ptr(const auto_ptr<U>& p) : _p(p.get()) {}
+        
+        // assign to ptr<T>
+        ptr& operator= (T* p) { _p = p; return *this; } // needed for NULL
+        template<typename U> ptr& operator= (U* p) { _p = p; return *this; }
+        template<typename U> ptr& operator= (const ptr<U>& p) { _p = p; return *this; }
+        template<typename U> ptr& operator= (const boost::shared_ptr<U>& p) { _p = p.get(); return *this; }
+        template<typename U> ptr& operator= (const boost::scoped_ptr<U>& p) { _p = p.get(); return *this; }
+        //template<typename U> ptr& operator= (const auto_ptr<U>& p) { _p = p.get(); return *this; }
+
+        // use
+        T* operator->() const { return _p; }
+        T& operator*() const { return *_p; }
+
+        // convert from ptr<T>
+        operator T* () const { return _p; }
+
+    private:
+        T* _p;
+    };
+
+    /** Hmmmm */
+    using namespace boost;
+
 } // namespace mongo

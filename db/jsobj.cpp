@@ -17,11 +17,10 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "jsobj.h"
 #include "nonce.h"
-#include "../util/atomic_int.h"
-#include "../util/goodies.h"
+#include "../bson/util/atomic_int.h"
 #include "../util/base64.h"
 #include "../util/md5.hpp"
 #include <limits>
@@ -31,9 +30,8 @@
 #include "jsobjmanipulator.h"
 #include "../util/optime.h"
 #include <boost/static_assert.hpp>
-#include <boost/any.hpp>
 #undef assert
-#define assert xassert
+#define assert MONGO_assert
 
 // make sure our assumptions are valid
 BOOST_STATIC_ASSERT( sizeof(int) == 4 );
@@ -46,114 +44,12 @@ namespace mongo {
 
     BSONElement nullElement;
 
-    ostream& operator<<( ostream &s, const OID &o ) {
-        s << o.str();
-        return s;
-    }
-
-    IDLabeler GENOID;
+    GENOIDLabeler GENOID;
 
     DateNowLabeler DATENOW;
 
-    string BSONElement::toString( bool includeFieldName ) const {
-        stringstream s;
-        if ( includeFieldName && type() != EOO )
-            s << fieldName() << ": ";
-        switch ( type() ) {
-        case EOO:
-            return "EOO";
-        case Date:
-            s << "new Date(" << date() << ')';
-            break;
-        case RegEx:
-            {
-                s << "/" << regex() << '/';
-                const char *p = regexFlags();
-                if ( p ) s << p;
-            }
-            break;
-        case NumberDouble:
-            {
-                stringstream tmp;
-                tmp.precision( 16 );
-                tmp << number();
-                string n = tmp.str();
-                s << n;
-                // indicate this is a double:
-                if( strchr(n.c_str(), '.') == 0 && strchr(n.c_str(), 'E') == 0 && strchr(n.c_str(), 'N') == 0 )
-                    s << ".0";
-            }
-            break;
-        case NumberLong:
-            s << _numberLong();
-            break;
-        case NumberInt:
-            s << _numberInt();
-            break;
-        case Bool:
-            s << ( boolean() ? "true" : "false" );
-            break;
-        case Object:
-        case Array:
-            s << embeddedObject().toString();
-            break;
-        case Undefined:
-            s << "undefined";
-            break;
-        case jstNULL:
-            s << "null";
-            break;
-        case MaxKey:
-            s << "MaxKey";
-            break;
-        case MinKey:
-            s << "MinKey";
-            break;
-        case CodeWScope:
-            s << "CodeWScope( "
-                << codeWScopeCode() << ", " << codeWScopeObject().toString() << ")";
-            break;
-        case Code:
-            if ( valuestrsize() > 80 )
-                s << string(valuestr()).substr(0, 70) << "...";
-            else {
-                s << valuestr();
-            }
-            break;
-        case Symbol:
-        case String:
-            if ( valuestrsize() > 80 )
-                s << '"' << string(valuestr()).substr(0, 70) << "...\"";
-            else {
-                s << '"' << valuestr() << '"';
-            }
-            break;
-        case DBRef:
-            s << "DBRef('" << valuestr() << "',";
-            {
-                OID *x = (OID *) (valuestr() + valuestrsize());
-                s << *x << ')';
-            }
-            break;
-        case jstOID:
-            s << "ObjId(";
-            s << __oid() << ')';
-            break;
-        case BinData:
-            s << "BinData";
-            break;
-        case Timestamp:
-            s << "Timestamp " << timestampTime() << "|" << timestampInc();
-            break;
-        default:
-            s << "?type=" << type();
-            break;
-        }
-        return s.str();
-    }
-
     string escape( string s , bool escape_slash=false) {
-        stringstream ret;
+        StringBuilder ret;
         for ( string::iterator i = s.begin(); i != s.end(); ++i ) {
             switch ( *i ) {
             case '"':
@@ -182,11 +78,9 @@ namespace mongo {
                 break;
             default:
                 if ( *i >= 0 && *i <= 0x1f ) {
-                    ret << "\\u";
-                    ret << hex;
-                    ret.width( 4 );
-                    ret.fill( '0' );
-                    ret << int( *i );
+                    //TODO: these should be utf16 code-units not bytes
+                    char c = *i;
+                    ret << "\\u00" << toHexLower(&c, 1);
                 } else {
                     ret << *i;
                 }
@@ -195,14 +89,18 @@ namespace mongo {
         return ret.str();
     }
 
-    string BSONElement::jsonString( JsonStringFormat format, bool includeFieldNames ) const {
+    string BSONElement::jsonString( JsonStringFormat format, bool includeFieldNames, int pretty ) const {
+        BSONType t = type();
+        if ( t == Undefined )
+            return "";
+
         stringstream s;
         if ( includeFieldNames )
             s << '"' << escape( fieldName() ) << "\" : ";
         switch ( type() ) {
-        case String:
+        case mongo::String:
         case Symbol:
-            s << '"' << escape( valuestr() ) << '"';
+            s << '"' << escape( string(valuestr(), valuestrsize()-1) ) << '"';
             break;
         case NumberLong:
             s << _numberLong();
@@ -214,22 +112,22 @@ namespace mongo {
                 s.precision( 16 );
                 s << number();
             } else {
-                stringstream ss;
+                StringBuilder ss;
                 ss << "Number " << number() << " cannot be represented in JSON";
                 string message = ss.str();
                 massert( 10311 ,  message.c_str(), false );
             }
             break;
-        case Bool:
+        case mongo::Bool:
             s << ( boolean() ? "true" : "false" );
             break;
         case jstNULL:
             s << "null";
             break;
         case Object:
-            s << embeddedObject().jsonString( format );
+            s << embeddedObject().jsonString( format, pretty );
             break;
-        case Array: {
+        case mongo::Array: {
             if ( embeddedObject().isEmpty() ) {
                 s << "[]";
                 break;
@@ -239,7 +137,12 @@ namespace mongo {
             BSONElement e = i.next();
             if ( !e.eoo() )
                 while ( 1 ) {
-                    s << e.jsonString( format, false );
+                    if( pretty ) {
+                        s << '\n';
+                        for( int x = 0; x < pretty; x++ )
+                            s << "  ";
+                    }
+                    s << e.jsonString( format, false, pretty?pretty+1:0 );
                     e = i.next();
                     if ( e.eoo() )
                         break;
@@ -249,7 +152,7 @@ namespace mongo {
             break;
         }
         case DBRef: {
-            OID *x = (OID *) (valuestr() + valuestrsize());
+            mongo::OID *x = (mongo::OID *) (valuestr() + valuestrsize());
             if ( format == TenGen )
                 s << "Dbref( ";
             else
@@ -290,12 +193,18 @@ namespace mongo {
             s << "\" }";
             break;
         }
-        case Date:
+        case mongo::Date:
             if ( format == Strict )
                 s << "{ \"$date\" : ";
             else
                 s << "Date( ";
-            s << date();
+            if( pretty ) {
+                Date_t d = date();
+                if( d == 0 ) s << '0';
+                else
+                    s << '"' << date().toString() << '"';
+            } else
+                s << date();
             if ( format == Strict )
                 s << " }";
             else
@@ -321,98 +230,40 @@ namespace mongo {
             }
             break;
 
-        case Code:
-            s << ascode();
-            break;
+        case CodeWScope: {
+            BSONObj scope = codeWScopeObject();
+            if ( ! scope.isEmpty() ){
+                s << "{ \"$code\" : " << _asCode() << " , "
+                  << " \"$scope\" : " << scope.jsonString() << " }";
+                break;
+            }
+        }
 
+
+        case Code:
+            s << _asCode();
+            break;
+            
         case Timestamp:
             s << "{ \"t\" : " << timestampTime() << " , \"i\" : " << timestampInc() << " }";
             break;
 
+        case MinKey:
+            s << "{ \"$minKey\" : 1 }";
+            break;
+
+        case MaxKey:
+            s << "{ \"$maxKey\" : 1 }";
+            break;
+
         default:
-            stringstream ss;
+            StringBuilder ss;
             ss << "Cannot create a properly formatted JSON string with "
             << "element: " << toString() << " of type: " << type();
             string message = ss.str();
             massert( 10312 ,  message.c_str(), false );
         }
         return s.str();
-    }
-
-    int BSONElement::size( int maxLen ) const {
-        if ( totalSize >= 0 )
-            return totalSize;
-
-        int remain = maxLen - fieldNameSize() - 1;
-
-        int x = 0;
-        switch ( type() ) {
-        case EOO:
-        case Undefined:
-        case jstNULL:
-        case MaxKey:
-        case MinKey:
-            break;
-        case Bool:
-            x = 1;
-            break;
-        case NumberInt:
-            x = 4;
-            break;
-        case Timestamp:
-        case Date:
-        case NumberDouble:
-        case NumberLong:
-            x = 8;
-            break;
-        case jstOID:
-            x = 12;
-            break;
-        case Symbol:
-        case Code:
-        case String:
-            massert( 10313 ,  "Insufficient bytes to calculate element size", maxLen == -1 || remain > 3 );
-            x = valuestrsize() + 4;
-            break;
-        case CodeWScope:
-            massert( 10314 ,  "Insufficient bytes to calculate element size", maxLen == -1 || remain > 3 );
-            x = objsize();
-            break;
-
-        case DBRef:
-            massert( 10315 ,  "Insufficient bytes to calculate element size", maxLen == -1 || remain > 3 );
-            x = valuestrsize() + 4 + 12;
-            break;
-        case Object:
-        case Array:
-            massert( 10316 ,  "Insufficient bytes to calculate element size", maxLen == -1 || remain > 3 );
-            x = objsize();
-            break;
-        case BinData:
-            massert( 10317 ,  "Insufficient bytes to calculate element size", maxLen == -1 || remain > 3 );
-            x = valuestrsize() + 4 + 1/*subtype*/;
-            break;
-        case RegEx:
-        {
-            const char *p = value();
-            int len1 = ( maxLen == -1 ) ? strlen( p ) : strnlen( p, remain );
-            massert( 10318 ,  "Invalid regex string", len1 != -1 );
-            p = p + len1 + 1;
-            int len2 = ( maxLen == -1 ) ? strlen( p ) : strnlen( p, remain - len1 - 1 );
-            massert( 10319 ,  "Invalid regex options string", len2 != -1 );
-            x = len1 + 1 + len2 + 1;
-        }
-        break;
-        default: {
-            stringstream ss;
-            ss << "BSONElement: bad type " << (int) type();
-            string msg = ss.str();
-            massert( 10320 , msg.c_str(),false);
-        }
-        }
-        totalSize =  x + fieldNameSize() + 1; // BSONType
-
-        return totalSize;
     }
 
     int BSONElement::getGtLtOp( int def ) const {
@@ -434,8 +285,12 @@ namespace mongo {
                 if ( fn[3] == 'a' && fn[4] == 'r' && fn[5] == 0 )
                     return BSONObj::opNEAR;
             }
-            else if ( fn[1] == 'm' && fn[2] == 'o' && fn[3] == 'd' && fn[4] == 0 )
-                return BSONObj::opMOD;
+            else if ( fn[1] == 'm' ){
+                if ( fn[2] == 'o' && fn[3] == 'd' && fn[4] == 0 )
+                    return BSONObj::opMOD;
+                if ( fn[2] == 'a' && fn[3] == 'x' && fn[4] == 'D' && fn[5] == 'i' && fn[6] == 's' && fn[7] == 't' && fn[8] == 'a' && fn[9] == 'n' && fn[10] == 'c' && fn[11] == 'e' && fn[12] == 0 )
+                    return BSONObj::opMAX_DISTANCE;
+            }
             else if ( fn[1] == 't' && fn[2] == 'y' && fn[3] == 'p' && fn[4] == 'e' && fn[5] == 0 )
                 return BSONObj::opTYPE;
             else if ( fn[1] == 'i' && fn[2] == 'n' && fn[3] == 0 )
@@ -579,40 +434,6 @@ namespace mongo {
         return -1;
     }
 
-    void BSONElement::validate() const {
-        switch( type() ) {
-        case DBRef:
-        case Code:
-        case Symbol:
-        case String: {
-            int x = valuestrsize();
-            if ( x > 0 && valuestr()[x-1] == 0 )
-                return;
-            StringBuilder buf;
-            buf <<  "Invalid dbref/code/string/symbol size: " << x << " strnlen:" << strnlen( valuestr() , x );
-            massert( 10321 , buf.str() , 0 );
-            break;
-        }
-        case CodeWScope: {
-            int totalSize = *( int * )( value() );
-            massert( 10322 ,  "Invalid CodeWScope size", totalSize >= 8 );
-            int strSizeWNull = *( int * )( value() + 4 );
-            massert( 10323 ,  "Invalid CodeWScope string size", totalSize >= strSizeWNull + 4 + 4 );
-            massert( 10324 ,  "Invalid CodeWScope string size",
-                     strSizeWNull > 0 &&
-                     strSizeWNull - 1 == strnlen( codeWScopeCode(), strSizeWNull ) );
-            massert( 10325 ,  "Invalid CodeWScope size", totalSize >= strSizeWNull + 4 + 4 + 4 );
-            int objSize = *( int * )( value() + 4 + 4 + strSizeWNull );
-            massert( 10326 ,  "Invalid CodeWScope object size", totalSize == 4 + 4 + strSizeWNull + objSize );
-            // Subobject validation handled elsewhere.
-        }
-        case Object:
-            // We expect Object size validation to be handled elsewhere.
-        default:
-            break;
-        }
-    }
-
     /* Matcher --------------------------------------*/
 
 // If the element is something like:
@@ -676,39 +497,6 @@ namespace mongo {
 
     /* BSONObj ------------------------------------------------------------*/
 
-    BSONObj::EmptyObject BSONObj::emptyObject;
-
-    string BSONObj::toString() const {
-        if ( isEmpty() ) return "{}";
-
-        stringstream s;
-        s << "{ ";
-        BSONObjIterator i(*this);
-        bool first = true;
-        while ( 1 ) {
-            massert( 10327 ,  "Object does not end with EOO", i.moreWithEOO() );
-            BSONElement e = i.next( true );
-            massert( 10328 ,  "Invalid element size", e.size() > 0 );
-            massert( 10329 ,  "Element too large", e.size() < ( 1 << 30 ) );
-            int offset = e.rawdata() - this->objdata();
-            massert( 10330 ,  "Element extends past end of object",
-                    e.size() + offset <= this->objsize() );
-            e.validate();
-            bool end = ( e.size() + offset == this->objsize() );
-            if ( e.eoo() ) {
-                massert( 10331 ,  "EOO Before end of object", end );
-                break;
-            }
-            if ( first )
-                first = false;
-            else
-                s << ", ";
-            s << e.toString();
-        }
-        s << " }";
-        return s.str();
-    }
-
     string BSONObj::md5() const {
         md5digest d;
         md5_state_t st;
@@ -718,21 +506,29 @@ namespace mongo {
         return digestToString( d );
     }
 
-    string BSONObj::jsonString( JsonStringFormat format ) const {
+    string BSONObj::jsonString( JsonStringFormat format, int pretty ) const {
 
         if ( isEmpty() ) return "{}";
 
-        stringstream s;
+        StringBuilder s;
         s << "{ ";
         BSONObjIterator i(*this);
         BSONElement e = i.next();
         if ( !e.eoo() )
             while ( 1 ) {
-                s << e.jsonString( format );
+                s << e.jsonString( format, true, pretty?pretty+1:0 );
                 e = i.next();
                 if ( e.eoo() )
                     break;
-                s << ", ";
+                s << ",";
+                if ( pretty ) {
+                    s << '\n';
+                    for( int x = 0; x < pretty; x++ )
+                        s << "  ";
+                }
+                else {
+                    s << " ";
+                }
             }
         s << " }";
         return s.str();
@@ -740,13 +536,60 @@ namespace mongo {
 
 // todo: can be a little faster if we don't use toString() here.
     bool BSONObj::valid() const {
-        try {
-            toString();
+        try{
+            BSONObjIterator it(*this);
+            while( it.moreWithEOO() ){
+                // both throw exception on failure
+                BSONElement e = it.next(true);
+                e.validate();
+
+                if (e.eoo()){
+                    if (it.moreWithEOO())
+                        return false;
+                    return true;
+                }else if (e.isABSONObj()){
+                    if(!e.embeddedObject().valid())
+                        return false;
+                }else if (e.type() == CodeWScope){
+                    if(!e.codeWScopeObject().valid())
+                        return false;
+                }
+            }
+        } catch (...) {
         }
-        catch (...) {
-            return false;
+        return false;
+    }
+
+    int BSONObj::woCompare(const BSONObj& r, const Ordering &o, bool considerFieldName) const { 
+        if ( isEmpty() )
+            return r.isEmpty() ? 0 : -1;
+        if ( r.isEmpty() )
+            return 1;
+
+        BSONObjIterator i(*this);
+        BSONObjIterator j(r);
+        unsigned mask = 1;
+        while ( 1 ) {
+            // so far, equal...
+
+            BSONElement l = i.next();
+            BSONElement r = j.next();
+            if ( l.eoo() )
+                return r.eoo() ? 0 : -1;
+            if ( r.eoo() )
+                return 1;
+
+            int x;
+            {
+                x = l.woCompare( r, considerFieldName );
+                if( o.descending(mask) )
+                    x = -x;
+            }
+            if ( x != 0 )
+                return x;
+            mask <<= 1;
         }
-        return true;
+        return -1;
     }
 
     /* well ordered compare */
@@ -796,7 +639,7 @@ namespace mongo {
     BSONObj staticNull = fromjson( "{'':null}" );
 
     /* well ordered compare */
-    int BSONObj::woSortOrder(const BSONObj& other, const BSONObj& sortKey ) const{
+    int BSONObj::woSortOrder(const BSONObj& other, const BSONObj& sortKey , bool useDotted ) const{
         if ( isEmpty() )
             return other.isEmpty() ? 0 : -1;
         if ( other.isEmpty() )
@@ -810,10 +653,10 @@ namespace mongo {
             if ( f.eoo() )
                 return 0;
 
-            BSONElement l = getField( f.fieldName() );
+            BSONElement l = useDotted ? getFieldDotted( f.fieldName() ) : getField( f.fieldName() );
             if ( l.eoo() )
                 l = staticNull.firstElement();
-            BSONElement r = other.getField( f.fieldName() );
+            BSONElement r = useDotted ? other.getFieldDotted( f.fieldName() ) : other.getField( f.fieldName() );
             if ( r.eoo() )
                 r = staticNull.firstElement();
 
@@ -826,78 +669,46 @@ namespace mongo {
         return -1;
     }
 
-
-    /* return has eoo() true if no match
-       supports "." notation to reach into embedded objects
-    */
-    BSONElement BSONObj::getFieldDotted(const char *name) const {
+    void BSONObj::getFieldsDotted(const StringData& name, BSONElementSet &ret ) const {
         BSONElement e = getField( name );
         if ( e.eoo() ) {
-            const char *p = strchr(name, '.');
+            const char *p = strchr(name.data(), '.');
             if ( p ) {
-                string left(name, p-name);
-                BSONObj sub = getObjectField(left.c_str());
-                return sub.isEmpty() ? nullElement : sub.getFieldDotted(p+1);
-            }
-        }
+                string left(name.data(), p-name.data());
+                const char* next = p+1;
+                BSONElement e = getField( left.c_str() );
 
-        return e;
-    }
-
-    void BSONObj::getFieldsDotted(const char *name, BSONElementSet &ret ) const {
-        BSONObjIterator i(*this);
-        while ( i.more() ){
-            BSONElement e = i.next();
-            FieldCompareResult cmp = compareDottedFieldNames( name , e.fieldName() );
-            switch ( cmp ){
-
-            case LEFT_BEFORE: 
-            case RIGHT_BEFORE:
-                break;
-
-            case RIGHT_SUBFIELD: 
-                assert(0); 
-                break;
-
-            case LEFT_SUBFIELD: {
-                const char * next = name + strlen( e.fieldName() ) + 1;
-                bool allDigits = false;
-                if ( isdigit( *next ) ){
-                    const char * temp = next + 1;
-                    while ( isdigit( *temp ) )
-                        temp++;
-                    allDigits = *temp == '.';
-                }
-
-                if ( e.type() == Object || allDigits ){
-                    e.embeddedObject().getFieldsDotted( next , ret );
-                }
-                else if ( e.type() == Array ){
-                    BSONObjIterator j( e.embeddedObject() );
-                    while ( j.more() ){
-                        BSONElement f = j.next();
-                        if ( f.type() == Object )
-                            f.embeddedObject().getFieldsDotted( next , ret );
+                if (e.type() == Object){
+                    e.embeddedObject().getFieldsDotted(next, ret);
+                } else if (e.type() == Array) {
+                    bool allDigits = false;
+                    if ( isdigit( *next ) ){
+                        const char * temp = next + 1;
+                        while ( isdigit( *temp ) )
+                            temp++;
+                        allDigits = *temp == '.';
                     }
+                    if (allDigits) {
+                        e.embeddedObject().getFieldsDotted(next, ret);
+                    } else {
+                        BSONObjIterator i(e.embeddedObject());
+                        while ( i.more() ){
+                            BSONElement e2 = i.next();
+                            if (e2.type() == Object || e2.type() == Array)
+                                e2.embeddedObject().getFieldsDotted(next, ret);
+                        }
+                    }
+                } else {
+                    // do nothing: no match
                 }
-                else {
-                    // intentially left blank, this means no match
-                }
-                return;
             }
-
-            case SAME: {
-                if ( e.type() == Array ){
-                    BSONObjIterator j( e.embeddedObject() );
-                    while ( j.more() )
-                        ret.insert( j.next() );
-                }
-                else {
-                    ret.insert( e );
-                }
-                return;
-            }
-
+        } else {
+            if (e.type() == Array){
+                BSONObjIterator i(e.embeddedObject());
+                while ( i.more() )
+                    ret.insert(i.next());
+            } else {
+                ret.insert(e);
             }
         }
     }
@@ -915,37 +726,12 @@ namespace mongo {
         BSONElement sub = getField(left.c_str());
         if ( sub.eoo() )
             return nullElement;
-        else if ( sub.type() == Array || strlen( name ) == 0 )
+        else if ( sub.type() == Array || name[0] == '\0')
             return sub;
         else if ( sub.type() == Object )
             return sub.embeddedObject().getFieldDottedOrArray( name );
         else
             return nullElement;
-    }
-
-    /* makes a new BSONObj with the fields specified in pattern.
-       fields returned in the order they appear in pattern.
-       if any field missing or undefined in the original object, that field
-       in the output will be null.
-
-       n^2 implementation bad if pattern and object have lots
-       of fields - normally pattern doesn't so should be fine.
-    */
-    BSONObj BSONObj::extractFieldsDotted(BSONObj pattern) const {
-        BSONObjBuilder b;
-        BSONObjIterator i(pattern);
-        while (i.more()) {
-            BSONElement e = i.next();
-            const char *name = e.fieldName();
-
-            BSONElement x = getFieldDotted( name );
-            if ( x.eoo() || x.type() == Undefined ) {
-                b.appendNull(name);
-            } else {
-                b.appendAs(x, name);
-            }
-        }
-        return b.done();
     }
 
     /**
@@ -1035,24 +821,6 @@ namespace mongo {
     const char * BSONObj::getStringField(const char *name) const {
         BSONElement e = getField(name);
         return e.type() == String ? e.valuestr() : "";
-    }
-
-    BSONObj BSONObj::getObjectField(const char *name) const {
-        BSONElement e = getField(name);
-        BSONType t = e.type();
-        return t == Object || t == Array ? e.embeddedObject() : BSONObj();
-    }
-
-    int BSONObj::nFields() const {
-        int n = 0;
-        BSONObjIterator i(*this);
-        while ( i.moreWithEOO() ) {
-            BSONElement e = i.next();
-            if ( e.eoo() )
-                break;
-            n++;
-        }
-        return n;
     }
 
     /* grab names of all the fields in this object */
@@ -1186,6 +954,18 @@ namespace mongo {
         return true;
     }
 
+    void BSONObj::dump() const {
+        out() << hex;
+        const char *p = objdata();
+        for ( int i = 0; i < objsize(); i++ ) {
+            out() << i << '\t' << ( 0xff & ( (unsigned) *p ) );
+            if ( *p >= 'A' && *p <= 'z' )
+                out() << '\t' << *p;
+            out() << endl;
+            p++;
+        }
+    }
+
     string BSONObj::hexDump() const {
         stringstream ss;
         const char *d = objdata();
@@ -1202,14 +982,6 @@ namespace mongo {
         return ss.str();
     }
 
-    ostream& operator<<( ostream &s, const BSONObj &o ) {
-        return s << o.toString();
-    }
-
-    ostream& operator<<( ostream &s, const BSONElement &e ) {
-        return s << e.toString();
-    }
-
     void nested2dotted(BSONObjBuilder& b, const BSONObj& obj, const string& base){
         BSONObjIterator it(obj);
         while (it.more()){
@@ -1219,7 +991,7 @@ namespace mongo {
                 nested2dotted(b, e.embeddedObject(), newbase);
             }else{
                 string newbase = base + e.fieldName();
-                b.appendAs(e, newbase.c_str());
+                b.appendAs(e, newbase);
             }
         }
     }
@@ -1265,6 +1037,7 @@ namespace mongo {
     } minkeydata;
     BSONObj minKey((const char *) &minkeydata);
 
+/*
     struct JSObj0 {
         JSObj0() {
             totsize = 5;
@@ -1273,13 +1046,8 @@ namespace mongo {
         int totsize;
         char eoo;
     } js0;
+*/
 #pragma pack()
-
-    BSONElement::BSONElement() {
-        data = &js0.eoo;
-        fieldNameSize_ = 0;
-        totalSize = 1;
-    }
 
     struct BsonUnitTest : public UnitTest {
         void testRegex() {
@@ -1425,14 +1193,8 @@ namespace mongo {
     }
 */
 
-    unsigned OID::_machine = (unsigned) security.getNonceInitSafe();
-    void OID::newState(){
-        // using fresh Security object to avoid buffered devrandom
-        _machine = (unsigned) Security().getNonce();
-    }
-    
     void OID::init() {
-        static AtomicUInt inc = (unsigned) security.getNonce();
+        static AtomicUInt inc = getRandomNumber();
         unsigned t = (unsigned) time(0);
         char *T = (char *) &t;
         data[0] = T[3];
@@ -1451,31 +1213,45 @@ namespace mongo {
         raw[3] = T[0];
     }
 
+    unsigned OID::_machine = (unsigned) security.getNonceInitSafe();
+    void OID::newState(){
+        unsigned before = _machine;
+        // using fresh Security object to avoid buffered devrandom
+        _machine = (unsigned)security.getNonce();
+        assert( _machine != before );
+    }
+    
     void OID::init( string s ){
         assert( s.size() == 24 );
         const char *p = s.c_str();
-        char buf[3];
-        buf[2] = 0;
         for( int i = 0; i < 12; i++ ) {
-            buf[0] = p[0];
-            buf[1] = p[1];
+            data[i] = fromHex(p);
             p += 2;
-            stringstream ss(buf);
-            unsigned z;
-            ss >> hex >> z;
-            data[i] = z;
         }
+    }
 
-/*
-        string as = s.substr( 0 , 16 );
-        string bs = s.substr( 16 );
+    void OID::init(Date_t date, bool max){
+        int time = (int) (date / 1000);
+        char* T = (char *) &time;
+        data[0] = T[3];
+        data[1] = T[2];
+        data[2] = T[1];
+        data[3] = T[0];
 
-        stringstream ssa(as);
-        ssa >> hex >> a;
+        if (max)
+            *(long long*)(data + 4) = 0xFFFFFFFFFFFFFFFFll;
+        else
+            *(long long*)(data + 4) = 0x0000000000000000ll;
+    }
 
-        stringstream ssb(bs);
-        ssb >> hex >> b;
-*/
+    time_t OID::asTimeT(){
+        int time;
+        char* T = (char *) &time;
+        T[0] = data[3];
+        T[1] = data[2];
+        T[2] = data[1];
+        T[3] = data[0];
+        return time;
     }
 
     Labeler::Label GT( "$gt" );
@@ -1492,84 +1268,83 @@ namespace mongo {
             timestamp = OpTime::now().asDate();
     }
 
-
-    void BSONObjBuilder::appendMinForType( const string& field , int t ){
+    void BSONObjBuilder::appendMinForType( const StringData& fieldName , int t ){
         switch ( t ){
-        case MinKey: appendMinKey( field.c_str() ); return;
-        case MaxKey: appendMinKey( field.c_str() ); return;
+        case MinKey: appendMinKey( fieldName ); return;
+        case MaxKey: appendMinKey( fieldName ); return;
         case NumberInt:
         case NumberDouble:
         case NumberLong:
-            append( field.c_str() , - numeric_limits<double>::max() ); return;
+            append( fieldName , - numeric_limits<double>::max() ); return;
         case jstOID:
             {
                 OID o;
                 memset(&o, 0, sizeof(o));
-                appendOID( field.c_str() , &o);
+                appendOID( fieldName , &o);
                 return;
             }
-        case Bool: appendBool( field.c_str() , false); return;
-        case Date: appendDate( field.c_str() , 0); return;
-        case jstNULL: appendNull( field.c_str() ); return;
+        case Bool: appendBool( fieldName , false); return;
+        case Date: appendDate( fieldName , 0); return;
+        case jstNULL: appendNull( fieldName ); return;
         case Symbol:
-        case String: append( field.c_str() , "" ); return;
-        case Object: append( field.c_str() , BSONObj() ); return;
+        case String: append( fieldName , "" ); return;
+        case Object: append( fieldName , BSONObj() ); return;
         case Array:
-            appendArray( field.c_str() , BSONObj() ); return;
+            appendArray( fieldName , BSONObj() ); return;
         case BinData:
-            appendBinData( field.c_str() , 0 , Function , (const char *) 0 ); return;
+            appendBinData( fieldName , 0 , Function , (const char *) 0 ); return;
         case Undefined:
-            appendUndefined( field.c_str() ); return;
-        case RegEx: appendRegex( field.c_str() , "" ); return;
+            appendUndefined( fieldName ); return;
+        case RegEx: appendRegex( fieldName , "" ); return;
         case DBRef:
             {
                 OID o;
                 memset(&o, 0, sizeof(o));
-                appendDBRef( field.c_str() , "" , o );
+                appendDBRef( fieldName , "" , o );
                 return;
             }
-        case Code: appendCode( field.c_str() , "" ); return;
-        case CodeWScope: appendCodeWScope( field.c_str() , "" , BSONObj() ); return;
-        case Timestamp: appendTimestamp( field.c_str() , 0); return;
+        case Code: appendCode( fieldName , "" ); return;
+        case CodeWScope: appendCodeWScope( fieldName , "" , BSONObj() ); return;
+        case Timestamp: appendTimestamp( fieldName , 0); return;
 
         };
         log() << "type not support for appendMinElementForType: " << t << endl;
         uassert( 10061 ,  "type not supported for appendMinElementForType" , false );
     }
 
-    void BSONObjBuilder::appendMaxForType( const string& field , int t ){
+    void BSONObjBuilder::appendMaxForType( const StringData& fieldName , int t ){
         switch ( t ){
-        case MinKey: appendMaxKey( field.c_str() );  break;
-        case MaxKey: appendMaxKey( field.c_str() ); break;
+        case MinKey: appendMaxKey( fieldName );  break;
+        case MaxKey: appendMaxKey( fieldName ); break;
         case NumberInt:
         case NumberDouble:
         case NumberLong:
-            append( field.c_str() , numeric_limits<double>::max() );
+            append( fieldName , numeric_limits<double>::max() );
             break;
         case BinData:
-            appendMinForType( field , jstOID );
+            appendMinForType( fieldName , jstOID );
             break;
         case jstOID:
             {
                 OID o;
                 memset(&o, 0xFF, sizeof(o));
-                appendOID( field.c_str() , &o);
+                appendOID( fieldName , &o);
                 break;
             }
         case Undefined:
         case jstNULL:
-            appendMinForType( field , NumberInt );
-        case Bool: appendBool( field.c_str() , true); break;
-        case Date: appendDate( field.c_str() , 0xFFFFFFFFFFFFFFFFLL ); break;
+            appendMinForType( fieldName , NumberInt );
+        case Bool: appendBool( fieldName , true); break;
+        case Date: appendDate( fieldName , 0xFFFFFFFFFFFFFFFFLL ); break;
         case Symbol:
-        case String: append( field.c_str() , BSONObj() ); break;
+        case String: append( fieldName , BSONObj() ); break;
         case Code:
         case CodeWScope:
-            appendCodeWScope( field.c_str() , "ZZZ" , BSONObj() ); break;
+            appendCodeWScope( fieldName , "ZZZ" , BSONObj() ); break;
         case Timestamp:
-            appendTimestamp( field.c_str() , numeric_limits<unsigned long long>::max() ); break;
+            appendTimestamp( fieldName , numeric_limits<unsigned long long>::max() ); break;
         default:
-            appendMinForType( field , t + 1 );
+            appendMinForType( fieldName , t + 1 );
         }
     }
 
@@ -1586,8 +1361,8 @@ namespace mongo {
         "90", "91", "92", "93", "94", "95", "96", "97", "98", "99",
     };
 
-    bool BSONObjBuilder::appendAsNumber( const string& fieldName , const string& data ){
-        if ( data.size() == 0 )
+    bool BSONObjBuilder::appendAsNumber( const StringData& fieldName , const string& data ){
+        if ( data.size() == 0 || data == "-")
             return false;
         
         unsigned int pos=0;
@@ -1612,7 +1387,7 @@ namespace mongo {
         
         if ( hasDec ){
             double d = atof( data.c_str() );
-            append( fieldName.c_str() , d );
+            append( fieldName , d );
             return true;
         }
         
@@ -1665,5 +1440,27 @@ namespace mongo {
         _cur = 0;
     }
 
+    /** transform a BSON array into a vector of BSONElements.
+        we match array # positions with their vector position, and ignore 
+        any non-numeric fields. 
+        */
+    vector<BSONElement> BSONElement::Array() const { 
+        chk(mongo::Array);
+        vector<BSONElement> v;
+        BSONObjIterator i(Obj());
+        while( i.more() ) {
+            BSONElement e = i.next();
+            const char *f = e.fieldName();
+            try {
+                unsigned u = stringToNum(f);
+                assert( u < 4096 );
+                if( u >= v.size() )
+                    v.resize(u+1);
+                v[u] = e;
+            }
+            catch(unsigned) { }
+        }
+        return v;
+    }
 
 } // namespace mongo

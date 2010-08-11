@@ -1,0 +1,72 @@
+
+import os
+
+AddOption( "--extrapath",
+           dest="extrapath",
+           type="string",
+           nargs=1,
+           action="store",
+           help="comma separated list of add'l paths  (--extrapath /opt/foo/,/foo) static linking" )
+
+env = Environment()
+
+def addExtraLibs( s ):
+    for x in s.split(","):
+        if os.path.exists( x ):
+            env.Append( CPPPATH=[ x + "/include" ] )
+            env.Append( LIBPATH=[ x + "/lib" ] )
+            env.Append( LIBPATH=[ x + "/lib64" ] )
+
+if GetOption( "extrapath" ) is not None:
+    addExtraLibs( GetOption( "extrapath" ) )
+
+env.Append( CPPPATH=[ "mongo/" ] )
+
+env.Append( CPPDEFINES=[ "_SCONS" , "MONGO_EXPOSE_MACROS" ] )
+
+nix = False
+linux = False
+
+if "darwin" == os.sys.platform:
+    addExtraLibs( "/opt/local/" )
+    nix = True
+elif "linux2" == os.sys.platform:
+    nix = True
+    linux = True
+
+if nix:
+    env.Append( CPPFLAGS=" -O3" )
+if linux:
+    env.Append( LINKFLAGS=" -Wl,--as-needed -Wl,-zdefs " )
+
+boostLibs = [ "thread" , "filesystem" , "system" ]
+conf = Configure(env)
+for lib in boostLibs:
+    if not conf.CheckLib("boost_%s-mt" % lib):
+        conf.CheckLib("boost_%s" % lib)
+allClientFiles = []
+allClientFiles += Glob( "mongo/*.cpp" )
+allClientFiles += Glob( "mongo/client/*.cpp" )
+allClientFiles += Glob( "mongo/s/*.cpp" )
+allClientFiles += Glob( "mongo/shell/*.cpp" )
+allClientFiles += Glob( "mongo/db/*.cpp" )
+allClientFiles += Glob( "mongo/scripting/*.cpp" )
+allClientFiles += Glob( "mongo/util/*.cpp" )
+allClientFiles += Glob( "mongo/util/*.c" )
+
+env.SharedLibrary( "mongoclient" , allClientFiles )
+env.Library( "mongoclient" , allClientFiles )
+
+clientTests = []
+clientEnv = env.Clone();
+clientEnv.Prepend( LIBS=["libmongoclient.a"])
+clientEnv.Prepend( LIBPATH=["."] )
+
+# examples
+clientTests += [ clientEnv.Program( "firstExample" , [ "client/examples/first.cpp" ] ) ]
+clientTests += [ clientEnv.Program( "secondExample" , [ "client/examples/second.cpp" ] ) ]
+clientTests += [ clientEnv.Program( "whereExample" , [ "client/examples/whereExample.cpp" ] ) ]
+clientTests += [ clientEnv.Program( "authTest" , [ "client/examples/authTest.cpp" ] ) ]
+clientTests += [ clientEnv.Program( "httpClientTest" , [ "client/examples/httpClientTest.cpp" ] ) ]
+clientTests += [ clientEnv.Program( "clientTest" , [ "client/examples/clientTest.cpp" ] ) ]
+clientEnv.Alias("clientTests", clientTests, [])

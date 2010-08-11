@@ -18,6 +18,7 @@
 #pragma once
 
 #include "dbclient.h"
+#include "redef_macros.h"
 
 namespace mongo {
 
@@ -26,26 +27,19 @@ namespace mongo {
     class GridFS;
     class GridFile;
 
-    class Chunk {
+    class GridFSChunk {
     public:
-        Chunk( BSONObj data );
-        Chunk( BSONObj fileId , int chunkNumber , const char * data , int len );
+        GridFSChunk( BSONObj data );
+        GridFSChunk( BSONObj fileId , int chunkNumber , const char * data , int len );
 
         int len(){
             int len;
-            const char * data = _data["data"].binData( len );
-            int * foo = (int*)data;
-            assert( len - 4 == foo[0] );
-            return len - 4;
+            _data["data"].binDataClean( len );
+            return len;
         }
 
         const char * data( int & len ){
-            const char * data = _data["data"].binData( len );
-            int * foo = (int*)data;
-            assert( len - 4 == foo[0] );
-
-            len = len - 4;
-            return data + 4;
+            return _data["data"].binDataClean( len );
         }
 
     private:
@@ -66,6 +60,11 @@ namespace mongo {
          */
         GridFS( DBClientBase& client , const string& dbName , const string& prefix="fs" );
         ~GridFS();
+
+        /**
+         * @param
+         */
+        void setChunkSize(unsigned int size);
 
         /**
          * puts the file reference by fileName into the db
@@ -122,9 +121,10 @@ namespace mongo {
         string _prefix;
         string _filesNS;
         string _chunksNS;
+        unsigned int _chunkSize;
 
         // insert fileobject. All chunks must be in DB.
-        BSONObj insertFile(const string& name, const OID& id, unsigned length, const string& contentType);
+        BSONObj insertFile(const string& name, const OID& id, gridfs_offset length, const string& contentType);
 
         friend class GridFile;
     };
@@ -176,7 +176,7 @@ namespace mongo {
             return (int) ceil( (double)getContentLength() / (double)getChunkSize() );
         }
 
-        Chunk getChunk( int n );
+        GridFSChunk getChunk( int n );
 
         /**
            write the file to the output stream
@@ -200,4 +200,4 @@ namespace mongo {
     };
 }
 
-
+#include "undef_macros.h"

@@ -17,8 +17,8 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "stdafx.h"
-#include "../db/replset.h"
+#include "pch.h"
+#include "../db/replpair.h"
 #include "dbtests.h"
 #include "mockdbclient.h"
 #include "../db/cmdline.h"
@@ -195,7 +195,7 @@ namespace PairingTests {
 
                 TestableReplPair rp3( true, fromjson( "{ok:0}" ) );
                 rp3.arbitrate();
-                ASSERT( rp3.state == ReplPair::State_Confused );
+                ASSERT_EQUALS( rp3.state , ReplPair::State_Confused );
 
                 TestableReplPair rp4( true, fromjson( "{ok:1,you_are:1}" ) );
                 rp4.arbitrate();

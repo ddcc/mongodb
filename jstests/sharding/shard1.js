@@ -8,7 +8,8 @@ db = s.getDB( "test" );
 db.foo.insert( { num : 1 , name : "eliot" } );
 db.foo.insert( { num : 2 , name : "sara" } );
 db.foo.insert( { num : -1 , name : "joe" } );
-assert.eq( 3 , db.foo.find().length() );
+db.foo.ensureIndex( { num : 1 } );
+assert.eq( 3 , db.foo.find().length() , "A" );
 
 shardCommand = { shardcollection : "test.foo" , key : { num : 1 } };
 
@@ -18,10 +19,15 @@ s.adminCommand( { enablesharding : "test" } );
 assert.eq( 3 , db.foo.find().length() , "after partitioning count failed" );
 
 s.adminCommand( shardCommand );
-dbconfig = s.config.databases.findOne( { name : "test" } );
-assert.eq( dbconfig.sharded["test.foo"] , { key : { num : 1 } , unique : false } , "Sharded content" );
 
-assert.eq( 1 , s.config.chunks.count() );
+cconfig = s.config.collections.findOne( { _id : "test.foo" } );
+delete cconfig.lastmod
+delete cconfig.dropped
+assert.eq( cconfig , { _id : "test.foo" , key : { num : 1 } , unique : false } , "Sharded content" );
+
+s.config.collections.find().forEach( printjson )
+
+assert.eq( 1 , s.config.chunks.count() , "num chunks A");
 si = s.config.chunks.findOne();
 assert( si );
 assert.eq( si.ns , "test.foo" );
