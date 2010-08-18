@@ -528,7 +528,8 @@ namespace mongo {
                 
                 log(0) << "_recvChunkStatus : " << res << endl;
                 
-                if ( ! ok ){
+                if ( ! ok || res["state"].String() == "fail" ){
+                    log( LL_ERROR ) << "_recvChunkStatus error : " << res << endl;
                     errmsg = "_recvChunkStatus error";
                     result.append( "cause" ,res );
                     return false;
@@ -544,7 +545,7 @@ namespace mongo {
                 // 5.a
                 migrateFromStatus._inCriticalSection = true;
                 ShardChunkVersion myVersion = maxVersion;
-                ++myVersion;
+                myVersion.incMajor();
                 
                 {
                     dblock lk;
@@ -587,7 +588,8 @@ namespace mongo {
                     if ( ! x.isEmpty() ){
                         
                         BSONObjBuilder temp2;
-                        ++myVersion;
+                        myVersion.incMinor();
+
                         temp2.appendTimestamp( "lastmod" , myVersion );
                         
                         shardingState.setVersion( ns , myVersion );
@@ -685,10 +687,12 @@ namespace mongo {
             catch ( std::exception& e ){
                 state = FAIL;
                 errmsg = e.what();
+                log( LL_ERROR ) << "migrate failed: " << e.what() << endl;
             }
             catch ( ... ){
                 state = FAIL;
                 errmsg = "UNKNOWN ERROR";
+                log( LL_ERROR ) << "migrate failed with unknown exception" << endl;
             }
             active = false;
         }
@@ -739,7 +743,7 @@ namespace mongo {
                 auto_ptr<DBClientCursor> cursor = conn->query( ns , Query().minKey( min ).maxKey( max ) , /* QueryOption_Exhaust */ 0 );
                 assert( cursor.get() );
                 while ( cursor->more() ){
-                    BSONObj o = cursor->next();
+                    BSONObj o = cursor->next().getOwned();
                     {
                         writelock lk( ns );
                         Helpers::upsert( ns , o );
@@ -756,7 +760,11 @@ namespace mongo {
                     BSONObj res;
                     if ( ! conn->runCommand( "admin" , BSON( "_transferMods" << 1 ) , res ) ){
                         state = FAIL;
+                        errmsg = "_transferMods failed: ";
+                        errmsg += res.toString();
                         log( LL_ERROR ) << "_transferMods failed: " << res << endl;
+                        conn.done();
+                        return;
                     }
                     if ( res["size"].number() == 0 )
                         break;
@@ -775,6 +783,7 @@ namespace mongo {
                         log() << "_transferMods failed in STEADY state: " << res << endl;
                         errmsg = res.toString();
                         state = FAIL;
+                        conn.done();
                         return;
                     }
 
@@ -801,9 +810,10 @@ namespace mongo {
             b.append( "from" , from );
             b.append( "min" , min );
             b.append( "max" , max );
-
+            
             b.append( "state" , stateString() );
-
+            if ( state == FAIL )
+                b.append( "errmsg" , errmsg );
             {
                 BSONObjBuilder bb( b.subobjStart( "counts" ) );
                 bb.append( "cloned" , numCloned );
