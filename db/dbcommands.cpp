@@ -160,32 +160,6 @@ namespace mongo {
         }
     } cmdGetPrevError;
 
-    class CmdSwitchToClientErrors : public Command {
-    public:
-        virtual bool requiresAuth() { return false; }
-        virtual bool logTheOp() {
-            return false;
-        }
-        virtual void help( stringstream& help ) const {
-            help << "convert to id based errors rather than connection based";
-        }
-        virtual bool slaveOk() const {
-            return true;
-        }
-        virtual LockType locktype() const { return NONE; } 
-        CmdSwitchToClientErrors() : Command("switchToClientErrors", false, "switchtoclienterrors") {}
-        bool run(const string& dbnamne , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            if ( lastError.getID() ){
-                errmsg = "already in client id mode";
-                return false;
-            }
-            LastError *le = lastError.disableForCommand();
-            le->overridenById = true;
-            result << "ok" << 1;
-            return true;
-        }
-    } cmdSwitchToClientErrors;
-
     class CmdDropDatabase : public Command {
     public:
         virtual bool logTheOp() {
@@ -293,7 +267,6 @@ namespace mongo {
         }
 
         bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            
             long long start = Listener::getElapsedTimeMillis();
             BSONObjBuilder timeBuilder(128);
 
@@ -382,7 +355,13 @@ namespace mongo {
                 globalFlushCounters.append( bb );
                 bb.done();
             }
-
+            
+            {
+                BSONObjBuilder bb( result.subobjStart( "cursros" ) );
+                ClientCursor::appendStats( bb );
+                bb.done();
+            }
+            
             timeBuilder.appendNumber( "after counters" , Listener::getElapsedTimeMillis() - start );            
 
             if ( anyReplEnabled() ){
@@ -649,10 +628,10 @@ namespace mongo {
         virtual void help( stringstream& help ) const {
             help << "create a collection";
         }
-        virtual bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool) {
+        virtual bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
             string ns = dbname + '.' + cmdObj.firstElement().valuestr();
             string err;
-            bool ok = userCreateNS(ns.c_str(), cmdObj, err, true);
+            bool ok = userCreateNS(ns.c_str(), cmdObj, err, ! fromRepl );
             if ( !ok && !err.empty() )
                 errmsg = err;
             return ok;
