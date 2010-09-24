@@ -137,9 +137,6 @@ namespace mongo {
         virtual bool adminOnly() const {
             return true;
         }
-        virtual bool logTheOp() {
-            return false;
-        }
         virtual LockType locktype() const { return WRITE; }
         void help(stringstream&h) const { h << "replace a node in a replica pair"; }
         CmdReplacePeer() : Command("replacePeer", false, "replacepeer") { }
@@ -199,9 +196,6 @@ namespace mongo {
         virtual bool adminOnly() const {
             return true;
         }
-        virtual bool logTheOp() {
-            return false;   
-        }
         virtual void help(stringstream& h) const { h << "internal"; }
         virtual LockType locktype() const { return WRITE; }
         CmdForceDead() : Command("forcedead") { }
@@ -222,9 +216,7 @@ namespace mongo {
         virtual bool adminOnly() const {
             return true;
         }
-        virtual bool logTheOp() {
-            return false;
-        }
+        virtual bool logTheOp() { return false; }
         virtual LockType locktype() const { return WRITE; }
         void help(stringstream&h) const { h << "resync (from scratch) an out of date replica slave.\nhttp://www.mongodb.org/display/DOCS/Master+Slave"; }
         CmdResync() : Command("resync") { }
@@ -861,7 +853,6 @@ namespace mongo {
         if( logLevel >= 6 ) // op.tostring is expensive so doing this check explicitly
             log(6) << "processing op: " << op << endl;
 
-        // skip no-op
         if( op.getStringField("op")[0] == 'n' )
             return;
 
@@ -1260,8 +1251,14 @@ namespace mongo {
             if ( tailing || initial ) {
                 if ( initial )
                     log(1) << "repl:   initial run\n";
-                else
-                    assert( syncedTo < nextOpTime );
+                else {
+                    if( !( syncedTo <= nextOpTime ) ) { 
+                        log() << "repl ASSERTION failed : syncedTo <= nextOpTime" << endl;
+                        log() << "repl syncTo:     " << syncedTo.toStringLong() << endl;
+                        log() << "repl nextOpTime: " << nextOpTime.toStringLong() << endl;
+                        assert(false);
+                    }
+                }
                 oplogReader.putBack( op ); // op will be processed in the loop below
                 nextOpTime = OpTime(); // will reread the op below
             }
@@ -1690,6 +1687,7 @@ namespace mongo {
     void replSlaveThread() {
         sleepsecs(1);
         Client::initThread("replslave");
+        cc().iAmSyncThread();
             
         {
             dblock lk;

@@ -61,7 +61,7 @@ namespace mongo {
         o << '\n';
         for (i = 0; i < size; i++)
             o << ' ' << strings[i] << '\n';
-
+        o.flush();
         free (strings);
     }
 #else
@@ -543,13 +543,15 @@ namespace mongo {
             _num = _outof - used;
         }
 
-        int available(){
+        int available() const {
             return _num;
         }
 
-        int used(){
+        int used() const {
             return _outof - _num;
         }
+
+        int outof() const { return _outof; }
 
     private:
         int _outof;

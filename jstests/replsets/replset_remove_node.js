@@ -27,8 +27,13 @@ doTest = function( signal ) {
     // Remove that node from the configuration
     replTest.remove( slaveId );
 
-    // Then, reinitiate
-    replTest.reInitiate();
+    // Now, re-initiate
+    var c = master.getDB("local")['system.replset'].findOne();
+    var config  = replTest.getReplSetConfig();
+    config.version = c.version + 1;
+    config.members = [ { "_id" : 0, "host" : replTest.host + ":31000" },
+                       { "_id" : 2, "host" : replTest.host + ":31002" } ]
+    replTest.initiate( config , 'replSetReconfig' );
 
     // Make sure that a new master comes up
     master = replTest.getMaster();
@@ -54,4 +59,6 @@ doTest = function( signal ) {
     }, "Wrong number of members", 60000);
 }
 
-doTest( 15 );
+print("replset_remove_node.js");
+doTest(15);
+print("replset_remove_node SUCCESS");

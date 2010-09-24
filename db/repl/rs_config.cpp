@@ -31,6 +31,16 @@ namespace mongo {
 
     void logOpInitiate(const bo&);
 
+    void assertOnlyHas(BSONObj o, const set<string>& fields) { 
+        BSONObj::iterator i(o);
+        while( i.more() ) {
+            BSONElement e = i.next();
+            if( !fields.count( e.fieldName() ) ) {
+                uasserted(13434, str::stream() << "unexpected field '" << e.fieldName() << "'in object");
+            }
+        }
+    }
+
     list<HostAndPort> ReplSetConfig::otherMemberHostnames() const { 
         list<HostAndPort> L;
         for( vector<MemberCfg>::const_iterator i = members.begin(); i != members.end(); i++ ) {
@@ -42,7 +52,7 @@ namespace mongo {
     
     /* comment MUST only be set when initiating the set by the initiator */
     void ReplSetConfig::saveConfigLocally(bo comment) { 
-        check();
+        checkRsConfig();
         log() << "replSet info saving a newer config version to local.system.replset" << rsLog;
         { 
             writelock lk("");
@@ -81,6 +91,8 @@ namespace mongo {
         if( votes != 1 ) b << "votes" << votes;
         if( priority != 1.0 ) b << "priority" << priority;
         if( arbiterOnly ) b << "arbiterOnly" << true;
+        if( slaveDelay ) b << "slaveDelay" << slaveDelay;
+        if( hidden ) b << "hidden" << hidden;
         return b.obj();
     }
 
@@ -115,9 +127,17 @@ namespace mongo {
         mchk(priority >= 0 && priority <= 1000);
         mchk(votes >= 0 && votes <= 100);
         uassert(13419, "this version of mongod only supports priorities 0 and 1", priority == 0 || priority == 1);
+        uassert(13437, "slaveDelay requires priority be zero", slaveDelay == 0 || priority == 0);
+        uassert(13438, "bad slaveDelay value", slaveDelay >= 0 && slaveDelay <= 3600 * 24 * 366);
+        uassert(13439, "priority must be 0 when hidden=true", priority == 0 || !hidden);
     }
 
+    /** @param o old config
+        @param n new config 
+        */
     /*static*/ bool ReplSetConfig::legalChange(const ReplSetConfig& o, const ReplSetConfig& n, string& errmsg) { 
+        assert( theReplSet );
+
         if( o._id != n._id ) { 
             errmsg = "set name may not change"; 
             return false;
@@ -130,6 +150,25 @@ namespace mongo {
             errmsg = "version number wrong";
             return false;
         }
+
+        map<HostAndPort,const ReplSetConfig::MemberCfg*> old;
+        for( vector<ReplSetConfig::MemberCfg>::const_iterator i = o.members.begin(); i != o.members.end(); i++ ) { 
+            old[i->h] = &(*i);
+        }
+        int me = 0;
+        for( vector<ReplSetConfig::MemberCfg>::const_iterator i = n.members.begin(); i != n.members.end(); i++ ) { 
+            const ReplSetConfig::MemberCfg& m = *i;
+            if( old.count(m.h) ) { 
+                if( old[m.h]->_id != m._id ) { 
+                    log() << "replSet reconfig error with member: " << m.h.toString() << rsLog;
+                    uasserted(13432, "_id may not change for members");
+                }
+            }
+            if( m.h.isSelf() ) 
+                me++;
+        }
+
+        uassert(13433, "can't find self in new replset config", me == 1);
 
         /* TODO : MORE CHECKS HERE */
 
@@ -144,7 +183,7 @@ namespace mongo {
         _ok = false;
     }
 
-    void ReplSetConfig::check() const { 
+    void ReplSetConfig::checkRsConfig() const { 
         uassert(13132,
             "nonmatching repl set name in _id field; check --replSet command line",
             _id == cmdLine.ourSetName());
@@ -154,6 +193,10 @@ namespace mongo {
     }
 
     void ReplSetConfig::from(BSONObj o) {
+        static const string legal[] = {"_id","version", "members","settings"};
+        static const set<string> legals(legal, legal + 4);
+        assertOnlyHas(o, legals);
+
         md5 = o.md5();
         _id = o["_id"].String();
         if( o["version"].ok() ) {
@@ -170,7 +213,7 @@ namespace mongo {
             if( settings["heartbeatTimeout"].ok() )
                 ho.heartbeatTimeoutMillis = (unsigned) (settings["heartbeatTimeout"].Number() * 1000);
             ho.check();
-            try { getLastErrorDefaults = settings["getLastErrorDefaults"].Obj(); } catch(...) { }
+            try { getLastErrorDefaults = settings["getLastErrorDefaults"].Obj().copy(); } catch(...) { }
         }
 
         set<string> hosts;
@@ -188,6 +231,10 @@ namespace mongo {
             BSONObj mobj = members[i].Obj();
             MemberCfg m;
             try {
+                static const string legal[] = {"_id","votes","priority","host","hidden","slaveDelay","arbiterOnly"};
+                static const set<string> legals(legal, legal + 7);
+                assertOnlyHas(mobj, legals);
+
                 try { 
                     m._id = (int) mobj["_id"].Number();
                 } catch(...) { 
@@ -205,6 +252,9 @@ namespace mongo {
                 if( m.h.isLocalHost() ) 
                     localhosts++;
                 m.arbiterOnly = mobj.getBoolField("arbiterOnly");
+                m.slaveDelay = mobj["slaveDelay"].numberInt();
+                if( mobj.hasElement("hidden") )
+                    m.hidden = mobj.getBoolField("hidden");
                 if( mobj.hasElement("priority") )
                     m.priority = mobj["priority"].Number();
                 if( mobj.hasElement("votes") )
@@ -308,6 +358,7 @@ namespace mongo {
         BSONObj o = c->nextSafe();
         uassert(13109, "multiple rows in " + rsConfigNs + " not supported", !c->more());
         from(o);
+        checkRsConfig();
         _ok = true;
         log(level) << "replSet load config ok from " << (h.isSelf() ? "self" : h.toString()) << rsLog;
     }

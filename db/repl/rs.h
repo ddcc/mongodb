@@ -44,19 +44,19 @@ namespace mongo {
     public:
         Member(HostAndPort h, unsigned ord, const ReplSetConfig::MemberCfg *c, bool self);
         string fullName() const { return h().toString(); }
-        const ReplSetConfig::MemberCfg& config() const { return *_config; }
+        const ReplSetConfig::MemberCfg& config() const { return _config; }
         const HeartbeatInfo& hbinfo() const { return _hbinfo; }
-        string lhb() { return _hbinfo.lastHeartbeatMsg; }
+        HeartbeatInfo& get_hbinfo() { return _hbinfo; }
+        string lhb() const { return _hbinfo.lastHeartbeatMsg; }
         MemberState state() const { return _hbinfo.hbstate; }
         const HostAndPort& h() const { return _h; }
         unsigned id() const { return _hbinfo.id(); }
-        bool potentiallyHot() const { return _config->potentiallyHot(); } // not arbiter, not priority 0
-
+        bool potentiallyHot() const { return _config.potentiallyHot(); } // not arbiter, not priority 0
         void summarizeMember(stringstream& s) const;
         friend class ReplSetImpl;
     private:
-        const ReplSetConfig::MemberCfg *_config; /* todo: when this changes??? */
-        HostAndPort _h;
+        const ReplSetConfig::MemberCfg _config;
+        const HostAndPort _h;
         HeartbeatInfo _hbinfo;
     };
 
@@ -64,7 +64,13 @@ namespace mongo {
         ReplSetImpl *rs;
         bool busyWithElectSelf;
         int _primary;
-        const Member* findOtherPrimary();
+
+        /** @param two - if true two primaries were seen.  this can happen transiently, in addition to our 
+                         polling being only occasional.  in this case null is returned, but the caller should 
+                         not assume primary itself in that situation.
+        */
+        const Member* findOtherPrimary(bool& two);
+
         void noteARemoteIsPrimary(const Member *);
         virtual void starting();
     public:
@@ -102,6 +108,7 @@ namespace mongo {
 
         int totalVotes() const;
         bool aMajoritySeemsToBeUp() const;
+        bool shouldRelinquish() const;
         void electSelf();
         void electCmdReceived(BSONObj, BSONObjBuilder*);
         void multiCommand(BSONObj cmd, list<Target>& L);
@@ -119,8 +126,8 @@ namespace mongo {
     protected:
         RSBase() : magic(0x12345677), m("RSBase"), _locked(0) { }
         ~RSBase() { 
-            log() << "~RSBase should never be called?" << rsLog;
-            assert(false);
+            /* this can happen if we throw in the constructor; otherwise never happens.  thus we log it as it is quite unusual. */
+            log() << "replSet ~RSBase called" << rsLog;
         }
 
         class lock { 
@@ -175,6 +182,9 @@ namespace mongo {
         const Member* getPrimary() const { return sp.primary; }
         void change(MemberState s, const Member *self) { 
             scoped_lock lk(m);
+            if( sp.state != s ) { 
+                log() << "replSet " << s.toString() << rsLog;
+            }
             sp.state = s;
             if( s.primary() ) { 
                 sp.primary = self;
@@ -193,6 +203,12 @@ namespace mongo {
             scoped_lock lk(m);
             assert( !sp.state.primary() );
             sp.primary = mem;
+        }
+        void noteRemoteIsPrimary(const Member *remote) { 
+            scoped_lock lk(m);
+            if( !sp.state.secondary() && !sp.state.fatal() )
+                sp.state = MemberState::RS_RECOVERING;
+            sp.primary = remote;
         }
         StateBox() : m("StateBox") { }
     private:
@@ -226,7 +242,6 @@ namespace mongo {
         };
         static StartupStatus startupStatus;
         static string startupStatusMsg;
-        static string stateAsStr(MemberState state);
         static string stateAsHtml(MemberState state);
 
         /* todo thread */
@@ -241,28 +256,24 @@ namespace mongo {
         void endOldHealthTasks();
         void startHealthTaskFor(Member *m);
 
-    private:
         Consensus elect;
-        bool ok() const { return !box.getState().fatal(); }
-
         void relinquish();
         void forgetPrimary();
-
     protected:
         bool _stepDown();
     private:
         void assumePrimary();
         void loadLastOpTimeWritten();
         void changeState(MemberState s);
-
     protected:
         // "heartbeat message"
         // sent in requestHeartbeat respond in field "hbm" 
         char _hbmsg[256]; // we change this unlocked, thus not an stl::string
+        time_t _hbmsgTime; // when it was logged
     public:
         void sethbmsg(string s, int logLevel = 0); 
     protected:
-        bool initFromConfig(ReplSetConfig& c); // true if ok; throws if config really bad; false if config doesn't include self
+        bool initFromConfig(ReplSetConfig& c, bool reconf=false); // true if ok; throws if config really bad; false if config doesn't include self
         void _fillIsMaster(BSONObjBuilder&);
         void _fillIsMasterHost(const Member*, vector<string>&, vector<string>&, vector<string>&);
         const ReplSetConfig& config() { return *_cfg; }
@@ -323,8 +334,10 @@ namespace mongo {
         void _syncDoInitialSync();
         void syncDoInitialSync();
         void _syncThread();
+        bool tryToGoLiveAsASecondary(OpTime&); // readlocks
         void syncTail();
         void syncApply(const BSONObj &o);
+        unsigned _syncRollback(OplogReader& r);
         void syncRollback(OplogReader& r);
         void syncFixUp(HowToFixUp& h, OplogReader& r);
     public:
@@ -344,9 +357,10 @@ namespace mongo {
 
         /* call after constructing to start - returns fairly quickly after la[unching its threads */
         void go() { _go(); }
+
         void fatal() { _fatal(); }
-        bool isPrimary();
-        bool isSecondary();
+        bool isPrimary() { return box.getState().primary(); }
+        bool isSecondary() {  return box.getState().secondary(); }
         MemberState state() const { return ReplSetImpl::state(); }
         string name() const { return ReplSetImpl::name(); }
         const ReplSetConfig& config() { return ReplSetImpl::config(); }
@@ -366,7 +380,10 @@ namespace mongo {
         bool lockedByMe() { return RSBase::lockedByMe(); }
 
         // heartbeat msg to send to others; descriptive diagnostic info
-        string hbmsg() const { return _hbmsg; }
+        string hbmsg() const { 
+            if( time(0)-_hbmsgTime > 120 ) return "";
+            return _hbmsg; 
+        }
     };
 
     /** base class for repl set commands.  checks basic things such as in rs mode before the command 
@@ -388,6 +405,8 @@ namespace mongo {
             if( theReplSet == 0 ) {
                 result.append("startupStatus", ReplSet::startupStatus);
                 errmsg = ReplSet::startupStatusMsg.empty() ? "replset unknown error 2" : ReplSet::startupStatusMsg;
+                if( ReplSet::startupStatus == 3 ) 
+                    result.append("info", "run rs.initiate(...) if not yet done for the set");
                 return false;
             }
             return true;
@@ -397,19 +416,10 @@ namespace mongo {
     /** inlines ----------------- */
 
     inline Member::Member(HostAndPort h, unsigned ord, const ReplSetConfig::MemberCfg *c, bool self) : 
-        _config(c), _h(h), _hbinfo(ord) { 
-            if( self ) { 
-                _hbinfo.health = 1.0;
-            }
-    }
-
-    inline bool ReplSet::isPrimary() {         
-        /* todo replset */
-        return box.getState().primary();
-    }
-
-    inline bool ReplSet::isSecondary() { 
-      return box.getState().secondary();
+        _config(*c), _h(h), _hbinfo(ord) 
+    { 
+        if( self )
+            _hbinfo.health = 1.0;
     }
 
 }

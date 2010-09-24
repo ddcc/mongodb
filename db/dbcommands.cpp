@@ -74,6 +74,14 @@ namespace mongo {
         }
     } cmdResetError;
 
+    /* set by replica sets if specified in the configuration. 
+       a pointer is used to avoid any possible locking issues with lockless reading (see below locktype() is NONE 
+       and would like to keep that)
+       (for now, it simply orphans any old copy as config changes should be extremely rare).
+       note: once non-null, never goes to null again.
+    */
+    BSONObj *getLastErrorDefault = 0;
+
     class CmdGetLastError : public Command {
     public:
         virtual LockType locktype() const { return NONE; } 
@@ -88,7 +96,7 @@ namespace mongo {
             help << "return error status of the last operation on this connection";
         }
         CmdGetLastError() : Command("getLastError", false, "getlasterror") {}
-        bool run(const string& dbnamne, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        bool run(const string& dbnamne, BSONObj& _cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             LastError *le = lastError.disableForCommand();
             if ( le->nPrev != 1 )
                 LastError::noError.appendSelf( result );
@@ -97,6 +105,18 @@ namespace mongo {
             
             Client& c = cc();
             c.appendLastOp( result );
+
+            BSONObj cmdObj = _cmdObj;
+            { 
+                BSONObj::iterator i(_cmdObj);
+                i.next();
+                if( !i.more() ) { 
+                    /* empty, use default */
+                    BSONObj *def = getLastErrorDefault;
+                    if( def )
+                        cmdObj = *def;
+                }
+            }
 
             if ( cmdObj["fsync"].trueValue() ){
                 log() << "fsync from getlasterror" << endl;
@@ -389,8 +409,11 @@ namespace mongo {
             if ( ! authed )
                 result.append( "note" , "run against admin for more info" );
             
-            if ( Listener::getElapsedTimeMillis() - start > 1000 )
-                result.append( "timing" , timeBuilder.obj() );
+            if ( Listener::getElapsedTimeMillis() - start > 1000 ){
+                BSONObj t = timeBuilder.obj();
+                log() << "serverStatus was very slow: " << t << endl;
+                result.append( "timing" , t );
+            }
 
             return true;
         }
@@ -690,12 +713,8 @@ namespace mongo {
 
     class CmdReIndex : public Command {
     public:
-        virtual bool logTheOp() {
-            return true;
-        }
-        virtual bool slaveOk() const {
-            return false;
-        }
+        virtual bool logTheOp() { return false; } // only reindexes on the one node
+        virtual bool slaveOk() const { return true; }    // can reindex on a secondary
         virtual LockType locktype() const { return WRITE; } 
         virtual void help( stringstream& help ) const {
             help << "re-index a collection";
@@ -745,9 +764,6 @@ namespace mongo {
 
     class CmdListDatabases : public Command {
     public:
-        virtual bool logTheOp() {
-            return false;
-        }
         virtual bool slaveOk() const {
             return true;
         }
@@ -925,15 +941,34 @@ namespace mongo {
                 "\nnote: This command may take a while to run";
         }
         bool run(const string& dbname, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
+            Timer timer;
+
             string ns = jsobj.firstElement().String();
             BSONObj min = jsobj.getObjectField( "min" );
             BSONObj max = jsobj.getObjectField( "max" );
             BSONObj keyPattern = jsobj.getObjectField( "keyPattern" );
+            bool estimate = jsobj["estimate"].trueValue();
 
             Client::Context ctx( ns );
+            NamespaceDetails *d = nsdetails(ns.c_str());
             
+            if ( ! d || d->nrecords == 0 ){
+                result.appendNumber( "size" , 0 );
+                result.appendNumber( "numObjects" , 0 );
+                result.append( "millis" , timer.millis() );
+                return true;
+            }
+            
+            result.appendBool( "estimate" , estimate );
+
             shared_ptr<Cursor> c;
             if ( min.isEmpty() && max.isEmpty() ) {
+                if ( estimate ){
+                    result.appendNumber( "size" , d->datasize );
+                    result.appendNumber( "numObjects" , d->nrecords );
+                    result.append( "millis" , timer.millis() );
+                    return 1;
+                }
                 c = theDataFileMgr.findAll( ns.c_str() );
             } 
             else if ( min.isEmpty() || max.isEmpty() ) {
@@ -944,18 +979,24 @@ namespace mongo {
                 IndexDetails *idx = cmdIndexDetailsForRange( ns.c_str(), errmsg, min, max, keyPattern );
                 if ( idx == 0 )
                     return false;
-                NamespaceDetails *d = nsdetails(ns.c_str());
+                
                 c.reset( new BtreeCursor( d, d->idxNo(*idx), *idx, min, max, false, 1 ) );
             }
             
+            long long avgObjSize = d->datasize / d->nrecords;
+
             long long maxSize = jsobj["maxSize"].numberLong();
             long long maxObjects = jsobj["maxObjects"].numberLong();
 
-            Timer timer;
             long long size = 0;
             long long numObjects = 0;
             while( c->ok() ) {
-                size += c->currLoc().rec()->netLength();
+
+                if ( estimate )
+                    size += avgObjSize;
+                else
+                    size += c->currLoc().rec()->netLength();
+                
                 numObjects++;
                 
                 if ( ( maxSize && size > maxSize ) || 
@@ -974,8 +1015,8 @@ namespace mongo {
             }
             logIfSlow( timer , os.str() );
 
-            result.append( "size", (double)size );
-            result.append( "numObjects" , (double)numObjects );
+            result.appendNumber( "size", size );
+            result.appendNumber( "numObjects" , numObjects );
             result.append( "millis" , timer.millis() );
             return true;
         }
@@ -1555,9 +1596,6 @@ namespace mongo {
     class CmdWhatsMyUri : public Command {
     public:
         CmdWhatsMyUri() : Command("whatsmyuri") { }
-        virtual bool logTheOp() {
-            return false; // the modification will be logged directly
-        }
         virtual bool slaveOk() const {
             return true;
         }
@@ -1693,12 +1731,8 @@ namespace mongo {
     public:
         virtual LockType locktype() const { return NONE; } 
         virtual bool adminOnly() const { return true; }
-        virtual bool logTheOp() {
-            return false;
-        }
-        virtual bool slaveOk() const {
-            return true;
-        }
+        virtual bool logTheOp() { return false; }
+        virtual bool slaveOk() const { return true; }
         virtual void help( stringstream& help ) const {
             help << "internal testing command.  Makes db block (in a read lock) for 100 seconds\n";
             help << "w:true write lock";
@@ -1798,7 +1832,7 @@ namespace mongo {
         
 
         if ( c->adminOnly() && ! fromRepl && dbname != "admin" ) {
-            result.append( "errmsg" ,  "access denied- use admin db" );
+            result.append( "errmsg" ,  "access denied; use admin db" );
             log() << "command denied: " << cmdObj.toString() << endl;
             return false;
         }        

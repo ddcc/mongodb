@@ -68,6 +68,9 @@ DBCollection.prototype.help = function () {
 DBCollection.prototype.getFullName = function(){
     return this._fullName;
 }
+DBCollection.prototype.getMongo = function(){
+    return this._db.getMongo();
+}
 DBCollection.prototype.getDB = function(){
     return this._db;
 }
@@ -170,8 +173,8 @@ DBCollection.prototype.insert = function( obj , _allow_dot ){
     this._lastID = obj._id;
 }
 
-DBCollection.prototype.remove = function( t ){
-    this._mongo.remove( this._fullName , this._massageObject( t ) );
+DBCollection.prototype.remove = function( t , justOne ){
+    this._mongo.remove( this._fullName , this._massageObject( t ) , justOne ? true : false );
 }
 
 DBCollection.prototype.update = function( query , obj , upsert , multi ){

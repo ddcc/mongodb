@@ -35,16 +35,18 @@
 
 namespace mongo {
 
+    Client* Client::syncThread;
     mongo::mutex Client::clientsMutex("clientsMutex");
     set<Client*> Client::clients; // always be in clientsMutex when manipulating this
     boost::thread_specific_ptr<Client> currentClient;
 
-    Client::Client(const char *desc) : 
+    Client::Client(const char *desc, MessagingPort *p) : 
       _context(0),
       _shutdown(false),
       _desc(desc),
       _god(0),
-      _lastOp(0)
+      _lastOp(0), 
+      _mp(p)
     {
         _curOp = new CurOp( this );
         scoped_lock bl(clientsMutex);
@@ -52,15 +54,21 @@ namespace mongo {
     }
 
     Client::~Client() { 
-        delete _curOp;
         _god = 0;
 
         if ( _context )
-            cout << "ERROR: Client::~Client _context should be NULL: " << _desc << endl;
-        if ( !_shutdown ) 
-            cout << "ERROR: Client::shutdown not called: " << _desc << endl;
-    }
+            error() << "Client::~Client _context should be null but is not; client:" << _desc << endl;
 
+        if ( ! _shutdown ) {
+            error() << "Client::shutdown not called: " << _desc << endl;
+        }
+        
+        scoped_lock bl(clientsMutex);
+        if ( ! _shutdown )
+            clients.erase(this);
+        delete _curOp;
+    }
+    
     void Client::_dropns( const string& ns ){
         Top::global.collectionDropped( ns );
                     
@@ -75,7 +83,7 @@ namespace mongo {
             dropCollection( ns , err , b );
         }
         catch ( ... ){
-            log() << "error dropping temp collection: " << ns << endl;
+            warning() << "error dropping temp collection: " << ns << endl;
         }
 
     }
@@ -196,11 +204,17 @@ namespace mongo {
         if ( doauth )
             _auth( lockState );
 
-        if ( _client->_curOp->getOp() != dbGetMore ){ // getMore's are special and should be handled else where
+        switch ( _client->_curOp->getOp() ){
+        case dbGetMore: // getMore's are special and should be handled else where
+        case dbUpdate: // update & delete check shard version in instance.cpp, so don't check here as well
+        case dbDelete: 
+            break;
+        default: {
             string errmsg;
-            if ( ! shardVersionOk( _ns , errmsg ) ){
+            if ( ! shardVersionOk( _ns , lockState > 0 , errmsg ) ){
                 msgasserted( StaleConfigInContextCode , (string)"[" + _ns + "] shard version not ok in Client::Context: " + errmsg );
             }
+        }
         }
     }
     
@@ -237,7 +251,7 @@ namespace mongo {
 
     string sayClientState(){
         Client* c = currentClient.get();
-        if ( ! c )
+        if ( !c )
             return "no client";
         return c->toString();
     }
@@ -257,6 +271,15 @@ namespace mongo {
         if ( co ){
             co->gotLock();
         }
+    }
+
+    CurOp::~CurOp(){
+        if ( _wrapped ){
+            scoped_lock bl(Client::clientsMutex);
+            _client->_curOp = _wrapped;
+        }
+        
+        _client = 0;
     }
 
     BSONObj CurOp::query( bool threadSafe ) {

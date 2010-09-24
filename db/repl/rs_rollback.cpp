@@ -62,6 +62,14 @@ namespace mongo {
 
     using namespace bson;
 
+    bool copyCollectionFromRemote(const string& host, const string& ns, const BSONObj& query, string& errmsg, bool logforrepl);
+    void incRBID();
+
+    class rsfatal : public std::exception { 
+    public:
+        virtual const char* what() const throw(){ return "replica set fatal exception"; }
+    };
+
     struct DocID {
         const char *ns;
         be _id;
@@ -80,6 +88,8 @@ namespace mongo {
 
         /* collections to drop */
         set<string> toDrop;
+
+        set<string> collectionsToResync;
 
         OpTime commonPoint;
         DiskLoc commonPointOurDiskloc;
@@ -113,17 +123,59 @@ namespace mongo {
         if( *op == 'c' ) { 
             be first = o.firstElement();
             NamespaceString s(d.ns); // foo.$cmd
-
-            if( string("create") == first.fieldName() ) {
-                /* Create collection operation 
-                   { ts: ..., h: ..., op: "c", ns: "foo.$cmd", o: { create: "abc", ... } }
-                */
-                string ns = s.db + '.' + o["create"].String(); // -> foo.abc
-                h.toDrop.insert(ns);
+            string cmdname = first.fieldName();
+            Command *cmd = Command::findCommand(cmdname.c_str());
+            if( cmd == 0 ) { 
+                log() << "replSet warning rollback no suchcommand " << first.fieldName() << " - different mongod versions perhaps?" << rsLog;
                 return;
             }
-            else { 
-                log() << "replSet WARNING can't roll back this command yet: " << o.toString() << rsLog;
+            else {
+                /* findandmodify - tranlated?
+                   godinsert?,  
+                   renamecollection a->b.  just resync a & b
+                */
+                if( cmdname == "create" ) {
+                    /* Create collection operation 
+                       { ts: ..., h: ..., op: "c", ns: "foo.$cmd", o: { create: "abc", ... } }
+                    */
+                    string ns = s.db + '.' + o["create"].String(); // -> foo.abc
+                    h.toDrop.insert(ns);
+                    return;
+                }
+                else if( cmdname == "drop" ) { 
+                    string ns = s.db + '.' + first.valuestr();
+                    h.collectionsToResync.insert(ns);
+                    return;
+                }
+                else if( cmdname == "dropIndexes" || cmdname == "deleteIndexes" ) { 
+                    /* TODO: this is bad.  we simply full resync the collection here, which could be very slow. */
+                    log() << "replSet info rollback of dropIndexes is slow in this version of mongod" << rsLog;
+                    string ns = s.db + '.' + first.valuestr();
+                    h.collectionsToResync.insert(ns);
+                    return;
+                }
+                else if( cmdname == "renameCollection" ) { 
+                    /* TODO: slow. */
+                    log() << "replSet info rollback of renameCollection is slow in this version of mongod" << rsLog;
+                    string from = first.valuestr();
+                    string to = o["to"].String();
+                    h.collectionsToResync.insert(from);
+                    h.collectionsToResync.insert(to);
+                    return;
+                }
+                else if( cmdname == "reIndex" ) { 
+                    return;
+                }
+                else if( cmdname == "dropDatabase" ) { 
+                    log() << "replSet error rollback : can't rollback drop database full resync will be required" << rsLog;
+                    log() << "replSet " << o.toString() << rsLog;
+                    throw rsfatal();
+                }
+                else { 
+                    log() << "replSet error can't rollback this command yet: " << o.toString() << rsLog;
+                    log() << "replSet cmdname=" << cmdname << rsLog;
+                    throw rsfatal();
+                }
             }
         }
 
@@ -141,8 +193,6 @@ namespace mongo {
     static void syncRollbackFindCommonPoint(DBClientConnection *them, HowToFixUp& h) { 
         static time_t last;
         if( time(0)-last < 60 ) { 
-            // this could put a lot of load on someone else, don't repeat too often
-            sleepsecs(10);
             throw "findcommonpoint waiting a while before trying again";
         }
         last = time(0);
@@ -170,12 +220,14 @@ namespace mongo {
         BSONObj theirObj = t->nextSafe();
         OpTime theirTime = theirObj["ts"]._opTime();
 
-        if( 1 ) {
+        {
             long long diff = (long long) ourTime.getSecs() - ((long long) theirTime.getSecs());
             /* diff could be positive, negative, or zero */
-            log() << "replSet info syncRollback diff in end of log times : " << diff << " seconds" << rsLog;
+            log() << "replSet info rollback our last optime:   " << ourTime.toStringPretty() << rsLog;
+            log() << "replSet info rollback their last optime: " << theirTime.toStringPretty() << rsLog;
+            log() << "replSet info rollback diff in end of log times: " << diff << " seconds" << rsLog;
             if( diff > 3600 ) { 
-                log() << "replSet syncRollback too long a time period for a rollback." << rsLog;
+                log() << "replSet rollback too long a time period for a rollback." << rsLog;
                 throw "error not willing to roll back more than one hour of data";
             }
         }
@@ -197,16 +249,35 @@ namespace mongo {
 
                 refetch(h, ourObj);
 
+                if( !t->more() ) { 
+                    log() << "replSet rollback error RS100 reached beginning of remote oplog" << rsLog;
+                    log() << "replSet   them:      " << them->toString() << " scanned: " << scanned << rsLog;
+                    log() << "replSet   theirTime: " << theirTime.toStringLong() << rsLog;
+                    log() << "replSet   ourTime:   " << ourTime.toStringLong() << rsLog;
+                    throw "RS100 reached beginning of remote oplog [2]";
+                }
                 theirObj = t->nextSafe();
                 theirTime = theirObj["ts"]._opTime();
 
                 u.advance();
-                if( !u.ok() ) throw "reached beginning of local oplog";
+                if( !u.ok() ) {
+                    log() << "replSet rollback error RS101 reached beginning of local oplog" << rsLog;
+                    log() << "replSet   them:      " << them->toString() << " scanned: " << scanned << rsLog;
+                    log() << "replSet   theirTime: " << theirTime.toStringLong() << rsLog;
+                    log() << "replSet   ourTime:   " << ourTime.toStringLong() << rsLog;
+                    throw "RS101 reached beginning of local oplog [1]";
+                }
                 ourObj = u.current();
                 ourTime = ourObj["ts"]._opTime();
             }
             else if( theirTime > ourTime ) { 
-                /* todo: we could hit beginning of log here.  exception thrown is ok but not descriptive, so fix up */
+                if( !t->more() ) { 
+                    log() << "replSet rollback error RS100 reached beginning of remote oplog" << rsLog;
+                    log() << "replSet   them:      " << them->toString() << " scanned: " << scanned << rsLog;
+                    log() << "replSet   theirTime: " << theirTime.toStringLong() << rsLog;
+                    log() << "replSet   ourTime:   " << ourTime.toStringLong() << rsLog;
+                    throw "RS100 reached beginning of remote oplog [1]";
+                }
                 theirObj = t->nextSafe();
                 theirTime = theirObj["ts"]._opTime();
             }
@@ -214,7 +285,13 @@ namespace mongo {
                 // theirTime < ourTime
                 refetch(h, ourObj);
                 u.advance();
-                if( !u.ok() ) throw "reached beginning of local oplog";
+                if( !u.ok() ) { 
+                    log() << "replSet rollback error RS101 reached beginning of local oplog" << rsLog;
+                    log() << "replSet   them:      " << them->toString() << " scanned: " << scanned << rsLog;
+                    log() << "replSet   theirTime: " << theirTime.toStringLong() << rsLog;
+                    log() << "replSet   ourTime:   " << ourTime.toStringLong() << rsLog;
+                    throw "RS101 reached beginning of local oplog [2]";
+                }
                 ourObj = u.current();
                 ourTime = ourObj["ts"]._opTime();
             }
@@ -226,7 +303,19 @@ namespace mongo {
         bson::bo goodVersionOfObject;
     };
 
-   void ReplSetImpl::syncFixUp(HowToFixUp& h, OplogReader& r) {
+    static void setMinValid(bo newMinValid) { 
+       try {
+           log() << "replSet minvalid=" << newMinValid["ts"]._opTime().toStringLong() << rsLog;
+       }
+       catch(...) { }
+       {
+           Helpers::putSingleton("local.replset.minvalid", newMinValid);
+           Client::Context cx( "local." );
+           cx.db()->flushFiles(true);            
+       }
+    }
+
+    void ReplSetImpl::syncFixUp(HowToFixUp& h, OplogReader& r) {
        DBClientConnection *them = r.conn();
 
        // fetch all first so we needn't handle interruption in a fancy way
@@ -237,6 +326,7 @@ namespace mongo {
 
        bo newMinValid;
 
+       /* fetch all the goodVersions of each document from current primary */
        DocID d;
        unsigned long long n = 0;
        try {
@@ -258,43 +348,98 @@ namespace mongo {
            }
            newMinValid = r.getLastOp(rsoplog);
            if( newMinValid.isEmpty() ) { 
-               sethbmsg("syncRollback error newMinValid empty?");
+               sethbmsg("rollback error newMinValid empty?");
                return;
            }
        }
        catch(DBException& e) {
-           sethbmsg(str::stream() << "syncRollback re-get objects: " << e.toString(),0);
-           log() << "syncRollback couldn't re-get ns:" << d.ns << " _id:" << d._id << ' ' << n << '/' << h.toRefetch.size() << rsLog;
+           sethbmsg(str::stream() << "rollback re-get objects: " << e.toString(),0);
+           log() << "rollback couldn't re-get ns:" << d.ns << " _id:" << d._id << ' ' << n << '/' << h.toRefetch.size() << rsLog;
            throw e;
        }
 
-       sethbmsg("syncRollback 3.5");
+       MemoryMappedFile::flushAll(true);
+
+       sethbmsg("rollback 3.5");
        if( h.rbid != getRBID(r.conn()) ) { 
            // our source rolled back itself.  so the data we received isn't necessarily consistent.
-           sethbmsg("syncRollback rbid on source changed during rollback, cancelling this attempt");
+           sethbmsg("rollback rbid on source changed during rollback, cancelling this attempt");
            return;
        }
 
        // update them
-       sethbmsg(str::stream() << "syncRollback 4 n:" << goodVersions.size());
+       sethbmsg(str::stream() << "rollback 4 n:" << goodVersions.size());
 
        bool warn = false;
 
        assert( !h.commonPointOurDiskloc.isNull() );
 
-       MemoryMappedFile::flushAll(true);
-
        dbMutex.assertWriteLocked();
 
        /* we have items we are writing that aren't from a point-in-time.  thus best not to come online 
 	      until we get to that point in freshness. */
-       try {
-           log() << "replSet set minvalid=" << newMinValid["ts"]._opTime().toString() << rsLog;
-       }
-       catch(...){}
-       Helpers::putSingleton("local.replset.minvalid", newMinValid);
+       setMinValid(newMinValid);
+       
+       /** any full collection resyncs required? */
+       if( !h.collectionsToResync.empty() ) {
+           for( set<string>::iterator i = h.collectionsToResync.begin(); i != h.collectionsToResync.end(); i++ ) { 
+               string ns = *i;
+               sethbmsg(str::stream() << "rollback 4.1 coll resync " << ns);
+               Client::Context c(*i, dbpath, 0, /*doauth*/false);
+               try {
+                   bob res;
+                   string errmsg;
+                   dropCollection(ns, errmsg, res);
+                   {
+                       dbtemprelease r;
+                       bool ok = copyCollectionFromRemote(them->getServerAddress(), ns, bo(), errmsg, false);
+                       if( !ok ) { 
+                           log() << "replSet rollback error resyncing collection " << ns << ' ' << errmsg << rsLog;
+                           throw "rollback error resyncing rollection [1]";
+                       }
+                   }
+               }
+               catch(...) { 
+                   log() << "replset rollback error resyncing collection " << ns << rsLog;
+                   throw "rollback error resyncing rollection [2]";
+               }
+           }
 
-       /** first drop collections to drop - that might make things faster below actually if there were subsequent inserts */
+           /* we did more reading from primary, so check it again for a rollback (which would mess us up), and 
+              make minValid newer. 
+              */
+           sethbmsg("rollback 4.2");
+           { 
+               string err;
+               try {
+                   newMinValid = r.getLastOp(rsoplog);
+                   if( newMinValid.isEmpty() ) {
+                       err = "can't get minvalid from primary";
+                   } else { 
+                       setMinValid(newMinValid);
+                   }
+               }
+               catch(...) { 
+                   err = "can't get/set minvalid"; 
+               }
+               if( h.rbid != getRBID(r.conn()) ) {
+                   // our source rolled back itself.  so the data we received isn't necessarily consistent.
+                   // however, we've now done writes.  thus we have a problem.
+                   err += "rbid at primary changed during resync/rollback";
+               }
+               if( !err.empty() ) {
+                   log() << "replSet error rolling back : " << err << ". A full resync will be necessary." << rsLog;
+                   /* todo: reset minvalid so that we are permanently in fatal state */
+                   /* todo: don't be fatal, but rather, get all the data first. */
+                   sethbmsg("rollback error");
+                   throw rsfatal();
+               }
+           }
+           sethbmsg("rollback 4.3");
+       }
+
+       sethbmsg("rollback 4.6");
+       /** drop collections to drop before doing individual fixups - that might make things faster below actually if there were subsequent inserts to rollback */
        for( set<string>::iterator i = h.toDrop.begin(); i != h.toDrop.end(); i++ ) { 
            Client::Context c(*i, dbpath, 0, /*doauth*/false);
            try {
@@ -308,6 +453,7 @@ namespace mongo {
            }
        }
 
+       sethbmsg("rollback 4.7");
        Client::Context c(rsoplog, dbpath, 0, /*doauth*/false);
        NamespaceDetails *oplogDetails = nsdetails(rsoplog);
        uassert(13423, str::stream() << "replSet error in rollback can't find " << rsoplog, oplogDetails);
@@ -320,7 +466,12 @@ namespace mongo {
            bo pattern = d._id.wrap(); // { _id : ... }
            try { 
                assert( d.ns && *d.ns );
-               
+               if( h.collectionsToResync.count(d.ns) ) {
+                   /* we just synced this entire collection */
+                   continue;
+               }
+
+               /* keep an archive of items rolled back */
                shared_ptr<RemoveSaver>& rs = removeSavers[d.ns];
                if ( ! rs )
                    rs.reset( new RemoveSaver( "rollback" , "" , d.ns ) );
@@ -343,7 +494,7 @@ namespace mongo {
                                long long start = Listener::getElapsedTimeMillis();
                                DiskLoc loc = Helpers::findOne(d.ns, pattern, false);
                                if( Listener::getElapsedTimeMillis() - start > 200 ) 
-                                   log() << "replSet warning roll back slow no _id index for " << d.ns << rsLog; 
+                                   log() << "replSet warning roll back slow no _id index for " << d.ns << " perhaps?" << rsLog; 
                                //would be faster but requires index: DiskLoc loc = Helpers::findById(nsd, pattern);
                                if( !loc.isNull() ) {
                                    try {
@@ -411,9 +562,9 @@ namespace mongo {
 
        removeSavers.clear(); // this effectively closes all of them
 
-       sethbmsg(str::stream() << "syncRollback 5 d:" << deletes << " u:" << updates);
+       sethbmsg(str::stream() << "rollback 5 d:" << deletes << " u:" << updates);
        MemoryMappedFile::flushAll(true);
-       sethbmsg("syncRollback 6");
+       sethbmsg("rollback 6");
 
        // clean up oplog
        log(2) << "replSet rollback truncate oplog after " << h.commonPoint.toStringPretty() << rsLog;
@@ -423,59 +574,99 @@ namespace mongo {
        /* reset cached lastoptimewritten and h value */
        loadLastOpTimeWritten();
 
-       sethbmsg("syncRollback 7");
+       sethbmsg("rollback 7");
        MemoryMappedFile::flushAll(true);
 
        // done
        if( warn ) 
            sethbmsg("issues during syncRollback, see log");
        else
-           sethbmsg("syncRollback done");
+           sethbmsg("rollback done");
    }
 
     void ReplSetImpl::syncRollback(OplogReader&r) { 
+        unsigned s = _syncRollback(r);
+        if( s ) 
+            sleepsecs(s);
+    }
+
+    unsigned ReplSetImpl::_syncRollback(OplogReader&r) { 
         assert( !lockedByMe() );
         assert( !dbMutex.atLeastReadLocked() );
 
-        sethbmsg("syncRollback 0");
+        sethbmsg("rollback 0");
 
         writelocktry lk(rsoplog, 20000);
         if( !lk.got() ) {
-            sethbmsg("syncRollback couldn't get write lock in a reasonable time");
-            sleepsecs(2);
-            return;
+            sethbmsg("rollback couldn't get write lock in a reasonable time");
+            return 2;
+        }
+
+        if( box.getState().secondary() ) {
+            /* by doing this, we will not service reads (return an error as we aren't in secondary staate.
+               that perhaps is moot becasue of the write lock above, but that write lock probably gets deferred 
+               or removed or yielded later anyway.
+
+               also, this is better for status reporting - we know what is happening.
+               */
+            box.change(MemberState::RS_ROLLBACK, _self);
         }
 
         HowToFixUp how;
-        sethbmsg("syncRollback 1");
+        sethbmsg("rollback 1");
         {
             r.resetCursor();
             /*DBClientConnection us(false, 0, 0);
             string errmsg;
             if( !us.connect(HostAndPort::me().toString(),errmsg) ) { 
-                sethbmsg("syncRollback connect to self failure" + errmsg);
+                sethbmsg("rollback connect to self failure" + errmsg);
                 return;
             }*/
 
-            sethbmsg("syncRollback 2 FindCommonPoint");
+            sethbmsg("rollback 2 FindCommonPoint");
             try {
                 syncRollbackFindCommonPoint(r.conn(), how);
             }
             catch( const char *p ) { 
-                sethbmsg(string("syncRollback 2 error ") + p);
-                sleepsecs(10);
-                return;
+                sethbmsg(string("rollback 2 error ") + p);
+                return 10;
+            }
+            catch( rsfatal& ) { 
+                _fatal();
+                return 2;
             }
             catch( DBException& e ) { 
-                sethbmsg(string("syncRollback 2 exception ") + e.toString() + "; sleeping 1 min");
+                sethbmsg(string("rollback 2 exception ") + e.toString() + "; sleeping 1 min");
+                dbtemprelease r;
                 sleepsecs(60);
                 throw;
             }
         }
 
-        sethbmsg("replSet syncRollback 3 fixup");
+        sethbmsg("replSet rollback 3 fixup");
 
-        syncFixUp(how, r);
+        {
+            incRBID();
+            try { 
+                syncFixUp(how, r);
+            }
+            catch( rsfatal& ) { 
+                sethbmsg("rollback fixup error");
+                _fatal();
+                return 2;
+            }
+            catch(...) { 
+                incRBID(); throw;
+            }
+            incRBID();
+
+            /* success - leave "ROLLBACK" state 
+               can go to SECONDARY once minvalid is achieved
+            */
+            box.change(MemberState::RS_RECOVERING, _self);
+        }
+
+        return 0;
     }
 
 }
