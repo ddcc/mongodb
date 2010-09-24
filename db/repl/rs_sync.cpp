@@ -24,8 +24,11 @@ namespace mongo {
 
     using namespace bson;
 
+    extern unsigned replSetForceInitialSyncFailure;
+
     void startSyncThread() { 
         Client::initThread("rs_sync");
+        cc().iAmSyncThread();
         theReplSet->syncThread();
         cc().shutdown();
     }
@@ -91,6 +94,7 @@ namespace mongo {
             // todo : use exhaust
             unsigned long long n = 0;
             while( 1 ) { 
+
                 if( !r.more() )
                     break;
                 BSONObj o = r.nextSafe(); /* note we might get "not master" at some point */
@@ -103,9 +107,14 @@ namespace mongo {
                         anymore. assumePrimary is in the db lock so we are safe as long as 
                         we check after we locked above. */
 					const Member *p1 = box.getPrimary();
-                    if( p1 != primary ) {
-					  log() << "replSet primary was:" << primary->fullName() << " now:" << 
-						(p1 != 0 ? p1->fullName() : "none") << rsLog;
+                    if( p1 != primary || replSetForceInitialSyncFailure ) {
+                        int f = replSetForceInitialSyncFailure;
+                        if( f > 0 ) {
+                            replSetForceInitialSyncFailure = f-1;
+                            log() << "replSet test code invoked, replSetForceInitialSyncFailure" << rsLog;
+                        }
+                        log() << "replSet primary was:" << primary->fullName() << " now:" << 
+                            (p1 != 0 ? p1->fullName() : "none") << rsLog;
                         throw DBException("primary changed",0);
                     }
 
@@ -131,6 +140,32 @@ namespace mongo {
         return true;
     }
 
+    /* should be in RECOVERING state on arrival here.  
+       readlocks
+       @return true if transitioned to SECONDARY
+    */
+    bool ReplSetImpl::tryToGoLiveAsASecondary(OpTime& /*out*/ minvalid) { 
+        bool golive = false;			
+        {
+            readlock lk("local.replset.minvalid");
+            BSONObj mv;
+            if( Helpers::getSingleton("local.replset.minvalid", mv) ) { 
+                minvalid = mv["ts"]._opTime();
+                if( minvalid <= lastOpTimeWritten ) { 
+                    golive=true;
+                }
+            }
+            else 
+                golive = true; /* must have been the original member */
+        }
+        if( golive ) {
+            sethbmsg("");
+            changeState(MemberState::RS_SECONDARY);
+        }
+        return golive;
+    }
+
+    /* tail the primary's oplog.  ok to return, will be re-called. */
     void ReplSetImpl::syncTail() { 
         // todo : locking vis a vis the mgr...
 
@@ -147,14 +182,19 @@ namespace mongo {
         {
             BSONObj remoteOldestOp = r.findOne(rsoplog, Query());
             OpTime ts = remoteOldestOp["ts"]._opTime();
-            DEV log() << "remoteOldestOp: " << ts.toStringPretty() << endl;
-            else log(3) << "remoteOldestOp: " << ts.toStringPretty() << endl;
+            DEV log() << "replSet remoteOldestOp:    " << ts.toStringLong() << rsLog;
+            else log(3) << "replSet remoteOldestOp: " << ts.toStringLong() << rsLog;
+            DEV { 
+                // debugging sync1.js...
+                log() << "replSet lastOpTimeWritten: " << lastOpTimeWritten.toStringLong() << rsLog;
+                log() << "replSet our state: " << state().toString() << rsLog;
+            }
             if( lastOpTimeWritten < ts ) { 
-                log() << "replSet error too stale to catch up, at least from primary " << hn << rsLog;
-                log() << "replSet our last optime : " << lastOpTimeWritten.toStringPretty() << rsLog;
-                log() << "replSet oldest at " << hn << " : " << ts.toStringPretty() << rsLog;
+                log() << "replSet error RS102 too stale to catch up, at least from primary: " << hn << rsLog;
+                log() << "replSet our last optime : " << lastOpTimeWritten.toStringLong() << rsLog;
+                log() << "replSet oldest at " << hn << " : " << ts.toStringLong() << rsLog;
                 log() << "replSet See http://www.mongodb.org/display/DOCS/Resyncing+a+Very+Stale+Replica+Set+Member" << rsLog;
-                sethbmsg("error too stale to catch up");
+                sethbmsg("error RS102 too stale to catch up");
                 sleepsecs(120);
                 return;
             }
@@ -213,7 +253,13 @@ namespace mongo {
             }
         }
 
-        while( 1 ) { 
+        /* we have now checked if we need to rollback and we either don't have to or did it. */
+        {
+            OpTime minvalid;
+            tryToGoLiveAsASecondary(minvalid);
+        }
+
+        while( 1 ) {
             while( 1 ) {
                 if( !r.moreInCurrentBatch() ) { 
                     /* we need to occasionally check some things. between 
@@ -222,27 +268,13 @@ namespace mongo {
                     /* perhaps we should check this earlier? but not before the rollback checks. */
                     if( state().recovering() ) { 
                         /* can we go to RS_SECONDARY state?  we can if not too old and if minvalid achieved */
-                        bool golive = false;			
                         OpTime minvalid;
-                        {
-                            readlock lk("local.replset.minvalid");
-                            BSONObj mv;
-                            if( Helpers::getSingleton("local.replset.minvalid", mv) ) { 
-                                minvalid = mv["ts"]._opTime();
-                                if( minvalid <= lastOpTimeWritten ) { 
-                                    golive=true;
-                                }
-                            }
-                            else 
-                                golive = true; /* must have been the original member */
-                        }
+                        bool golive = ReplSetImpl::tryToGoLiveAsASecondary(minvalid);
                         if( golive ) {
-                            sethbmsg("");
-                            log() << "replSet SECONDARY" << rsLog;
-                            changeState(MemberState::RS_SECONDARY);
+                            ;
                         }
                         else { 
-                            sethbmsg(str::stream() << "still syncing, not yet to minValid optime " << minvalid.toString());
+                            sethbmsg(str::stream() << "still syncing, not yet to minValid optime" << minvalid.toString());
                         }
 
                         /* todo: too stale capability */
@@ -270,12 +302,40 @@ namespace mongo {
                         syncApply(o);
                         _logOpObjRS(o);   /* with repl sets we write the ops to our oplog too: */                   
                     }
+                    int sd = myConfig().slaveDelay;
+                    if( sd ) { 
+                        const OpTime ts = o["ts"]._opTime();
+                        long long a = ts.getSecs();
+                        long long b = time(0);
+                        long long lag = b - a;
+                        long long sleeptime = sd - lag;
+                        if( sleeptime > 0 ) {
+                            uassert(12000, "rs slaveDelay differential too big check clocks and systems", sleeptime < 0x40000000);
+                            log() << "replSet temp slavedelay sleep:" << sleeptime << rsLog;
+                            if( sleeptime < 60 ) {
+                                sleepsecs((int) sleeptime);
+                            }
+                            else {
+                                // sleep(hours) would prevent reconfigs from taking effect & such!
+                                long long waitUntil = b + sleeptime;
+                                while( 1 ) {
+                                    sleepsecs(6);
+                                    if( time(0) >= waitUntil )
+                                        break;
+                                    if( box.getPrimary() != primary )
+                                        break;
+                                    if( myConfig().slaveDelay != sd ) // reconf
+                                        break;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             r.tailCheck();
             if( !r.haveCursor() ) {
-                log() << "replSet TEMP end syncTail pass with " << hn << rsLog;
-                // TODO : reuse our cnonection to the primary.
+                log(1) << "replSet end syncTail pass with " << hn << rsLog;
+                // TODO : reuse our connection to the primary.
                 return;
             }
             if( box.getPrimary() != primary )
@@ -288,6 +348,10 @@ namespace mongo {
         StateBox::SP sp = box.get();
         if( sp.state.primary() ) {
             sleepsecs(1);
+            return;
+        }
+        if( sp.state.fatal() ) { 
+            sleepsecs(5);
             return;
         }
 

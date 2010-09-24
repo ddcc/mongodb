@@ -56,8 +56,6 @@ namespace mongo {
         }
     };
 
-    const int MaxExtentSize = 0x7ff00000;
-
     map<string, unsigned> BackgroundOperation::dbsInProg;
     set<string> BackgroundOperation::nsInProg;
 
@@ -157,7 +155,7 @@ namespace mongo {
             sz = 1000000000;
         int z = ((int)sz) & 0xffffff00;
         assert( z > len );
-        DEV tlog() << "initialExtentSize(" << len << ") returns " << z << endl;
+        //DEV tlog() << "initialExtentSize(" << len << ") returns " << z << endl;
         return z;
     }
 
@@ -272,10 +270,19 @@ namespace mongo {
     /*---------------------------------------------------------------------*/
 
     int MongoDataFile::maxSize() {
-        if ( sizeof( int* ) == 4 )
+        if ( sizeof( int* ) == 4 ) {
             return 512 * 1024 * 1024;
-        else
+        } else if ( cmdLine.smallfiles ) {
+            return 0x7ff00000 >> 2;
+        } else {
             return 0x7ff00000;
+        }
+    }
+
+    void MongoDataFile::badOfs(int ofs) const { 
+        stringstream ss;
+        ss << "bad offset:" << ofs << " accessing file: " << mmf.filename() << " - consider repairing database";
+        uasserted(13440, ss.str());
     }
 
     int MongoDataFile::defaultSize( const char *filename ) const {
@@ -380,7 +387,7 @@ namespace mongo {
 
     Extent* MongoDataFile::createExtent(const char *ns, int approxSize, bool newCapped, int loops) {
         massert( 10357 ,  "shutdown in progress", !goingAway );
-        massert( 10358 ,  "bad new extent size", approxSize >= 0 && approxSize <= MaxExtentSize );
+        massert( 10358 ,  "bad new extent size", approxSize >= 0 && approxSize <= Extent::maxSize() );
         massert( 10359 ,  "header==0 on new extent: 32 bit mmap space exceeded?", header ); // null if file open failed
         int ExtentSize = approxSize <= header->unusedLength ? approxSize : header->unusedLength;
         DiskLoc loc;
@@ -403,8 +410,8 @@ namespace mongo {
 
         addNewExtentToNamespace(ns, e, loc, emptyLoc, newCapped);
 
-        DEV tlog() << "new extent " << ns << " size: 0x" << hex << ExtentSize << " loc: 0x" << hex << offset
-                   << " emptyLoc:" << hex << emptyLoc.getOfs() << dec << endl;
+        DEV tlog(1) << "new extent " << ns << " size: 0x" << hex << ExtentSize << " loc: 0x" << hex << offset
+                    << " emptyLoc:" << hex << emptyLoc.getOfs() << dec << endl;
         return e;
     }
 
@@ -568,6 +575,14 @@ namespace mongo {
       }
     */
 
+    int Extent::maxSize() {
+        int maxExtentSize = 0x7ff00000;
+        if ( cmdLine.smallfiles ) {
+            maxExtentSize >>= 2;
+        }
+        return maxExtentSize;
+    }
+    
     /*---------------------------------------------------------------------*/
 
     shared_ptr<Cursor> DataFileMgr::findAll(const char *ns, const DiskLoc &startLoc) {
@@ -897,7 +912,7 @@ namespace mongo {
 
         if ( toupdate->netLength() < objNew.objsize() ) {
             // doesn't fit.  reallocate -----------------------------------------------------
-            uassert( 10003 , "E10003 failing update: objects in a capped ns cannot grow", !(d && d->capped));
+            uassert( 10003 , "failing update: objects in a capped ns cannot grow", !(d && d->capped));
             d->paddingTooSmall();
             if ( cc().database()->profile )
                 ss << " moved ";
@@ -950,15 +965,15 @@ namespace mongo {
     }
 
     int followupExtentSize(int len, int lastExtentLen) {
-        assert( len < MaxExtentSize );
+        assert( len < Extent::maxSize() );
         int x = initialExtentSize(len);
         int y = (int) (lastExtentLen < 4000000 ? lastExtentLen * 4.0 : lastExtentLen * 1.2);
         int sz = y > x ? y : x;
 
         if ( sz < lastExtentLen )
             sz = lastExtentLen;
-        else if ( sz > MaxExtentSize )
-            sz = MaxExtentSize;
+        else if ( sz > Extent::maxSize() )
+            sz = Extent::maxSize();
         
         sz = ((int)sz) & 0xffffff00;
         assert( sz > len );
@@ -1029,7 +1044,7 @@ namespace mongo {
 
         Timer t;
 
-        tlog() << "Buildindex " << ns << " idxNo:" << idxNo << ' ' << idx.info.obj().toString() << endl;
+        tlog(1) << "fastBuildIndex " << ns << " idxNo:" << idxNo << ' ' << idx.info.obj().toString() << endl;
 
         bool dupsAllowed = !idx.unique();
         bool dropDups = idx.dropDups() || inDBRepair;
@@ -1514,6 +1529,13 @@ namespace mongo {
 
             BSONObj info = loc.obj();
             bool background = info["background"].trueValue();
+            if( background && cc().isSyncThread() ) { 
+                /* don't do background indexing on slaves.  there are nuances.  this could be added later 
+                   but requires more code.
+                   */
+                log() << "info: indexing in foreground on this replica; was a background index build on the primary" << endl;
+                background = false;
+            }
 
             int idxNo = tableToIndex->nIndexes;
             IndexDetails& idx = tableToIndex->addIndex(tabletoidxns.c_str(), !background); // clear transient info caches so they refresh; increments nIndexes

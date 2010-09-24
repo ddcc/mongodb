@@ -29,12 +29,17 @@ namespace mongo {
     };
 
     /* check members OTHER THAN US to see if they think they are primary */
-    const Member * Manager::findOtherPrimary() { 
+    const Member * Manager::findOtherPrimary(bool& two) { 
+        two = false;
         Member *m = rs->head();
         Member *p = 0;
         while( m ) {
+            DEV assert( m != rs->_self );
             if( m->state().primary() && m->hbinfo().up() ) {
-                if( p ) throw "twomasters"; // our polling is asynchronous, so this is often ok.
+                if( p ) { 
+                    two = true;
+                    return 0;
+                }
                 p = m;
             }
             m = m->next();
@@ -63,7 +68,11 @@ namespace mongo {
         if( rs->box.getPrimary() == m )
             return;
         rs->_self->lhb() = "";
-        rs->box.set(rs->iAmArbiterOnly() ? MemberState::RS_ARBITER : MemberState::RS_RECOVERING, m);
+        if( rs->iAmArbiterOnly() ) {
+            rs->box.set(MemberState::RS_ARBITER, m);
+        } else {
+            rs->box.noteRemoteIsPrimary(m);
+        }
     }
 
     /** called as the health threads get new results */
@@ -87,11 +96,14 @@ namespace mongo {
             }
 
             const Member *p2;
-            try { p2 = findOtherPrimary(); }
-            catch(string s) { 
-                /* two other nodes think they are primary (asynchronously polled) -- wait for things to settle down. */
-                log() << "replSet warning DIAG 2 primary" << s << rsLog;
-                return;
+            {
+                bool two;
+                p2 = findOtherPrimary(two);
+                if( two ) {
+                    /* two other nodes think they are primary (asynchronously polled) -- wait for things to settle down. */
+                    log() << "replSet warning DIAG two primaries (transiently)" << rsLog;
+                    return;
+                }
             }
 
             if( p2 ) {
@@ -136,7 +148,7 @@ namespace mongo {
                     return;
                 }
 
-                if( !rs->elect.aMajoritySeemsToBeUp() ) { 
+                if( rs->elect.shouldRelinquish() ) { 
                     log() << "replSet can't see a majority of the set, relinquishing primary" << rsLog;
                     rs->relinquish();
                 }

@@ -62,7 +62,6 @@ namespace mongo {
     bool useCursors = true;
     bool useHints = true;
     
-    void closeAllSockets();
     void flushOpLog( stringstream &ss ) {
         if( _diaglog.f && _diaglog.f->is_open() ) {
             ss << "flushing op log and files\n";
@@ -332,9 +331,10 @@ namespace mongo {
                     }
                 }
                 catch ( AssertionException& e ) {
-                    tlog() << " Caught Assertion in " << opToString(op) << " , continuing" << endl;
+                    static int n;
+                    tlog(3) << " Caught Assertion in " << opToString(op) << ", continuing" << endl;
                     ss << " exception " + e.toString();
-                    log = true;
+                    log = ++n < 10;
                 }
             }
         }
@@ -446,6 +446,7 @@ namespace mongo {
 
         mongolock lk(1);
 
+        // if this ever moves to outside of lock, need to adjust check Client::Context::_finishInit
         if ( ! broadcast && handlePossibleShardedMessage( m , 0 ) )
             return;
 
@@ -472,8 +473,10 @@ namespace mongo {
         }        
 
         writelock lk(ns);
+        // if this ever moves to outside of lock, need to adjust check Client::Context::_finishInit
         if ( ! broadcast & handlePossibleShardedMessage( m , 0 ) )
             return;
+        
         Client::Context ctx(ns);
         
         long long n = deleteObjects(ns, pattern, justOne, true);
@@ -709,32 +712,32 @@ namespace mongo {
         }
         catch (...) { }
         
-        tryToOutputFatal( "dbexit: really exiting now\n" );
+        tryToOutputFatal( "dbexit: really exiting now" );
         if ( c ) c->shutdown();
         ::exit(rc);
     }
     
     void shutdown() {
 
-        log() << "\t shutdown: going to close listening sockets..." << endl;        
+        log() << "shutdown: going to close listening sockets..." << endl;        
         ListeningSockets::get()->closeAll();
 
-        log() << "\t shutdown: going to flush oplog..." << endl;
+        log() << "shutdown: going to flush oplog..." << endl;
         stringstream ss2;
         flushOpLog( ss2 );
         rawOut( ss2.str() );
 
         /* must do this before unmapping mem or you may get a seg fault */
-        log() << "\t shutdown: going to close sockets..." << endl;
-        boost::thread close_socket_thread(closeAllSockets);
+        log() << "shutdown: going to close sockets..." << endl;
+        boost::thread close_socket_thread( boost::bind(MessagingPort::closeAllSockets, 0) );
 
         // wait until file preallocation finishes
         // we would only hang here if the file_allocator code generates a
         // synchronous signal, which we don't expect
-        log() << "\t shutdown: waiting for fs preallocator..." << endl;
+        log() << "shutdown: waiting for fs preallocator..." << endl;
         theFileAllocator().waitUntilFinished();
         
-        log() << "\t shutdown: closing all files..." << endl;
+        log() << "shutdown: closing all files..." << endl;
         stringstream ss3;
         MemoryMappedFile::closeAllFiles( ss3 );
         rawOut( ss3.str() );
@@ -744,9 +747,9 @@ namespace mongo {
         
 #if !defined(_WIN32) && !defined(__sunos__)
         if ( lockFile ){
-            log() << "\t shutdown: removing fs lock..." << endl;
+            log() << "shutdown: removing fs lock..." << endl;
             if( ftruncate( lockFile , 0 ) ) 
-                log() << "\t couldn't remove fs lock " << errnoWithDescription() << endl;
+                log() << "couldn't remove fs lock " << errnoWithDescription() << endl;
             flock( lockFile, LOCK_UN );
         }
 #endif
@@ -766,12 +769,14 @@ namespace mongo {
 
         bool oldFile = false;
 
-        if ( boost::filesystem::exists( name ) && boost::filesystem::file_size( name ) > 0 ){
+        if ( boost::filesystem::exists( name ) && boost::filesystem::file_size( name ) > 0 ) {
             oldFile = true;
         }
 
         lockFile = open( name.c_str(), O_RDWR | O_CREAT , S_IRWXU | S_IRWXG | S_IRWXO );
-        uassert( 10309 ,  "Unable to create / open lock file for lockfilepath: " + name, lockFile > 0 );
+		if( lockFile <= 0 ) {
+		    uasserted( 10309 , str::stream() << "Unable to create / open lock file for lockfilepath: " << name << ' ' << errnoWithDescription());
+        }
         if (flock( lockFile, LOCK_EX | LOCK_NB ) != 0) {
             close ( lockFile );
             lockFile = 0;

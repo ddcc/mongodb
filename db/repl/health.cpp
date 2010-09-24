@@ -89,11 +89,13 @@ namespace mongo {
         }
         s << td(config().votes);
         { 
-            string stateText = ReplSet::stateAsStr(state());
+            string stateText = state().toString();
+            if( _config.hidden )
+                stateText += " (hidden)";
             if( ok || stateText.empty() ) 
                 s << td(stateText); // text blank if we've never connected
             else
-                s << td( grey(str::stream() << "(was " << ReplSet::stateAsStr(state()) << ')', true) );
+                s << td( grey(str::stream() << "(was " << state().toString() << ')', true) );
         }
         s << td( grey(hbinfo().lastHeartbeatMsg,!ok) );
         stringstream q;
@@ -105,28 +107,30 @@ namespace mongo {
             s << td("");
         s << _tr();
     }
-    
+   
     string ReplSetImpl::stateAsHtml(MemberState s) { 
         if( s.s == MemberState::RS_STARTUP ) return a("", "serving still starting up, or still trying to initiate the set", "STARTUP");
         if( s.s == MemberState::RS_PRIMARY ) return a("", "this server thinks it is primary", "PRIMARY");
         if( s.s == MemberState::RS_SECONDARY ) return a("", "this server thinks it is a secondary (slave mode)", "SECONDARY");
         if( s.s == MemberState::RS_RECOVERING ) return a("", "recovering/resyncing; after recovery usually auto-transitions to secondary", "RECOVERING");
-        if( s.s == MemberState::RS_FATAL ) return a("", "something bad has occurred and server is not completely offline with regard to the replica set.  fatal error.", "RS_FATAL");
-        if( s.s == MemberState::RS_STARTUP2 ) return a("", "loaded config, still determining who is primary", "RS_STARTUP2");
+        if( s.s == MemberState::RS_FATAL ) return a("", "something bad has occurred and server is not completely offline with regard to the replica set.  fatal error.", "FATAL");
+        if( s.s == MemberState::RS_STARTUP2 ) return a("", "loaded config, still determining who is primary", "STARTUP2");
         if( s.s == MemberState::RS_ARBITER ) return a("", "this server is an arbiter only", "ARBITER");
         if( s.s == MemberState::RS_DOWN ) return a("", "member is down, slow, or unreachable", "DOWN");
+        if( s.s == MemberState::RS_ROLLBACK ) return a("", "rolling back operations to get in sync", "ROLLBACK");
         return "";
     }
 
-    string ReplSetImpl::stateAsStr(MemberState s) { 
-        if( s.s == MemberState::RS_STARTUP ) return "STARTUP";
-        if( s.s == MemberState::RS_PRIMARY ) return "PRIMARY";
-        if( s.s == MemberState::RS_SECONDARY ) return "SECONDARY";
-        if( s.s == MemberState::RS_RECOVERING ) return "RECOVERING";
-        if( s.s == MemberState::RS_FATAL ) return "FATAL";
-        if( s.s == MemberState::RS_STARTUP2 ) return "STARTUP2";
-        if( s.s == MemberState::RS_ARBITER ) return "ARBITER";
-        if( s.s == MemberState::RS_DOWN ) return "DOWN";
+    string MemberState::toString() const { 
+        if( s == MemberState::RS_STARTUP ) return "STARTUP";
+        if( s == MemberState::RS_PRIMARY ) return "PRIMARY";
+        if( s == MemberState::RS_SECONDARY ) return "SECONDARY";
+        if( s == MemberState::RS_RECOVERING ) return "RECOVERING";
+        if( s == MemberState::RS_FATAL ) return "FATAL";
+        if( s == MemberState::RS_STARTUP2 ) return "STARTUP2";
+        if( s == MemberState::RS_ARBITER ) return "ARBITER";
+        if( s == MemberState::RS_DOWN ) return "DOWN";
+        if( s == MemberState::RS_ROLLBACK ) return "ROLLBACK";
         return "";
     }
 
@@ -302,7 +306,7 @@ namespace mongo {
                 td(ago(started)) << 
 	        td("") << // last heartbeat
                 td(ToString(_self->config().votes)) << 
-                td(stateAsHtml(box.getState()));
+                td( stateAsHtml(box.getState()) + (_self->config().hidden?" (hidden)":"") );
             s << td( _hbmsg );
             stringstream q;
             q << "/_replSetOplog?" << _self->id();

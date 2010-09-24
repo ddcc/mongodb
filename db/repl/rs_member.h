@@ -40,7 +40,8 @@ namespace mongo {
             RS_STARTUP2,
             RS_UNKNOWN, /* remote node not yet reached */
             RS_ARBITER,
-            RS_DOWN /* node not reachable for a report */
+            RS_DOWN, /* node not reachable for a report */
+            RS_ROLLBACK
         } s;
 
         MemberState(MS ms = RS_UNKNOWN) : s(ms) { }
@@ -51,6 +52,9 @@ namespace mongo {
         bool recovering() const { return s == RS_RECOVERING; }
         bool startup2() const { return s == RS_STARTUP2; }
         bool fatal() const { return s == RS_FATAL; }
+        bool rollback() const { return s == RS_ROLLBACK; }
+
+        string toString() const;
 
         bool operator==(const MemberState& r) const { return s == r.s; }
         bool operator!=(const MemberState& r) const { return s != r.s; }
@@ -61,26 +65,31 @@ namespace mongo {
     class HeartbeatInfo { 
         unsigned _id;
     public:
-        HeartbeatInfo() : _id(0xffffffff),skew(INT_MIN) { }
+        HeartbeatInfo() : _id(0xffffffff),hbstate(MemberState::RS_UNKNOWN),health(-1.0),downSince(0),skew(INT_MIN) { }
         HeartbeatInfo(unsigned id);
         bool up() const { return health > 0; }
         unsigned id() const { return _id; }
         MemberState hbstate;
         double health;
         time_t upSince;
+        long long downSince;
         time_t lastHeartbeat;
         string lastHeartbeatMsg;
         OpTime opTime;
         int skew;
+
+        long long timeDown() const; // ms
 
         /* true if changed in a way of interest to the repl set manager. */
         bool changed(const HeartbeatInfo& old) const;
     };
 
     inline HeartbeatInfo::HeartbeatInfo(unsigned id) : _id(id) { 
-          health = -1.0;
-          lastHeartbeat = upSince = 0; 
-          skew = INT_MIN;
+        hbstate = MemberState::RS_UNKNOWN;
+        health = -1.0;
+        downSince = 0;
+        lastHeartbeat = upSince = 0; 
+        skew = INT_MIN;
     }
 
     inline bool HeartbeatInfo::changed(const HeartbeatInfo& old) const { 

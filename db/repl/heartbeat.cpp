@@ -40,6 +40,13 @@ namespace mongo {
     // hacky
     string *discoveredSeed = 0;
 
+    long long HeartbeatInfo::timeDown() const {
+        if( up() ) return 0;
+        if( downSince == 0 ) 
+            return 0; // still waiting on first heartbeat
+        return jsTime() - downSince;
+    }
+
     /* { replSetHeartbeat : <setname> } */
     class CmdReplSetHeartbeat : public ReplSetCommand {
     public:
@@ -55,6 +62,14 @@ namespace mongo {
                 errmsg = "not running with --replSet";
                 return false;
             }
+
+            /* we want to keep heartbeat connections open when relinquishing primary.  tag them here. */
+            {
+                MessagingPort *mp = cc()._mp;
+                if( mp ) 
+                    mp->tag |= 1;
+            }
+
             if( cmdObj["pv"].Int() != 1 ) { 
                 errmsg = "incompatible replset protocol version";
                 return false;
@@ -91,7 +106,7 @@ namespace mongo {
             result.append("set", theReplSet->name());
             result.append("state", theReplSet->state().s);
             result.append("hbmsg", theReplSet->hbmsg());
-            result.append("time", (int) time(0));
+            result.append("time", (long long) time(0));
             result.appendDate("opTime", theReplSet->lastOpTimeWritten.asDate());
             int v = theReplSet->config().version;
             result.append("v", v);
@@ -196,7 +211,12 @@ namespace mongo {
 
             static time_t last = 0;
             time_t now = time(0);
-            if( mem.changed(old) || now-last>4 ) {
+            bool changed = mem.changed(old);
+            if( changed ) { 
+                if( old.hbstate != mem.hbstate ) 
+                    log() << "replSet " << h.toString() << ' ' << mem.hbstate.toString() << rsLog;
+            }
+            if( changed || now-last>4 ) {
                 last = now;
                 theReplSet->mgr->send( boost::bind(&Manager::msgCheckNewState, theReplSet->mgr) );
             }
@@ -205,8 +225,9 @@ namespace mongo {
     private:
         void down(HeartbeatInfo& mem, string msg) {
             mem.health = 0.0;
-            if( mem.upSince ) {
+            if( mem.upSince || mem.downSince == 0 ) {
                 mem.upSince = 0;
+                mem.downSince = jsTime();
                 log() << "replSet info " << h.toString() << " is now down (or slow to respond)" << rsLog;
             }
             mem.lastHeartbeatMsg = msg;

@@ -67,7 +67,6 @@ namespace mongo {
 #endif
 
     void setupSignals();
-    void closeAllSockets();
     void startReplSets(ReplSetCmdline*);
     void startReplication();
     void pairWith(const char *remoteEnd, const char *arb);
@@ -104,7 +103,7 @@ namespace mongo {
         virtual void accepted(MessagingPort *mp) {
 
             if ( ! connTicketHolder.tryAcquire() ){
-                log() << "connection refused because too many open connections: " << connTicketHolder.used() << endl;
+                log() << "connection refused because too many open connections: " << connTicketHolder.used() << " of " << connTicketHolder.outof() << endl;
                 // TODO: would be nice if we notified them...
                 mp->shutdown();
                 delete mp;
@@ -207,16 +206,14 @@ namespace mongo {
     void connThread( MessagingPort * inPort )
     {
         TicketHolderReleaser connTicketReleaser( &connTicketHolder );
-        Client::initThread("conn");
 
         /* todo: move to Client object */
         LastError *le = new LastError();
         lastError.reset(le);
 
+        inPort->_logLevel = 1;
         auto_ptr<MessagingPort> dbMsgPort( inPort );
-
-        dbMsgPort->_logLevel = 1;
-        Client& c = cc();
+        Client& c = Client::initThread("conn", inPort);
 
         try {
 
@@ -522,7 +519,7 @@ sendmore:
             l << ( is32bit ? " 32" : " 64" ) << "-bit " << endl;
         }
         DEV log() << "_DEBUG build (which is slower)" << endl;
-        show_32_warning();
+        show_warnings();
         log() << mongodVersion() << endl;
         printGitVersion();
         printSysInfo();
@@ -629,7 +626,7 @@ using namespace mongo;
 namespace po = boost::program_options;
 
 void show_help_text(po::options_description options) {
-    show_32_warning();
+    show_warnings();
     cout << options << endl;
 };
 
@@ -1110,9 +1107,6 @@ int main(int argc, char* argv[], char *envp[] )
 }
 
 namespace mongo {
-
-    /* we do not use log() below as it uses a mutex and that could cause deadlocks.
-    */
 
     string getDbContext();
 
