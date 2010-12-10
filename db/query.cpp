@@ -320,7 +320,6 @@ namespace mongo {
 
             while ( 1 ) {
                 if ( !c->ok() ) {
-//                    log() << "TEMP Tailable : " << c->tailable() << ' ' << (queryOptions & QueryOption_AwaitData) << endl;
                     if ( c->tailable() ) {
                         /* when a tailable cursor hits "EOF", ok() goes false, and current() is null.  however 
                            advance() can still be retries as a reactivation attempt.  when there is new data, it will 
@@ -787,8 +786,10 @@ namespace mongo {
             if ( _pq.isExplain()) {
                 _eb.noteScan( _c.get(), _nscanned, _nscannedObjects, _n, scanAndOrderRequired(), _curop.elapsedMillis(), useHints && !_pq.getHint().eoo() );
             } else {
-                _response.appendData( _buf.buf(), _buf.len() );
-                _buf.decouple();
+                if (_buf.len()) {
+                    _response.appendData( _buf.buf(), _buf.len() );
+                    _buf.decouple();
+                }
             }
             if ( stop ) {
                 setStop();
