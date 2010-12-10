@@ -1,3 +1,10 @@
+mongodb (1:1.6.5-1) unstable; urgency=low
+
+  * Upstream 1.6.5
+    http://jira.mongodb.org/browse/SERVER/fixforversion/10207
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Fri, 10 Dec 2010 13:10:04 +0100
+
 mongodb (1:1.6.3-1) unstable; urgency=low
 
   * [0ad0c09] Imported Upstream version 1.6.3
