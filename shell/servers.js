@@ -457,13 +457,15 @@ printShardingStatus = function( configDB ){
             if (db.partitioned){
                 configDB.collections.find( { _id : new RegExp( "^" + db._id + "\." ) } ).sort( { _id : 1 } ).forEach(
                     function( coll ){
-                        output("\t\t" + coll._id + " chunks:");
-                        configDB.chunks.find( { "ns" : coll._id } ).sort( { min : 1 } ).forEach( 
-                            function(chunk){
-                                output( "\t\t\t" + tojson( chunk.min ) + " -->> " + tojson( chunk.max ) + 
-                                        " on : " + chunk.shard + " " + tojson( chunk.lastmod ) );
-                            }
-                        );
+                        if ( coll.dropped == false ){
+                            output("\t\t" + coll._id + " chunks:");
+                            configDB.chunks.find( { "ns" : coll._id } ).sort( { min : 1 } ).forEach( 
+                                function(chunk){
+                                    output( "\t\t\t" + tojson( chunk.min ) + " -->> " + tojson( chunk.max ) + 
+                                            " on : " + chunk.shard + " " + tojson( chunk.lastmod ) );
+                                }
+                            );
+                        }
                     }
                 )
             }
@@ -1314,7 +1316,7 @@ ReplSetTest.prototype.awaitReplication = function() {
                var entry = log.find({}).sort({'$natural': -1}).limit(1).next();
                printjson( entry );
                var ts = entry['ts'];
-               print("TS for " + slave + " is " + ts + " and latest is " + latest);
+               print("TS for " + slave + " is " + ts.t + " and latest is " + latest.t);
                print("Oplog size for " + slave + " is " + log.count());
                synced = (synced && friendlyEqual(latest,ts))
              }

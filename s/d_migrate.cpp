@@ -49,9 +49,11 @@ namespace mongo {
 
     class MoveTimingHelper {
     public:
-        MoveTimingHelper( const string& where , const string& ns )
+        MoveTimingHelper( const string& where , const string& ns , BSONObj min , BSONObj max )
             : _where( where ) , _ns( ns ){
             _next = 1;
+            _b.append( "min" , min );
+            _b.append( "max" , max );
         }
 
         ~MoveTimingHelper(){
@@ -100,9 +102,11 @@ namespace mongo {
             log() << "moveChunk deleted: " << num << endl;
         }
     };
+
+    static const char * const cleanUpThreadName = "cleanupOldData";
     
     void _cleanupOldData( OldDataCleanup cleanup ){
-        Client::initThread( "cleanupOldData");
+        Client::initThread( cleanUpThreadName );
         log() << " (start) waiting to cleanup " << cleanup.ns << " from " << cleanup.min << " -> " << cleanup.max << "  # cursors:" << cleanup.initial.size() << endl;
 
         int loops = 0;
@@ -240,6 +244,14 @@ namespace mongo {
             switch ( opstr[0] ){
                 
             case 'd': {
+                
+                if ( getThreadName() == cleanUpThreadName ){
+                    // we don't want to xfer things we're cleaning
+                    // as then they'll be deleted on TO
+                    // which is bad
+                    return;
+                }
+                
                 // can't filter deletes :(
                 scoped_lock lk( _mutex );
                 _deleted.push_back( ide.wrap() );
@@ -267,7 +279,7 @@ namespace mongo {
         }
 
         void xfer( list<BSONObj> * l , BSONObjBuilder& b , const char * name , long long& size , bool explode ){
-            static long long maxSize = 1024 * 1024;
+            const long long maxSize = 1024 * 1024;
             
             if ( l->size() == 0 || size > maxSize )
                 return;
@@ -437,7 +449,7 @@ namespace mongo {
                 configServer.init( configdb );
             }
 
-            MoveTimingHelper timing( "from" , ns );
+            MoveTimingHelper timing( "from" , ns , min , max );
 
             Shard fromShard( from );
             Shard toShard( to );
@@ -702,12 +714,12 @@ namespace mongo {
         }
         
         void _go(){
-            MoveTimingHelper timing( "to" , ns );
-            
             assert( active );
             assert( state == READY );
             assert( ! min.isEmpty() );
             assert( ! max.isEmpty() );
+            
+            MoveTimingHelper timing( "to" , ns , min , max );
             
             ScopedDbConnection conn( from );
             conn->getLastError(); // just test connection
@@ -841,6 +853,17 @@ namespace mongo {
                 BSONObjIterator i( xfer["deleted"].Obj() );
                 while ( i.more() ){
                     BSONObj id = i.next().Obj();
+
+                    // do not apply deletes if they do not belong to the chunk being migrated
+                    BSONObj fullObj;
+                    if ( Helpers::findById( cc() , ns.c_str() , id, fullObj ) ) {
+                        if ( ! isInRange( fullObj , min , max ) ) {
+                            log() << "not applying out of range deletion: " << fullObj << endl;
+
+                            continue;
+                        }
+                    }
+
                     Helpers::removeRange( ns , id , id, false , true , cmdLine.moveParanoia ? &rs : 0 );
                     didAnything = true;
                 }
