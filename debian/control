@@ -3,7 +3,7 @@ Section: database
 Priority: optional
 Maintainer: Antonin Kral <A.Kral@sh.cvut.cz>
 Uploaders: Roberto C. Sanchez <roberto@connexer.com>
-Build-Depends: debhelper (>= 7), libpcre3, libpcre3-dev, scons, xulrunner-dev (>= 1.9) | xulrunner-1.9-dev | xulrunner-1.9.1-dev, libreadline-dev, libboost1.42-dev | libboost1.40-dev | libboost1.35-dev | libboost1.37-dev | libboost1.38-dev, libboost-thread1.42-dev | libboost-thread1.40-dev | libboost-thread1.38-dev | libboost-thread1.37-dev | libboost-thread1.35-dev, libboost-filesystem1.42-dev | libboost-filesystem1.40-dev | libboost-filesystem1.38-dev | libboost-filesystem1.37-dev | libboost-filesystem1.35-dev, libboost-program-options1.42-dev | libboost-program-options1.40-dev | libboost-program-options1.38-dev | libboost-program-options1.37-dev | libboost-program-options1.35-dev, libboost-date-time1.42-dev | libboost-date-time1.40-dev | libboost-date-time1.38-dev | libboost-date-time1.37-dev | libboost-date-time1.35-dev
+Build-Depends: debhelper (>= 7), libpcre3, libpcre3-dev, scons, xulrunner-dev (>= 1.9) | xulrunner-1.9-dev | xulrunner-1.9.1-dev, libreadline-dev, libboost-dev, libboost-thread-dev, libboost-filesystem-dev, libboost-program-options-dev, libboost-date-time-dev
 Standards-Version: 3.9.1
 Homepage: http://www.mongodb.org
 
@@ -79,7 +79,7 @@ Description: An object/document-oriented database (client apps)
 Package: mongodb-dev
 Section: libdevel
 Architecture: i386 amd64
-Depends: mongodb-server, ${shlibs:Depends}, ${misc:Depends}
+Depends: mongodb-server, libboost-dev, ${shlibs:Depends}, ${misc:Depends}
 Description: An object/document-oriented database (development)
  MongoDB is a high-performance, open source, schema-free 
  document-oriented  data store that's easy to deploy, manage
