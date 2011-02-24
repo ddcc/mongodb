@@ -19,3 +19,6 @@ DEB_SCONS_CHECK_TARGET = --smokedbprefix=$(CURDIR)/debian/tmp-test smoke
 
 clean::
 	find . -name "*.pyc" -delete
+	rm -f buildinfo.cpp
+	rm -rf debian/tmp-test
+
