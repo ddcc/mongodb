@@ -17,3 +17,5 @@ endif
 DEB_SCONS_INSTALL_OPTIONS += --prefix=$(CURDIR)/debian/tmp/usr --full
 DEB_SCONS_CHECK_TARGET = --smokedbprefix=$(CURDIR)/debian/tmp-test smoke
 
+clean::
+	find . -name "*.pyc" -delete
