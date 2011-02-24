@@ -7,3 +7,10 @@ mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongofiles /usr/lib/xul
 mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongoimport /usr/lib/xulrunner-1.9.1
 mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongorestore /usr/lib/xulrunner-1.9.1
 mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongostat /usr/lib/xulrunner-1.9.1
+mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongo /usr/lib64/xulrunner-1.9.1
+mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongodump /usr/lib64/xulrunner-1.9.1
+mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongoexport /usr/lib64/xulrunner-1.9.1
+mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongofiles /usr/lib64/xulrunner-1.9.1
+mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongoimport /usr/lib64/xulrunner-1.9.1
+mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongorestore /usr/lib64/xulrunner-1.9.1
+mongodb-clients: binary-or-shlib-defines-rpath ./usr/bin/mongostat /usr/lib64/xulrunner-1.9.1
