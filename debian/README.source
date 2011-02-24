@@ -1,0 +1,13 @@
+gbp
+===
+
+Use of git-import-orig is highly encouraged.
+
+
+debian/gbp.conf
+===============
+
+debian/* files from upstream tarball are filtered out because the merge is really
+difficult to maintain.
+It is up to the maintainer to check manually for upstream changes in debian dir,
+especially man pages.

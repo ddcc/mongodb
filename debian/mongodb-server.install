@@ -1,6 +1,3 @@
-etc
+debian/mongodb.conf etc
 usr/bin/mongod
 usr/bin/mongos
-usr/share/lintian/overrides/mongodb-server
-usr/share/man/man1/mongod.1
-usr/share/man/man1/mongos.1
