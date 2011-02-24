@@ -1,9 +1,14 @@
 mongodb (1:1.6.5-3) unstable; urgency=low
 
+  [ Jérémy Lal ]
   * Switch to cdbs, cleanup.
   * Use debian/gbp.conf to filter out debian/* files from upstream tarball.
 
- -- Jérémy Lal <kapouer@melix.org>  Thu, 24 Feb 2011 03:07:25 +0100
+  [ Antonin Kral ]
+  * [ab13e0b] added Vcs-* to debian/control
+  * [eb35fc8] added Jeremy as co-maintainer
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 24 Feb 2011 08:36:10 +0100
 
 mongodb (1:1.6.5-2) unstable; urgency=low
 
