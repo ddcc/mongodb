@@ -1,0 +1,16 @@
+Description: Install libs to /usr/lib, not /usr/lib64
+ Closes: #588557
+Forwarded: not-needed
+Author: Antonin Kral <A.Kral@sh.cvut.cz>
+Last-Update: 2010-08-11
+--- a/SConstruct
++++ b/SConstruct
+@@ -553,7 +553,7 @@
+ 
+     if os.uname()[4] == "x86_64" and not force32:
+         linux64 = True
+-        nixLibPrefix = "lib64"
++        nixLibPrefix = "lib"
+         env.Append( LIBPATH=["/usr/lib64" , "/lib64" ] )
+         env.Append( LIBS=["pthread"] )
+ 
