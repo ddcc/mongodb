@@ -1,3 +1,10 @@
+mongodb (1:1.8.0-1) unstable; urgency=low
+
+  * Upstream 1.8.0
+    http://blog.mongodb.org/post/3903149313/mongodb-1-8-released
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 17 Mar 2011 00:10:27 +0100
+
 mongodb (1:1.6.5-3) unstable; urgency=low
 
   [ Jérémy Lal ]
