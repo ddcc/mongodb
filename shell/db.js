@@ -12,9 +12,11 @@ DB.prototype.getMongo = function(){
     return this._mongo;
 }
 
-DB.prototype.getSisterDB = function( name ){
+DB.prototype.getSiblingDB = function( name ){
     return this.getMongo().getDB( name );
 }
+
+DB.prototype.getSisterDB = DB.prototype.getSiblingDB;
 
 DB.prototype.getName = function(){
     return this._name;
@@ -32,7 +34,10 @@ DB.prototype.commandHelp = function( name ){
     var c = {};
     c[name] = 1;
     c.help = true;
-    return this.runCommand( c ).help;
+    var res = this.runCommand( c );
+    if ( ! res.ok )
+        throw res.errmsg;
+    return res.help;
 }
 
 DB.prototype.runCommand = function( obj ){
@@ -46,11 +51,13 @@ DB.prototype.runCommand = function( obj ){
 
 DB.prototype._dbCommand = DB.prototype.runCommand;
 
-DB.prototype._adminCommand = function( obj ){
+DB.prototype.adminCommand = function( obj ){
     if ( this._name == "admin" )
         return this.runCommand( obj );
-    return this.getSisterDB( "admin" ).runCommand( obj );
+    return this.getSiblingDB( "admin" ).runCommand( obj );
 }
+
+DB.prototype._adminCommand = DB.prototype.adminCommand; // alias old name
 
 DB.prototype.addUser = function( username , pass, readOnly ){
     readOnly = readOnly || false;
@@ -122,12 +129,26 @@ DB.prototype.createCollection = function(name, opt) {
 }
 
 /**
+ * @deprecated use getProfilingStatus
  *  Returns the current profiling level of this database
  *  @return SOMETHING_FIXME or null on error
  */
- DB.prototype.getProfilingLevel  = function() { 
+DB.prototype.getProfilingLevel  = function() { 
     var res = this._dbCommand( { profile: -1 } );
     return res ? res.was : null;
+}
+
+/**
+ *  @return the current profiling status
+ *  example { was : 0, slowms : 100 }
+ *  @return SOMETHING_FIXME or null on error
+ */
+DB.prototype.getProfilingStatus  = function() { 
+    var res = this._dbCommand( { profile: -1 } );
+    if ( ! res.ok )
+        throw "profile command failed: " + tojson( res );
+    delete res.ok
+    return res;
 }
 
 
@@ -270,9 +291,10 @@ DB.prototype.help = function() {
     print("\tdb.getMongo().setSlaveOk() allow this connection to read from the nonmaster member of a replica pair");
     print("\tdb.getName()");
     print("\tdb.getPrevError()");
-    print("\tdb.getProfilingLevel()");
+    print("\tdb.getProfilingLevel() - deprecated");
+    print("\tdb.getProfilingStatus() - returns if profiling is on and slow threshold ");
     print("\tdb.getReplicationInfo()");
-    print("\tdb.getSisterDB(name) get the db at the same server as this one");
+    print("\tdb.getSiblingDB(name) get the db at the same server as this one");
     print("\tdb.isMaster() check replica primary status");
     print("\tdb.killOp(opid) kills the current operation in the db");
     print("\tdb.listCommands() lists all the db commands");
@@ -538,8 +560,15 @@ DB.prototype.toString = function(){
 
 DB.prototype.isMaster = function () { return this.runCommand("isMaster"); }
 
-DB.prototype.currentOp = function(){
-    return db.$cmd.sys.inprog.findOne();
+DB.prototype.currentOp = function( arg ){
+    var q = {}
+    if ( arg ) {
+        if ( typeof( arg ) == "object" )
+            Object.extend( q , arg );
+        else if ( arg )
+            q["$all"] = true;
+    }
+    return db.$cmd.sys.inprog.findOne( q );
 }
 DB.prototype.currentOP = DB.prototype.currentOp;
 
@@ -574,22 +603,38 @@ DB.tsToSeconds = function(x){
   *                          of date than that, it can't recover without a complete resync
 */
 DB.prototype.getReplicationInfo = function() { 
-    var db = this.getSisterDB("local");
+    var db = this.getSiblingDB("local");
 
     var result = { };
-    var ol = db.system.namespaces.findOne({name:"local.oplog.$main"});
-    if( ol && ol.options ) {
-	result.logSizeMB = ol.options.size / 1000 / 1000;
-    } else {
-	result.errmsg  = "local.oplog.$main, or its options, not found in system.namespaces collection (not --master?)";
-	return result;
+    var oplog;
+    if (db.system.namespaces.findOne({name:"local.oplog.rs"}) != null) {
+        oplog = 'oplog.rs';
     }
+    else if (db.system.namespaces.findOne({name:"local.oplog.$main"}) != null) {
+        oplog = 'oplog.$main';
+    }
+    else {
+        result.errmsg = "neither master/slave nor replica set replication detected";
+        return result;
+    }
+    
+    var ol_entry = db.system.namespaces.findOne({name:"local."+oplog});
+    if( ol_entry && ol_entry.options ) {
+	result.logSizeMB = ol_entry.options.size / ( 1024 * 1024 );
+    } else {
+        result.errmsg  = "local."+oplog+", or its options, not found in system.namespaces collection";
+        return result;
+    }
+    ol = db.getCollection(oplog);
 
-    var firstc = db.oplog.$main.find().sort({$natural:1}).limit(1);
-    var lastc = db.oplog.$main.find().sort({$natural:-1}).limit(1);
+    result.usedMB = ol.stats().size / ( 1024 * 1024 );
+    result.usedMB = Math.ceil( result.usedMB * 100 ) / 100;
+    
+    var firstc = ol.find().sort({$natural:1}).limit(1);
+    var lastc = ol.find().sort({$natural:-1}).limit(1);
     if( !firstc.hasNext() || !lastc.hasNext() ) { 
 	result.errmsg = "objects not found in local.oplog.$main -- is this a new and empty db instance?";
-	result.oplogMainRowCount = db.oplog.$main.count();
+	result.oplogMainRowCount = ol.count();
 	return result;
     }
 
@@ -614,7 +659,8 @@ DB.prototype.getReplicationInfo = function() {
     }
 
     return result;
-}
+};
+
 DB.prototype.printReplicationInfo = function() {
     var result = this.getReplicationInfo();
     if( result.errmsg ) { 
@@ -629,27 +675,53 @@ DB.prototype.printReplicationInfo = function() {
 }
 
 DB.prototype.printSlaveReplicationInfo = function() {
+    function getReplLag(st) {
+        var now = new Date();
+        print("\t syncedTo: " + st.toString() );
+        var ago = (now-st)/1000;
+        var hrs = Math.round(ago/36)/100;
+        print("\t\t = " + Math.round(ago) + "secs ago (" + hrs + "hrs)"); 
+    };
+    
     function g(x) {
         assert( x , "how could this be null (printSlaveReplicationInfo gx)" )
         print("source:   " + x.host);
         if ( x.syncedTo ){
             var st = new Date( DB.tsToSeconds( x.syncedTo ) * 1000 );
-            var now = new Date();
-            print("\t syncedTo: " + st.toString() );
-            var ago = (now-st)/1000;
-            var hrs = Math.round(ago/36)/100;
-            print("\t\t = " + Math.round(ago) + "secs ago (" + hrs + "hrs)"); 
+            getReplLag(st);
         }
         else {
             print( "\t doing initial sync" );
         }
+    };
+
+    function r(x) {
+        assert( x , "how could this be null (printSlaveReplicationInfo rx)" );
+        if ( x.state == 1 ) {
+            return;
+        }
+        
+        print("source:   " + x.name);
+        if ( x.optime ) {
+            getReplLag(x.optimeDate);
+        }
+        else {
+            print( "\t no replication info, yet.  State: " + x.stateStr );
+        }
+    };
+    
+    var L = this.getSiblingDB("local");
+    if( L.sources.count() != 0 ) { 
+        L.sources.find().forEach(g);
     }
-    var L = this.getSisterDB("local");
-    if( L.sources.count() == 0 ) { 
+    else if (L.system.replset.count() != 0) {
+        var status = this.adminCommand({'replSetGetStatus' : 1});
+        status.members.forEach(r);
+    }
+    else {
         print("local.sources is empty; is this db a --slave?");
         return;
     }
-    L.sources.find().forEach(g);
 }
 
 DB.prototype.serverBuildInfo = function(){
@@ -666,6 +738,10 @@ DB.prototype.serverCmdLineOpts = function(){
 
 DB.prototype.version = function(){
     return this.serverBuildInfo().version;
+}
+
+DB.prototype.serverBits = function(){
+    return this.serverBuildInfo().bits;
 }
 
 DB.prototype.listCommands = function(){
@@ -693,6 +769,16 @@ DB.prototype.listCommands = function(){
     }
 }
 
-DB.prototype.printShardingStatus = function(){
-    printShardingStatus( this.getSisterDB( "config" ) );
+DB.prototype.printShardingStatus = function( verbose ){
+    printShardingStatus( this.getSiblingDB( "config" ) , verbose );
+}
+
+DB.autocomplete = function(obj){
+    var colls = obj.getCollectionNames();
+    var ret=[];
+    for (var i=0; i<colls.length; i++){
+        if (colls[i].match(/^[a-zA-Z0-9_.\$]+$/))
+            ret.push(colls[i]);
+    }
+    return ret;
 }

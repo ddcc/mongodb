@@ -50,34 +50,25 @@ namespace mongo {
        _ response size limit from runquery; push it up a bit.
     */
 
-    inline void fillQueryResultFromObj(BufBuilder& bb, FieldMatcher *filter, BSONObj& js, DiskLoc* loc=NULL) {
+    inline void fillQueryResultFromObj(BufBuilder& bb, Projection *filter, const BSONObj& js, DiskLoc* loc=NULL) {
         if ( filter ) {
             BSONObjBuilder b( bb );
-            BSONObjIterator i( js );
-            while ( i.more() ){
-                BSONElement e = i.next();
-                const char * fname = e.fieldName();
-                
-                if ( strcmp( fname , "_id" ) == 0 ){
-                    if (filter->includeID())
-                        b.append( e );
-                } else {
-                    filter->append( b , e );
-                }
-            }
+            filter->transform( js , b );
             if (loc)
                 b.append("$diskLoc", loc->toBSONObj());
             b.done();
-        } else if (loc) {
+        }
+        else if (loc) {
             BSONObjBuilder b( bb );
             b.appendElements(js);
             b.append("$diskLoc", loc->toBSONObj());
             b.done();
-        } else {
+        }
+        else {
             bb.appendBuf((void*) js.objdata(), js.objsize());
         }
     }
-    
+
     typedef multimap<BSONObj,BSONObj,BSONObjCmp> BestMap;
     class ScanAndOrder {
         BestMap best; // key -> full object
@@ -87,9 +78,10 @@ namespace mongo {
         unsigned approxSize;
 
         void _add(BSONObj& k, BSONObj o, DiskLoc* loc) {
-            if (!loc){
+            if (!loc) {
                 best.insert(make_pair(k.getOwned(),o.getOwned()));
-            } else {
+            }
+            else {
                 BSONObjBuilder b;
                 b.appendElements(o);
                 b.append("$diskLoc", loc->toBSONObj());
@@ -110,8 +102,8 @@ namespace mongo {
 
     public:
         ScanAndOrder(int _startFrom, int _limit, BSONObj _order) :
-                best( BSONObjCmp( _order ) ),
-                startFrom(_startFrom), order(_order) {
+            best( BSONObjCmp( _order ) ),
+            startFrom(_startFrom), order(_order) {
             limit = _limit > 0 ? _limit + startFrom : 0x7fffffff;
             approxSize = 0;
         }
@@ -140,7 +132,7 @@ namespace mongo {
             _addIfBetter(k, o, i, loc);
         }
 
-        void _fill(BufBuilder& b, FieldMatcher *filter, int& nout, BestMap::iterator begin, BestMap::iterator end) {
+        void _fill(BufBuilder& b, Projection *filter, int& nout, BestMap::iterator begin, BestMap::iterator end) {
             int n = 0;
             int nFilled = 0;
             for ( BestMap::iterator i = begin; i != end; i++ ) {
@@ -158,7 +150,7 @@ namespace mongo {
         }
 
         /* scanning complete. stick the query result in b for n objects. */
-        void fill(BufBuilder& b, FieldMatcher *filter, int& nout) {
+        void fill(BufBuilder& b, Projection *filter, int& nout) {
             _fill(b, filter, nout, best.begin(), best.end());
         }
 

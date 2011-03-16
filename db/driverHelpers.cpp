@@ -24,11 +24,11 @@
 #include "pch.h"
 #include "jsobj.h"
 #include "pdfile.h"
-#include "namespace.h"
+#include "namespace-inl.h"
 #include "commands.h"
 #include "cmdline.h"
 #include "btree.h"
-#include "curop.h"
+#include "curop-inl.h"
 #include "../util/background.h"
 #include "../scripting/engine.h"
 
@@ -36,18 +36,18 @@ namespace mongo {
 
     class BasicDriverHelper : public Command {
     public:
-        BasicDriverHelper( const char * name ) : Command( name ){}
-        
+        BasicDriverHelper( const char * name ) : Command( name ) {}
+
         virtual LockType locktype() const { return NONE; }
         virtual bool slaveOk() const { return true; }
-        virtual bool slaveOverrideOk(){ return true; }        
+        virtual bool slaveOverrideOk() { return true; }
     };
 
     class ObjectIdTest : public BasicDriverHelper {
     public:
-        ObjectIdTest() : BasicDriverHelper( "driverOIDTest" ){}
-        virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl){
-            if ( cmdObj.firstElement().type() != jstOID ){
+        ObjectIdTest() : BasicDriverHelper( "driverOIDTest" ) {}
+        virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+            if ( cmdObj.firstElement().type() != jstOID ) {
                 errmsg = "not oid";
                 return false;
             }

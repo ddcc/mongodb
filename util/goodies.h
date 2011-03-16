@@ -1,5 +1,5 @@
 // @file goodies.h
-// miscellaneous junk
+// miscellaneous
 
 /*    Copyright 2009 10gen Inc.
  *
@@ -23,11 +23,18 @@
 
 namespace mongo {
 
-    void setThreadName(const char * name);
+    /* @return a dump of the buffer as hex byte ascii output */
+    string hexdump(const char *data, unsigned len);
+
+    /**
+     * @return if this name has an increasing counter associated, return the value
+     *         otherwise 0
+     */
+    unsigned setThreadName(const char * name);
     string getThreadName();
-    
+
     template<class T>
-    inline string ToString(const T& t) { 
+    inline string ToString(const T& t) {
         stringstream s;
         s << t;
         return s.str();
@@ -49,17 +56,16 @@ namespace mongo {
     /* use "addr2line -CFe <exe>" to parse. */
     inline void printStackTrace( ostream &o = cout ) {
         void *b[20];
-        size_t size;
-        char **strings;
-        size_t i;
 
-        size = backtrace(b, 20);
-        strings = backtrace_symbols(b, size);
-
-        for (i = 0; i < size; i++)
+        int size = backtrace(b, 20);
+        for (int i = 0; i < size; i++)
             o << hex << b[i] << dec << ' ';
-        o << '\n';
-        for (i = 0; i < size; i++)
+        o << endl;
+
+        char **strings;
+
+        strings = backtrace_symbols(b, size);
+        for (int i = 0; i < size; i++)
             o << ' ' << strings[i] << '\n';
         o.flush();
         free (strings);
@@ -67,23 +73,6 @@ namespace mongo {
 #else
     inline void printStackTrace( ostream &o = cout ) { }
 #endif
-
-    /* set to TRUE if we are exiting */
-    extern bool goingAway;
-
-    /* find the multimap member which matches a particular key and value.
-
-       note this can be slow if there are a lot with the same key.
-    */
-    template<class C,class K,class V> inline typename C::iterator kv_find(C& c, const K& k,const V& v) {
-        pair<typename C::iterator,typename C::iterator> p = c.equal_range(k);
-
-        for ( typename C::iterator it=p.first; it!=p.second; ++it)
-            if ( it->second == v )
-                return it;
-
-        return c.end();
-    }
 
     bool isPrime(int n);
     int nextPrime(int n);
@@ -109,7 +98,8 @@ namespace mongo {
                 cout << endl;
                 len -= 16;
             }
-        } catch (...) {
+        }
+        catch (...) {
         }
     }
 
@@ -147,173 +137,15 @@ namespace mongo {
         }
     };
 
-    inline void time_t_to_Struct(time_t t, struct tm * buf , bool local = false ) {
-#if defined(_WIN32)
-        if ( local )
-            localtime_s( buf , &t );
-        else
-            gmtime_s(buf, &t);
-#else
-        if ( local )
-            localtime_r(&t, buf);
-        else
-            gmtime_r(&t, buf);
-#endif
-    }
-
-    // uses ISO 8601 dates without trailing Z
-    // colonsOk should be false when creating filenames
-    inline string terseCurrentTime(bool colonsOk=true){
-        struct tm t;
-        time_t_to_Struct( time(0) , &t );
-
-        const char* fmt = (colonsOk ? "%Y-%m-%dT%H:%M:%S" : "%Y-%m-%dT%H-%M-%S");
-        char buf[32];
-        assert(strftime(buf, sizeof(buf), fmt, &t) == 19);
-        return buf;
-    }
-
-#define MONGO_asctime _asctime_not_threadsafe_
-#define asctime MONGO_asctime
-#define MONGO_gmtime _gmtime_not_threadsafe_
-#define gmtime MONGO_gmtime
-#define MONGO_localtime _localtime_not_threadsafe_
-#define localtime MONGO_localtime
-#define MONGO_ctime _ctime_is_not_threadsafe_
-#define ctime MONGO_ctime
-
-#if defined(_WIN32) || defined(__sunos__)
-    inline void sleepsecs(int s) {
-        boost::xtime xt;
-        boost::xtime_get(&xt, boost::TIME_UTC);
-        xt.sec += s;
-        boost::thread::sleep(xt);
-    }
-    inline void sleepmillis(long long s) {
-        boost::xtime xt;
-        boost::xtime_get(&xt, boost::TIME_UTC);
-        xt.sec += (int)( s / 1000 );
-        xt.nsec += (int)(( s % 1000 ) * 1000000);
-        if ( xt.nsec >= 1000000000 ) {
-            xt.nsec -= 1000000000;
-            xt.sec++;
-        }        
-        boost::thread::sleep(xt);
-    }
-    inline void sleepmicros(long long s) {
-        if ( s <= 0 )
-            return;
-        boost::xtime xt;
-        boost::xtime_get(&xt, boost::TIME_UTC);
-        xt.sec += (int)( s / 1000000 );
-        xt.nsec += (int)(( s % 1000000 ) * 1000);
-        if ( xt.nsec >= 1000000000 ) {
-            xt.nsec -= 1000000000;
-            xt.sec++;
-        }        
-        boost::thread::sleep(xt);
-    }
-#else
-    inline void sleepsecs(int s) {
-        struct timespec t;
-        t.tv_sec = s;
-        t.tv_nsec = 0;
-        if ( nanosleep( &t , 0 ) ){
-            cout << "nanosleep failed" << endl;
-        }
-    }
-    inline void sleepmicros(long long s) {
-        if ( s <= 0 )
-            return;
-        struct timespec t;
-        t.tv_sec = (int)(s / 1000000);
-        t.tv_nsec = 1000 * ( s % 1000000 );
-        struct timespec out;
-        if ( nanosleep( &t , &out ) ){
-            cout << "nanosleep failed" << endl;
-        }
-    }
-    inline void sleepmillis(long long s) {
-        sleepmicros( s * 1000 );
-    }
-#endif
-
-    // note this wraps
-    inline int tdiff(unsigned told, unsigned tnew) {
-        return WrappingInt::diff(tnew, told);
-    }
-    inline unsigned curTimeMillis() {
-        boost::xtime xt;
-        boost::xtime_get(&xt, boost::TIME_UTC);
-        unsigned t = xt.nsec / 1000000;
-        return (xt.sec & 0xfffff) * 1000 + t;
-    }
-
-    inline Date_t jsTime() {
-        boost::xtime xt;
-        boost::xtime_get(&xt, boost::TIME_UTC);
-        unsigned long long t = xt.nsec / 1000000;
-        return ((unsigned long long) xt.sec * 1000) + t;
-    }
-
-    inline unsigned long long curTimeMicros64() {
-        boost::xtime xt;
-        boost::xtime_get(&xt, boost::TIME_UTC);
-        unsigned long long t = xt.nsec / 1000;
-        return (((unsigned long long) xt.sec) * 1000000) + t;
-    }
-
-// measures up to 1024 seconds.  or, 512 seconds with tdiff that is...
-    inline unsigned curTimeMicros() {
-        boost::xtime xt;
-        boost::xtime_get(&xt, boost::TIME_UTC);
-        unsigned t = xt.nsec / 1000;
-        unsigned secs = xt.sec % 1024;
-        return secs*1000000 + t;
-    }
-    
-// simple scoped timer
-    class Timer {
-    public:
-        Timer() {
-            reset();
-        }
-        Timer( unsigned long long start ) {
-            old = start;
-        }
-        int seconds() const {
-            return (int)(micros() / 1000000);
-        }
-        int millis() const {
-            return (long)(micros() / 1000);
-        }
-        unsigned long long micros() const {
-            unsigned long long n = curTimeMicros64();
-            return n - old;
-        }
-        unsigned long long micros(unsigned long long & n) const { // returns cur time in addition to timer result
-            n = curTimeMicros64();
-            return n - old;
-        }
-        unsigned long long startTime(){
-            return old;
-        }
-        void reset() {
-            old = curTimeMicros64();
-        }
-    private:
-        unsigned long long old;
-    };
-
     /*
 
     class DebugMutex : boost::noncopyable {
-    	friend class lock;
-    	mongo::mutex m;
-    	int locked;
+        friend class lock;
+        mongo::mutex m;
+        int locked;
     public:
-    	DebugMutex() : locked(0); { }
-    	bool isLocked() { return locked; }
+        DebugMutex() : locked(0); { }
+        bool isLocked() { return locked; }
     };
 
     */
@@ -351,19 +183,20 @@ namespace mongo {
         return swapEndian(x);
     }
 #endif
-    
+
 #if !defined(_WIN32)
     typedef int HANDLE;
     inline void strcpy_s(char *dst, unsigned len, const char *src) {
+        assert( strlen(src) < len );
         strcpy(dst, src);
     }
 #else
     typedef void *HANDLE;
 #endif
-    
+
     /* thread local "value" rather than a pointer
        good for things which have copy constructors (and the copy constructor is fast enough)
-       e.g. 
+       e.g.
          ThreadLocalValue<int> myint;
     */
     template<class T>
@@ -371,7 +204,7 @@ namespace mongo {
     public:
         ThreadLocalValue( T def = 0 ) : _default( def ) { }
 
-        T get() {
+        T get() const {
             T * val = _val.get();
             if ( val )
                 return *val;
@@ -380,7 +213,7 @@ namespace mongo {
 
         void set( const T& i ) {
             T *v = _val.get();
-            if( v ) { 
+            if( v ) {
                 *v = i;
                 return;
             }
@@ -389,21 +222,21 @@ namespace mongo {
         }
 
     private:
-        T _default;
         boost::thread_specific_ptr<T> _val;
+        const T _default;
     };
 
     class ProgressMeter : boost::noncopyable {
     public:
-        ProgressMeter( long long total , int secondsBetween = 3 , int checkInterval = 100 ){
+        ProgressMeter( unsigned long long total , int secondsBetween = 3 , int checkInterval = 100 ) {
             reset( total , secondsBetween , checkInterval );
         }
 
-        ProgressMeter(){
+        ProgressMeter() {
             _active = 0;
         }
-        
-        void reset( long long total , int secondsBetween = 3 , int checkInterval = 100 ){
+
+        void reset( unsigned long long total , int secondsBetween = 3 , int checkInterval = 100 ) {
             _total = total;
             _secondsBetween = secondsBetween;
             _checkInterval = checkInterval;
@@ -415,29 +248,33 @@ namespace mongo {
             _active = 1;
         }
 
-        void finished(){
+        void finished() {
             _active = 0;
         }
 
-        bool isActive(){
+        bool isActive() {
             return _active;
         }
-        
-        bool hit( int n = 1 ){
-            if ( ! _active ){
+
+        /**
+         * @return if row was printed
+         */
+        bool hit( int n = 1 ) {
+            if ( ! _active ) {
                 cout << "warning: hit on in-active ProgressMeter" << endl;
+                return false;
             }
 
             _done += n;
             _hits++;
             if ( _hits % _checkInterval )
                 return false;
-            
+
             int t = (int) time(0);
             if ( t - _lastTime < _secondsBetween )
                 return false;
-            
-            if ( _total > 0 ){
+
+            if ( _total > 0 ) {
                 int per = (int)( ( (double)_done * 100.0 ) / (double)_total );
                 cout << "\t\t" << _done << "/" << _total << "\t" << per << "%" << endl;
             }
@@ -445,11 +282,11 @@ namespace mongo {
             return true;
         }
 
-        long long done(){
+        unsigned long long done() {
             return _done;
         }
-        
-        long long hits(){
+
+        unsigned long long hits() {
             return _hits;
         }
 
@@ -467,42 +304,42 @@ namespace mongo {
     private:
 
         bool _active;
-        
-        long long _total;
+
+        unsigned long long _total;
         int _secondsBetween;
         int _checkInterval;
 
-        long long _done;
-        long long _hits;
+        unsigned long long _done;
+        unsigned long long _hits;
         int _lastTime;
     };
 
     class ProgressMeterHolder : boost::noncopyable {
     public:
         ProgressMeterHolder( ProgressMeter& pm )
-            : _pm( pm ){
+            : _pm( pm ) {
         }
-        
-        ~ProgressMeterHolder(){
+
+        ~ProgressMeterHolder() {
             _pm.finished();
         }
 
-        ProgressMeter* operator->(){
+        ProgressMeter* operator->() {
             return &_pm;
         }
 
-        bool hit( int n = 1 ){
+        bool hit( int n = 1 ) {
             return _pm.hit( n );
         }
 
-        void finished(){
+        void finished() {
             _pm.finished();
         }
-        
-        bool operator==( const ProgressMeter& other ){
+
+        bool operator==( const ProgressMeter& other ) {
             return _pm == other;
         }
-        
+
     private:
         ProgressMeter& _pm;
     };
@@ -513,11 +350,11 @@ namespace mongo {
             _outof = num;
             _num = num;
         }
-        
-        bool tryAcquire(){
+
+        bool tryAcquire() {
             scoped_lock lk( _mutex );
-            if ( _num <= 0 ){
-                if ( _num < 0 ){
+            if ( _num <= 0 ) {
+                if ( _num < 0 ) {
                     cerr << "DISASTER! in TicketHolder" << endl;
                 }
                 return false;
@@ -525,20 +362,20 @@ namespace mongo {
             _num--;
             return true;
         }
-        
-        void release(){
+
+        void release() {
             scoped_lock lk( _mutex );
             _num++;
         }
 
-        void resize( int newSize ){
-            scoped_lock lk( _mutex );            
+        void resize( int newSize ) {
+            scoped_lock lk( _mutex );
             int used = _outof - _num;
-            if ( used > newSize ){
+            if ( used > newSize ) {
                 cout << "ERROR: can't resize since we're using (" << used << ") more than newSize(" << newSize << ")" << endl;
                 return;
             }
-            
+
             _outof = newSize;
             _num = _outof - used;
         }
@@ -561,11 +398,11 @@ namespace mongo {
 
     class TicketHolderReleaser {
     public:
-        TicketHolderReleaser( TicketHolder * holder ){
+        TicketHolderReleaser( TicketHolder * holder ) {
             _holder = holder;
         }
-        
-        ~TicketHolderReleaser(){
+
+        ~TicketHolderReleaser() {
             _holder->release();
         }
     private:
@@ -580,26 +417,26 @@ namespace mongo {
     class ThreadSafeString {
     public:
         ThreadSafeString( size_t size=256 )
-            : _size( 256 ) , _buf( new char[256] ){
+            : _size( 256 ) , _buf( new char[256] ) {
             memset( _buf , 0 , _size );
         }
 
         ThreadSafeString( const ThreadSafeString& other )
-            : _size( other._size ) , _buf( new char[_size] ){
+            : _size( other._size ) , _buf( new char[_size] ) {
             strncpy( _buf , other._buf , _size );
         }
 
-        ~ThreadSafeString(){
+        ~ThreadSafeString() {
             delete[] _buf;
             _buf = 0;
         }
-        
+
         string toString() const {
             string s = _buf;
             return s;
         }
 
-        ThreadSafeString& operator=( const char * str ){
+        ThreadSafeString& operator=( const char * str ) {
             size_t s = strlen(str);
             if ( s >= _size - 2 )
                 s = _size - 2;
@@ -607,7 +444,7 @@ namespace mongo {
             _buf[s] = 0;
             return *this;
         }
-        
+
         bool operator==( const ThreadSafeString& other ) const {
             return strcmp( _buf , other._buf ) == 0;
         }
@@ -626,7 +463,7 @@ namespace mongo {
 
     private:
         size_t _size;
-        char * _buf;  
+        char * _buf;
     };
 
     ostream& operator<<( ostream &s, const ThreadSafeString &o );
@@ -648,7 +485,7 @@ namespace mongo {
         }
         return x;
     }
-    
+
     // for convenience, '{' is greater than anything and stops number parsing
     inline int lexNumCmp( const char *s1, const char *s2 ) {
         //cout << "START : " << s1 << "\t" << s2 << endl;
@@ -661,10 +498,10 @@ namespace mongo {
                 return 1;
             if ( p2 && !p1 )
                 return -1;
-                
+
             bool n1 = isNumber( *s1 );
             bool n2 = isNumber( *s2 );
-        
+
             if ( n1 && n2 ) {
                 // get rid of leading 0s
                 while ( *s1 == '0' ) s1++;
@@ -678,8 +515,8 @@ namespace mongo {
                 while ( isNumber (*e1) ) e1++;
                 while ( isNumber (*e2) ) e2++;
 
-                int len1 = e1-s1;
-                int len2 = e2-s2;
+                int len1 = (int)(e1-s1);
+                int len2 = (int)(e2-s2);
 
                 int result;
                 // if one is longer than the other, return
@@ -698,24 +535,24 @@ namespace mongo {
                 s1 = e1;
                 s2 = e2;
                 continue;
-            } 
-        
-            if ( n1 ) 
+            }
+
+            if ( n1 )
                 return 1;
-        
-            if ( n2 ) 
+
+            if ( n2 )
                 return -1;
-        
+
             if ( *s1 > *s2 )
                 return 1;
-        
+
             if ( *s2 > *s1 )
                 return -1;
-        
+
             s1++; s2++;
         }
-    
-        if ( *s1 ) 
+
+        if ( *s1 )
             return 1;
         if ( *s2 )
             return -1;
@@ -729,8 +566,8 @@ namespace mongo {
      *  ptr<const T>  =>  T const *  or  const T*
      */
     template <typename T>
-    struct ptr{
-        
+    struct ptr {
+
         ptr() : _p(NULL) {}
 
         // convert to ptr<T>
@@ -740,7 +577,7 @@ namespace mongo {
         template<typename U> ptr(const boost::shared_ptr<U>& p) : _p(p.get()) {}
         template<typename U> ptr(const boost::scoped_ptr<U>& p) : _p(p.get()) {}
         //template<typename U> ptr(const auto_ptr<U>& p) : _p(p.get()) {}
-        
+
         // assign to ptr<T>
         ptr& operator= (T* p) { _p = p; return *this; } // needed for NULL
         template<typename U> ptr& operator= (U* p) { _p = p; return *this; }

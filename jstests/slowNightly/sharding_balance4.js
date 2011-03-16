@@ -1,6 +1,8 @@
 // sharding_balance4.js
 
-s = new ShardingTest( "slow_sharding_balance4" , 2 , 2 , 1 , { chunksize : 1 } )
+// check that doing updates done during a migrate all go to the right place
+
+s = new ShardingTest( "slow_sharding_balance4" , 2 , 1 , 1 , { chunksize : 1 } )
 
 s.adminCommand( { enablesharding : "test" } );
 s.adminCommand( { shardcollection : "test.foo" , key : { _id : 1 } } );
@@ -36,9 +38,8 @@ for ( i=0; i<N*10; i++ ){
 }
 db.getLastError();
 
-s.printChunks( "test.foo" )
-
-for ( var i=0; i<10; i++ ){
+for ( var i=0; i<50; i++ ){
+    s.printChunks( "test.foo" )
     if ( check( "initial:" + i , true ) )
         break;
     sleep( 5000 )
@@ -48,19 +49,6 @@ check( "initial at end" )
 
 assert.lt( 20 , s.config.chunks.count()  , "setup2" );
 
-function dist(){
-    var x = {}
-    s.config.chunks.find( { ns : "test.foo" } ).forEach(
-        function(z){
-            if ( x[z.shard] )
-                x[z.shard]++
-            else
-                x[z.shard] = 1;
-        }
-    );
-    return x;
-}
-
 function check( msg , dontAssert ){
     for ( var x in counts ){
         var e = counts[x];
@@ -69,9 +57,15 @@ function check( msg , dontAssert ){
         if ( z && z.x == e )
             continue;
         
-        if ( dontAssert )
+        if ( dontAssert ){
+            if ( z )
+                delete z.s;
+            print( "not asserting for key failure: " + x + " want: " + e + " got: " + tojson(z) )
             return false;
+        }
 
+        // we will assert past this point but wait a bit to see if it is because the missing update
+        // was being held in the writeback roundtrip
         sleep( 10000 );
         
         var y = db.foo.findOne( { _id : parseInt( x ) } )
@@ -79,6 +73,8 @@ function check( msg , dontAssert ){
         if ( y ){
             delete y.s;
         }
+
+        s.printChunks( "test.foo" )
         
         assert( z , "couldn't find : " + x + " y:" + tojson(y) + " e: " + e + " " + msg )
         assert.eq( e , z.x , "count for : " + x + " y:" + tojson(y) + " " + msg )
@@ -90,22 +86,27 @@ function check( msg , dontAssert ){
 function diff(){
     var myid = doUpdate( false )
     var le = db.getLastErrorCmd();
+
     if ( le.err )
         print( "ELIOT ELIOT : " + tojson( le ) + "\t" + myid );
 
+    assert( le.updatedExisting , "GLE diff 1: " + tojson(le) )
+    assert.eq( 1 , le.n , "GLE diff 2: " + tojson(le) )
+
+
     if ( Math.random() > .99 ){
         db.getLastError()
-        check(); // SERVER-1430  TODO
+        check( "random late check" ); // SERVER-1430 
     }
 
-    var x = dist();
+    var x = s.chunkCounts( "foo" )
     if ( Math.random() > .999 )
         printjson( x )
     return Math.max( x.shard0000 , x.shard0001 ) - Math.min( x.shard0000 , x.shard0001 );
 }
 
 function sum(){
-    var x = dist();
+    var x = s.chunkCounts( "foo" )
     return x.shard0000 + x.shard0001;
 }
 

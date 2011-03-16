@@ -31,29 +31,27 @@ namespace mongo {
     public:
         Top() : _lock("Top") { }
 
-        class UsageData {
-        public:
-            UsageData() : time(0) , count(0){}
+        struct UsageData {
+            UsageData() : time(0) , count(0) {}
             UsageData( const UsageData& older , const UsageData& newer );
             long long time;
             long long count;
 
-            void inc( long long micros ){
+            void inc( long long micros ) {
                 count++;
                 time += micros;
             }
         };
 
-        class CollectionData {
-        public:
+        struct CollectionData {
             /**
              * constructs a diff
              */
-            CollectionData(){}
+            CollectionData() {}
             CollectionData( const CollectionData& older , const CollectionData& newer );
-            
+
             UsageData total;
-            
+
             UsageData readLock;
             UsageData writeLock;
 
@@ -66,25 +64,23 @@ namespace mongo {
         };
 
         typedef map<string,CollectionData> UsageMap;
-        
+
     public:
         void record( const string& ns , int op , int lockType , long long micros , bool command );
         void append( BSONObjBuilder& b );
-        void cloneMap(UsageMap& out);
-        CollectionData getGlobalData(){ return _global; }
+        void cloneMap(UsageMap& out) const;
+        CollectionData getGlobalData() const { return _global; }
         void collectionDropped( const string& ns );
 
     public: // static stuff
         static Top global;
-        
-        void append( BSONObjBuilder& b , const char * name , const UsageData& map );
-        void append( BSONObjBuilder& b , const UsageMap& map );
-        
+
     private:
-        
+        void _appendToUsageMap( BSONObjBuilder& b , const UsageMap& map ) const;
+        void _appendStatsEntry( BSONObjBuilder& b , const char * statsName , const UsageData& map ) const;
         void _record( CollectionData& c , int op , int lockType , long long micros , bool command );
 
-        mongo::mutex _lock;
+        mutable mongo::mutex _lock;
         CollectionData _global;
         UsageMap _usage;
         string _lastDropped;
@@ -99,9 +95,9 @@ namespace mongo {
         typedef boost::tuple< D, int, int, int > UsageData;
     public:
         TopOld() : _read(false), _write(false) { }
-        
+
         /* these are used to record activity: */
-        
+
         void clientStart( const char *client ) {
             clientStop();
             _currentStart = currentTime();
@@ -130,11 +126,11 @@ namespace mongo {
 
         /* these are used to fetch the stats: */
 
-        struct Usage { 
-            string ns; 
-            D time; 
-            double pct; 
-            int reads, writes, calls; 
+        struct Usage {
+            string ns;
+            D time;
+            double pct;
+            int reads, writes, calls;
         };
 
         static void usage( vector< Usage > &res ) {
@@ -145,7 +141,7 @@ namespace mongo {
             UsageMap totalUsage;
             fillParentNamespaces( snapshot, _snapshot );
             fillParentNamespaces( totalUsage, _totalUsage );
-        
+
             multimap< D, string, more > sorted;
             for( UsageMap::iterator i = snapshot.begin(); i != snapshot.end(); ++i )
                 sorted.insert( make_pair( i->second.get<0>(), i->first ) );
@@ -181,7 +177,8 @@ namespace mongo {
             if ( &_snapshot == &_snapshotA ) {
                 _snapshot = _snapshotB;
                 _nextSnapshot = _snapshotA;
-            } else {
+            }
+            else {
                 _snapshot = _snapshotA;
                 _nextSnapshot = _snapshotB;
             }
@@ -211,7 +208,7 @@ namespace mongo {
                 g.get< 1 >()++;
             else if ( !_read && _write )
                 g.get< 2 >()++;
-            g.get< 3 >()++;        
+            g.get< 3 >()++;
         }
         static void fillParentNamespaces( UsageMap &to, const UsageMap &from ) {
             for( UsageMap::const_iterator i = from.begin(); i != from.end(); ++i ) {
@@ -224,8 +221,8 @@ namespace mongo {
                     current = current.substr( 0, dot );
                     inc( to[ current ], i->second );
                     dot = current.rfind( "." );
-                }            
-            }        
+                }
+            }
         }
         static void inc( UsageData &to, const UsageData &from ) {
             to.get<0>() += from.get<0>();

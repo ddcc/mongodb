@@ -28,23 +28,23 @@ namespace mongo {
     typedef set< BSONElement, BSONElementCmpWithoutField > BSONElementSet;
 
     /**
-	   C++ representation of a "BSON" object -- that is, an extended JSON-style 
+       C++ representation of a "BSON" object -- that is, an extended JSON-style
        object in a binary representation.
 
        See bsonspec.org.
 
-       Note that BSONObj's have a smart pointer capability built in -- so you can 
+       Note that BSONObj's have a smart pointer capability built in -- so you can
        pass them around by value.  The reference counts used to implement this
        do not use locking, so copying and destroying BSONObj's are not thread-safe
        operations.
 
      BSON object format:
-     
+
      code
      <unsigned totalSize> {<byte BSONType><cstring FieldName><Data>}* EOO
-     
+
      totalSize includes itself.
-     
+
      Data:
      Bool:      <byte>
      EOO:       nothing follows
@@ -67,31 +67,65 @@ namespace mongo {
      */
     class BSONObj {
     public:
-        /** Construct a BSONObj from data in the proper format. 
-            @param ifree true if the BSONObj should free() the msgdata when 
-            it destructs. 
-            */
+
+        /** Construct a BSONObj from data in the proper format.
+            @param ifree true if the BSONObj should free() the msgdata when
+            it destructs.
+        */
         explicit BSONObj(const char *msgdata, bool ifree = false) {
             init(msgdata, ifree);
         }
-        BSONObj(const Record *r);
+
+        explicit BSONObj(const Record *r);
+
         /** Construct an empty BSONObj -- that is, {}. */
         BSONObj();
-        // defensive
-        ~BSONObj() { _objdata = 0; }
 
-        void appendSelfToBufBuilder(BufBuilder& b) const {
-            assert( objsize() );
-            b.appendBuf(reinterpret_cast<const void *>( objdata() ), objsize());
-        }
+        ~BSONObj() { /*defensive:*/ _objdata = 0; }
 
-        /** Readable representation of a BSON object in an extended JSON-style notation. 
+        /**
+           A BSONObj can use a buffer it "owns" or one it does not.
+
+           OWNED CASE
+           If the BSONObj owns the buffer, the buffer can be shared among several BSONObj's (by assignment).
+           In this case the buffer is basically implemented as a shared_ptr.
+           Since BSONObj's are typically immutable, this works well.
+
+           UNOWNED CASE
+           A BSONObj can also point to BSON data in some other data structure it does not "own" or free later.
+           For example, in a memory mapped file.  In this case, it is important the original data stays in
+           scope for as long as the BSONObj is in use.  If you think the original data may go out of scope,
+           call BSONObj::getOwned() to promote your BSONObj to having its own copy.
+
+           On a BSONObj assignment, if the source is unowned, both the source and dest will have unowned
+           pointers to the original buffer after the assignment.
+
+           If you are not sure about ownership but need the buffer to last as long as the BSONObj, call
+           getOwned().  getOwned() is a no-op if the buffer is already owned.  If not already owned, a malloc
+           and memcpy will result.
+
+           Most ways to create BSONObj's create 'owned' variants.  Unowned versions can be created with:
+           (1) specifying true for the ifree parameter in the constructor
+           (2) calling BSONObjBuilder::done().  Use BSONObjBuilder::obj() to get an owned copy
+           (3) retrieving a subobject retrieves an unowned pointer into the parent BSON object
+
+           @return true if this is in owned mode
+        */
+        bool isOwned() const { return _holder.get() != 0; }
+
+        /* make sure the data buffer is under the control of this BSONObj and not a remote buffer */
+        BSONObj getOwned() const;
+
+        /** @return a new full (and owned) copy of the object. */
+        BSONObj copy() const;
+
+        /** Readable representation of a BSON object in an extended JSON-style notation.
             This is an abbreviated representation which might be used for logging.
         */
         string toString( bool isArray = false, bool full=false ) const;
         void toString(StringBuilder& s, bool isArray = false, bool full=false ) const;
-        
-        /** Properly formatted JSON string. 
+
+        /** Properly formatted JSON string.
             @param pretty if true we try to add some lf's and indentation
         */
         string jsonString( JsonStringFormat format = Strict, int pretty = 0 ) const;
@@ -126,38 +160,36 @@ namespace mongo {
             names with respect to the returned element. */
         BSONElement getFieldDottedOrArray(const char *&name) const;
 
-        /** Get the field of the specified name. eoo() is true on the returned 
-            element if not found. 
+        /** Get the field of the specified name. eoo() is true on the returned
+            element if not found.
         */
         BSONElement getField(const StringData& name) const;
 
-        /** Get the field of the specified name. eoo() is true on the returned 
-            element if not found. 
+        /** Get the field of the specified name. eoo() is true on the returned
+            element if not found.
         */
-        BSONElement operator[] (const char *field) const { 
+        BSONElement operator[] (const char *field) const {
             return getField(field);
         }
 
-        BSONElement operator[] (const string& field) const { 
+        BSONElement operator[] (const string& field) const {
             return getField(field);
         }
 
-        BSONElement operator[] (int field) const { 
+        BSONElement operator[] (int field) const {
             StringBuilder ss;
             ss << field;
             string s = ss.str();
             return getField(s.c_str());
         }
 
-		/** @return true if field exists */
-        bool hasField( const char * name )const {
-            return ! getField( name ).eoo();
-        }
+        /** @return true if field exists */
+        bool hasField( const char * name ) const { return ! getField( name ).eoo(); }
 
         /** @return "" if DNE or wrong type */
         const char * getStringField(const char *name) const;
 
-		/** @return subobject of the given name */
+        /** @return subobject of the given name */
         BSONObj getObjectField(const char *name) const;
 
         /** @return INT_MIN if not present - does some type conversions */
@@ -172,26 +204,24 @@ namespace mongo {
            object.
         */
         BSONObj extractFieldsUnDotted(BSONObj pattern) const;
-        
+
         /** extract items from object which match a pattern object.
-			e.g., if pattern is { x : 1, y : 1 }, builds an object with 
-			x and y elements of this object, if they are present.
+            e.g., if pattern is { x : 1, y : 1 }, builds an object with
+            x and y elements of this object, if they are present.
            returns elements with original field names
         */
         BSONObj extractFields(const BSONObj &pattern , bool fillWithNull=false) const;
-        
+
         BSONObj filterFieldsUndotted(const BSONObj &filter, bool inFilter) const;
 
         BSONElement getFieldUsingIndexNames(const char *fieldName, const BSONObj &indexKey) const;
-        
+
         /** @return the raw data of the object */
         const char *objdata() const {
             return _objdata;
         }
         /** @return total size of the BSON object in bytes */
-        int objsize() const {
-            return *(reinterpret_cast<const int*>(objdata()));
-        }
+        int objsize() const { return *(reinterpret_cast<const int*>(objdata())); }
 
         /** performs a cursory check on the object's size only. */
         bool isValid();
@@ -201,32 +231,30 @@ namespace mongo {
          */
         bool okForStorage() const;
 
-		/** @return true if object is empty -- i.e.,  {} */
-        bool isEmpty() const {
-            return objsize() <= 5;
-        }
+        /** @return true if object is empty -- i.e.,  {} */
+        bool isEmpty() const { return objsize() <= 5; }
 
         void dump() const;
 
         /** Alternative output format */
         string hexDump() const;
-        
+
         /**wo='well ordered'.  fields must be in same order in each object.
-           Ordering is with respect to the signs of the elements 
+           Ordering is with respect to the signs of the elements
            and allows ascending / descending key mixing.
-		   @return  <0 if l<r. 0 if l==r. >0 if l>r
+           @return  <0 if l<r. 0 if l==r. >0 if l>r
         */
         int woCompare(const BSONObj& r, const Ordering &o,
                       bool considerFieldName=true) const;
 
         /**wo='well ordered'.  fields must be in same order in each object.
-           Ordering is with respect to the signs of the elements 
+           Ordering is with respect to the signs of the elements
            and allows ascending / descending key mixing.
-		   @return  <0 if l<r. 0 if l==r. >0 if l>r
+           @return  <0 if l<r. 0 if l==r. >0 if l>r
         */
         int woCompare(const BSONObj& r, const BSONObj &ordering = BSONObj(),
                       bool considerFieldName=true) const;
-        
+
 
         bool operator<( const BSONObj& other ) const { return woCompare( other ) < 0; }
         bool operator<=( const BSONObj& other ) const { return woCompare( other ) <= 0; }
@@ -249,31 +277,18 @@ namespace mongo {
             return false;
         }
 
-		/** @return first field of the object */
-        BSONElement firstElement() const {
-            return BSONElement(objdata() + 4);
-        }
+        /** @return first field of the object */
+        BSONElement firstElement() const { return BSONElement(objdata() + 4); }
 
-		/** @return true if field exists in the object */
+        /** @return true if field exists in the object */
         bool hasElement(const char *name) const;
 
-		/** Get the _id field from the object.  For good performance drivers should 
-            assure that _id is the first element of the object; however, correct operation 
+        /** Get the _id field from the object.  For good performance drivers should
+            assure that _id is the first element of the object; however, correct operation
             is assured regardless.
             @return true if found
-		*/
-		bool getObjectID(BSONElement& e) const;
-
-        /** makes a copy of the object. */
-        BSONObj copy() const;
-
-        /* make sure the data buffer is under the control of this BSONObj and not a remote buffer */
-        BSONObj getOwned() const{
-            if ( !isOwned() )
-                return copy();
-            return *this;
-        }
-        bool isOwned() const { return _holder.get() != 0; }
+        */
+        bool getObjectID(BSONElement& e) const;
 
         /** @return A hash code for the object */
         int hash() const {
@@ -289,18 +304,18 @@ namespace mongo {
         // string identifier equivalents.
         // TODO Support conversion of element types other than min and max.
         BSONObj clientReadable() const;
-        
+
         /** Return new object with the field names replaced by those in the
             passed object. */
         BSONObj replaceFieldNames( const BSONObj &obj ) const;
-        
+
         /** true unless corrupt */
         bool valid() const;
-        
+
         /** @return an md5 value for this object. */
         string md5() const;
-        
-        bool operator==( const BSONObj& other ) const{
+
+        bool operator==( const BSONObj& other ) const {
             return woCompare( other ) == 0;
         }
 
@@ -324,14 +339,21 @@ namespace mongo {
             opNEAR = 0x13,
             opWITHIN = 0x14,
             opMAX_DISTANCE=0x15
-        };               
+        };
 
         /** add all elements of the object to the specified vector */
         void elems(vector<BSONElement> &) const;
         /** add all elements of the object to the specified list */
         void elems(list<BSONElement> &) const;
 
-        /** add all values of the object to the specified vector.  If type mismatches, exception. */
+        /** add all values of the object to the specified vector.  If type mismatches, exception.
+            this is most useful when the BSONObj is an array, but can be used with non-arrays too in theory.
+
+            example:
+              bo sub = y["subobj"].Obj();
+              vector<int> myints;
+              sub.Vals(myints);
+        */
         template <class T>
         void Vals(vector<T> &) const;
         /** add all values of the object to the specified list.  If type mismatches, exception. */
@@ -347,13 +369,25 @@ namespace mongo {
 
         friend class BSONObjIterator;
         typedef BSONObjIterator iterator;
+
+        /** use something like this:
+            for( BSONObj::iterator i = myObj.begin(); i.more(); ) {
+                BSONElement e = i.next();
+                ...
+            }
+        */
         BSONObjIterator begin();
 
-private:
+        void appendSelfToBufBuilder(BufBuilder& b) const {
+            assert( objsize() );
+            b.appendBuf(reinterpret_cast<const void *>( objdata() ), objsize());
+        }
+
+    private:
         class Holder {
         public:
             Holder( const char *objdata ) :
-            _objdata( objdata ) {
+                _objdata( objdata ) {
             }
             ~Holder() {
                 free((void *)_objdata);
@@ -362,28 +396,26 @@ private:
         private:
             const char *_objdata;
         };
+
         const char *_objdata;
         boost::shared_ptr< Holder > _holder;
+
+        void _assertInvalid() const;
         void init(const char *data, bool ifree) {
             if ( ifree )
                 _holder.reset( new Holder( data ) );
             _objdata = data;
-            if ( ! isValid() ){
-                StringBuilder ss;
-                int os = objsize();
-                ss << "Invalid BSONObj spec size: " << os << " (" << toHex( &os, 4 ) << ")";
-                try {
-                    BSONElement e = firstElement();
-                    ss << " first element:" << e.toString() << " ";
-                }
-                catch ( ... ){}
-                string s = ss.str();
-                massert( 10334 , s , 0 );
-            }
+            if ( !isValid() )
+                _assertInvalid();
         }
     };
+
     ostream& operator<<( ostream &s, const BSONObj &o );
     ostream& operator<<( ostream &s, const BSONElement &e );
+
+    StringBuilder& operator<<( StringBuilder &s, const BSONObj &o );
+    StringBuilder& operator<<( StringBuilder &s, const BSONElement &e );
+
 
     struct BSONArray : BSONObj {
         // Don't add anything other than forwarding constructors!!!

@@ -1,5 +1,5 @@
 Name: mongo
-Version: 1.6.5
+Version: 1.8.0
 Release: mongodb_1%{?dist}
 Summary: mongo client shell and tools
 License: AGPL 3.0
@@ -105,6 +105,7 @@ fi
 %{_bindir}/mongoimport
 %{_bindir}/mongorestore
 %{_bindir}/mongostat
+%{_bindir}/bsondump
 
 %{_mandir}/man1/mongo.1*
 %{_mandir}/man1/mongod.1*

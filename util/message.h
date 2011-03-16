@@ -32,7 +32,7 @@ namespace mongo {
 
     class Listener : boost::noncopyable {
     public:
-        Listener(const string &ip, int p, bool logConnect=true ) : _port(p), _ip(ip), _logConnect(logConnect), _elapsedTime(0){ }
+        Listener(const string &ip, int p, bool logConnect=true ) : _port(p), _ip(ip), _logConnect(logConnect), _elapsedTime(0) { }
         virtual ~Listener() {
             if ( _timeTracker == this )
                 _timeTracker = 0;
@@ -41,28 +41,30 @@ namespace mongo {
 
         /* spawn a thread, etc., then return */
         virtual void accepted(int sock, const SockAddr& from);
-        virtual void accepted(MessagingPort *mp){
+        virtual void accepted(MessagingPort *mp) {
             assert(!"You must overwrite one of the accepted methods");
         }
 
         const int _port;
-        
+
         /**
          * @return a rough estimate of elepased time since the server started
          */
         long long getMyElapsedTimeMillis() const { return _elapsedTime; }
 
-        void setAsTimeTracker(){
+        void setAsTimeTracker() {
             _timeTracker = this;
         }
 
-        static const Listener* getTimeTracker(){
+        static const Listener* getTimeTracker() {
             return _timeTracker;
         }
-        
-        static long long getElapsedTimeMillis() { 
+
+        static long long getElapsedTimeMillis() {
             if ( _timeTracker )
                 return _timeTracker->getMyElapsedTimeMillis();
+
+            // should this assert or throw?  seems like callers may not expect to get zero back, certainly not forever.
             return 0;
         }
 
@@ -79,11 +81,11 @@ namespace mongo {
         virtual ~AbstractMessagingPort() { }
         virtual void reply(Message& received, Message& response, MSGID responseTo) = 0; // like the reply below, but doesn't rely on received.data still being available
         virtual void reply(Message& received, Message& response) = 0;
-        
+
         virtual HostAndPort remote() const = 0;
         virtual unsigned remotePort() const = 0;
 
-        virtual int getClientId(){
+        virtual int getClientId() {
             int x = remotePort();
             x = x << 16;
             x |= ( ( 0xFF0 & (long long)this ) >> 8 ); // lowest byte in pointer often meaningless
@@ -98,12 +100,12 @@ namespace mongo {
         // in some cases the timeout will actually be 2x this value - eg we do a partial send,
         // then the timeout fires, then we try to send again, then the timeout fires again with
         // no data sent, then we detect that the other side is down
-        MessagingPort(double timeout = 0, int logLevel = 0 );
+        MessagingPort(double so_timeout = 0, int logLevel = 0 );
 
         virtual ~MessagingPort();
 
         void shutdown();
-        
+
         bool connect(SockAddr& farEnd);
 
         /* it's assumed if you reuse a message object, that it doesn't cross MessagingPort's.
@@ -113,7 +115,19 @@ namespace mongo {
         void reply(Message& received, Message& response, MSGID responseTo);
         void reply(Message& received, Message& response);
         bool call(Message& toSend, Message& response);
+
         void say(Message& toSend, int responseTo = -1);
+
+        /**
+         * this is used for doing 'async' queries
+         * instead of doing call( to , from )
+         * you would do
+         * say( to )
+         * recv( from )
+         * Note: if you fail to call recv and someone else uses this port,
+         *       horrible things will happend
+         */
+        bool recv( const Message& sent , Message& response );
 
         void piggyBack( Message& toSend , int responseTo = -1 );
 
@@ -126,11 +140,23 @@ namespace mongo {
 
         // recv len or throw SocketException
         void recv( char * data , int len );
-        
+
         int unsafe_recv( char *buf, int max );
+
+        void clearCounters() { _bytesIn = 0; _bytesOut = 0; }
+        long long getBytesIn() const { return _bytesIn; }
+        long long getBytesOut() const { return _bytesOut; }
     private:
         int sock;
         PiggyBackData * piggyBackData;
+
+        long long _bytesIn;
+        long long _bytesOut;
+        
+        // this is the parsed version of farEnd
+        // mutable because its initialized only on call to remote()
+        mutable HostAndPort _farEndParsed; 
+
     public:
         SockAddr farEnd;
         double _timeout;
@@ -158,8 +184,8 @@ namespace mongo {
 
     bool doesOpGetAResponse( int op );
 
-    inline const char * opToString( int op ){
-        switch ( op ){
+    inline const char * opToString( int op ) {
+        switch ( op ) {
         case 0: return "none";
         case opReply: return "reply";
         case dbMsg: return "msg";
@@ -169,54 +195,54 @@ namespace mongo {
         case dbGetMore: return "getmore";
         case dbDelete: return "remove";
         case dbKillCursors: return "killcursors";
-        default: 
+        default:
             PRINT(op);
-            assert(0); 
+            assert(0);
             return "";
         }
     }
-    
-    inline bool opIsWrite( int op ){
-        switch ( op ){
 
-        case 0: 
-        case opReply: 
-        case dbMsg: 
-        case dbQuery: 
-        case dbGetMore: 
-        case dbKillCursors: 
-            return false;
-            
-        case dbUpdate: 
-        case dbInsert: 
-        case dbDelete: 
+    inline bool opIsWrite( int op ) {
+        switch ( op ) {
+
+        case 0:
+        case opReply:
+        case dbMsg:
+        case dbQuery:
+        case dbGetMore:
+        case dbKillCursors:
             return false;
 
-        default: 
+        case dbUpdate:
+        case dbInsert:
+        case dbDelete:
+            return false;
+
+        default:
             PRINT(op);
-            assert(0); 
+            assert(0);
             return "";
         }
-        
+
     }
 
 #pragma pack(1)
-/* see http://www.mongodb.org/display/DOCS/Mongo+Wire+Protocol 
-*/
-struct MSGHEADER { 
-    int messageLength; // total message size, including this
-    int requestID;     // identifier for this message
-    int responseTo;    // requestID from the original request
-                       //   (used in reponses from db)
-    int opCode;     
-};
-struct OP_GETMORE : public MSGHEADER {
-    MSGHEADER header;             // standard message header
-    int       ZERO_or_flags;      // 0 - reserved for future use
-    //cstring   fullCollectionName; // "dbname.collectionname"
-    //int32     numberToReturn;     // number of documents to return
-    //int64     cursorID;           // cursorID from the OP_REPLY
-};
+    /* see http://www.mongodb.org/display/DOCS/Mongo+Wire+Protocol
+    */
+    struct MSGHEADER {
+        int messageLength; // total message size, including this
+        int requestID;     // identifier for this message
+        int responseTo;    // requestID from the original request
+        //   (used in reponses from db)
+        int opCode;
+    };
+    struct OP_GETMORE : public MSGHEADER {
+        MSGHEADER header;             // standard message header
+        int       ZERO_or_flags;      // 0 - reserved for future use
+        //cstring   fullCollectionName; // "dbname.collectionname"
+        //int32     numberToReturn;     // number of documents to return
+        //int64     cursorID;           // cursorID from the OP_REPLY
+    };
 #pragma pack()
 
 #pragma pack(1)
@@ -225,11 +251,15 @@ struct OP_GETMORE : public MSGHEADER {
         int len; /* len of the msg, including this field */
         MSGID id; /* request/reply id's match... */
         MSGID responseTo; /* id of the message we are responding to */
-        int _operation;
+        short _operation;
+        char _flags;
+        char _version;
         int operation() const {
             return _operation;
         }
         void setOperation(int o) {
+            _flags = 0;
+            _version = 0;
             _operation = o;
         }
         char _data[4];
@@ -237,16 +267,16 @@ struct OP_GETMORE : public MSGHEADER {
         int& dataAsInt() {
             return *((int *) _data);
         }
-        
-        bool valid(){
-            if ( len <= 0 || len > ( 1024 * 1024 * 10 ) )
+
+        bool valid() {
+            if ( len <= 0 || len > ( 4 * BSONObjMaxInternalSize ) )
                 return false;
-            if ( _operation < 0 || _operation > 100000 )
+            if ( _operation < 0 || _operation > 30000 )
                 return false;
             return true;
         }
 
-        long long getCursor(){
+        long long getCursor() {
             assert( responseTo > 0 );
             assert( _operation == opReply );
             long long * l = (long long *)(_data + 4);
@@ -269,13 +299,13 @@ struct OP_GETMORE : public MSGHEADER {
             _buf( 0 ), _data( 0 ), _freeIt( false ) {
             _setData( reinterpret_cast< MsgData* >( data ), freeIt );
         };
-        Message(Message& r) : _buf( 0 ), _data( 0 ), _freeIt( false ) { 
+        Message(Message& r) : _buf( 0 ), _data( 0 ), _freeIt( false ) {
             *this = r;
         }
         ~Message() {
             reset();
         }
-        
+
         SockAddr _from;
 
         MsgData *header() const {
@@ -283,7 +313,7 @@ struct OP_GETMORE : public MSGHEADER {
             return _buf ? _buf : reinterpret_cast< MsgData* > ( _data[ 0 ].first );
         }
         int operation() const { return header()->operation(); }
-        
+
         MsgData *singleData() const {
             massert( 13273, "single data buffer expected", _buf );
             return header();
@@ -291,25 +321,28 @@ struct OP_GETMORE : public MSGHEADER {
 
         bool empty() const { return !_buf && _data.empty(); }
 
-        int size() const{
+        int size() const {
             int res = 0;
-            if ( _buf ){
+            if ( _buf ) {
                 res =  _buf->len;
-            } else {
-                for (MsgVec::const_iterator it = _data.begin(); it != _data.end(); ++it){
+            }
+            else {
+                for (MsgVec::const_iterator it = _data.begin(); it != _data.end(); ++it) {
                     res += it->second;
                 }
             }
             return res;
         }
-        
+
+        int dataSize() const { return size() - sizeof(MSGHEADER); }
+
         // concat multiple buffers - noop if <2 buffers already, otherwise can be expensive copy
         // can get rid of this if we make response handling smarter
         void concat() {
             if ( _buf || empty() ) {
                 return;
             }
-            
+
             assert( _freeIt );
             int totalSize = 0;
             for( vector< pair< char *, int > >::const_iterator i = _data.begin(); i != _data.end(); ++i ) {
@@ -324,7 +357,7 @@ struct OP_GETMORE : public MSGHEADER {
             reset();
             _setData( (MsgData*)buf, true );
         }
-        
+
         // vector swap() so this is fast
         Message& operator=(Message& r) {
             assert( empty() );
@@ -373,7 +406,7 @@ struct OP_GETMORE : public MSGHEADER {
             _data.push_back( make_pair( d, size ) );
             header()->len += size;
         }
-        
+
         // use to set first buffer if empty
         void setData(MsgData *d, bool freeIt) {
             assert( empty() );
@@ -402,7 +435,8 @@ struct OP_GETMORE : public MSGHEADER {
             }
             if ( _buf != 0 ) {
                 p.send( (char*)_buf, _buf->len, context );
-            } else {
+            }
+            else {
                 p.send( _data, context );
             }
         }
@@ -422,13 +456,17 @@ struct OP_GETMORE : public MSGHEADER {
 
     class SocketException : public DBException {
     public:
-        enum Type { CLOSED , RECV_ERROR , SEND_ERROR } type;
-        SocketException( Type t ) : DBException( "socket exception" , 9001 ) , type(t){}
+        const enum Type { CLOSED , RECV_ERROR , SEND_ERROR, RECV_TIMEOUT, SEND_TIMEOUT, FAILED_STATE, CONNECT_ERROR } _type;
         
-        bool shouldPrint() const {
-            return type != CLOSED;
-        }
-        
+        SocketException( Type t , string server="" , int code = 9001 , string extra="" ) : DBException( "socket exception" , code ) , _type(t) , _server(server), _extra(extra){ }
+        virtual ~SocketException() throw() {}
+
+        bool shouldPrint() const { return _type != CLOSED; }
+        virtual string toString() const;
+
+    private:
+        string _server;
+        string _extra;
     };
 
     MSGID nextMessageId();
@@ -441,7 +479,7 @@ struct OP_GETMORE : public MSGHEADER {
     class ElapsedTracker {
     public:
         ElapsedTracker( int hitsBetweenMarks , int msBetweenMarks )
-            : _h( hitsBetweenMarks ) , _ms( msBetweenMarks ) , _pings(0){
+            : _h( hitsBetweenMarks ) , _ms( msBetweenMarks ) , _pings(0) {
             _last = Listener::getElapsedTimeMillis();
         }
 
@@ -449,18 +487,18 @@ struct OP_GETMORE : public MSGHEADER {
          * call this for every iteration
          * returns true if one of the triggers has gone off
          */
-        bool ping(){
-            if ( ( ++_pings % _h ) == 0 ){
+        bool ping() {
+            if ( ( ++_pings % _h ) == 0 ) {
                 _last = Listener::getElapsedTimeMillis();
                 return true;
             }
-            
+
             long long now = Listener::getElapsedTimeMillis();
-            if ( now - _last > _ms ){
+            if ( now - _last > _ms ) {
                 _last = now;
                 return true;
             }
-                
+
             return false;
         }
 
@@ -471,7 +509,7 @@ struct OP_GETMORE : public MSGHEADER {
         unsigned long long _pings;
 
         long long _last;
-        
+
     };
-        
+
 } // namespace mongo

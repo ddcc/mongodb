@@ -22,56 +22,48 @@
 namespace mongo {
 
 #pragma pack(1)
-    /**	Object ID type.
-        BSON objects typically have an _id field for the object id.  This field should be the first 
-        member of the object when present.  class OID is a special type that is a 12 byte id which 
+    /** Object ID type.
+        BSON objects typically have an _id field for the object id.  This field should be the first
+        member of the object when present.  class OID is a special type that is a 12 byte id which
         is likely to be unique to the system.  You may also use other types for _id's.
-        When _id field is missing from a BSON object, on an insert the database may insert one 
+        When _id field is missing from a BSON object, on an insert the database may insert one
         automatically in certain circumstances.
 
         Warning: You must call OID::newState() after a fork().
+
+        Typical contents of the BSON ObjectID is a 12-byte value consisting of a 4-byte timestamp (seconds since epoch),
+        a 3-byte machine id, a 2-byte process id, and a 3-byte counter. Note that the timestamp and counter fields must
+        be stored big endian unlike the rest of BSON. This is because they are compared byte-by-byte and we want to ensure
+        a mostly increasing order.
     */
     class OID {
-        union {
-            struct{
-                long long a;
-                unsigned b;
-            };
-            unsigned char data[12];
-        };
-        static unsigned _machine;
     public:
-        /** call this after a fork */
-        static void newState();
+        OID() : a(0), b(0) { }
 
-		/** initialize to 'null' */
-		void clear() { a = 0; b = 0; }
+        /** init from a 24 char hex string */
+        explicit OID(const string &s) { init(s); }
+
+        /** initialize to 'null' */
+        void clear() { a = 0; b = 0; }
 
         const unsigned char *getData() const { return data; }
 
-        bool operator==(const OID& r) {
-            return a==r.a&&b==r.b;
-        }
-        bool operator!=(const OID& r) {
-            return a!=r.a||b!=r.b;
-        }
+        bool operator==(const OID& r) const { return a==r.a && b==r.b; }
+        bool operator!=(const OID& r) const { return a!=r.a || b!=r.b; }
+        int compare( const OID& other ) const { return memcmp( data , other.data , 12 ); }
+        bool operator<( const OID& other ) const { return compare( other ) < 0; }
+        bool operator<=( const OID& other ) const { return compare( other ) <= 0; }
 
-        /** The object ID output as 24 hex digits. */
-        string str() const {
-            return toHexLower(data, 12);
-        }
-
+        /** @return the object ID output as 24 hex digits */
+        string str() const { return toHexLower(data, 12); }
         string toString() const { return str(); }
 
         static OID gen() { OID o; o.init(); return o; }
-        
-        static unsigned staticMachine(){ return _machine; }
-        /**
-           sets the contents to a new oid / randomized value
-        */
+
+        /** sets the contents to a new oid / randomized value */
         void init();
 
-        /** Set to the hex string value specified. */
+        /** init from a 24 char hex string */
         void init( string s );
 
         /** Set to the min/max OID that could be generated at given timestamp. */
@@ -79,12 +71,39 @@ namespace mongo {
 
         time_t asTimeT();
         Date_t asDateT() { return asTimeT() * (long long)1000; }
-        
+
         bool isSet() const { return a || b; }
-        
-        int compare( const OID& other ) const { return memcmp( data , other.data , 12 ); }
-        
-        bool operator<( const OID& other ) const { return compare( other ) < 0; }
+
+        /** call this after a fork to update the process id */
+        static void justForked();
+
+        static unsigned getMachineId(); // features command uses
+        static void regenMachineId(); // used by unit tests
+
+    private:
+        struct MachineAndPid {
+            unsigned char _machineNumber[3];
+            unsigned short _pid;
+            bool operator!=(const OID::MachineAndPid& rhs) const;
+        };
+        static MachineAndPid ourMachine, ourMachineAndPid;
+        union {
+            struct {
+                // 12 bytes total
+                unsigned char _time[4];
+                MachineAndPid _machineAndPid;
+                unsigned char _inc[3];
+            };
+            struct {
+                long long a;
+                unsigned b;
+            };
+            unsigned char data[12];
+        };
+
+        static unsigned ourPid();
+        static void foldInPid(MachineAndPid& x);
+        static MachineAndPid genMachineAndPid();
     };
 #pragma pack()
 

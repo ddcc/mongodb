@@ -10,6 +10,8 @@
 #      scons --distname=0.8 s3dist
 #      all s3 pushes require settings.py and simples3
 
+EnsureSConsVersion(0, 98, 4) # this is a common version known to work
+
 import os
 import sys
 import imp
@@ -24,241 +26,137 @@ from buildscripts import utils
 
 buildscripts.bb.checkOk()
 
+def findSettingsSetup():
+    sys.path.append( "." )
+    sys.path.append( ".." )
+    sys.path.append( "../../" )
+
+
+
 # --- options ----
-AddOption('--prefix',
-          dest='prefix',
-          type='string',
-          nargs=1,
-          action='store',
-          metavar='DIR',
-          help='installation prefix')
 
-AddOption('--distname',
-          dest='distname',
-          type='string',
-          nargs=1,
-          action='store',
-          metavar='DIR',
-          help='dist name (0.8.0)')
+options = {}
 
-AddOption('--distmod',
-          dest='distmod',
-          type='string',
-          nargs=1,
-          action='store',
-          metavar='DIR',
-          help='additional piece for full dist name')
+def add_option( name, help , nargs , contibutesToVariantDir , dest=None ):
 
-AddOption( "--64",
-           dest="force64",
-           type="string",
-           nargs=0,
-           action="store",
-           help="whether to force 64 bit" )
+    if dest is None:
+        dest = name
 
+    AddOption( "--" + name , 
+               dest=dest,
+               type="string",
+               nargs=nargs,
+               action="store",
+               help=help )
 
-AddOption( "--32",
-           dest="force32",
-           type="string",
-           nargs=0,
-           action="store",
-           help="whether to force 32 bit" )
+    options[name] = { "help" : help ,
+                      "nargs" : nargs , 
+                      "contibutesToVariantDir" : contibutesToVariantDir ,
+                      "dest" : dest } 
 
+def get_option( name ):
+    return GetOption( name )
 
-AddOption( "--mm",
-           dest="mm",
-           type="string",
-           nargs=0,
-           action="store",
-           help="use main memory instead of memory mapped files" )
+def has_option( name ):
+    x = get_option( name )
+    if x is None:
+        return False
 
+    if x == False:
+        return False
 
-AddOption( "--release",
-           dest="release",
-           type="string",
-           nargs=0,
-           action="store",
-           help="relase build")
+    if x == "":
+        return False
 
+    return True
 
-AddOption( "--static",
-           dest="static",
-           type="string",
-           nargs=0,
-           action="store",
-           help="fully static build")
+def get_variant_dir():
+    
+    a = []
+    
+    for name in options:
+        o = options[name]
+        if not has_option( o["dest"] ):
+            continue
+        if not o["contibutesToVariantDir"]:
+            continue
+        
+        if o["nargs"] == 0:
+            a.append( name )
+        else:
+            a.append( name + "-" + get_option( name ) )
+
+    s = "build/"
+
+    if len(a) > 0:
+        a.sort()
+        s += "/".join( a ) + "/"
+        
+    return s
+        
 
 
-AddOption('--usesm',
-          dest='usesm',
-          type="string",
-          nargs=0,
-          action="store",
-          help="use spider monkey for javascript" )
+# installation/packaging
+add_option( "prefix" , "installation prefix" , 1 , False )
+add_option( "distname" , "dist name (0.8.0)" , 1 , False )
+add_option( "distmod", "additional piece for full dist name" , 1 , False )
+add_option( "nostrip", "do not strip installed binaries" , 0 , False )
 
-AddOption('--usev8',
-          dest='usev8',
-          type="string",
-          nargs=0,
-          action="store",
-          help="use v8 for javascript" )
+add_option( "sharedclient", "build a libmongoclient.so/.dll" , 0 , False )
+add_option( "full", "include client and headers when doing scons install", 0 , False )
 
-AddOption('--asio',
-          dest='asio',
-          type="string",
-          nargs=0,
-          action="store",
-          help="Use Asynchronous IO (NOT READY YET)" )
+# linking options
+add_option( "release" , "release build" , 0 , True )
+add_option( "static" , "fully static build" , 0 , True )
 
-AddOption( "--d",
-           dest="debugBuild",
-           type="string",
-           nargs=0,
-           action="store",
-           help="debug build no optimization, etc..." )
+# base compile flags
+add_option( "64" , "whether to force 64 bit" , 0 , True , "force64" )
+add_option( "32" , "whether to force 32 bit" , 0 , True , "force32" )
 
-AddOption( "--dd",
-           dest="debugBuildAndLogging",
-           type="string",
-           nargs=0,
-           action="store",
-           help="debug build no optimization, additional debug logging, etc..." )
+add_option( "cxx", "compiler to use" , 1 , True )
 
-AddOption( "--recstore",
-           dest="recstore",
-           type="string",
-           nargs=0,
-           action="store",
-           help="use new recstore" )
+add_option( "cpppath", "Include path if you have headers in a nonstandard directory" , 1 , True )
+add_option( "libpath", "Library path if you have libraries in a nonstandard directory" , 1 , True )
 
-AddOption( "--noshell",
-           dest="noshell",
-           type="string",
-           nargs=0,
-           action="store",
-           help="don't build shell" )
+add_option( "extrapath", "comma separated list of add'l paths  (--extrapath /opt/foo/,/foo) static linking" , 1 , True )
+add_option( "extrapathdyn", "comma separated list of add'l paths  (--extrapath /opt/foo/,/foo) dynamic linking" , 1 , True )
+add_option( "extralib", "comma separated list of libraries  (--extralib js_static,readline" , 1 , True )
+add_option( "staticlib", "comma separated list of libs to link statically (--staticlib js_static,boost_program_options-mt,..." , 1 , True )
+add_option( "staticlibpath", "comma separated list of dirs to search for staticlib arguments" , 1 , True )
 
-AddOption( "--safeshell",
-           dest="safeshell",
-           type="string",
-           nargs=0,
-           action="store",
-           help="don't let shell scripts run programs (still, don't run untrusted scripts)" )
-
-AddOption( "--extrapath",
-           dest="extrapath",
-           type="string",
-           nargs=1,
-           action="store",
-           help="comma separated list of add'l paths  (--extrapath /opt/foo/,/foo) static linking" )
-
-AddOption( "--extrapathdyn",
-           dest="extrapathdyn",
-           type="string",
-           nargs=1,
-           action="store",
-           help="comma separated list of add'l paths  (--extrapath /opt/foo/,/foo) dynamic linking" )
+add_option( "boost-compiler", "compiler used for boost (gcc41)" , 1 , True , "boostCompiler" )
+add_option( "boost-version", "boost version for linking(1_38)" , 1 , True , "boostVersion" )
 
 
-AddOption( "--extralib",
-           dest="extralib",
-           type="string",
-           nargs=1,
-           action="store",
-           help="comma separated list of libraries  (--extralib js_static,readline" )
+# experimental features
+add_option( "mm", "use main memory instead of memory mapped files" , 0 , True )
+add_option( "asio" , "Use Asynchronous IO (NOT READY YET)" , 0 , True )
 
-AddOption( "--staticlib",
-           dest="staticlib",
-           type="string",
-           nargs=1,
-           action="store",
-           help="comma separated list of libs to link statically (--staticlib js_static,boost_program_options-mt,..." )
+# library choices
+add_option( "usesm" , "use spider monkey for javascript" , 0 , True )
+add_option( "usev8" , "use v8 for javascript" , 0 , True )
 
-AddOption( "--staticlibpath",
-           dest="staticlibpath",
-           type="string",
-           nargs=1,
-           action="store",
-           help="comma separated list of dirs to search for staticlib arguments" )
+# mongo feature options
+add_option( "noshell", "don't build shell" , 0 , True )
+add_option( "safeshell", "don't let shell scripts run programs (still, don't run untrusted scripts)" , 0 , True )
 
-AddOption( "--cxx",
-           dest="cxx",
-           type="string",
-           nargs=1,
-           action="store",
-           help="compiler to use" )
+# dev tools
+add_option( "d", "debug build no optimization, etc..." , 0 , True , "debugBuild" )
+add_option( "dd", "debug build no optimization, additional debug logging, etc..." , 0 , False , "debugBuildAndLogging" )
+add_option( "durableDefaultOn" , "have durable default to on" , 0 , True )
 
+add_option( "pch" , "use precompiled headers to speed up the build (experimental)" , 0 , True , "usePCH" )
+add_option( "distcc" , "use distcc for distributing builds" , 0 , False )
 
-AddOption( "--boost-compiler",
-           dest="boostCompiler",
-           type="string",
-           nargs=1,
-           action="store",
-           help="compiler used for boost (gcc41)" )
+# debugging/profiling help
 
-AddOption( "--boost-version",
-           dest="boostVersion",
-           type="string",
-           nargs=1,
-           action="store",
-           help="boost version for linking(1_38)" )
-
-AddOption( "--cpppath",
-           dest="cpppath",
-           type="string",
-           nargs=1,
-           action="store",
-           help="Include path if you have headers in a nonstandard directory" )
-
-AddOption( "--libpath",
-           dest="libpath",
-           type="string",
-           nargs=1,
-           action="store",
-           help="Library path if you have libraries in a nonstandard directory" )
-
-# 
 # to use CPUPROFILE=/tmp/profile
 # to view pprof -gv mongod /tmp/profile
-#
-AddOption( "--pg",
-           dest="profile",
-           type="string",
-           nargs=0,
-           action="store" )
+add_option( "pg", "link against profiler" , 0 , False , "profile" )
+add_option( "gdbserver" , "build in gdb server support" , 0 , True )
+add_option( "heapcheck", "link to heap-checking malloc-lib and look for memory leaks during tests" , 0 , False )
 
-AddOption( "--gdbserver",
-           dest="gdbserver",
-           type="string",
-           nargs=0,
-           action="store" )
-
-AddOption("--nostrip",
-          dest="nostrip",
-          action="store_true",
-          help="do not strip installed binaries")
-
-AddOption("--sharedclient",
-          dest="sharedclient",
-          action="store_true",
-          help="build a libmongoclient.so/.dll")
-
-AddOption("--full",
-          dest="full",
-          action="store_true",
-          help="include client and headers when doing scons install")
-
-AddOption("--smokedbprefix",
-          dest="smokedbprefix",
-          action="store",
-          help="prefix to dbpath et al. for smoke tests")
-
-AddOption( "--pch",
-           dest="usePCH",
-           type="string",
-           nargs=0,
-           action="store",
-           help="use precompiled headers to speed up the build (experimental)" )
+add_option("smokedbprefix", "prefix to dbpath et al. for smoke tests", 1 , False )
 
 # --- environment setup ---
 
@@ -284,7 +182,7 @@ windows = False
 freebsd = False
 openbsd = False
 solaris = False
-force64 = not GetOption( "force64" ) is None
+force64 = has_option( "force64" )
 if not force64 and os.getcwd().endswith( "mongo-64" ):
     force64 = True
     print( "*** assuming you want a 64-bit build b/c of directory *** " )
@@ -292,43 +190,44 @@ msarch = None
 if force64:
     msarch = "amd64"
 
-force32 = not GetOption( "force32" ) is None
-release = not GetOption( "release" ) is None
-static = not GetOption( "static" ) is None
+force32 = has_option( "force32" ) 
+release = has_option( "release" )
+static = has_option( "static" )
 
-debugBuild = ( not GetOption( "debugBuild" ) is None ) or ( not GetOption( "debugBuildAndLogging" ) is None )
-debugLogging = not GetOption( "debugBuildAndLogging" ) is None
-noshell = not GetOption( "noshell" ) is None
+debugBuild = has_option( "debugBuild" ) or has_option( "debugBuildAndLogging" ) 
+debugLogging = has_option( "debugBuildAndLogging" )
+noshell = has_option( "noshell" ) 
 
-usesm = not GetOption( "usesm" ) is None
-usev8 = not GetOption( "usev8" ) is None
+usesm = has_option( "usesm" )
+usev8 = has_option( "usev8" ) 
 
-asio = not GetOption( "asio" ) is None
+asio = has_option( "asio" )
 
-usePCH = not GetOption( "usePCH" ) is None
+usePCH = has_option( "usePCH" )
 
 justClientLib = (COMMAND_LINE_TARGETS == ['mongoclient'])
 
 env = Environment( MSVS_ARCH=msarch , tools = ["default", "gch"], toolpath = '.' )
-if GetOption( "cxx" ) is not None:
-    env["CC"] = GetOption( "cxx" )
-    env["CXX"] = GetOption( "cxx" )
+if has_option( "cxx" ):
+    env["CC"] = get_option( "cxx" )
+    env["CXX"] = get_option( "cxx" )
 env["LIBPATH"] = []
 
-if GetOption( "libpath" ) is not None:
-    env["LIBPATH"] = [GetOption( "libpath" )]
+if has_option( "libpath" ):
+    env["LIBPATH"] = [get_option( "libpath" )]
 
-if GetOption( "cpppath" ) is not None:
-    env["CPPPATH"] = [GetOption( "cpppath" )]
+if has_option( "cpppath" ):
+    env["CPPPATH"] = [get_option( "cpppath" )]
 
-if GetOption( "recstore" ) != None:
-    env.Append( CPPDEFINES=[ "_RECSTORE" ] )
 env.Append( CPPDEFINES=[ "_SCONS" , "MONGO_EXPOSE_MACROS" ] )
 env.Append( CPPPATH=[ "." ] )
 
 
-if GetOption( "safeshell" ) != None:
+if has_option( "safeshell" ):
     env.Append( CPPDEFINES=[ "MONGO_SAFE_SHELL" ] )
+
+if has_option( "durableDefaultOn" ):
+    env.Append( CPPDEFINES=[ "_DURABLEDEFAULTON" ] )
 
 boostCompiler = GetOption( "boostCompiler" )
 if boostCompiler is None:
@@ -356,14 +255,14 @@ def addExtraLibs( s ):
         env.Append( LIBPATH=[ x + "/lib64" ] )
         extraLibPlaces.append( x + "/lib" )
 
-if GetOption( "extrapath" ) is not None:
+if has_option( "extrapath" ):
     addExtraLibs( GetOption( "extrapath" ) )
-    release = True
+    release = True # this is so we force using .a
 
-if GetOption( "extrapathdyn" ) is not None:
+if has_option( "extrapathdyn" ):
     addExtraLibs( GetOption( "extrapathdyn" ) )
 
-if GetOption( "extralib" ) is not None:
+if has_option( "extralib" ):
     for x in GetOption( "extralib" ).split( "," ):
         env.Append( LIBS=[ x ] )
 
@@ -399,53 +298,61 @@ installSetup = InstallSetup()
 if distBuild:
     installSetup.bannerDir = "distsrc"
 
-if GetOption( "full" ):
+if has_option( "full" ):
     installSetup.headers = True
     installSetup.libraries = True
 
 
 # ------    SOURCE FILE SETUP -----------
 
-commonFiles = Split( "pch.cpp buildinfo.cpp db/common.cpp db/jsobj.cpp db/json.cpp db/lasterror.cpp db/nonce.cpp db/queryutil.cpp shell/mongo.cpp" )
-commonFiles += [ "util/background.cpp" , "util/mmap.cpp" , "util/ramstore.cpp", "util/sock.cpp" ,  "util/util.cpp" , "util/message.cpp" , 
+commonFiles = Split( "pch.cpp buildinfo.cpp db/common.cpp  db/indexkey.cpp db/jsobj.cpp bson/oid.cpp db/json.cpp db/lasterror.cpp db/nonce.cpp db/queryutil.cpp db/projection.cpp shell/mongo.cpp db/security_key.cpp" )
+commonFiles += [ "util/background.cpp" , "util/mmap.cpp" , "util/sock.cpp" ,  "util/util.cpp" , "util/file_allocator.cpp" , "util/message.cpp" , 
                  "util/assert_util.cpp" , "util/log.cpp" , "util/httpclient.cpp" , "util/md5main.cpp" , "util/base64.cpp", "util/concurrency/vars.cpp", "util/concurrency/task.cpp", "util/debug_util.cpp",
-                 "util/concurrency/thread_pool.cpp", "util/password.cpp", "util/version.cpp", 
-                 "util/histogram.cpp", "util/concurrency/spin_lock.cpp", "util/text.cpp" , "util/stringutils.cpp" , "util/processinfo.cpp" ]
+                 "util/concurrency/thread_pool.cpp", "util/password.cpp", "util/version.cpp", "util/signal_handlers.cpp",  
+                 "util/histogram.cpp", "util/concurrency/spin_lock.cpp", "util/text.cpp" , "util/stringutils.cpp" ,
+                 "util/concurrency/synchronization.cpp" ]
 commonFiles += Glob( "util/*.c" )
-commonFiles += Split( "client/connpool.cpp client/dbclient.cpp client/dbclientcursor.cpp client/model.cpp client/syncclusterconnection.cpp client/distlock.cpp s/shardconnection.cpp" )
+commonFiles += Split( "client/connpool.cpp client/dbclient.cpp client/dbclient_rs.cpp client/dbclientcursor.cpp client/model.cpp client/syncclusterconnection.cpp client/distlock.cpp s/shardconnection.cpp" )
 
 #mmap stuff
 
-if GetOption( "mm" ) != None:
+if has_option( "mm" ):
     commonFiles += [ "util/mmap_mm.cpp" ]
 elif os.sys.platform == "win32":
     commonFiles += [ "util/mmap_win.cpp" ]
 else:
     commonFiles += [ "util/mmap_posix.cpp" ]
 
-if os.path.exists( "util/processinfo_" + os.sys.platform + ".cpp" ):
-    commonFiles += [ "util/processinfo_" + os.sys.platform + ".cpp" ]
-else:
-    commonFiles += [ "util/processinfo_none.cpp" ]
-
 coreDbFiles = [ "db/commands.cpp" ]
 coreServerFiles = [ "util/message_server_port.cpp" , 
                     "client/parallel.cpp" ,  
                     "util/miniwebserver.cpp" , "db/dbwebserver.cpp" , 
-                    "db/matcher.cpp" , "db/indexkey.cpp" , "db/dbcommands_generic.cpp" ]
+                    "db/matcher.cpp" , "db/dbcommands_generic.cpp" ]
 
-if GetOption( "asio" ) != None:
+processInfoFiles = [ "util/processinfo.cpp" ]
+
+if os.path.exists( "util/processinfo_" + os.sys.platform + ".cpp" ):
+    processInfoFiles += [ "util/processinfo_" + os.sys.platform + ".cpp" ]
+else:
+    processInfoFiles += [ "util/processinfo_none.cpp" ]
+
+coreServerFiles += processInfoFiles
+
+
+
+if has_option( "asio" ):
     coreServerFiles += [ "util/message_server_asio.cpp" ]
 
-serverOnlyFiles = Split( "db/query.cpp db/update.cpp db/introspect.cpp db/btree.cpp db/clientcursor.cpp db/tests.cpp db/repl.cpp db/repl/rs.cpp db/repl/consensus.cpp db/repl/rs_initiate.cpp db/repl/replset_commands.cpp db/repl/manager.cpp db/repl/health.cpp db/repl/heartbeat.cpp db/repl/rs_config.cpp db/repl/rs_rollback.cpp db/repl/rs_sync.cpp db/repl/rs_initialsync.cpp db/oplog.cpp db/repl_block.cpp db/btreecursor.cpp db/cloner.cpp db/namespace.cpp db/cap.cpp db/matcher_covered.cpp db/dbeval.cpp db/restapi.cpp db/dbhelpers.cpp db/instance.cpp db/client.cpp db/database.cpp db/pdfile.cpp db/cursor.cpp db/security_commands.cpp db/security.cpp db/storage.cpp db/queryoptimizer.cpp db/extsort.cpp db/mr.cpp s/d_util.cpp db/cmdline.cpp" )
+serverOnlyFiles = Split( "util/logfile.cpp util/alignedbuilder.cpp db/mongommf.cpp db/dur.cpp db/durop.cpp db/dur_writetodatafiles.cpp db/dur_preplogbuffer.cpp db/dur_commitjob.cpp db/dur_recover.cpp db/dur_journal.cpp db/query.cpp db/update.cpp db/introspect.cpp db/btree.cpp db/clientcursor.cpp db/tests.cpp db/repl.cpp db/repl/rs.cpp db/repl/consensus.cpp db/repl/rs_initiate.cpp db/repl/replset_commands.cpp db/repl/manager.cpp db/repl/health.cpp db/repl/heartbeat.cpp db/repl/rs_config.cpp db/repl/rs_rollback.cpp db/repl/rs_sync.cpp db/repl/rs_initialsync.cpp db/oplog.cpp db/repl_block.cpp db/btreecursor.cpp db/cloner.cpp db/namespace.cpp db/cap.cpp db/matcher_covered.cpp db/dbeval.cpp db/restapi.cpp db/dbhelpers.cpp db/instance.cpp db/client.cpp db/database.cpp db/pdfile.cpp db/cursor.cpp db/security_commands.cpp db/security.cpp db/queryoptimizer.cpp db/extsort.cpp db/cmdline.cpp" )
 
 serverOnlyFiles += [ "db/index.cpp" ] + Glob( "db/geo/*.cpp" )
 
 serverOnlyFiles += [ "db/dbcommands.cpp" , "db/dbcommands_admin.cpp" ]
+serverOnlyFiles += Glob( "db/commands/*.cpp" )
 coreServerFiles += Glob( "db/stats/*.cpp" )
 serverOnlyFiles += [ "db/driverHelpers.cpp" ]
 
-scriptingFiles = [ "scripting/engine.cpp" , "scripting/utils.cpp" ]
+scriptingFiles = [ "scripting/engine.cpp" , "scripting/utils.cpp" , "scripting/bench.cpp" ]
 
 if usesm:
     scriptingFiles += [ "scripting/engine_spidermonkey.cpp" ]
@@ -457,8 +364,8 @@ else:
 coreServerFiles += scriptingFiles
 
 coreShardFiles = [ "s/config.cpp" , "s/grid.cpp" , "s/chunk.cpp" , "s/shard.cpp" , "s/shardkey.cpp" ]
-shardServerFiles = coreShardFiles + Glob( "s/strategy*.cpp" ) + [ "s/commands_admin.cpp" , "s/commands_public.cpp" , "s/request.cpp" ,  "s/cursors.cpp" ,  "s/server.cpp" , "s/config_migrate.cpp" , "s/s_only.cpp" , "s/stats.cpp" , "s/balance.cpp" , "s/balancer_policy.cpp" , "db/cmdline.cpp" ]
-serverOnlyFiles += coreShardFiles + [ "s/d_logic.cpp" , "s/d_writeback.cpp" , "s/d_migrate.cpp" , "s/d_state.cpp" , "s/d_split.cpp" , "client/distlock_test.cpp" ]
+shardServerFiles = coreShardFiles + Glob( "s/strategy*.cpp" ) + [ "s/commands_admin.cpp" , "s/commands_public.cpp" , "s/request.cpp" , "s/client.cpp" , "s/cursors.cpp" ,  "s/server.cpp" , "s/config_migrate.cpp" , "s/s_only.cpp" , "s/stats.cpp" , "s/balance.cpp" , "s/balancer_policy.cpp" , "db/cmdline.cpp" , "s/writeback_listener.cpp" , "s/shard_version.cpp" ]
+serverOnlyFiles += coreShardFiles + [ "s/d_logic.cpp" , "s/d_writeback.cpp" , "s/d_migrate.cpp" , "s/d_state.cpp" , "s/d_split.cpp" , "client/distlock_test.cpp" , "s/d_chunk_manager.cpp" ]
 
 serverOnlyFiles += [ "db/module.cpp" ] + Glob( "db/modules/*.cpp" )
 
@@ -471,12 +378,20 @@ for x in os.listdir( "db/modules/" ):
     print( "adding module: " + x )
     moduleNames.append( x )
     modRoot = "db/modules/" + x + "/"
-    serverOnlyFiles += Glob( modRoot + "src/*.cpp" )
-    modBuildFile = modRoot + "build.py"
-    if os.path.exists( modBuildFile ):
-        modules += [ imp.load_module( "module_" + x , open( modBuildFile , "r" ) , modBuildFile , ( ".py" , "r" , imp.PY_SOURCE  ) ) ]
 
-allClientFiles = commonFiles + coreDbFiles + [ "client/clientOnly.cpp" , "client/gridfs.cpp" , "s/d_util.cpp" ];
+    modBuildFile = modRoot + "build.py"
+    myModule = None
+    if os.path.exists( modBuildFile ):
+        myModule = imp.load_module( "module_" + x , open( modBuildFile , "r" ) , modBuildFile , ( ".py" , "r" , imp.PY_SOURCE  ) )
+        modules.append( myModule )
+        
+    if myModule and "customIncludes" in dir(myModule) and myModule.customIncludes:
+        pass
+    else:
+        serverOnlyFiles += Glob( modRoot + "src/*.cpp" )
+
+
+allClientFiles = commonFiles + coreDbFiles + [ "client/clientOnly.cpp" , "client/gridfs.cpp" ];
 
 # ---- other build setup -----
 
@@ -504,7 +419,7 @@ if distBuild:
 def isDriverBuild():
     return GetOption( "prefix" ) and GetOption( "prefix" ).find( "mongo-cxx-driver" ) >= 0
 
-if GetOption( "prefix" ):
+if has_option( "prefix" ):
     installDir = GetOption( "prefix" )
     if isDriverBuild():
         installSetup.justClient()
@@ -533,6 +448,7 @@ if "darwin" == os.sys.platform:
     platform = "osx" # prettier than darwin
 
     if env["CXX"] is None:
+        print( "YO" )
         if os.path.exists( "/usr/bin/g++-4.2" ):
             env["CXX"] = "g++-4.2"
 
@@ -623,8 +539,6 @@ elif "win32" == os.sys.platform:
     else:
         print( "boost found at '" + boostDir + "'" )
 
-    serverOnlyFiles += [ "util/ntservice.cpp" ]
-
     boostLibs = []
 
     env.Append(CPPPATH=[ "js/src/" ])
@@ -651,7 +565,7 @@ elif "win32" == os.sys.platform:
     # some warnings we don't like:
     env.Append( CPPFLAGS=" /wd4355 /wd4800 /wd4267 /wd4244 " )
     
-    env.Append( CPPDEFINES=["WIN32","_CONSOLE","_CRT_SECURE_NO_WARNINGS","HAVE_CONFIG_H","PCRE_STATIC","SUPPORT_UCP","SUPPORT_UTF8,PSAPI_VERSION=1" ] )
+    env.Append( CPPDEFINES=["WIN32","_CONSOLE","_CRT_SECURE_NO_WARNINGS","HAVE_CONFIG_H","PCRE_STATIC","SUPPORT_UCP","SUPPORT_UTF8","PSAPI_VERSION=1" ] )
 
     #env.Append( CPPFLAGS='  /Yu"pch.h" ' ) # this would be for pre-compiled headers, could play with it later
 
@@ -667,14 +581,20 @@ elif "win32" == os.sys.platform:
         env.Append( CPPFLAGS= " /GL " ) 
         env.Append( LINKFLAGS=" /LTCG " )
     else:
-        env.Append( CPPDEFINES=[ "_DEBUG" ] )
+
         # /Od disable optimization
         # /ZI debug info w/edit & continue 
         # /TP it's a c++ file
         # RTC1 /GZ (Enable Stack Frame Run-Time Error Checking)
-        env.Append( CPPFLAGS=" /Od /RTC1 /MDd /Z7 /TP /errorReport:none " )
+        env.Append( CPPFLAGS=" /RTC1 /MDd /Z7 /TP /errorReport:none " )
         env.Append( CPPFLAGS=' /Fd"mongod.pdb" ' )
-        env.Append( LINKFLAGS=" /debug " )
+
+        if debugBuild:
+            env.Append( LINKFLAGS=" /debug " )
+            env.Append( CPPFLAGS=" /Od " )
+            
+        if debugLogging:
+            env.Append( CPPDEFINES=[ "_DEBUG" ] )
 
     if os.path.exists("../readline/lib") :
         env.Append( LIBPATH=["../readline/lib"] )
@@ -744,14 +664,24 @@ else:
     print( "No special config for [" + os.sys.platform + "] which probably means it won't work" )
 
 if nix:
+
+    if has_option( "distcc" ):
+        env["CXX"] = "distcc " + env["CXX"]
+        
     env.Append( CPPFLAGS="-fPIC -fno-strict-aliasing -ggdb -pthread -Wall -Wsign-compare -Wno-unknown-pragmas -Winvalid-pch" )
+    # env.Append( " -Wconversion" ) TODO: this doesn't really work yet
     if linux:
         env.Append( CPPFLAGS=" -Werror " )
+        env.Append( CPPFLAGS=" -fno-builtin-memcmp " ) # glibc's memcmp is faster than gcc's
     env.Append( CXXFLAGS=" -Wnon-virtual-dtor " )
     env.Append( LINKFLAGS=" -fPIC -pthread -rdynamic" )
     env.Append( LIBS=[] )
 
-    if linux and GetOption( "sharedclient" ):
+    #make scons colorgcc friendly
+    env['ENV']['HOME'] = os.environ['HOME']
+    env['ENV']['TERM'] = os.environ['TERM']
+
+    if linux and has_option( "sharedclient" ):
         env.Append( LINKFLAGS=" -Wl,--as-needed -Wl,-zdefs " )
 
     if debugBuild:
@@ -759,6 +689,11 @@ if nix:
         env['ENV']['GLIBCXX_FORCE_NEW'] = 1; # play nice with valgrind
     else:
         env.Append( CPPFLAGS=" -O3" )
+        #env.Append( CPPFLAGS=" -fprofile-generate" )
+        #env.Append( LINKFLAGS=" -fprofile-generate" )
+        # then:
+        #env.Append( CPPFLAGS=" -fprofile-use" )
+        #env.Append( LINKFLAGS=" -fprofile-use" )        
 
     if debugLogging:
         env.Append( CPPFLAGS=" -D_DEBUG" );
@@ -773,10 +708,10 @@ if nix:
         env.Append( CXXFLAGS="-m32" )
         env.Append( LINKFLAGS="-m32" )
 
-    if GetOption( "profile" ) is not None:
+    if has_option( "profile" ):
         env.Append( LIBS=[ "profiler" ] )
 
-    if GetOption( "gdbserver" ) is not None:
+    if has_option( "gdbserver" ):
         env.Append( CPPDEFINES=["USE_GDBSERVER"] )
 
     # pre-compiled headers
@@ -940,8 +875,12 @@ def doConfigure( myenv , needPcre=True , shell=False ):
     removeIfInList( myenv["LIBS"] , "wpcap" )
 
     for m in modules:
-        m.configure( conf , myenv )
+        if "customIncludes" in dir(m) and m.customIncludes:
+            m.configure( conf , myenv , serverOnlyFiles )
+        else:
+            m.configure( conf , myenv )
 
+    # XP_* is for spidermonkey.
     # this is outside of usesm block so don't have to rebuild for java
     if windows:
         myenv.Append( CPPDEFINES=[ "XP_WIN" ] )
@@ -1018,14 +957,14 @@ def doConfigure( myenv , needPcre=True , shell=False ):
 
     # Handle staticlib,staticlibpath options.
     staticlibfiles = []
-    if GetOption( "staticlib" ) is not None:
+    if has_option( "staticlib" ):
         # FIXME: probably this loop ought to do something clever
         # depending on whether we want to use 32bit or 64bit
         # libraries.  For now, we sort of rely on the user supplying a
         # sensible staticlibpath option. (myCheckLib implements an
         # analogous search, but it also does other things I don't
         # understand, so I'm not using it.)
-        if GetOption ( "staticlibpath" ) is not None:
+        if has_option ( "staticlibpath" ):
             dirs = GetOption ( "staticlibpath" ).split( "," )
         else:
             dirs = [ "/usr/lib64", "/usr/lib" ]
@@ -1042,6 +981,28 @@ def doConfigure( myenv , needPcre=True , shell=False ):
             if not found:
                 raise "can't find a static %s" % l
 
+    # 'tcmalloc' needs to be the last library linked. Please, add new libraries before this 
+    # point.
+    if has_option( "heapcheck" ) and not shell:
+        if ( not debugBuild ) and ( not debugLogging ):
+            print( "--heapcheck needs --d or --dd" )
+            Exit( 1 )
+
+        if not conf.CheckCXXHeader( "google/heap-checker.h" ):
+            print( "--heapcheck neads header 'google/heap-checker.h'" )
+            Exit( 1 )
+
+        myCheckLib( "tcmalloc" , True );  # if successful, appedded 'tcmalloc' to myenv[ LIBS ]
+        myenv.Append( CPPDEFINES=[ "HEAP_CHECKING" ] )
+        myenv.Append( CPPFLAGS="-fno-omit-frame-pointer" )
+
+    # FIXME doConfigure() is being called twice, in the case of the shell. So if it is called 
+    # with shell==True, it'd be on its second call and it would need to rearrange the libraries'
+    # order. The following removes tcmalloc from the LIB's list and reinserts it at the end.
+    if has_option( "heapcheck" ) and shell:
+        removeIfInList( myenv["LIBS"] , "tcmalloc" )
+        myenv.Append( LIBS="tcmalloc" )
+
     myenv.Append(LINKCOM=" $STATICFILES")
     myenv.Append(STATICFILES=staticlibfiles)
 
@@ -1049,90 +1010,60 @@ def doConfigure( myenv , needPcre=True , shell=False ):
 
 env = doConfigure( env )
 
-# --- js concat ---
-
-def concatjs(target, source, env):
-
-    outFile = str( target[0] )
-
-    fullSource = ""
-
-    first = True
-
-    for s in source:
-        f = open( str(s) , 'r' )
-        for l in f:
-
-            #strip comments. special case if // is potentially in a string
-            parts = l.split("//", 1)
-            if (len(parts) > 1) and ('"' not in parts[1]) and ('"' not in parts[1]):
-                l = parts[0]
-
-            l = l.strip()
-            if len ( l ) == 0:
-                continue
-            
-            if l == "}":
-                fullSource += "}"
-                continue
-
-            if first:
-                first = False
-            else:
-                fullSource += "\n"
-
-            fullSource += l
-
-    fullSource += "\n"
-    
-    fullSource = re.compile( r'/\*\*.*?\*/' , re.M | re.S ).sub( "" , fullSource )
-
-    out = open( outFile , 'w' )
-    out.write( fullSource )
-
-    return None
-
-jsBuilder = Builder(action = concatjs,
-                    suffix = '.jsall',
-                    src_suffix = '.js')
-
-env.Append( BUILDERS={'JSConcat' : jsBuilder})
 
 # --- jsh ---
 
 def jsToH(target, source, env):
 
     outFile = str( target[0] )
-    if len( source ) != 1:
-        raise Exception( "wrong" )
 
-    h = "const char * jsconcatcode" + outFile.split( "mongo" )[-1].replace( "-" , "_").split( ".cpp")[0] + " = \n"
+    h =  ['#include "bson/stringdata.h"'
+         ,'namespace mongo {'
+         ,'struct JSFile{ const char* name; const StringData& source; };'
+         ,'namespace JSFiles{'
+         ]
 
-    for l in open( str(source[0]) , 'r' ):
-        l = l.strip()
-        l = l.replace( '\\' , "\\\\" )
-        l = l.replace( '"' , "\\\"" )
+    def cppEscape(s):
+        s = s.strip()
+        s = s.replace( '\\' , '\\\\' )
+        s = s.replace( '"' , r'\"' )
+        return s
 
+    for s in source:
+        filename = str(s)
+        objname = os.path.split(filename)[1].split('.')[0]
+        stringname = '_jscode_raw_' + objname
 
-        h += '"' + l + "\\n\"\n "
+        h.append('const StringData ' + stringname + " = ")
 
-    h += ";\n\n"
+        for l in open( filename , 'r' ):
+            h.append( '"' + cppEscape(l) + r'\n" ' )
 
-    out = open( outFile , 'w' )
-    out.write( h )
+        h.append(";")
+        h.append('extern const JSFile %s;'%objname) #symbols aren't exported w/o this
+        h.append('const JSFile %s = { "%s" , %s };'%(objname, filename.replace('\\', '/'), stringname))
+
+    h.append("} // namespace JSFiles")
+    h.append("} // namespace mongo")
+    h.append("")
+
+    text = '\n'.join(h);
+
+    out = open( outFile , 'wb' )
+    out.write( text )
     out.close()
 
     # mongo_vstudio.cpp is in git as the .vcproj doesn't generate this file.
     if outFile.find( "mongo.cpp" ) >= 0:
-        out = open( outFile.replace( "mongo" , "mongo_vstudio" ) , 'w' )
-        out.write( h )
+        out = open( outFile.replace( "mongo" , "mongo_vstudio" ) , 'wb' )
+        out.write( text )
         out.close()
 
     return None
 
 jshBuilder = Builder(action = jsToH,
                     suffix = '.cpp',
-                    src_suffix = '.jsall')
+                    src_suffix = '.js')
 
 env.Append( BUILDERS={'JSHeader' : jshBuilder})
 
@@ -1143,7 +1074,7 @@ clientEnv = env.Clone();
 clientEnv.Append( CPPPATH=["../"] )
 clientEnv.Prepend( LIBS=[ "mongoclient"] )
 clientEnv.Prepend( LIBPATH=["."] )
-#clientEnv["CPPDEFINES"].remove( "MONGO_EXPOSE_MACROS" )
+clientEnv["CPPDEFINES"].remove( "MONGO_EXPOSE_MACROS" )
 l = clientEnv[ "LIBS" ]
 removeIfInList( l , "pcre" )
 removeIfInList( l , "pcrecpp" )
@@ -1164,7 +1095,10 @@ def checkErrorCodes():
 checkErrorCodes()
 
 # main db target
-mongod = env.Program( "mongod" , commonFiles + coreDbFiles + coreServerFiles + serverOnlyFiles + [ "db/db.cpp" ] )
+mongodOnlyFiles = [ "db/db.cpp" ]
+if windows:
+    mongodOnlyFiles.append( "util/ntservice.cpp" ) 
+mongod = env.Program( "mongod" , commonFiles + coreDbFiles + coreServerFiles + serverOnlyFiles + mongodOnlyFiles )
 Default( mongod )
 
 # tools
@@ -1183,7 +1117,7 @@ mongos = env.Program( "mongos" , commonFiles + coreDbFiles + coreServerFiles + s
 
 # c++ library
 clientLibName = str( env.Library( "mongoclient" , allClientFiles )[0] )
-if GetOption( "sharedclient" ):
+if has_option( "sharedclient" ):
     sharedClientLibName = str( env.SharedLibrary( "mongoclient" , allClientFiles )[0] )
 env.Library( "mongotestfiles" , commonFiles + coreDbFiles + coreServerFiles + serverOnlyFiles + ["client/gridfs.cpp"])
 env.Library( "mongoshellfiles" , allClientFiles + coreServerFiles )
@@ -1192,11 +1126,12 @@ clientTests = []
 
 # examples
 clientTests += [ clientEnv.Program( "firstExample" , [ "client/examples/first.cpp" ] ) ]
+clientTests += [ clientEnv.Program( "rsExample" , [ "client/examples/rs.cpp" ] ) ]
 clientTests += [ clientEnv.Program( "secondExample" , [ "client/examples/second.cpp" ] ) ]
 clientTests += [ clientEnv.Program( "whereExample" , [ "client/examples/whereExample.cpp" ] ) ]
 clientTests += [ clientEnv.Program( "authTest" , [ "client/examples/authTest.cpp" ] ) ]
 clientTests += [ clientEnv.Program( "httpClientTest" , [ "client/examples/httpClientTest.cpp" ] ) ]
-# clientTests += [ clientEnv.Program( "bsondemo" , [ "bson/bsondemo/bsondemo.cpp" ] ) ] #TODO
+clientTests += [ clientEnv.Program( "bsondemo" , [ "bson/bsondemo/bsondemo.cpp" ] ) ]
 
 # testing
 test = testEnv.Program( "test" , Glob( "dbtests/*.cpp" ) )
@@ -1210,6 +1145,7 @@ mongosniff_built = False
 if darwin or clientEnv["_HAVEPCAP"]:
     mongosniff_built = True
     sniffEnv = clientEnv.Clone()
+    sniffEnv.Append( CPPDEFINES="MONGO_EXPOSE_MACROS" )
     if not windows:
         sniffEnv.Append( LIBS=[ "pcap" ] )
     else:
@@ -1218,11 +1154,9 @@ if darwin or clientEnv["_HAVEPCAP"]:
 
 # --- shell ---
 
-env.JSConcat( "shell/mongo.jsall"  , ["shell/utils.js","shell/db.js","shell/mongo.js","shell/mr.js","shell/query.js","shell/collection.js"] )
-env.JSHeader( "shell/mongo.jsall" )
+env.JSHeader( "shell/mongo.cpp"  , ["shell/utils.js","shell/db.js","shell/mongo.js","shell/mr.js","shell/query.js","shell/collection.js"] )
 
-env.JSConcat( "shell/mongo-server.jsall"  , [ "shell/servers.js"] )
-env.JSHeader( "shell/mongo-server.jsall" )
+env.JSHeader( "shell/mongo-server.cpp"  , [ "shell/servers.js"] )
 
 shellEnv = env.Clone();
 
@@ -1261,8 +1195,9 @@ elif not onlyServer:
             shell32BitFiles.append( "32bit/" + str( f ) )
         for f in scriptingFiles:
             shell32BitFiles.append( "32bit/" + str( f ) )
-        shellEnv.VariantDir( "32bit" , "." )
-        shellEnv.Append( CPPPATH=["32bit/"] )
+        for f in processInfoFiles:
+            shell32BitFiles.append( "32bit/" + str( f ) )
+        shellEnv.VariantDir( "32bit" , "." , duplicate=1 )
     else:
         shellEnv.Prepend( LIBPATH=[ "." ] )
 
@@ -1289,7 +1224,7 @@ smokeFlags = []
 
 # Ugh.  Frobbing the smokeFlags must precede using them to construct
 # actions, I think.
-if GetOption( 'smokedbprefix') is not None:
+if has_option( 'smokedbprefix'):
     smokeFlags += ['--smoke-db-prefix', GetOption( 'smokedbprefix')]
 
 if 'startMongodSmallOplog' in COMMAND_LINE_TARGETS:
@@ -1302,7 +1237,15 @@ def addTest(name, deps, actions):
     smokeEnv.SideEffect( "dummySmokeSideEffect", name )
 
 def addSmoketest( name, deps ):
-    addTest(name, deps, [ "python buildscripts/smoke.py " + " ".join(smokeFlags) + ' ' + name ])
+    # Convert from smoke to test, smokeJs to js, and foo to foo
+    target = name
+    if name.startswith("smoke"):
+        if name == "smoke":
+            target = "test"
+        else:
+            target = name[5].lower() + name[6:]
+
+    addTest(name, deps, [ "python buildscripts/smoke.py " + " ".join(smokeFlags) + ' ' + target ])
 
 addSmoketest( "smoke", [ add_exe( "test" ) ] )
 addSmoketest( "smokePerf", [ "perftest" ]  )
@@ -1315,15 +1258,16 @@ if not onlyServer and not noshell:
     addSmoketest( "smokeClone", [ "mongo", "mongod" ] )
     addSmoketest( "smokeRepl", [ "mongo", "mongod", "mongobridge" ] )
     addSmoketest( "smokeReplSets", [ "mongo", "mongod", "mongobridge" ] )
-    addSmoketest( "smokeDisk", [ add_exe( "mongo" ), add_exe( "mongod" ) ] )
+    addSmoketest( "smokeDur", [ add_exe( "mongo" ) , add_exe( "mongod" ) ] )
+    addSmoketest( "smokeDisk", [ add_exe( "mongo" ), add_exe( "mongod" ), add_exe( "mongodump" ), add_exe( "mongorestore" ) ] )
     addSmoketest( "smokeAuth", [ add_exe( "mongo" ), add_exe( "mongod" ) ] )
     addSmoketest( "smokeParallel", [ add_exe( "mongo" ), add_exe( "mongod" ) ] )
     addSmoketest( "smokeSharding", [ "mongo", "mongod", "mongos" ] )
     addSmoketest( "smokeJsPerf", [ "mongo" ] )
-    addSmoketest("smokeJsSlowNightly", [add_exe("mongo")])
-    addSmoketest("smokeJsSlowWeekly", [add_exe("mongo")])
+    addSmoketest( "smokeJsSlowNightly", [add_exe("mongo")])
+    addSmoketest( "smokeJsSlowWeekly", [add_exe("mongo")])
     addSmoketest( "smokeQuota", [ "mongo" ] )
-    addSmoketest( "smokeTool", [ add_exe( "mongo" ) ] )
+    addSmoketest( "smokeTool", [ add_exe( "mongo" ), add_exe("mongod"), "tools" ] )
 
 # Note: although the test running logic has been moved to
 # buildscripts/smoke.py, the interface to running the tests has been
@@ -1408,13 +1352,38 @@ def build_docs(env, target, source):
 env.Alias("docs", [], [build_docs])
 env.AlwaysBuild("docs")
 
+#  ---- astyle ----
+
+def doStyling( env , target , source ):
+    
+    res = utils.execsys( "astyle --version" )
+    res = " ".join(res)
+    if res.count( "2." ) == 0:
+        print( "astyle 2.x needed, found:" + res )
+        Exit(-1)
+
+    files = utils.getAllSourceFiles() 
+    files = filter( lambda x: not x.endswith( ".c" ) , files )
+    files.remove( "./shell/mongo_vstudio.cpp" )
+
+    cmd = "astyle --options=mongo_astyle " + " ".join( files )
+    res = utils.execsys( cmd )
+    print( res[0] )
+    print( res[1] )
+
+
+env.Alias( "style" , [] , [ doStyling ] )
+env.AlwaysBuild( "style" )
+
+
+
 #  ----  INSTALL -------
 
 def getSystemInstallName():
     n = platform + "-" + processor
     if static:
         n += "-static"
-    if GetOption("nostrip"):
+    if has_option("nostrip"):
         n += "-debugsymbols"
     if nix and os.uname()[2].startswith( "8." ):
         n += "-tiger"
@@ -1423,6 +1392,7 @@ def getSystemInstallName():
         n += "-" + "-".join( moduleNames )
 
     try:
+        findSettingsSetup()
         import settings
         if "distmod" in dir( settings ):
             n = n + "-" + str( settings.distmod )
@@ -1503,7 +1473,7 @@ def installBinary( e , name ):
     fullInstallName = installDir + "/bin/" + name
 
     allBinaries += [ name ]
-    if (solaris or linux) and (not GetOption("nostrip")):
+    if (solaris or linux) and (not has_option("nostrip")):
         e.AddPostAction( inst, e.Action( 'strip ' + fullInstallName ) )
 
     if linux and len( COMMAND_LINE_TARGETS ) == 1 and str( COMMAND_LINE_TARGETS[0] ) == "s3dist":
@@ -1542,7 +1512,7 @@ if installSetup.clientSrc:
 #lib
 if installSetup.libraries:
     env.Install( installDir + "/" + nixLibPrefix, clientLibName )
-    if GetOption( "sharedclient" ): 
+    if has_option( "sharedclient" ): 
         env.Install( installDir + "/" + nixLibPrefix, sharedClientLibName )
 
 
@@ -1569,7 +1539,7 @@ if installSetup.clientTestsDir:
 env.Alias( "install" , installDir )
 
 # aliases
-env.Alias( "mongoclient" , GetOption( "sharedclient" ) and sharedClientLibName or clientLibName )
+env.Alias( "mongoclient" , has_option( "sharedclient" ) and sharedClientLibName or clientLibName )
 
 
 #  ---- CONVENIENCE ----
@@ -1605,9 +1575,7 @@ def s3push( localName , remoteName=None , remotePrefix=None , fixName=True , pla
         else:
             remotePrefix = "-" + distName
 
-    sys.path.append( "." )
-    sys.path.append( ".." )
-    sys.path.append( "../../" )
+    findSettingsSetup()
 
     import simples3
     import settings
@@ -1676,7 +1644,7 @@ def build_and_test_client(env, target, source):
     call(scons_command + ["libmongoclient.a", "clientTests"], cwd=installDir)
 
     return bool(call(["python", "buildscripts/smoke.py",
-                      "--test-path", installDir, "smokeClient"]))
+                      "--test-path", installDir, "client"]))
 env.Alias("clientBuild", [mongod, installDir], [build_and_test_client])
 env.AlwaysBuild("clientBuild")
 

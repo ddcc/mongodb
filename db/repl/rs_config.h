@@ -23,7 +23,7 @@
 #include "../../util/hostandport.h"
 #include "health.h"
 
-namespace mongo { 
+namespace mongo {
 
     /* singleton config object is stored here */
     const string rsConfigNs = "local.system.replset";
@@ -31,7 +31,7 @@ namespace mongo {
     class ReplSetConfig {
         enum { EMPTYCONFIG = -2 };
     public:
-        /* if something is misconfigured, throws an exception. 
+        /* if something is misconfigured, throws an exception.
         if couldn't be queried or is just blank, ok() will be false.
         */
         ReplSetConfig(const HostAndPort& h);
@@ -41,7 +41,7 @@ namespace mongo {
         bool ok() const { return _ok; }
 
         struct MemberCfg {
-            MemberCfg() : _id(-1), votes(1), priority(1.0), arbiterOnly(false), slaveDelay(0), hidden(false) { }
+            MemberCfg() : _id(-1), votes(1), priority(1.0), arbiterOnly(false), slaveDelay(0), hidden(false), buildIndexes(true) { }
             int _id;              /* ordinal */
             unsigned votes;       /* how many votes this node gets. default 1. */
             HostAndPort h;
@@ -49,15 +49,17 @@ namespace mongo {
             bool arbiterOnly;
             int slaveDelay;       /* seconds.  int rather than unsigned for convenient to/front bson conversion. */
             bool hidden;          /* if set, don't advertise to drives in isMaster. for non-primaries (priority 0) */
+            bool buildIndexes;    /* if false, do not create any non-_id indexes */
+            set<string> tags;     /* tagging for data center, rack, etc. */
+            BSONObj initialSync;  /* directions for initial sync source */
 
             void check() const;   /* check validity, assert if not. */
             BSONObj asBson() const;
-            bool potentiallyHot() const { 
-                return !arbiterOnly && priority > 0;
-            }
-            bool operator==(const MemberCfg& r) const { 
-                return _id==r._id && votes == r.votes && h == r.h && priority == r.priority && 
-                    arbiterOnly == r.arbiterOnly && slaveDelay == r.slaveDelay && hidden == r.hidden;
+            bool potentiallyHot() const { return !arbiterOnly && priority > 0; }
+            bool operator==(const MemberCfg& r) const {
+                return _id==r._id && votes == r.votes && h == r.h && priority == r.priority &&
+                       arbiterOnly == r.arbiterOnly && slaveDelay == r.slaveDelay && hidden == r.hidden &&
+                       buildIndexes == buildIndexes;
             }
             bool operator!=(const MemberCfg& r) const { return !(*this == r); }
         };

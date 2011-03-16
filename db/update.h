@@ -26,32 +26,42 @@ namespace mongo {
     class ModState;
     class ModSetState;
 
-    /* Used for modifiers such as $inc, $set, $push, ... 
+    /* Used for modifiers such as $inc, $set, $push, ...
      * stores the info about a single operation
      * once created should never be modified
      */
     struct Mod {
         // See opFromStr below
-        //        0    1    2     3         4     5          6    7      8       9       10    11
-        enum Op { INC, SET, PUSH, PUSH_ALL, PULL, PULL_ALL , POP, UNSET, BITAND, BITOR , BIT , ADDTOSET  } op;
-        
+        //        0    1    2     3         4     5          6    7      8       9       10    11        12           13
+        enum Op { INC, SET, PUSH, PUSH_ALL, PULL, PULL_ALL , POP, UNSET, BITAND, BITOR , BIT , ADDTOSET, RENAME_FROM, RENAME_TO } op;
+
         static const char* modNames[];
         static unsigned modNamesNum;
 
         const char *fieldName;
         const char *shortFieldName;
-        
+
         BSONElement elt; // x:5 note: this is the actual element from the updateobj
         boost::shared_ptr<Matcher> matcher;
+        bool matcherOnPrimitive;
 
-        void init( Op o , BSONElement& e ){
+        void init( Op o , BSONElement& e ) {
             op = o;
             elt = e;
-            if ( op == PULL && e.type() == Object )
-                matcher.reset( new Matcher( e.embeddedObject() ) );
+            if ( op == PULL && e.type() == Object ) {
+                BSONObj t = e.embeddedObject();
+                if ( t.firstElement().getGtLtOp() == 0 ) {
+                    matcher.reset( new Matcher( t ) );
+                    matcherOnPrimitive = false;
+                }
+                else {
+                    matcher.reset( new Matcher( BSON( "" << t ) ) );
+                    matcherOnPrimitive = true;
+                }
+            }
         }
 
-        void setFieldName( const char * s ){
+        void setFieldName( const char * s ) {
             fieldName = s;
             shortFieldName = strrchr( fieldName , '.' );
             if ( shortFieldName )
@@ -59,14 +69,13 @@ namespace mongo {
             else
                 shortFieldName = fieldName;
         }
-        
+
         /**
          * @param in incrememnts the actual value inside in
          */
         void incrementMe( BSONElement& in ) const {
             BSONElementManipulator manip( in );
-            
-            switch ( in.type() ){
+            switch ( in.type() ) {
             case NumberDouble:
                 manip.setNumber( elt.numberDouble() + in.numberDouble() );
                 break;
@@ -79,18 +88,33 @@ namespace mongo {
             default:
                 assert(0);
             }
-            
         }
-        
+        void IncrementMe( BSONElement& in ) const {
+            BSONElementManipulator manip( in );
+            switch ( in.type() ) {
+            case NumberDouble:
+                manip.SetNumber( elt.numberDouble() + in.numberDouble() );
+                break;
+            case NumberLong:
+                manip.SetLong( elt.numberLong() + in.numberLong() );
+                break;
+            case NumberInt:
+                manip.SetInt( elt.numberInt() + in.numberInt() );
+                break;
+            default:
+                assert(0);
+            }
+        }
+
         template< class Builder >
         void appendIncremented( Builder& bb , const BSONElement& in, ModState& ms ) const;
-        
+
         bool operator<( const Mod &other ) const {
             return strcmp( fieldName, other.fieldName ) < 0;
         }
-        
+
         bool arrayDep() const {
-            switch (op){
+            switch (op) {
             case PUSH:
             case PUSH_ALL:
             case POP:
@@ -99,8 +123,8 @@ namespace mongo {
                 return false;
             }
         }
-        
-        static bool isIndexed( const string& fullName , const set<string>& idxKeys ){
+
+        static bool isIndexed( const string& fullName , const set<string>& idxKeys ) {
             const char * fieldName = fullName.c_str();
             // check if there is an index key that is a parent of mod
             for( const char *dot = strchr( fieldName, '.' ); dot; dot = strchr( dot + 1, '.' ) )
@@ -117,23 +141,23 @@ namespace mongo {
 
             return false;
         }
-        
+
         bool isIndexed( const set<string>& idxKeys ) const {
             string fullName = fieldName;
-            
+
             if ( isIndexed( fullName , idxKeys ) )
                 return true;
-            
-            if ( strstr( fieldName , "." ) ){
+
+            if ( strstr( fieldName , "." ) ) {
                 // check for a.0.1
                 StringBuilder buf( fullName.size() + 1 );
-                for ( size_t i=0; i<fullName.size(); i++ ){
+                for ( size_t i=0; i<fullName.size(); i++ ) {
                     char c = fullName[i];
-                    
-                    if ( c == '$' && 
-                         i > 0 && fullName[i-1] == '.' &&
-                         i+1<fullName.size() && 
-                         fullName[i+1] == '.' ){
+
+                    if ( c == '$' &&
+                            i > 0 && fullName[i-1] == '.' &&
+                            i+1<fullName.size() &&
+                            fullName[i+1] == '.' ) {
                         i++;
                         continue;
                     }
@@ -145,10 +169,10 @@ namespace mongo {
 
                     if ( ! isdigit( fullName[i+1] ) )
                         continue;
-                    
+
                     bool possible = true;
                     size_t j=i+2;
-                    for ( ; j<fullName.size(); j++ ){
+                    for ( ; j<fullName.size(); j++ ) {
                         char d = fullName[j];
                         if ( d == '.' )
                             break;
@@ -157,7 +181,7 @@ namespace mongo {
                         possible = false;
                         break;
                     }
-                    
+
                     if ( possible )
                         i = j;
                 }
@@ -168,25 +192,25 @@ namespace mongo {
 
             return false;
         }
-        
+
         template< class Builder >
         void apply( Builder& b , BSONElement in , ModState& ms ) const;
-        
+
         /**
          * @return true iff toMatch should be removed from the array
          */
         bool _pullElementMatch( BSONElement& toMatch ) const;
 
         void _checkForAppending( const BSONElement& e ) const {
-            if ( e.type() == Object ){
+            if ( e.type() == Object ) {
                 // this is a tiny bit slow, but rare and important
                 // only when setting something TO an object, not setting something in an object
-                // and it checks for { $set : { x : { 'a.b' : 1 } } } 
+                // and it checks for { $set : { x : { 'a.b' : 1 } } }
                 // which is feel has been common
                 uassert( 12527 , "not okForStorage" , e.embeddedObject().okForStorage() );
             }
         }
-        
+
         bool isEach() const {
             if ( elt.type() != Object )
                 return false;
@@ -199,14 +223,18 @@ namespace mongo {
         BSONObj getEach() const {
             return elt.embeddedObjectUserCheck().firstElement().embeddedObjectUserCheck();
         }
-        
+
         void parseEach( BSONElementSet& s ) const {
             BSONObjIterator i(getEach());
-            while ( i.more() ){
+            while ( i.more() ) {
                 s.insert( i.next() );
             }
         }
-        
+
+        const char *renameFrom() const {
+            massert( 13492, "mod must be RENAME_TO type", op == Mod::RENAME_TO );
+            return elt.fieldName();
+        }
     };
 
     /**
@@ -220,7 +248,7 @@ namespace mongo {
         bool _hasDynamicArray;
 
         static void extractFields( map< string, BSONElement > &fields, const BSONElement &top, const string &base );
-        
+
         FieldCompareResult compare( const ModHolder::iterator &m, map< string, BSONElement >::iterator &p, const map< string, BSONElement >::iterator &pEnd ) const {
             bool mDone = ( m == _mods.end() );
             bool pDone = ( p == pEnd );
@@ -236,11 +264,11 @@ namespace mongo {
 
             return compareDottedFieldNames( m->first, p->first.c_str() );
         }
-        
+
         bool mayAddEmbedded( map< string, BSONElement > &existing, string right ) {
             for( string left = EmbeddedBuilder::splitDot( right );
-                 left.length() > 0 && left[ left.length() - 1 ] != '.';
-                 left += "." + EmbeddedBuilder::splitDot( right ) ) {
+                    left.length() > 0 && left[ left.length() - 1 ] != '.';
+                    left += "." + EmbeddedBuilder::splitDot( right ) ) {
                 if ( existing.count( left ) > 0 && existing[ left ].type() != Object )
                     return false;
                 if ( haveModForField( left.c_str() ) )
@@ -250,7 +278,7 @@ namespace mongo {
         }
         static Mod::Op opFromStr( const char *fn ) {
             assert( fn[0] == '$' );
-            switch( fn[1] ){
+            switch( fn[1] ) {
             case 'i': {
                 if ( fn[2] == 'n' && fn[3] == 'c' && fn[4] == 0 )
                     return Mod::INC;
@@ -262,14 +290,14 @@ namespace mongo {
                 break;
             }
             case 'p': {
-                if ( fn[2] == 'u' ){
-                    if ( fn[3] == 's' && fn[4] == 'h' ){
+                if ( fn[2] == 'u' ) {
+                    if ( fn[3] == 's' && fn[4] == 'h' ) {
                         if ( fn[5] == 0 )
                             return Mod::PUSH;
                         if ( fn[5] == 'A' && fn[6] == 'l' && fn[7] == 'l' && fn[8] == 0 )
                             return Mod::PUSH_ALL;
                     }
-                    else if ( fn[3] == 'l' && fn[4] == 'l' ){
+                    else if ( fn[3] == 'l' && fn[4] == 'l' ) {
                         if ( fn[5] == 0 )
                             return Mod::PULL;
                         if ( fn[5] == 'A' && fn[6] == 'l' && fn[7] == 'l' && fn[8] == 0 )
@@ -286,7 +314,7 @@ namespace mongo {
                 break;
             }
             case 'b': {
-                if ( fn[2] == 'i' && fn[3] == 't' ){
+                if ( fn[2] == 'i' && fn[3] == 't' ) {
                     if ( fn[4] == 0 )
                         return Mod::BIT;
                     if ( fn[4] == 'a' && fn[5] == 'n' && fn[6] == 'd' && fn[7] == 0 )
@@ -297,27 +325,41 @@ namespace mongo {
                 break;
             }
             case 'a': {
-                if ( fn[2] == 'd' && fn[3] == 'd' ){
+                if ( fn[2] == 'd' && fn[3] == 'd' ) {
                     // add
                     if ( fn[4] == 'T' && fn[5] == 'o' && fn[6] == 'S' && fn[7] == 'e' && fn[8] == 't' && fn[9] == 0 )
                         return Mod::ADDTOSET;
-                    
+
                 }
+                break;
+            }
+            case 'r': {
+                if ( fn[2] == 'e' && fn[3] == 'n' && fn[4] == 'a' && fn[5] == 'm' && fn[6] =='e' ) {
+                    return Mod::RENAME_TO; // with this return code we handle both RENAME_TO and RENAME_FROM
+                }
+                break;
             }
             default: break;
             }
             uassert( 10161 ,  "Invalid modifier specified " + string( fn ), false );
             return Mod::INC;
         }
-        
-        ModSet(){}
+
+        ModSet() {}
+
+        void updateIsIndexed( const Mod &m, const set<string> &idxKeys, const set<string> *backgroundKeys ) {
+            if ( m.isIndexed( idxKeys ) ||
+                    (backgroundKeys && m.isIndexed(*backgroundKeys)) ) {
+                _isIndexed++;
+            }
+        }
 
     public:
-        
-        ModSet( const BSONObj &from , 
-            const set<string>& idxKeys = set<string>(),
-            const set<string>* backgroundKeys = 0
-            );
+
+        ModSet( const BSONObj &from ,
+                const set<string>& idxKeys = set<string>(),
+                const set<string>* backgroundKeys = 0
+              );
 
         // TODO: this is inefficient - should probably just handle when iterating
         ModSet * fixDynamicArray( const char * elemMatchKey ) const;
@@ -329,7 +371,7 @@ namespace mongo {
          * doesn't change or modify this ModSet or any underying Mod
          */
         auto_ptr<ModSetState> prepare( const BSONObj& obj ) const;
-        
+
         /**
          * given a query pattern, builds an object suitable for an upsert
          * will take the query spec and combine all $ operators
@@ -349,15 +391,15 @@ namespace mongo {
             return _mods.find( fieldName ) != _mods.end();
         }
 
-        bool haveConflictingMod( const string& fieldName ){
+        bool haveConflictingMod( const string& fieldName ) {
             size_t idx = fieldName.find( '.' );
             if ( idx == string::npos )
                 idx = fieldName.size();
-            
+
             ModHolder::const_iterator start = _mods.lower_bound(fieldName.substr(0,idx));
-            for ( ; start != _mods.end(); start++ ){
+            for ( ; start != _mods.end(); start++ ) {
                 FieldCompareResult r = compareDottedFieldNames( fieldName , start->first );
-                switch ( r ){
+                switch ( r ) {
                 case LEFT_SUBFIELD: return true;
                 case LEFT_BEFORE: return false;
                 case SAME: return true;
@@ -367,9 +409,9 @@ namespace mongo {
             }
             return false;
 
-            
+
         }
-        
+
     };
 
     /**
@@ -379,23 +421,28 @@ namespace mongo {
     public:
         const Mod * m;
         BSONElement old;
-        
+        BSONElement newVal;
+        BSONObj _objData;
+
         const char * fixedOpName;
         BSONElement * fixed;
         int pushStartSize;
-        
+
         BSONType incType;
         int incint;
         double incdouble;
         long long inclong;
-        
-        ModState(){
+
+        bool dontApply;
+
+        ModState() {
             fixedOpName = 0;
             fixed = 0;
             pushStartSize = -1;
             incType = EOO;
+            dontApply = false;
         }
-           
+
         Mod::Op op() const {
             return m->op;
         }
@@ -403,12 +450,18 @@ namespace mongo {
         const char * fieldName() const {
             return m->fieldName;
         }
-        
+
         bool needOpLogRewrite() const {
+            if ( dontApply )
+                return false;
+
             if ( fixed || fixedOpName || incType )
                 return true;
-            
-            switch( op() ){
+
+            switch( op() ) {
+            case Mod::RENAME_FROM:
+            case Mod::RENAME_TO:
+                return true;
             case Mod::BIT:
             case Mod::BITAND:
             case Mod::BITOR:
@@ -418,19 +471,19 @@ namespace mongo {
                 return false;
             }
         }
-        
+
         void appendForOpLog( BSONObjBuilder& b ) const;
 
         template< class Builder >
-        void apply( Builder& b , BSONElement in ){
+        void apply( Builder& b , BSONElement in ) {
             m->apply( b , in , *this );
         }
-        
+
         template< class Builder >
         void appendIncValue( Builder& b , bool useFullName ) const {
             const char * n = useFullName ? m->fieldName : m->shortFieldName;
 
-            switch ( incType ){
+            switch ( incType ) {
             case NumberDouble:
                 b.append( n , incdouble ); break;
             case NumberLong:
@@ -443,8 +496,11 @@ namespace mongo {
         }
 
         string toString() const;
+
+        template< class Builder >
+        void handleRename( Builder &newObjBuilder, const char *shortFieldName );
     };
-    
+
     /**
      * this is used to hold state, meta data while applying a ModSet to a BSONObj
      * the goal is to make ModSet const so its re-usable
@@ -459,15 +515,16 @@ namespace mongo {
         const BSONObj& _obj;
         ModStateHolder _mods;
         bool _inPlacePossible;
-        
-        ModSetState( const BSONObj& obj ) 
-            : _obj( obj ) , _inPlacePossible(true){
+        BSONObj _newFromMods; // keep this data alive, as oplog generation may depend on it
+
+        ModSetState( const BSONObj& obj )
+            : _obj( obj ) , _inPlacePossible(true) {
         }
-        
+
         /**
          * @return if in place is still possible
          */
-        bool amIInPlacePossible( bool inPlacePossible ){
+        bool amIInPlacePossible( bool inPlacePossible ) {
             if ( ! inPlacePossible )
                 _inPlacePossible = false;
             return _inPlacePossible;
@@ -478,17 +535,21 @@ namespace mongo {
 
         template< class Builder >
         void _appendNewFromMods( const string& root , ModState& m , Builder& b , set<string>& onedownseen );
-        
+
         template< class Builder >
-        void appendNewFromMod( ModState& ms , Builder& b ){
+        void appendNewFromMod( ModState& ms , Builder& b ) {
+            if ( ms.dontApply ) {
+                return;
+            }
+
             //const Mod& m = *(ms.m); // HACK
             Mod& m = *((Mod*)(ms.m)); // HACK
-                
-            switch ( m.op ){
-                    
-            case Mod::PUSH: 
-            case Mod::ADDTOSET: { 
-                if ( m.isEach() ){
+
+            switch ( m.op ) {
+
+            case Mod::PUSH:
+            case Mod::ADDTOSET: {
+                if ( m.isEach() ) {
                     b.appendArray( m.shortFieldName , m.getEach() );
                 }
                 else {
@@ -497,19 +558,19 @@ namespace mongo {
                     arr.done();
                 }
                 break;
-            } 
-                
+            }
+
             case Mod::PUSH_ALL: {
                 b.appendAs( m.elt, m.shortFieldName );
                 break;
-            } 
-                
+            }
+
             case Mod::UNSET:
             case Mod::PULL:
             case Mod::PULL_ALL:
                 // no-op b/c unset/pull of nothing does nothing
                 break;
-                
+
             case Mod::INC:
                 ms.fixedOpName = "$set";
             case Mod::SET: {
@@ -517,24 +578,29 @@ namespace mongo {
                 b.appendAs( m.elt, m.shortFieldName );
                 break;
             }
-            default: 
+            // shouldn't see RENAME_FROM here
+            case Mod::RENAME_TO:
+                ms.handleRename( b, m.shortFieldName );
+                break;
+            default:
                 stringstream ss;
                 ss << "unknown mod in appendNewFromMod: " << m.op;
                 throw UserException( 9015, ss.str() );
             }
-         
+
         }
 
     public:
-        
+
         bool canApplyInPlace() const {
             return _inPlacePossible;
         }
-        
+
         /**
          * modified underlying _obj
+         * @param isOnDisk - true means this is an on disk object, and this update needs to be made durable
          */
-        void applyModsInPlace();
+        void applyModsInPlace( bool isOnDisk );
 
         BSONObj createNewFromMods();
 
@@ -544,9 +610,9 @@ namespace mongo {
             for ( ModStateHolder::const_iterator i = _mods.begin(); i != _mods.end(); i++ )
                 if ( i->second.needOpLogRewrite() )
                     return true;
-            return false;            
+            return false;
         }
-        
+
         BSONObj getOpLogRewrite() const {
             BSONObjBuilder b;
             for ( ModStateHolder::const_iterator i = _mods.begin(); i != _mods.end(); i++ )
@@ -564,7 +630,7 @@ namespace mongo {
         void appendSizeSpecForArrayDepMods( BSONObjBuilder &b ) const {
             for ( ModStateHolder::const_iterator i = _mods.begin(); i != _mods.end(); i++ ) {
                 const ModState& m = i->second;
-                if ( m.m->arrayDep() ){
+                if ( m.m->arrayDep() ) {
                     if ( m.pushStartSize == -1 )
                         b.appendNull( m.fieldName() );
                     else
@@ -577,6 +643,6 @@ namespace mongo {
 
         friend class ModSet;
     };
-    
+
 }
 

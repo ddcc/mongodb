@@ -16,11 +16,20 @@ friendlyEqual = function( a , b ){
     return false;
 }
 
+printStackTrace = function(){
+    try{
+        throw new Error("Printing Stack Trace");
+    } catch (e) {
+        print(e.stack);
+    }
+}
+
 doassert = function (msg) {
     if (msg.indexOf("assert") == 0)
         print(msg);
     else
         print("assert: " + msg);
+    printStackTrace();
     throw msg;
 }
 
@@ -87,7 +96,7 @@ assert.repeat = function( f, msg, timeout, interval ) {
     }
 }
     
-assert.soon = function( f, msg, timeout, interval ) {
+assert.soon = function( f, msg, timeout /*ms*/, interval ) {
     if ( assert._debug && msg ) print( "in assert for: " + msg );
 
     var start = new Date();
@@ -113,6 +122,10 @@ assert.soon = function( f, msg, timeout, interval ) {
 
 assert.throws = function( func , params , msg ){
     if ( assert._debug && msg ) print( "in assert for: " + msg );
+    
+    if ( params && typeof( params ) == "string" )
+        throw "2nd argument to assert.throws has to be an array"
+    
     try {
         func.apply( null , params );
     }
@@ -202,7 +215,11 @@ Object.extend = function( dst , src , deep ){
     for ( var k in src ){
         var v = src[k];
         if ( deep && typeof(v) == "object" ){
-            v = Object.extend( typeof ( v.length ) == "number" ? [] : {} , v , true );
+            if ( "floatApprox" in v ) { // convert NumberLong properly
+                eval( "v = " + tojson( v ) );
+            } else {
+                v = Object.extend( typeof ( v.length ) == "number" ? [] : {} , v , true );
+            }
         }
         dst[k] = v;
     }
@@ -238,6 +255,13 @@ String.prototype.rtrim = function() {
     return this.replace(/\s+$/,"");
 }
 
+Number.prototype.zeroPad = function(width) {
+    var str = this + '';
+    while (str.length < width)
+        str = '0' + str;
+    return str;
+}
+
 Date.timeFunc = function( theFunc , numTimes ){
 
     var start = new Date();
@@ -251,7 +275,67 @@ Date.timeFunc = function( theFunc , numTimes ){
 }
 
 Date.prototype.tojson = function(){
-    return "\"" + this.toString() + "\"";
+
+    var UTC = Date.printAsUTC ? 'UTC' : '';
+
+    var year = this['get'+UTC+'FullYear']().zeroPad(4);
+    var month = (this['get'+UTC+'Month']() + 1).zeroPad(2);
+    var date = this['get'+UTC+'Date']().zeroPad(2);
+    var hour = this['get'+UTC+'Hours']().zeroPad(2);
+    var minute = this['get'+UTC+'Minutes']().zeroPad(2);
+    var sec = this['get'+UTC+'Seconds']().zeroPad(2)
+
+    if (this['get'+UTC+'Milliseconds']())
+        sec += '.' + this['get'+UTC+'Milliseconds']().zeroPad(3)
+
+    var ofs = 'Z';
+    if (!Date.printAsUTC){
+        var ofsmin = this.getTimezoneOffset();
+        if (ofsmin != 0){
+            ofs = ofsmin > 0 ? '-' : '+'; // This is correct
+            ofs += (ofsmin/60).zeroPad(2)
+            ofs += (ofsmin%60).zeroPad(2)
+        }
+    }
+
+    return 'ISODate("'+year+'-'+month+'-'+date+'T'+hour+':'+minute+':'+sec+ofs+'")';
+}
+
+Date.printAsUTC = true;
+
+
+ISODate = function(isoDateStr){
+    if (!isoDateStr)
+        return new Date();
+
+    var isoDateRegex = /(\d{4})-?(\d{2})-?(\d{2})([T ](\d{2})(:?(\d{2})(:?(\d{2}(\.\d+)?))?)?(Z|([+-])(\d{2}):?(\d{2})?)?)?/;
+    var res = isoDateRegex.exec(isoDateStr);
+
+    if (!res)
+        throw "invalid ISO date";
+
+    var year = parseInt(res[1],10) || 1970; // this should always be present
+    var month = (parseInt(res[2],10) || 1) - 1;
+    var date = parseInt(res[3],10) || 0;
+    var hour = parseInt(res[5],10) || 0;
+    var min = parseInt(res[7],10) || 0;
+    var sec = parseFloat(res[9]) || 0;
+    var ms = Math.round((sec%1) * 1000)
+    sec -= ms/1000
+
+    var time = Date.UTC(year, month, date, hour, min, sec, ms);
+
+    if (res[11] && res[11] != 'Z'){
+        var ofs = 0;
+        ofs += (parseInt(res[13],10) || 0) * 60*60*1000; // hours
+        ofs += (parseInt(res[14],10) || 0) *    60*1000; // mins
+        if (res[12] == '+') // if ahead subtract
+            ofs *= -1;
+
+        time += ofs
+    }
+
+    return new Date(time);
 }
 
 RegExp.prototype.tojson = RegExp.prototype.toString;
@@ -347,6 +431,14 @@ Array.stdDev = function( arr ){
     }
 
     return Math.sqrt( sum / arr.length );
+}
+
+//these two are helpers for Array.sort(func)
+compare = function(l, r){ return (l == r ? 0 : (l < r ? -1 : 1)); }
+
+// arr.sort(compareOn('name'))
+compareOn = function(field){
+    return function(l, r) { return compare(l[field], r[field]); }
 }
 
 Object.keySet = function( o ) {
@@ -569,7 +661,13 @@ if ( typeof _threadInject != "undefined" ){
                                    "jstests/mr3.js",
                                    "jstests/indexh.js",
                                    "jstests/apitest_db.js",
-                                   "jstests/evalb.js"] );
+                                   "jstests/evalb.js",
+                                   "jstests/evald.js",
+                                   "jstests/evalf.js",
+                                   "jstests/killop.js",
+                                   "jstests/run_program1.js",
+                                   "jstests/notablescan.js",
+                                   "jstests/drop2.js"] );
         
         // some tests can't be run in parallel with each other
         var serialTestsArr = [ "jstests/fsync.js",
@@ -640,7 +738,7 @@ if ( typeof _threadInject != "undefined" ){
                             "__parallelTests__fun.apply( 0, __parallelTests__argv );" +
                             "__parallelTests__passed = true;" +
                          "} catch ( e ) {" +
-                            "print( e );" +
+                            "print( '********** Parallel Test FAILED: ' + tojson(e) );" +
                          "}" +
                          "return __parallelTests__passed;" +
                          "}"
@@ -805,47 +903,146 @@ printjsononeline = function(x){
     print( tojsononeline( x ) );
 }
 
-shellPrintHelper = function( x ){
+shellPrintHelper = function (x) {
 
-    if ( typeof( x ) == "undefined" ){
+    if (typeof (x) == "undefined") {
 
-        if ( typeof( db ) != "undefined" && db.getLastError ){
-            var e = db.getLastError();
-            if ( e != null )
-                print( e );
+        if (typeof (db) != "undefined" && db.getLastError) {
+            // explicit w:1 so that replset getLastErrorDefaults aren't used here which would be bad.
+            var e = db.getLastError(1);
+            if (e != null)
+                print(e);
         }
 
         return;
     }
-    
-    if ( x == __magicNoPrint )
+
+    if (x == __magicNoPrint)
         return;
 
-    if ( x == null ){
-        print( "null" );
+    if (x == null) {
+        print("null");
         return;
     }
 
-    if ( typeof x != "object" ) 
-        return print( x );
-    
+    if (typeof x != "object")
+        return print(x);
+
     var p = x.shellPrint;
-    if ( typeof p == "function" )
+    if (typeof p == "function")
         return x.shellPrint();
 
     var p = x.tojson;
-    if ( typeof p == "function" )
-        print( x.tojson() );
+    if (typeof p == "function")
+        print(x.tojson());
     else
-        print( tojson( x ) );
+        print(tojson(x));
 }
 
-shellAutocomplete = function( prefix ){
-    var a = [];
-    //a.push( prefix + "z" )
-    //a.push( prefix + "y" )
-    __autocomplete__ = a;
-}
+shellAutocomplete = function (/*prefix*/){ // outer scope function called on init. Actual function at end
+
+    var universalMethods = "constructor prototype toString valueOf toLocaleString hasOwnProperty propertyIsEnumerable".split(' ');
+
+    var builtinMethods = {}; // uses constructor objects as keys
+    builtinMethods[Array] = "length concat join pop push reverse shift slice sort splice unshift indexOf lastIndexOf every filter forEach map some".split(' ');
+    builtinMethods[Boolean] = "".split(' '); // nothing more than universal methods
+    builtinMethods[Date] = "getDate getDay getFullYear getHours getMilliseconds getMinutes getMonth getSeconds getTime getTimezoneOffset getUTCDate getUTCDay getUTCFullYear getUTCHours getUTCMilliseconds getUTCMinutes getUTCMonth getUTCSeconds getYear parse setDate setFullYear setHours setMilliseconds setMinutes setMonth setSeconds setTime setUTCDate setUTCFullYear setUTCHours setUTCMilliseconds setUTCMinutes setUTCMonth setUTCSeconds setYear toDateString toGMTString toLocaleDateString toLocaleTimeString toTimeString toUTCString UTC".split(' ');
+    builtinMethods[Math] = "E LN2 LN10 LOG2E LOG10E PI SQRT1_2 SQRT2 abs acos asin atan atan2 ceil cos exp floor log max min pow random round sin sqrt tan".split(' ');
+    builtinMethods[Number] = "MAX_VALUE MIN_VALUE NEGATIVE_INFINITY POSITIVE_INFINITY toExponential toFixed toPrecision".split(' ');
+    builtinMethods[RegExp] = "global ignoreCase lastIndex multiline source compile exec test".split(' ');
+    builtinMethods[String] = "length charAt charCodeAt concat fromCharCode indexOf lastIndexOf match replace search slice split substr substring toLowerCase toUpperCase".split(' ');
+    builtinMethods[Function] = "call apply".split(' ');
+    builtinMethods[Object] = "bsonsize".split(' ');
+
+    builtinMethods[Mongo] = "find update insert remove".split(' ');
+    builtinMethods[BinData] = "hex base64 length subtype".split(' ');
+    builtinMethods[NumberLong] = "toNumber".split(' ');
+
+    var extraGlobals = "Infinity NaN undefined null true false decodeURI decodeURIComponent encodeURI encodeURIComponent escape eval isFinite isNaN parseFloat parseInt unescape Array Boolean Date Math Number RegExp String print load gc MinKey MaxKey Mongo NumberLong ObjectId DBPointer UUID BinData Map".split(' ');
+
+    var isPrivate = function(name){
+        if (shellAutocomplete.showPrivate) return false;
+        if (name == '_id') return false;
+        if (name[0] == '_') return true;
+        if (name[name.length-1] == '_') return true; // some native functions have an extra name_ method
+        return false;
+    }
+
+    var customComplete = function(obj){
+        try {
+            if(obj.__proto__.constructor.autocomplete){
+                var ret = obj.constructor.autocomplete(obj);
+                if (ret.constructor != Array){
+                    print("\nautocompleters must return real Arrays");
+                    return [];
+                }
+                return ret;
+            } else {
+                return [];
+            }
+        } catch (e) {
+            // print(e); // uncomment if debugging custom completers
+            return [];
+        }
+    }
+
+    var worker = function( prefix ){
+        var global = (function(){return this;}).call(); // trick to get global object
+
+        var curObj = global;
+        var parts = prefix.split('.');
+        for (var p=0; p < parts.length - 1; p++){ // doesn't include last part
+            curObj = curObj[parts[p]];
+            if (curObj == null)
+                return [];
+        }
+
+        var lastPrefix = parts[parts.length-1] || '';
+        var begining = parts.slice(0, parts.length-1).join('.');
+        if (begining.length)
+            begining += '.';
+
+        var possibilities = new Array().concat(
+            universalMethods,
+            Object.keySet(curObj),
+            Object.keySet(curObj.__proto__),
+            builtinMethods[curObj] || [], // curObj is a builtin constructor
+            builtinMethods[curObj.__proto__.constructor] || [], // curObj is made from a builtin constructor
+            curObj == global ? extraGlobals : [],
+            customComplete(curObj)
+        );
+
+        var ret = [];
+        for (var i=0; i < possibilities.length; i++){
+            var p = possibilities[i];
+            if (typeof(curObj[p]) == "undefined" && curObj != global) continue; // extraGlobals aren't in the global object
+            if (p.length == 0 || p.length < lastPrefix.length) continue;
+            if (isPrivate(p)) continue;
+            if (p.match(/^[0-9]+$/)) continue; // don't array number indexes
+            if (p.substr(0, lastPrefix.length) != lastPrefix) continue;
+
+            var completion = begining + p;
+            if(curObj[p] && curObj[p].constructor == Function && p != 'constructor')
+                completion += '(';
+
+            ret.push(completion);
+        }
+
+        return ret;
+    }
+
+    // this is the actual function that gets assigned to shellAutocomplete
+    return function( prefix ){
+        try {
+            __autocomplete__ = worker(prefix).sort();
+        }catch (e){
+            print("exception durring autocomplete: " + tojson(e.message));
+            __autocomplete__ = [];
+        }
+    }
+}();
+
+shellAutocomplete.showPrivate = false; // toggle to show (useful when working on internals)
 
 shellHelper = function( command , rest , shouldPrint ){
     command = command.trim();
@@ -861,9 +1058,14 @@ shellHelper = function( command , rest , shouldPrint ){
     return res;
 }
 
-shellHelper.use = function( dbname ){
-    db = db.getMongo().getDB( dbname );
-    print( "switched to db " + db.getName() );
+shellHelper.use = function (dbname) {
+    var s = "" + dbname;
+    if (s == "") {
+        print("bad use parameter");
+        return;
+    }
+    db = db.getMongo().getDB(dbname);
+    print("switched to db " + db.getName());
 }
 
 shellHelper.it = function(){
@@ -874,37 +1076,48 @@ shellHelper.it = function(){
     shellPrintHelper( ___it___ );
 }
 
-shellHelper.show = function( what ){
-    assert( typeof what == "string" );
-    
-    if( what == "profile" ) { 
-	if( db.system.profile.count() == 0 ) { 
-	    print("db.system.profile is empty");
-	    print("Use db.setProfilingLevel(2) will enable profiling");
-	    print("Use db.system.profile.find() to show raw profile entries");
-	} 
-	else { 
-	    print(); 
-	    db.system.profile.find({ millis : { $gt : 0 } }).sort({$natural:-1}).limit(5).forEach( function(x){print(""+x.millis+"ms " + String(x.ts).substring(0,24)); print(x.info); print("\n");} )
-        }
-	return "";
-    }
+shellHelper.show = function (what) {
+    assert(typeof what == "string");
 
-    if ( what == "users" ){
-	db.system.users.find().forEach( printjson );
+    if (what == "profile") {
+        if (db.system.profile.count() == 0) {
+            print("db.system.profile is empty");
+            print("Use db.setProfilingLevel(2) will enable profiling");
+            print("Use db.system.profile.find() to show raw profile entries");
+        }
+        else {
+            print();
+            db.system.profile.find({ millis: { $gt: 0} }).sort({ $natural: -1 }).limit(5).forEach(function (x) { print("" + x.millis + "ms " + String(x.ts).substring(0, 24)); print(x.info); print("\n"); })
+        }
         return "";
     }
 
-    if ( what == "collections" || what == "tables" ) {
-        db.getCollectionNames().forEach( function(x){print(x)} );
-	return "";
+    if (what == "users") {
+        db.system.users.find().forEach(printjson);
+        return "";
     }
-    
-    if ( what == "dbs" ) {
-        db.getMongo().getDBNames().sort().forEach( function(x){print(x)} );
-	return "";
+
+    if (what == "collections" || what == "tables") {
+        db.getCollectionNames().forEach(function (x) { print(x) });
+        return "";
     }
-    
+
+    if (what == "dbs") {
+        var dbs = db.getMongo().getDBs();
+        var size = {};
+        dbs.databases.forEach(function (x) { size[x.name] = x.sizeOnDisk; });
+        var names = dbs.databases.map(function (z) { return z.name; }).sort();
+        names.forEach(function (n) {
+            if (size[n] > 1) {
+                print(n + "\t" + size[n] / 1024 / 1024 / 1024 + "GB");
+            } else {
+                print(n + "\t(empty)");
+            }
+        });
+        //db.getMongo().getDBNames().sort().forEach(function (x) { print(x) });
+        return "";
+    }
+
     throw "don't know how to show [" + what + "]";
 
 }
@@ -1010,17 +1223,6 @@ Random.genExp = function( mean ) {
     return -Math.log( Random.rand() ) * mean;
 }
 
-killWithUris = function( uris ) {
-    var inprog = db.currentOp().inprog;
-    for( var u in uris ) {
-        for ( var i in inprog ) {
-            if ( uris[ u ] == inprog[ i ].client ) {
-                db.killOp( inprog[ i ].opid );
-            }
-        }
-    }
-}
-
 Geo = {};
 Geo.distance = function( a , b ){
     var ax = null;
@@ -1046,6 +1248,46 @@ Geo.distance = function( a , b ){
                       Math.pow( bx - ax , 2 ) );
 }
 
+Geo.sphereDistance = function( a , b ){
+    var ax = null;
+    var ay = null;
+    var bx = null;
+    var by = null;
+    
+    // TODO swap order of x and y when done on server
+    for ( var key in a ){
+        if ( ax == null )
+            ax = a[key] * (Math.PI/180);
+        else if ( ay == null )
+            ay = a[key] * (Math.PI/180);
+    }
+    
+    for ( var key in b ){
+        if ( bx == null )
+            bx = b[key] * (Math.PI/180);
+        else if ( by == null )
+            by = b[key] * (Math.PI/180);
+    }
+
+    var sin_x1=Math.sin(ax), cos_x1=Math.cos(ax);
+    var sin_y1=Math.sin(ay), cos_y1=Math.cos(ay);
+    var sin_x2=Math.sin(bx), cos_x2=Math.cos(bx);
+    var sin_y2=Math.sin(by), cos_y2=Math.cos(by);
+
+    var cross_prod = 
+        (cos_y1*cos_x1 * cos_y2*cos_x2) +
+        (cos_y1*sin_x1 * cos_y2*sin_x2) +
+        (sin_y1        * sin_y2);
+
+    if (cross_prod >= 1 || cross_prod <= -1){
+        // fun with floats
+        assert( Math.abs(cross_prod)-1 < 1e-6 );
+        return cross_prod > 0 ? 0 : Math.PI;
+    }
+
+    return Math.acos(cross_prod);
+}
+
 rs = function () { return "try rs.help()"; }
 
 rs.help = function () {
@@ -1053,26 +1295,36 @@ rs.help = function () {
     print("\trs.initiate()                   { replSetInitiate : null } initiates set with default settings");
     print("\trs.initiate(cfg)                { replSetInitiate : cfg } initiates set with configuration cfg");
     print("\trs.conf()                       get the current configuration object from local.system.replset");
-    print("\trs.reconfig(cfg)                updates the configuration of a running replica set with cfg");
-    print("\trs.add(hostportstr)             add a new member to the set with default attributes");
-    print("\trs.add(membercfgobj)            add a new member to the set with extra attributes");
-    print("\trs.addArb(hostportstr)          add a new member which is arbiterOnly:true");
-    print("\trs.stepDown()                   step down as primary (momentarily)");
-    print("\trs.remove(hostportstr)          remove a host from the replica set");
+    print("\trs.reconfig(cfg)                updates the configuration of a running replica set with cfg (disconnects)");
+    print("\trs.add(hostportstr)             add a new member to the set with default attributes (disconnects)");
+    print("\trs.add(membercfgobj)            add a new member to the set with extra attributes (disconnects)");
+    print("\trs.addArb(hostportstr)          add a new member which is arbiterOnly:true (disconnects)");
+    print("\trs.stepDown([secs])             step down as primary (momentarily) (disconnects)");
+    print("\trs.freeze(secs)                 make a node ineligible to become primary for the time specified");
+    print("\trs.remove(hostportstr)          remove a host from the replica set (disconnects)");
     print("\trs.slaveOk()                    shorthand for db.getMongo().setSlaveOk()");
     print();
     print("\tdb.isMaster()                   check who is primary");
     print();
+    print("\treconfiguration helpers disconnect from the database so the shell will display");
+    print("\tan error, even if the command succeeds.");
     print("\tsee also http://<mongod_host>:28017/_replSet for additional diagnostic info");
 }
 rs.slaveOk = function () { return db.getMongo().setSlaveOk(); }
 rs.status = function () { return db._adminCommand("replSetGetStatus"); }
 rs.isMaster = function () { return db.isMaster(); }
 rs.initiate = function (c) { return db._adminCommand({ replSetInitiate: c }); }
-rs.reconfig = function(cfg) {
-  cfg.version = rs.conf().version + 1;
-
-  return db._adminCommand({ replSetReconfig: cfg });
+rs.reconfig = function (cfg) {
+    cfg.version = rs.conf().version + 1;
+    var res = null;
+    try {
+        res = db.adminCommand({ replSetReconfig: cfg });
+    }
+    catch (e) {
+        print("shell got exception during reconfig: " + e);
+        print("in some circumstances, the primary steps down and closes connections on a reconfig");
+    }
+    return res;
 }
 rs.add = function (hostport, arb) {
     var cfg = hostport;
@@ -1093,9 +1345,18 @@ rs.add = function (hostport, arb) {
             cfg.arbiterOnly = true;
     }
     c.members.push(cfg);
-    return db._adminCommand({ replSetReconfig: c });
+    var res = null;
+    try { 
+        res = db.adminCommand({ replSetReconfig: c });
+    }
+    catch (e) {
+        print("shell got exception during reconfig: " + e);
+        print("in some circumstances, the primary steps down and closes connections on a reconfig");
+    }
+    return res;
 }
-rs.stepDown = function () { return db._adminCommand({ replSetStepDown:true}); }
+rs.stepDown = function (secs) { return db._adminCommand({ replSetStepDown:secs||60}); }
+rs.freeze = function (secs) { return db._adminCommand({replSetFreeze:secs}); }
 rs.addArb = function (hn) { return this.add(hn, true); }
 rs.conf = function () { return db.getSisterDB("local").system.replset.findOne(); }
 
@@ -1117,7 +1378,27 @@ rs.remove = function (hn) {
 };
 
 help = shellHelper.help = function (x) {
-    if (x == "connect") {
+    if (x == "mr") {
+        print("\nSee also http://www.mongodb.org/display/DOCS/MapReduce");
+        print("\nfunction mapf() {");
+        print("  // 'this' holds current document to inspect");
+        print("  emit(key, value);");
+        print("}");
+        print("\nfunction reducef(key,value_array) {");
+        print("  return reduced_value;");
+        print("}");
+        print("\ndb.mycollection.mapReduce(mapf, reducef[, options])");
+        print("\noptions");
+        print("{[query : <query filter object>]");
+        print(" [, sort : <sort the query.  useful for optimization>]");
+        print(" [, limit : <number of objects to return from collection>]");
+        print(" [, out : <output-collection name>]");
+        print(" [, keeptemp: <true|false>]");
+        print(" [, finalize : <finalizefunction>]");
+        print(" [, scope : <object where fields go into javascript global scope >]");
+        print(" [, verbose : true]}\n");
+        return;
+    } else if (x == "connect") {
         print("\nNormally one specifies the server on the mongo shell command line.  Run mongo --help to see those options.");
         print("Additional connections may be opened:\n");
         print("    var x = new Mongo('host[:port]');");
@@ -1127,52 +1408,68 @@ help = shellHelper.help = function (x) {
         print("\nNote: the REPL prompt only auto-reports getLastError() for the shell command line connection.\n");
         return;
     }
-    if (x == "misc") {
+    else if (x == "misc") {
         print("\tb = new BinData(subtype,base64str)  create a BSON BinData value");
         print("\tb.subtype()                         the BinData subtype (0..255)");
         print("\tb.length()                          length of the BinData data in bytes");
         print("\tb.hex()                             the data as a hex encoded string");
         print("\tb.base64()                          the data as a base 64 encoded string");
         print("\tb.toString()");
+        print();
+        print("\to = new ObjectId()                  create a new ObjectId");
+        print("\to.getTimestamp()                    return timestamp derived from first 32 bits of the OID");
+        print("\to.isObjectId()");
+        print("\to.toString()");
+        print("\to.equals(otherid)");
         return;
     }
-    if (x == "admin") {
+    else if (x == "admin") {
         print("\tls([path])                      list files");
         print("\tpwd()                           returns current directory");
         print("\tlistFiles([path])               returns file list");
         print("\thostname()                      returns name of this host");
         print("\tcat(fname)                      returns contents of text file as a string");
-        print("\tremoveFile(f)                   delete a file");
+        print("\tremoveFile(f)                   delete a file or directory");
         print("\tload(jsfilename)                load and execute a .js file");
         print("\trun(program[, args...])         spawn a program and wait for its completion");
+        print("\trunProgram(program[, args...])  same as run(), above");
         print("\tsleep(m)                        sleep m milliseconds");
         print("\tgetMemInfo()                    diagnostic");
         return;
     }
-    if (x == "test") {
+    else if (x == "test") {
         print("\tstartMongodEmpty(args)        DELETES DATA DIR and then starts mongod");
         print("\t                              returns a connection to the new server");
-        print("\tstartMongodTest()             DELETES DATA DIR");
+        print("\tstartMongodTest(port,dir,options)");
+        print("\t                              DELETES DATA DIR");
         print("\t                              automatically picks port #s starting at 27000 and increasing");
         print("\t                              or you can specify the port as the first arg");
         print("\t                              dir is /data/db/<port>/ if not specified as the 2nd arg");
         print("\t                              returns a connection to the new server");
+        print("\tresetDbpath(dirpathstr)       deletes everything under the dir specified including subdirs");
+        print("\tstopMongoProgram(port[, signal])");
         return;
     }
-    print("\t" + "db.help()                    help on db methods");
-    print("\t" + "db.mycoll.help()             help on collection methods");
-    print("\t" + "rs.help()                    help on replica set methods");
-    print("\t" + "help connect                 connecting to a db help");
-    print("\t" + "help admin                   administrative help");
-    print("\t" + "help misc                    misc things to know");
-    print();
-    print("\t" + "show dbs                     show database names");
-    print("\t" + "show collections             show collections in current database");
-    print("\t" + "show users                   show users in current database");
-    print("\t" + "show profile                 show most recent system.profile entries with time >= 1ms");
-    print("\t" + "use <db_name>                set current database");
-    print("\t" + "db.foo.find()                list objects in collection foo");
-    print("\t" + "db.foo.find( { a : 1 } )     list objects in foo where a == 1");
-    print("\t" + "it                           result of the last line evaluated; use to further iterate");
-    print("\t" + "exit                         quit the mongo shell");
+    else if (x == "") {
+        print("\t" + "db.help()                    help on db methods");
+        print("\t" + "db.mycoll.help()             help on collection methods");
+        print("\t" + "rs.help()                    help on replica set methods");
+        print("\t" + "help connect                 connecting to a db help");
+        print("\t" + "help admin                   administrative help");
+        print("\t" + "help misc                    misc things to know");
+        print("\t" + "help mr                      mapreduce help");
+        print();
+        print("\t" + "show dbs                     show database names");
+        print("\t" + "show collections             show collections in current database");
+        print("\t" + "show users                   show users in current database");
+        print("\t" + "show profile                 show most recent system.profile entries with time >= 1ms");
+        print("\t" + "use <db_name>                set current database");
+        print("\t" + "db.foo.find()                list objects in collection foo");
+        print("\t" + "db.foo.find( { a : 1 } )     list objects in foo where a == 1");
+        print("\t" + "it                           result of the last line evaluated; use to further iterate");
+        print("\t" + "DBQuery.shellBatchSize = x   set default number of items to display on shell");
+        print("\t" + "exit                         quit the mongo shell");
+    }
+    else
+        print("unknown help option");
 }

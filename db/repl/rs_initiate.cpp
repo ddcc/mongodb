@@ -26,47 +26,63 @@
 #include "rs.h"
 #include "rs_config.h"
 #include "../dbhelpers.h"
+#include "../oplog.h"
 
 using namespace bson;
 using namespace mongoutils;
 
-namespace mongo { 
+namespace mongo {
 
     /* called on a reconfig AND on initiate
-       throws 
+       throws
        @param initial true when initiating
     */
     void checkMembersUpForConfigChange(const ReplSetConfig& cfg, bool initial) {
         int failures = 0;
         int me = 0;
+        stringstream selfs;
         for( vector<ReplSetConfig::MemberCfg>::const_iterator i = cfg.members.begin(); i != cfg.members.end(); i++ ) {
             if( i->h.isSelf() ) {
                 me++;
-                if( !i->potentiallyHot() ) { 
+                if( me > 1 )
+                    selfs << ',';
+                selfs << i->h.toString();
+                if( !i->potentiallyHot() ) {
                     uasserted(13420, "initiation and reconfiguration of a replica set must be sent to a node that can become primary");
                 }
             }
         }
-        uassert(13278, "bad config - dups?", me <= 1); // dups?
-        uassert(13279, "can't find self in the replset config", me == 1);
+        uassert(13278, "bad config: isSelf is true for multiple hosts: " + selfs.str(), me <= 1); // dups?
+        if( me != 1 ) {
+            stringstream ss;
+            ss << "can't find self in the replset config";
+            if( !cmdLine.isDefaultPort() ) ss << " my port: " << cmdLine.port;
+            if( me != 0 ) ss << " found: " << me;
+            uasserted(13279, ss.str());
+        }
 
         for( vector<ReplSetConfig::MemberCfg>::const_iterator i = cfg.members.begin(); i != cfg.members.end(); i++ ) {
+            // we know we're up
+            if (i->h.isSelf()) {
+                continue;
+            }
+
             BSONObj res;
             {
                 bool ok = false;
                 try {
                     int theirVersion = -1000;
-                    ok = requestHeartbeat(cfg._id, "", i->h.toString(), res, -1, theirVersion, initial/*check if empty*/); 
-                    if( theirVersion >= cfg.version ) { 
+                    ok = requestHeartbeat(cfg._id, "", i->h.toString(), res, -1, theirVersion, initial/*check if empty*/);
+                    if( theirVersion >= cfg.version ) {
                         stringstream ss;
                         ss << "replSet member " << i->h.toString() << " has too new a config version (" << theirVersion << ") to reconfigure";
                         uasserted(13259, ss.str());
                     }
                 }
-                catch(DBException& e) { 
+                catch(DBException& e) {
                     log() << "replSet cmufcc requestHeartbeat " << i->h.toString() << " : " << e.toString() << rsLog;
                 }
-                catch(...) { 
+                catch(...) {
                     log() << "replSet cmufcc error exception in requestHeartbeat?" << rsLog;
                 }
                 if( res.getBoolField("mismatch") )
@@ -96,7 +112,7 @@ namespace mongo {
                            trying to keep change small as release is near.
                            */
                         const Member* m = theReplSet->findById( i->_id );
-                        if( m ) { 
+                        if( m ) {
                             // ok, so this was an existing member (wouldn't make sense to add to config a new member that is down)
                             assert( m->h().toString() == i->h.toString() );
                             allowFailure = true;
@@ -113,24 +129,24 @@ namespace mongo {
             }
             if( initial ) {
                 bool hasData = res["hasData"].Bool();
-                uassert(13311, "member " + i->h.toString() + " has data already, cannot initiate set.  All members except initiator must be empty.", 
-                    !hasData || i->h.isSelf());
+                uassert(13311, "member " + i->h.toString() + " has data already, cannot initiate set.  All members except initiator must be empty.",
+                        !hasData || i->h.isSelf());
             }
         }
     }
 
-    class CmdReplSetInitiate : public ReplSetCommand { 
+    class CmdReplSetInitiate : public ReplSetCommand {
     public:
         virtual LockType locktype() const { return NONE; }
         CmdReplSetInitiate() : ReplSetCommand("replSetInitiate") { }
-        virtual void help(stringstream& h) const { 
-            h << "Initiate/christen a replica set."; 
+        virtual void help(stringstream& h) const {
+            h << "Initiate/christen a replica set.";
             h << "\nhttp://www.mongodb.org/display/DOCS/Replica+Set+Commands";
         }
         virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             log() << "replSet replSetInitiate admin command received from client" << rsLog;
 
-            if( !replSet ) { 
+            if( !replSet ) {
                 errmsg = "server is not running with --replSet";
                 return false;
             }
@@ -141,12 +157,12 @@ namespace mongo {
             }
 
             {
-                // just make sure we can get a write lock before doing anything else.  we'll reacquire one 
-                // later.  of course it could be stuck then, but this check lowers the risk if weird things 
+                // just make sure we can get a write lock before doing anything else.  we'll reacquire one
+                // later.  of course it could be stuck then, but this check lowers the risk if weird things
                 // are up.
                 time_t t = time(0);
                 writelock lk("");
-                if( time(0)-t > 10 ) { 
+                if( time(0)-t > 10 ) {
                     errmsg = "took a long time to get write lock, so not initiating.  Initiate when server less busy?";
                     return false;
                 }
@@ -155,7 +171,7 @@ namespace mongo {
                    it is ok if the initiating member has *other* data than that.
                    */
                 BSONObj o;
-                if( Helpers::getFirst(rsoplog, o) ) { 
+                if( Helpers::getFirst(rsoplog, o) ) {
                     errmsg = rsoplog + string(" is not empty on the initiating member.  cannot initiate.");
                     return false;
                 }
@@ -194,7 +210,7 @@ namespace mongo {
                 configObj = b.obj();
                 log() << "replSet created this configuration for initiation : " << configObj.toString() << rsLog;
             }
-            else { 
+            else {
                 configObj = cmdObj["replSetInitiate"].Obj();
             }
 
@@ -203,7 +219,7 @@ namespace mongo {
                 ReplSetConfig newConfig(configObj);
                 parsed = true;
 
-                if( newConfig.version > 1 ) { 
+                if( newConfig.version > 1 ) {
                     errmsg = "can't initiate with a version number greater than 1";
                     return false;
                 }
@@ -214,6 +230,8 @@ namespace mongo {
 
                 log() << "replSet replSetInitiate all members seem up" << rsLog;
 
+                createOplog();
+
                 writelock lk("");
                 bo comment = BSON( "msg" << "initiating set");
                 newConfig.saveConfigLocally(comment);
@@ -222,9 +240,9 @@ namespace mongo {
                 ReplSet::startupStatus = ReplSet::SOON;
                 ReplSet::startupStatusMsg = "Received replSetInitiate - should come online shortly.";
             }
-            catch( DBException& e ) { 
+            catch( DBException& e ) {
                 log() << "replSet replSetInitiate exception: " << e.what() << rsLog;
-                if( !parsed ) 
+                if( !parsed )
                     errmsg = string("couldn't parse cfg object ") + e.what();
                 else
                     errmsg = string("couldn't initiate : ") + e.what();

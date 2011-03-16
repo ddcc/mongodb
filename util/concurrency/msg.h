@@ -21,14 +21,14 @@
 #include <deque>
 #include "task.h"
 
-namespace mongo { 
+namespace mongo {
 
-    namespace task { 
+    namespace task {
 
         typedef boost::function<void()> lam;
 
         /** typical usage is: task::fork( new Server("threadname") ); */
-        class Server : public Task { 
+        class Server : public Task {
         public:
             /** send a message to the port */
             void send(lam);
@@ -47,7 +47,7 @@ namespace mongo {
 
         private:
             virtual bool initClient() { return true; }
-            virtual string name() { return _name; }
+            virtual string name() const { return _name; }
             void doWork();
             deque<lam> d;
             boost::mutex m;

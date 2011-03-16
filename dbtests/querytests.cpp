@@ -25,6 +25,8 @@
 #include "../db/json.h"
 #include "../db/lasterror.h"
 
+#include "../util/timer.h"
+
 #include "dbtests.h"
 
 namespace mongo {
@@ -37,7 +39,7 @@ namespace QueryTests {
         dblock lk;
         Client::Context _context;
     public:
-        Base() : _context( ns() ){
+        Base() : _context( ns() ) {
             addIndex( fromjson( "{\"a\":1}" ) );
         }
         ~Base() {
@@ -48,7 +50,8 @@ namespace QueryTests {
                     toDelete.push_back( c->currLoc() );
                 for( vector< DiskLoc >::iterator i = toDelete.begin(); i != toDelete.end(); ++i )
                     theDataFileMgr.deleteRecord( ns(), i->rec(), *i, false );
-            } catch ( ... ) {
+            }
+            catch ( ... ) {
                 FAIL( "Exception while cleaning up records" );
             }
         }
@@ -129,7 +132,7 @@ namespace QueryTests {
             ASSERT_EQUALS( 1, runCount( ns(), cmd, err ) );
         }
     };
-    
+
     class FindOne : public Base {
     public:
         void run() {
@@ -145,12 +148,11 @@ namespace QueryTests {
 
     class ClientBase {
     public:
-        // NOTE: Not bothering to backup the old error record.
         ClientBase() {
             mongo::lastError.reset( new LastError() );
         }
         ~ClientBase() {
-            mongo::lastError.release();
+            //mongo::lastError.release();
         }
     protected:
         static void insert( const char *ns, BSONObj o ) {
@@ -170,6 +172,9 @@ namespace QueryTests {
 
     class BoundedKey : public ClientBase {
     public:
+        ~BoundedKey() {
+            client().dropCollection( "unittests.querytests.BoundedKey" );
+        }
         void run() {
             const char *ns = "unittests.querytests.BoundedKey";
             insert( ns, BSON( "a" << 1 ) );
@@ -210,7 +215,7 @@ namespace QueryTests {
             client().dropCollection( ns );
         }
 
-        void testLimit(int limit){
+        void testLimit(int limit) {
             ASSERT_EQUALS(client().query( ns, BSONObj(), limit )->itcount(), limit);
         }
         void run() {
@@ -285,7 +290,7 @@ namespace QueryTests {
             insert( ns, BSON( "a" << 0 ) );
             c = client().query( ns, QUERY( "a" << 1 ).hint( BSON( "$natural" << 1 ) ), 2, 0, 0, QueryOption_CursorTailable );
             ASSERT( 0 != c->getCursorId() );
-            ASSERT( !c->isDead() );            
+            ASSERT( !c->isDead() );
         }
     };
 
@@ -345,7 +350,7 @@ namespace QueryTests {
             ASSERT( !client().getLastError().empty() );
         }
     };
-    
+
     class TailableQueryOnId : public ClientBase {
     public:
         ~TailableQueryOnId() {
@@ -511,7 +516,13 @@ namespace QueryTests {
         static const char *ns() { return "unittests.querytests.AutoResetIndexCache"; }
         static const char *idxNs() { return "unittests.system.indexes"; }
         void index() const { ASSERT( !client().findOne( idxNs(), BSON( "name" << NE << "_id_" ) ).isEmpty() ); }
-        void noIndex() const { ASSERT( client().findOne( idxNs(), BSON( "name" << NE << "_id_" ) ).isEmpty() ); }
+        void noIndex() const {
+            BSONObj o = client().findOne( idxNs(), BSON( "name" << NE << "_id_" ) );
+            if( !o.isEmpty() ) {
+                cout << o.toString() << endl;
+                ASSERT( false );
+            }
+        }
         void checkIndex() {
             client().ensureIndex( ns(), BSON( "a" << 1 ) );
             index();
@@ -598,8 +609,8 @@ namespace QueryTests {
             client().insert( ns, fromjson( "{a:[1,2,3]}" ) );
             ASSERT( client().query( ns, Query( "{a:[1,2,3]}" ) )->more() );
             client().ensureIndex( ns, BSON( "a" << 1 ) );
-            ASSERT( client().query( ns, Query( "{a:{$in:[1,[1,2,3]]}}" ).hint( BSON( "a" << 1 ) ) )->more() ); 
-            ASSERT( client().query( ns, Query( "{a:[1,2,3]}" ).hint( BSON( "a" << 1 ) ) )->more() ); // SERVER-146 
+            ASSERT( client().query( ns, Query( "{a:{$in:[1,[1,2,3]]}}" ).hint( BSON( "a" << 1 ) ) )->more() );
+            ASSERT( client().query( ns, Query( "{a:[1,2,3]}" ).hint( BSON( "a" << 1 ) ) )->more() ); // SERVER-146
         }
     };
 
@@ -613,7 +624,7 @@ namespace QueryTests {
             client().insert( ns, fromjson( "{a:[[1],2]}" ) );
             check( "$natural" );
             client().ensureIndex( ns, BSON( "a" << 1 ) );
-            check( "a" ); // SERVER-146 
+            check( "a" ); // SERVER-146
         }
     private:
         void check( const string &hintField ) {
@@ -756,12 +767,12 @@ namespace QueryTests {
 
     class DifferentNumbers : public ClientBase {
     public:
-        ~DifferentNumbers(){
+        ~DifferentNumbers() {
             client().dropCollection( "unittests.querytests.DifferentNumbers" );
         }
-        void t( const char * ns ){
+        void t( const char * ns ) {
             auto_ptr< DBClientCursor > cursor = client().query( ns, Query().sort( "7" ) );
-            while ( cursor->more() ){
+            while ( cursor->more() ) {
                 BSONObj o = cursor->next();
                 assert( o.valid() );
                 //cout << " foo " << o << endl;
@@ -782,37 +793,37 @@ namespace QueryTests {
             t(ns);
         }
     };
-    
+
     class CollectionBase : public ClientBase {
     public:
-    
-        CollectionBase( string leaf ){
+
+        CollectionBase( string leaf ) {
             _ns = "unittests.querytests.";
             _ns += leaf;
             client().dropCollection( ns() );
         }
-        
-        virtual ~CollectionBase(){
+
+        virtual ~CollectionBase() {
             client().dropCollection( ns() );
         }
-        
-        int count(){
+
+        int count() {
             return (int) client().count( ns() );
         }
 
-        const char * ns(){
+        const char * ns() {
             return _ns.c_str();
         }
-        
+
     private:
         string _ns;
     };
 
     class SymbolStringSame : public CollectionBase {
     public:
-        SymbolStringSame() : CollectionBase( "symbolstringsame" ){}
+        SymbolStringSame() : CollectionBase( "symbolstringsame" ) {}
 
-        void run(){
+        void run() {
             { BSONObjBuilder b; b.appendSymbol( "x" , "eliot" ); b.append( "z" , 17 ); client().insert( ns() , b.obj() ); }
             ASSERT_EQUALS( 17 , client().findOne( ns() , BSONObj() )["z"].number() );
             {
@@ -828,46 +839,46 @@ namespace QueryTests {
 
     class TailableCappedRaceCondition : public CollectionBase {
     public:
-        
-        TailableCappedRaceCondition() : CollectionBase( "tailablecappedrace" ){
+
+        TailableCappedRaceCondition() : CollectionBase( "tailablecappedrace" ) {
             client().dropCollection( ns() );
             _n = 0;
         }
-        void run(){
+        void run() {
             string err;
 
-            writelock lk("");            
+            writelock lk("");
             Client::Context ctx( "unittests" );
 
             ASSERT( userCreateNS( ns() , fromjson( "{ capped : true , size : 2000 }" ) , err , false ) );
-            for ( int i=0; i<100; i++ ){
+            for ( int i=0; i<100; i++ ) {
                 insertNext();
                 ASSERT( count() < 45 );
             }
-            
+
             int a = count();
-            
+
             auto_ptr< DBClientCursor > c = client().query( ns() , QUERY( "i" << GT << 0 ).hint( BSON( "$natural" << 1 ) ), 0, 0, 0, QueryOption_CursorTailable );
             int n=0;
-            while ( c->more() ){
+            while ( c->more() ) {
                 BSONObj z = c->next();
                 n++;
             }
-            
+
             ASSERT_EQUALS( a , n );
 
             insertNext();
             ASSERT( c->more() );
 
-            for ( int i=0; i<50; i++ ){
+            for ( int i=0; i<50; i++ ) {
                 insertNext();
             }
 
-            while ( c->more() ){ c->next(); }
+            while ( c->more() ) { c->next(); }
             ASSERT( c->isDead() );
         }
-        
-        void insertNext(){
+
+        void insertNext() {
             insert( ns() , BSON( "i" << _n++ ) );
         }
 
@@ -876,89 +887,71 @@ namespace QueryTests {
 
     class HelperTest : public CollectionBase {
     public:
-        
-        HelperTest() : CollectionBase( "helpertest" ){
+
+        HelperTest() : CollectionBase( "helpertest" ) {
         }
 
-        void run(){
+        void run() {
             writelock lk("");
             Client::Context ctx( "unittests" );
-            
-            for ( int i=0; i<50; i++ ){
+
+            for ( int i=0; i<50; i++ ) {
                 insert( ns() , BSON( "_id" << i << "x" << i * 2 ) );
             }
 
             ASSERT_EQUALS( 50 , count() );
-            
+
             BSONObj res;
             ASSERT( Helpers::findOne( ns() , BSON( "_id" << 20 ) , res , true ) );
             ASSERT_EQUALS( 40 , res["x"].numberInt() );
-            
+
             ASSERT( Helpers::findById( cc(), ns() , BSON( "_id" << 20 ) , res ) );
             ASSERT_EQUALS( 40 , res["x"].numberInt() );
 
             ASSERT( ! Helpers::findById( cc(), ns() , BSON( "_id" << 200 ) , res ) );
 
             unsigned long long slow , fast;
-            
+
             int n = 10000;
             {
                 Timer t;
-                for ( int i=0; i<n; i++ ){
+                for ( int i=0; i<n; i++ ) {
                     ASSERT( Helpers::findOne( ns() , BSON( "_id" << 20 ) , res , true ) );
                 }
                 slow = t.micros();
             }
             {
                 Timer t;
-                for ( int i=0; i<n; i++ ){
+                for ( int i=0; i<n; i++ ) {
                     ASSERT( Helpers::findById( cc(), ns() , BSON( "_id" << 20 ) , res ) );
                 }
                 fast = t.micros();
             }
-            
-            cout << "HelperTest  slow:" << slow << " fast:" << fast << endl;
-            
-            {
-                auto_ptr<CursorIterator> i = Helpers::find( ns() );
-                int n = 0;
-                while ( i->hasNext() ){
-                    BSONObj o = i->next();
-                    n++;
-                }
-                ASSERT_EQUALS( 50 , n );
 
-                i = Helpers::find( ns() , BSON( "_id" << 20 ) );
-                n = 0;
-                while ( i->hasNext() ){
-                    BSONObj o = i->next();
-                    n++;
-                }
-                ASSERT_EQUALS( 1 , n );
-            }
-            
+            cout << "HelperTest  slow:" << slow << " fast:" << fast << endl;
+
         }
     };
 
     class HelperByIdTest : public CollectionBase {
     public:
-        
-        HelperByIdTest() : CollectionBase( "helpertestbyid" ){
+
+        HelperByIdTest() : CollectionBase( "helpertestbyid" ) {
         }
 
-        void run(){
+        void run() {
             writelock lk("");
             Client::Context ctx( "unittests" );
 
-            for ( int i=0; i<1000; i++ ){
+            for ( int i=0; i<1000; i++ ) {
                 insert( ns() , BSON( "_id" << i << "x" << i * 2 ) );
             }
-            for ( int i=0; i<1000; i+=2 ){
+            for ( int i=0; i<1000; i+=2 ) {
                 client_.remove( ns() , BSON( "_id" << i ) );
             }
 
-            BSONObj res;            
-            for ( int i=0; i<1000; i++ ){
+            BSONObj res;
+            for ( int i=0; i<1000; i++ ) {
                 bool found = Helpers::findById( cc(), ns() , BSON( "_id" << i ) , res );
                 ASSERT_EQUALS( i % 2 , int(found) );
             }
@@ -966,19 +959,19 @@ namespace QueryTests {
         }
     };
 
-    class ClientCursorTest : public CollectionBase{
-        ClientCursorTest() : CollectionBase( "clientcursortest" ){
+    class ClientCursorTest : public CollectionBase {
+        ClientCursorTest() : CollectionBase( "clientcursortest" ) {
         }
 
-        void run(){
+        void run() {
             writelock lk("");
             Client::Context ctx( "unittests" );
-            
-            for ( int i=0; i<1000; i++ ){
+
+            for ( int i=0; i<1000; i++ ) {
                 insert( ns() , BSON( "_id" << i << "x" << i * 2 ) );
             }
 
-            
+
         }
     };
 
@@ -990,19 +983,19 @@ namespace QueryTests {
         ~FindingStart() {
             __findingStartInitialTimeout = _old;
         }
-        
+
         void run() {
             BSONObj info;
             ASSERT( client().runCommand( "unittests", BSON( "create" << "querytests.findingstart" << "capped" << true << "size" << 1000 << "$nExtents" << 5 << "autoIndexId" << false ), info ) );
-            
+
             int i = 0;
             for( int oldCount = -1;
-                count() != oldCount;
-                oldCount = count(), client().insert( ns(), BSON( "ts" << i++ ) ) );
+                    count() != oldCount;
+                    oldCount = count(), client().insert( ns(), BSON( "ts" << i++ ) ) );
 
             for( int k = 0; k < 5; ++k ) {
                 client().insert( ns(), BSON( "ts" << i++ ) );
-                int min = client().query( ns(), Query().sort( BSON( "$natural" << 1 ) ) )->next()[ "ts" ].numberInt();            
+                int min = client().query( ns(), Query().sort( BSON( "$natural" << 1 ) ) )->next()[ "ts" ].numberInt();
                 for( int j = -1; j < i; ++j ) {
                     auto_ptr< DBClientCursor > c = client().query( ns(), QUERY( "ts" << GTE << j ), 0, 0, 0, QueryOption_OplogReplay );
                     ASSERT( c->more() );
@@ -1012,7 +1005,7 @@ namespace QueryTests {
                 }
             }
         }
-        
+
     private:
         int _old;
     };
@@ -1025,17 +1018,19 @@ namespace QueryTests {
         ~FindingStartPartiallyFull() {
             __findingStartInitialTimeout = _old;
         }
-        
+
         void run() {
+            unsigned startNumCursors = ClientCursor::numCursors();
+
             BSONObj info;
             ASSERT( client().runCommand( "unittests", BSON( "create" << "querytests.findingstart" << "capped" << true << "size" << 10000 << "$nExtents" << 5 << "autoIndexId" << false ), info ) );
-            
+
             int i = 0;
             for( ; i < 150; client().insert( ns(), BSON( "ts" << i++ ) ) );
-            
+
             for( int k = 0; k < 5; ++k ) {
                 client().insert( ns(), BSON( "ts" << i++ ) );
-                int min = client().query( ns(), Query().sort( BSON( "$natural" << 1 ) ) )->next()[ "ts" ].numberInt();            
+                int min = client().query( ns(), Query().sort( BSON( "$natural" << 1 ) ) )->next()[ "ts" ].numberInt();
                 for( int j = -1; j < i; ++j ) {
                     auto_ptr< DBClientCursor > c = client().query( ns(), QUERY( "ts" << GTE << j ), 0, 0, 0, QueryOption_OplogReplay );
                     ASSERT( c->more() );
@@ -1044,13 +1039,15 @@ namespace QueryTests {
                     ASSERT_EQUALS( ( j > min ? j : min ), next[ "ts" ].numberInt() );
                 }
             }
+
+            ASSERT_EQUALS( startNumCursors, ClientCursor::numCursors() );
         }
-        
+
     private:
         int _old;
     };
-        
-    
+
+
     class WhatsMyUri : public CollectionBase {
     public:
         WhatsMyUri() : CollectionBase( "whatsmyuri" ) {}
@@ -1060,15 +1057,15 @@ namespace QueryTests {
             ASSERT_EQUALS( unknownAddress.toString(), result[ "you" ].str() );
         }
     };
-    
+
     namespace parsedtests {
         class basic1 {
         public:
-            void _test( const BSONObj& in ){
+            void _test( const BSONObj& in ) {
                 ParsedQuery q( "a.b" , 5 , 6 , 9 , in , BSONObj() );
                 ASSERT_EQUALS( BSON( "x" << 5 ) , q.getFilter() );
             }
-            void run(){
+            void run() {
                 _test( BSON( "x" << 5 ) );
                 _test( BSON( "query" << BSON( "x" << 5 ) ) );
                 _test( BSON( "$query" << BSON( "x" << 5 ) ) );
@@ -1090,23 +1087,23 @@ namespace QueryTests {
     namespace queryobjecttests {
         class names1 {
         public:
-            void run(){
+            void run() {
                 ASSERT_EQUALS( BSON( "x" << 1 ) , QUERY( "query" << BSON( "x" << 1 ) ).getFilter() );
                 ASSERT_EQUALS( BSON( "x" << 1 ) , QUERY( "$query" << BSON( "x" << 1 ) ).getFilter() );
             }
-            
+
         };
     }
 
     class OrderingTest {
     public:
-        void run(){
+        void run() {
             {
                 Ordering o = Ordering::make( BSON( "a" << 1 << "b" << -1 << "c" << 1 ) );
                 ASSERT_EQUALS( 1 , o.get(0) );
                 ASSERT_EQUALS( -1 , o.get(1) );
                 ASSERT_EQUALS( 1 , o.get(2) );
-                
+
                 ASSERT( ! o.descending( 1 ) );
                 ASSERT( o.descending( 1 << 1 ) );
                 ASSERT( ! o.descending( 1 << 2 ) );
@@ -1117,7 +1114,7 @@ namespace QueryTests {
                 ASSERT_EQUALS( 1 , o.get(0) );
                 ASSERT_EQUALS( 1 , o.get(1) );
                 ASSERT_EQUALS( -1 , o.get(2) );
-                
+
                 ASSERT( ! o.descending( 1 ) );
                 ASSERT( ! o.descending( 1 << 1 ) );
                 ASSERT(  o.descending( 1 << 2 ) );
@@ -1126,12 +1123,100 @@ namespace QueryTests {
         }
     };
 
+    namespace proj { // Projection tests
+
+        class T1 {
+        public:
+            void run() {
+
+                Projection m;
+                m.init( BSON( "a" << 1 ) );
+                ASSERT_EQUALS( BSON( "a" << 5 ) , m.transform( BSON( "x" << 1 << "a" << 5 ) ) );
+            }
+        };
+
+        class K1 {
+        public:
+            void run() {
+
+                Projection m;
+                m.init( BSON( "a" << 1 ) );
+
+                scoped_ptr<Projection::KeyOnly> x( m.checkKey( BSON( "a" << 1 ) ) );
+                ASSERT( ! x );
+
+                x.reset( m.checkKey( BSON( "a" << 1  << "_id" << 1 ) ) );
+                ASSERT( x );
+
+                ASSERT_EQUALS( BSON( "a" << 5 << "_id" << 17 ) ,
+                               x->hydrate( BSON( "" << 5 << "" << 17 ) ) );
+
+                x.reset( m.checkKey( BSON( "a" << 1 << "x" << 1 << "_id" << 1 ) ) );
+                ASSERT( x );
+
+                ASSERT_EQUALS( BSON( "a" << 5 << "_id" << 17 ) ,
+                               x->hydrate( BSON( "" << 5 << "" << 123 << "" << 17 ) ) );
+
+            }
+        };
+
+        class K2 {
+        public:
+            void run() {
+
+                Projection m;
+                m.init( BSON( "a" << 1 << "_id" << 0 ) );
+
+                scoped_ptr<Projection::KeyOnly> x( m.checkKey( BSON( "a" << 1 ) ) );
+                ASSERT( x );
+
+                ASSERT_EQUALS( BSON( "a" << 17 ) ,
+                               x->hydrate( BSON( "" << 17 ) ) );
+
+                x.reset( m.checkKey( BSON( "x" << 1 << "a" << 1 << "_id" << 1 ) ) );
+                ASSERT( x );
+
+                ASSERT_EQUALS( BSON( "a" << 123 ) ,
+                               x->hydrate( BSON( "" << 5 << "" << 123 << "" << 17 ) ) );
+
+            }
+        };
+
+
+        class K3 {
+        public:
+            void run() {
+
+                {
+                    Projection m;
+                    m.init( BSON( "a" << 1 << "_id" << 0 ) );
+
+                    scoped_ptr<Projection::KeyOnly> x( m.checkKey( BSON( "a" << 1 << "x.a" << 1 ) ) );
+                    ASSERT( x );
+                }
+
+
+                {
+                    // TODO: this is temporary SERVER-2104
+                    Projection m;
+                    m.init( BSON( "x.a" << 1 << "_id" << 0 ) );
+
+                    scoped_ptr<Projection::KeyOnly> x( m.checkKey( BSON( "a" << 1 << "x.a" << 1 ) ) );
+                    ASSERT( ! x );
+                }
+
+            }
+        };
+
+
+    }
+
     class All : public Suite {
     public:
         All() : Suite( "query" ) {
         }
 
-        void setupTests(){
+        void setupTests() {
             add< CountBasic >();
             add< CountQuery >();
             add< CountFields >();
@@ -1176,14 +1261,19 @@ namespace QueryTests {
             add< FindingStart >();
             add< FindingStartPartiallyFull >();
             add< WhatsMyUri >();
-            
+
             add< parsedtests::basic1 >();
-            
+
             add< queryobjecttests::names1 >();
 
             add< OrderingTest >();
+
+            add< proj::T1 >();
+            add< proj::K1 >();
+            add< proj::K2 >();
+            add< proj::K3 >();
         }
     } myall;
-    
+
 } // namespace QueryTests
 

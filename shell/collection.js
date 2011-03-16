@@ -1,4 +1,4 @@
-// collection.js - DBCollection support in the mongo shell
+// @file collection.js - DBCollection support in the mongo shell
 // db.colName is a DBCollection object
 // or db["colName"]
 
@@ -37,10 +37,10 @@ DBCollection.prototype.help = function () {
     print("\tdb." + shortName + ".drop() drop the collection");
     print("\tdb." + shortName + ".dropIndex(name)");
     print("\tdb." + shortName + ".dropIndexes()");
-    print("\tdb." + shortName + ".ensureIndex(keypattern,options) - options should be an object with these possible fields: name, unique, dropDups");
+    print("\tdb." + shortName + ".ensureIndex(keypattern[,options]) - options is an object with these possible fields: name, unique, dropDups");
     print("\tdb." + shortName + ".reIndex()");
-    print("\tdb." + shortName + ".find( [query] , [fields]) - first parameter is an optional query filter. second parameter is optional set of fields to return.");
-    print("\t                                   e.g. db." + shortName + ".find( { x : 77 } , { name : 1 , x : 1 } )");
+    print("\tdb." + shortName + ".find([query],[fields]) - query is an optional query filter. fields is optional set of fields to return.");
+    print("\t                                              e.g. db." + shortName + ".find( {x:77} , {name:1, x:1} )");
     print("\tdb." + shortName + ".find(...).count()");
     print("\tdb." + shortName + ".find(...).limit(n)");
     print("\tdb." + shortName + ".find(...).skip(n)");
@@ -146,7 +146,8 @@ DBCollection.prototype.find = function( query , fields , limit , skip ){
 }
 
 DBCollection.prototype.findOne = function( query , fields ){
-    var cursor = this._mongo.find( this._fullName , this._massageObject( query ) || {} , fields , -1 , 0 , 0 );
+    var cursor = this._mongo.find( this._fullName , this._massageObject( query ) || {} , fields , 
+        -1 /* limit */ , 0 /* skip*/, 0 /* batchSize */ , 0 /* options */ );
     if ( ! cursor.hasNext() )
         return null;
     var ret = cursor.next();
@@ -174,19 +175,37 @@ DBCollection.prototype.insert = function( obj , _allow_dot ){
 }
 
 DBCollection.prototype.remove = function( t , justOne ){
+    for ( var k in t ){
+        if ( k == "_id" && typeof( t[k] ) == "undefined" ){
+            throw "can't have _id set to undefined in a remove expression"
+        }
+    }
     this._mongo.remove( this._fullName , this._massageObject( t ) , justOne ? true : false );
 }
 
 DBCollection.prototype.update = function( query , obj , upsert , multi ){
     assert( query , "need a query" );
     assert( obj , "need an object" );
-    this._validateObject( obj );
+
+    var firstKey = null;
+    for (var k in obj) { firstKey = k; break; }
+
+    if (firstKey != null && firstKey[0] == '$') {
+        // for mods we only validate partially, for example keys may have dots
+        this._validateObject( obj );
+    } else {
+        // we're basically inserting a brand new object, do full validation
+        this._validateForStorage( obj );
+    }
     this._mongo.update( this._fullName , query , obj , upsert ? true : false , multi ? true : false );
 }
 
 DBCollection.prototype.save = function( obj ){
     if ( obj == null || typeof( obj ) == "undefined" ) 
         throw "can't save a null";
+
+    if ( typeof( obj ) == "number" || typeof( obj) == "string" )
+        throw "can't save a number or string"
 
     if ( typeof( obj._id ) == "undefined" ){
         obj._id = new ObjectId();
@@ -321,6 +340,8 @@ DBCollection.prototype.dropIndexes = function(){
 
 
 DBCollection.prototype.drop = function(){
+    if ( arguments.length > 0 )
+        throw "drop takes no argument";
     this.resetIndexCache();
     var ret = this._db.runCommand( { drop: this.getName() } );
     if ( ! ret.ok ){
@@ -531,7 +552,9 @@ MapReduceResult = function( db , o ){
     this._o = o;
     this._keys = Object.keySet( o );
     this._db = db;
-    this._coll = this._db.getCollection( this.result );
+    if ( this.result != null ) {
+        this._coll = this._db.getCollection( this.result );
+    }
 }
 
 MapReduceResult.prototype._simpleKeys = function(){
@@ -539,11 +562,15 @@ MapReduceResult.prototype._simpleKeys = function(){
 }
 
 MapReduceResult.prototype.find = function(){
+    if ( this.results )
+        return this.results;
     return DBCollection.prototype.find.apply( this._coll , arguments );
 }
 
 MapReduceResult.prototype.drop = function(){
-    return this._coll.drop();
+    if ( this._coll ) {
+        return this._coll.drop();
+    }
 }
 
 /**
@@ -555,16 +582,29 @@ MapReduceResult.prototype.convertToSingleObject = function(){
     return z;
 }
 
+DBCollection.prototype.convertToSingleObject = function(valueField){
+    var z = {};
+    this.find().forEach( function(a){ z[a._id] = a[valueField]; } );
+    return z;
+}
+
 /**
 * @param optional object of optional fields;
 */
-DBCollection.prototype.mapReduce = function( map , reduce , optional ){
+DBCollection.prototype.mapReduce = function( map , reduce , optionsOrOutString ){
     var c = { mapreduce : this._shortName , map : map , reduce : reduce };
-    if ( optional )
-        Object.extend( c , optional );
+    assert( optionsOrOutString , "need to an optionsOrOutString" )
+
+    if ( typeof( optionsOrOutString ) == "string" )
+        c["out"] = optionsOrOutString;
+    else
+        Object.extend( c , optionsOrOutString );
+
     var raw = this._db.runCommand( c );
-    if ( ! raw.ok )
-        throw "map reduce failed: " + tojson( raw );
+    if ( ! raw.ok ){
+        __mrerror__ = raw;
+        throw "map reduce failed:" + tojson(raw);
+    }
     return new MapReduceResult( this._db , raw );
 
 }
@@ -581,3 +621,16 @@ DBCollection.prototype.toString = function(){
 DBCollection.prototype.tojson = DBCollection.prototype.toString;
 
 DBCollection.prototype.shellPrint = DBCollection.prototype.toString;
+
+DBCollection.autocomplete = function(obj){
+    var colls = DB.autocomplete(obj.getDB());
+    var ret = [];
+    for (var i=0; i<colls.length; i++){
+        var c = colls[i];
+        if (c.length <= obj.getName().length) continue;
+        if (c.slice(0,obj.getName().length+1) != obj.getName()+'.') continue;
+
+        ret.push(c.slice(obj.getName().length+1));
+    }
+    return ret;
+}

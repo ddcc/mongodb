@@ -29,6 +29,7 @@ createMongoArgs = function( binaryName , args ){
     if ( args.length == 1 && isObject( args[0] ) ){
         var o = args[0];
         for ( var k in o ){
+          if ( o.hasOwnProperty(k) ){
             if ( k == "v" && isNumber( o[k] ) ){
                 var n = o[k];
                 if ( n > 0 ){
@@ -43,6 +44,7 @@ createMongoArgs = function( binaryName , args ){
                 if ( o[k] != "" )
                     fullArgs.push( "" + o[k] );
             }
+          }
         }
     }
     else {
@@ -92,6 +94,7 @@ startMongodTest = function (port, dirname, restart, extraOptions ) {
 // Start a mongod instance and return a 'Mongo' object connected to it.
 // This function's arguments are passed as command line arguments to mongod.
 // The specified 'dbpath' is cleared if it exists, created if not.
+// var conn = startMongodEmpty("--port", 30000, "--dbpath", "asdf");
 startMongodEmpty = function () {
     var args = createMongoArgs("mongod", arguments);
 
@@ -132,7 +135,7 @@ startMongoProgram = function(){
         } catch( e ) {
         }
         return false;
-    }, "unable to connect to mongo program on port " + port, 60000 );
+    }, "unable to connect to mongo program on port " + port, 300 * 1000 );
 
     return m;
 }
@@ -176,8 +179,9 @@ ShardingTest = function( testName , numShards , verboseLevel , numMongos , other
         // start replica sets
         this._rs = []
         for ( var i=0; i<numShards; i++){
-            var rs = new ReplSetTest( { name : testName + "-rs" + i , nodes : 3 , startPort : 31100 + ( i * 100 ) } );
-            this._rs[i] = { test : rs , nodes : rs.startSet( { oplogSize:40 } ) , url : rs.getURL() };
+            var setName = testName + "-rs" + i;
+            var rs = new ReplSetTest( { name : setName , nodes : 3 , startPort : 31100 + ( i * 100 ) } );
+            this._rs[i] = { setName : setName , test : rs , nodes : rs.startSet( { oplogSize:40 } ) , url : rs.getURL() };
             rs.initiate();
             
         }
@@ -248,6 +252,13 @@ ShardingTest = function( testName , numShards , verboseLevel , numMongos , other
             }
         );
     }
+}
+
+ShardingTest.prototype.getRSEntry = function( setName ){
+    for ( var i=0; i<this._rs.length; i++ )
+        if ( this._rs[i].setName == setName )
+            return this._rs[i];
+    throw "can't find rs: " + setName;
 }
 
 ShardingTest.prototype.getDB = function( name ){
@@ -425,7 +436,7 @@ ShardingTest.prototype.printCollectionInfo = function( ns , msg ){
     print( out );
 }
 
-printShardingStatus = function( configDB ){
+printShardingStatus = function( configDB , verbose ){
     if (configDB === undefined)
         configDB = db.getSisterDB('config')
     
@@ -459,12 +470,25 @@ printShardingStatus = function( configDB ){
                     function( coll ){
                         if ( coll.dropped == false ){
                             output("\t\t" + coll._id + " chunks:");
-                            configDB.chunks.find( { "ns" : coll._id } ).sort( { min : 1 } ).forEach( 
-                                function(chunk){
-                                    output( "\t\t\t" + tojson( chunk.min ) + " -->> " + tojson( chunk.max ) + 
-                                            " on : " + chunk.shard + " " + tojson( chunk.lastmod ) );
-                                }
-                            );
+                            
+                            res = configDB.chunks.group( { cond : { ns : coll._id } , key : { shard : 1 }  , reduce : function( doc , out ){ out.nChunks++; } , initial : { nChunks : 0 } } );
+                            var totalChunks = 0;
+                            res.forEach( function(z){
+                                totalChunks += z.nChunks;
+                                output( "\t\t\t\t" + z.shard + "\t" + z.nChunks );
+                            } )
+                            
+                            if ( totalChunks < 20 || verbose ){
+                                configDB.chunks.find( { "ns" : coll._id } ).sort( { min : 1 } ).forEach( 
+                                    function(chunk){
+                                        output( "\t\t\t" + tojson( chunk.min ) + " -->> " + tojson( chunk.max ) + 
+                                                " on : " + chunk.shard + " " + tojson( chunk.lastmod ) );
+                                    }
+                                );
+                            }
+                            else {
+                                output( "\t\t\ttoo many chunksn to print, use verbose if you want to force print" );
+                            }
                         }
                     }
                 )
@@ -580,6 +604,20 @@ ShardingTest.prototype.chunkCounts = function( collName , dbName ){
 
 }
 
+ShardingTest.prototype.chunkDiff = function( collName , dbName ){
+    var c = this.chunkCounts( collName , dbName );
+    var min = 100000000;
+    var max = 0;
+    for ( var s in c ){
+        if ( c[s] < min )
+            min = c[s];
+        if ( c[s] > max )
+            max = c[s];
+    }
+    print( "input: " + tojson( c ) + " min: " + min + " max: " + max  );
+    return max - min;
+}
+
 ShardingTest.prototype.shardGo = function( collName , key , split , move , dbName ){
     split = split || key;
     move = move || split;
@@ -591,16 +629,34 @@ ShardingTest.prototype.shardGo = function( collName , key , split , move , dbNam
     s.adminCommand( { split : c , middle : split } );
     s.adminCommand( { movechunk : c , find : move , to : this.getOther( s.getServer( dbName ) ).name } );
     
-}
+};
 
-MongodRunner = function( port, dbpath, peer, arbiter, extraArgs ) {
+/**
+ * Run a mongod process.
+ *
+ * After initializing a MongodRunner, you must call start() on it.
+ * @param {int} port port to run db on, use allocatePorts(num) to requision
+ * @param {string} dbpath path to use
+ * @param {boolean} peer pass in false (DEPRECATED, was used for replica pair host)
+ * @param {boolean} arbiter pass in false (DEPRECATED, was used for replica pair host)
+ * @param {array} extraArgs other arguments for the command line
+ * @param {object} options other options include no_bind to not bind_ip to 127.0.0.1
+ *    (necessary for replica set testing)
+ */
+MongodRunner = function( port, dbpath, peer, arbiter, extraArgs, options ) {
     this.port_ = port;
     this.dbpath_ = dbpath;
     this.peer_ = peer;
     this.arbiter_ = arbiter;
     this.extraArgs_ = extraArgs;
-}
+    this.options_ = options ? options : {};
+};
 
+/**
+ * Start this mongod process.
+ *
+ * @param {boolean} reuseData If the data directory should be left intact (default is to wipe it)
+ */
 MongodRunner.prototype.start = function( reuseData ) {
     var args = [];
     if ( reuseData ) {
@@ -622,8 +678,10 @@ MongodRunner.prototype.start = function( reuseData ) {
     args.push( "--nohttpinterface" );
     args.push( "--noprealloc" );
     args.push( "--smallfiles" );
-    args.push( "--bind_ip" );
-    args.push( "127.0.0.1" );
+    if (!this.options_.no_bind) {
+      args.push( "--bind_ip" );
+      args.push( "127.0.0.1" );
+    }
     if ( this.extraArgs_ ) {
         args = args.concat( this.extraArgs_ );
     }
@@ -834,7 +892,7 @@ ToolTest.prototype.runTool = function(){
         a.push( "127.0.0.1:" + this.port );
     }
 
-    runMongoProgram.apply( null , a );
+    return runMongoProgram.apply( null , a );
 }
 
 
@@ -974,8 +1032,15 @@ SyncCCTest.prototype.tempStart = function( num ){
 }
 
 
-function startParallelShell( jsCode ){
-    var x = startMongoProgramNoConnect( "mongo" , "--eval" , jsCode , db ? db.getMongo().host : null );
+function startParallelShell( jsCode, port ){
+    assert( jsCode.indexOf( '"' ) == -1,
+           "double quotes should not be used in jsCode because the windows shell will stip them out" );
+    var x;
+    if ( port ) {
+        x = startMongoProgramNoConnect( "mongo" , "--port" , port , "--eval" , jsCode );
+    } else {
+        x = startMongoProgramNoConnect( "mongo" , "--eval" , jsCode , db ? db.getMongo().host : null );        
+    }
     return function(){
         waitProgram( x );
     };
@@ -990,14 +1055,12 @@ function skipIfTestingReplication(){
     }
 }
 
-// ReplSetTest
 ReplSetTest = function( opts ){
     this.name  = opts.name || "testReplSet";
     this.host  = opts.host || getHostName();
     this.numNodes = opts.nodes || 0;
     this.oplogSize = opts.oplogSize || 2;
     this.useSeedList = opts.useSeedList || false;
-
     this.bridged = opts.bridged || false;
     this.ports = [];
 
@@ -1316,7 +1379,12 @@ ReplSetTest.prototype.awaitReplication = function() {
                var entry = log.find({}).sort({'$natural': -1}).limit(1).next();
                printjson( entry );
                var ts = entry['ts'];
-               print("TS for " + slave + " is " + ts.t + " and latest is " + latest.t);
+               print("TS for " + slave + " is " + ts.t+":"+ts.i + " and latest is " + latest.t+":"+latest.i);
+               
+               if (latest.t < ts.t || (latest.t == ts.t && latest.i < ts.i)) {
+                   latest = this.liveNodes.master.getDB("local")['oplog.rs'].find({}).sort({'$natural': -1}).limit(1).next()['ts'];
+               }
+               
                print("Oplog size for " + slave + " is " + log.count());
                synced = (synced && friendlyEqual(latest,ts))
              }

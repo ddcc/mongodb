@@ -1,7 +1,7 @@
 // query.js
 
 if ( typeof DBQuery == "undefined" ){
-    DBQuery = function( mongo , db , collection , ns , query , fields , limit , skip , batchSize ){
+    DBQuery = function( mongo , db , collection , ns , query , fields , limit , skip , batchSize , options ){
         
         this._mongo = mongo; // 0
         this._db = db; // 1
@@ -13,6 +13,7 @@ if ( typeof DBQuery == "undefined" ){
         this._limit = limit || 0; // 6
         this._skip = skip || 0; // 7
         this._batchSize = batchSize || 0;
+        this._options = options || 0;
 
         this._cursor = null;
         this._numReturned = 0;
@@ -43,7 +44,7 @@ DBQuery.prototype.help = function () {
 DBQuery.prototype.clone = function(){
     var q =  new DBQuery( this._mongo , this._db , this._collection , this._ns , 
         this._query , this._fields , 
-        this._limit , this._skip , this._batchSize );
+        this._limit , this._skip , this._batchSize , this._options );
     q._special = this._special;
     return q;
 }
@@ -65,7 +66,7 @@ DBQuery.prototype._checkModify = function(){
 DBQuery.prototype._exec = function(){
     if ( ! this._cursor ){
         assert.eq( 0 , this._numReturned );
-        this._cursor = this._mongo.find( this._ns , this._query , this._fields , this._limit , this._skip , this._batchSize );
+        this._cursor = this._mongo.find( this._ns , this._query , this._fields , this._limit , this._skip , this._batchSize , this._options );
         this._cursorSeen = 0;
     }
     return this._cursor;
@@ -83,6 +84,11 @@ DBQuery.prototype.batchSize = function( batchSize ){
     return this;
 }
 
+
+DBQuery.prototype.addOption = function( option ){
+    this._options |= option;
+    return this;
+}
 
 DBQuery.prototype.skip = function( skip ){
     this._checkModify();
@@ -238,26 +244,37 @@ DBQuery.prototype.explain = function (verbose) {
     var n = this.clone();
     n._ensureSpecial();
     n._query.$explain = true;
-    n._limit = n._limit * -1;
+    n._limit = Math.abs(n._limit) * -1;
     var e = n.next();
-    if (!verbose) {
-        delete e.allPlans;
-        delete e.oldPlan;
-        if (e.shards){
-            for (var key in e.shards){
-                var s = e.shards[key];
-                if(s.length === undefined){
-                    delete s.allPlans;
-                    delete s.oldPlan;
-                } else {
-                    for (var i=0; i < s.length; i++){
-                        delete s[i].allPlans;
-                        delete s[i].oldPlan;
-                    }
-                }
+
+    function cleanup(obj){
+        if (typeof(obj) != 'object'){
+            return;
+        }
+
+        delete obj.allPlans;
+        delete obj.oldPlan;
+
+        if (typeof(obj.length) == 'number'){
+            for (var i=0; i < obj.length; i++){
+                cleanup(obj[i]);
             }
         }
+
+        if (obj.shards){
+            for (var key in obj.shards){
+                cleanup(obj.shards[key]);
+            }
+        }
+
+        if (obj.clauses){
+            cleanup(obj.clauses);
+        }
     }
+
+    if (!verbose)
+        cleanup(e);
+
     return e;
 }
 

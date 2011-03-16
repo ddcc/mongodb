@@ -21,9 +21,9 @@
 
 namespace mongo {
     void exitCleanly( ExitCode code );
-    
+
     struct ClockSkewException : public DBException {
-        ClockSkewException() : DBException( "clock skew exception" , 20001 ){}
+        ClockSkewException() : DBException( "clock skew exception" , 20001 ) {}
     };
 
     /* replsets use RSOpTime.
@@ -56,14 +56,17 @@ namespace mongo {
             secs = a;
             i = b;
         }
+        OpTime( const OpTime& other ) { 
+            secs = other.secs;
+            i = other.i;
+        }
         OpTime() {
             secs = 0;
             i = 0;
         }
         static OpTime now() {
             unsigned t = (unsigned) time(0);
-//            DEV assertInWriteLock();
-            if ( t < last.secs ){
+            if ( t < last.secs ) {
                 bool toLog = false;
                 ONCE toLog = true;
                 RARELY toLog = true;
@@ -82,13 +85,13 @@ namespace mongo {
                 return last;
             }
             last = OpTime(t, 1);
-            return last;            
+            return last;
         }
-        
+
         /* We store OpTime's in the database as BSON Date datatype -- we needed some sort of
          64 bit "container" for these values.  While these are not really "Dates", that seems a
          better choice for now than say, Number, which is floating point.  Note the BinData type
-         is perhaps the cleanest choice, lacking a true unsigned64 datatype, but BinData has 5 
+         is perhaps the cleanest choice, lacking a true unsigned64 datatype, but BinData has 5
          bytes of overhead.
          */
         unsigned long long asDate() const {
@@ -97,9 +100,9 @@ namespace mongo {
         long long asLL() const {
             return reinterpret_cast<const long long*>(&i)[0];
         }
-        
+
         bool isNull() const { return secs == 0; }
-        
+
         string toStringLong() const {
             char buf[64];
             time_t_to_String(secs, buf);
@@ -108,13 +111,13 @@ namespace mongo {
             ss << hex << secs << ':' << i;
             return ss.str();
         }
-        
+
         string toStringPretty() const {
             stringstream ss;
             ss << time_t_to_String_short(secs) << ':' << hex << i;
             return ss.str();
         }
-        
+
         string toString() const {
             stringstream ss;
             ss << hex << secs << ':' << i;
@@ -132,10 +135,10 @@ namespace mongo {
                 return secs < r.secs;
             return i < r.i;
         }
-        bool operator<=(const OpTime& r) const { 
+        bool operator<=(const OpTime& r) const {
             return *this < r || *this == r;
         }
-        bool operator>(const OpTime& r) const { 
+        bool operator>(const OpTime& r) const {
             return !(*this <= r);
         }
         bool operator>=(const OpTime& r) const {
@@ -143,5 +146,5 @@ namespace mongo {
         }
     };
 #pragma pack()
-    
+
 } // namespace mongo

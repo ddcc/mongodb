@@ -1,7 +1,7 @@
-// pch.h : include file for standard system include files,
-// or project specific include files that are used frequently, but
-// are changed infrequently
-//
+/** @file pch.h : include file for standard system include files,
+ *  or project specific include files that are used frequently, but
+ *  are changed infrequently
+ */
 
 /*    Copyright 2009 10gen Inc.
  *
@@ -31,15 +31,16 @@
 # define _CRT_SECURE_NO_WARNINGS
 #endif
 
+// [dm] i am not sure why we need this.
 #if defined(WIN32)
-
-#ifndef _WIN32
-#define _WIN32
-#endif
-
+# ifndef _WIN32
+# define _WIN32
+# endif
 #endif
 
 #if defined(_WIN32)
+// for rand_s() usage:
+# define _CRT_RAND_S
 # ifndef NOMINMAX
 #  define NOMINMAX
 # endif
@@ -69,6 +70,7 @@
 #include "limits.h"
 
 #include <boost/any.hpp>
+#include "boost/thread/once.hpp"
 #include <boost/archive/iterators/transform_width.hpp>
 #include <boost/filesystem/convenience.hpp>
 #include <boost/filesystem/exception.hpp>
@@ -107,16 +109,17 @@ namespace mongo {
     const int VERSION_MINOR = 5;
 
     enum ExitCode {
-        EXIT_CLEAN = 0 , 
-        EXIT_BADOPTIONS = 2 , 
+        EXIT_CLEAN = 0 ,
+        EXIT_BADOPTIONS = 2 ,
         EXIT_REPLICATION_ERROR = 3 ,
         EXIT_NEED_UPGRADE = 4 ,
+        EXIT_SHARDING_ERROR = 5 ,
         EXIT_KILL = 12 ,
-        EXIT_ABRUBT = 14 ,
+        EXIT_ABRUPT = 14 ,
         EXIT_NTSERVICE_ERROR = 20 ,
         EXIT_JAVA = 21 ,
-        EXIT_OOM_MALLOC = 42 , 
-        EXIT_OOM_REALLOC = 43 , 
+        EXIT_OOM_MALLOC = 42 ,
+        EXIT_OOM_REALLOC = 43 ,
         EXIT_FS = 45 ,
         EXIT_CLOCK_SKEW = 47 ,
         EXIT_NET_ERROR = 48 ,
@@ -126,7 +129,7 @@ namespace mongo {
 
     };
 
-    void dbexit( ExitCode returnCode, const char *whyMsg = "");
+    void dbexit( ExitCode returnCode, const char *whyMsg = "", bool tryToGetLock = false);
 
     /**
        this is here so you can't just type exit() to quit the program
@@ -135,10 +138,7 @@ namespace mongo {
      */
     void exit( ExitCode returnCode );
     bool inShutdown();
-    
-} // namespace mongo
 
-namespace mongo {
     using namespace boost::filesystem;
     void asserted(const char *msg, const char *file, unsigned line);
 }
@@ -155,10 +155,6 @@ namespace mongo {
 
     void sayDbContext(const char *msg = 0);
     void rawOut( const string &s );
-
-} // namespace mongo
-
-namespace mongo {
 
     typedef char _TCHAR;
 

@@ -17,31 +17,46 @@
 
 #include "pch.h"
 #include "processinfo.h"
+#include "mmap.h"
 
 #include <iostream>
 using namespace std;
 
 namespace mongo {
-    
+
     class PidFileWiper {
     public:
-        ~PidFileWiper(){
+        ~PidFileWiper() {
             ofstream out( path.c_str() , ios_base::out );
-            out.close();    
+            out.close();
         }
-        
-        void write( const string& p ){
+
+        void write( const string& p ) {
             path = p;
             ofstream out( path.c_str() , ios_base::out );
             out << getpid() << endl;
             out.close();
         }
-        
+
         string path;
     } pidFileWiper;
-    
-    void writePidFile( const string& path ){
+
+    void writePidFile( const string& path ) {
         pidFileWiper.write( path );
-    }    
+    }
+
+    void printMemInfo( const char * where ) {
+        cout << "mem info: ";
+        if ( where )
+            cout << where << " ";
+        ProcessInfo pi;
+        if ( ! pi.supported() ) {
+            cout << " not supported" << endl;
+            return;
+        }
+
+        cout << "vsize: " << pi.getVirtualMemorySize() << " resident: " << pi.getResidentSize() << " mapped: " << ( MemoryMappedFile::totalMappedLength() / ( 1024 * 1024 ) ) << endl;
+    }
+
 
 }

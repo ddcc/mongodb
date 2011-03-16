@@ -20,28 +20,47 @@
 #include "unittest.h"
 #include "file_allocator.h"
 #include "optime.h"
+#include "time_support.h"
 
 namespace mongo {
 
+    string hexdump(const char *data, unsigned len) {
+        assert( len < 1000000 );
+        const unsigned char *p = (const unsigned char *) data;
+        stringstream ss;
+        for( unsigned i = 0; i < 4 && i < len; i++ ) {
+            ss << std::hex << setw(2) << setfill('0');
+            unsigned n = p[i];
+            ss << n;
+            ss << ' ';
+        }
+        string s = ss.str();
+        return s;
+    }
+
     boost::thread_specific_ptr<string> _threadName;
-    
-    void _setThreadName( const char * name ){
-        static int N = 0;
-        if ( strcmp( name , "conn" ) == 0 ){
+
+    unsigned _setThreadName( const char * name ) {
+        if ( ! name ) name = "NONE";
+
+        static unsigned N = 0;
+
+        if ( strcmp( name , "conn" ) == 0 ) {
+            unsigned n = ++N;
             stringstream ss;
-            ss << name << ++N;
+            ss << name << n;
             _threadName.reset( new string( ss.str() ) );
+            return n;
         }
-        else {
-            _threadName.reset( new string(name) );        
-        }
+
+        _threadName.reset( new string(name) );
+        return 0;
     }
 
 #if defined(_WIN32)
 #define MS_VC_EXCEPTION 0x406D1388
 #pragma pack(push,8)
-    typedef struct tagTHREADNAME_INFO
-    {
+    typedef struct tagTHREADNAME_INFO {
         DWORD dwType; // Must be 0x1000.
         LPCSTR szName; // Pointer to name (in user addr space).
         DWORD dwThreadID; // Thread ID (-1=caller thread).
@@ -49,30 +68,42 @@ namespace mongo {
     } THREADNAME_INFO;
 #pragma pack(pop)
 
-    void setThreadName(const char *name)
-    {
-        _setThreadName( name );
-        Sleep(10);
+    void setWinThreadName(const char *name) {
+        /* is the sleep here necessary???
+           Sleep(10);
+           */
         THREADNAME_INFO info;
         info.dwType = 0x1000;
         info.szName = name;
         info.dwThreadID = -1;
         info.dwFlags = 0;
-        __try
-            {
-                RaiseException( MS_VC_EXCEPTION, 0, sizeof(info)/sizeof(ULONG_PTR), (ULONG_PTR*)&info );
-            }
-        __except(EXCEPTION_EXECUTE_HANDLER)
-        {
+        __try {
+            RaiseException( MS_VC_EXCEPTION, 0, sizeof(info)/sizeof(ULONG_PTR), (ULONG_PTR*)&info );
+        }
+        __except(EXCEPTION_EXECUTE_HANDLER) {
         }
     }
-#else
-    void setThreadName(const char * name ) { 
-        _setThreadName( name );
+
+    unsigned setThreadName(const char *name) {
+        unsigned n = _setThreadName( name );
+#if !defined(_DEBUG)
+        // naming might be expensive so don't do "conn*" over and over
+        if( string("conn") == name )
+            return n;
+#endif
+        setWinThreadName(name);
+        return n;
     }
+
+#else
+
+    unsigned setThreadName(const char * name ) {
+        return _setThreadName( name );
+    }
+
 #endif
 
-    string getThreadName(){
+    string getThreadName() {
         string * s = _threadName.get();
         if ( s )
             return *s;
@@ -89,8 +120,6 @@ namespace mongo {
     int tlogLevel = 0;
     mongo::mutex Logstream::mutex("Logstream");
     int Logstream::doneSetup = Logstream::magicNumber();
-    
-    bool goingAway = false;
 
     bool isPrime(int n) {
         int z = 2;
@@ -140,13 +169,9 @@ namespace mongo {
 
         }
     } utilTest;
-    
-    // The mutex contained in this object may be held on shutdown.
-    FileAllocator &theFileAllocator_ = *(new FileAllocator());
-    FileAllocator &theFileAllocator() { return theFileAllocator_; }
-    
+
     OpTime OpTime::last(0, 0);
-    
+
     /* this is a good place to set a breakpoint when debugging, as lots of warning things
        (assert, wassert) call it.
     */
@@ -174,11 +199,11 @@ namespace mongo {
         Logstream::logLockless("\n");
     }
 
-    ostream& operator<<( ostream &s, const ThreadSafeString &o ){
+    ostream& operator<<( ostream &s, const ThreadSafeString &o ) {
         s << o.toString();
         return s;
     }
 
-    bool __destroyingStatics = false;
-    
+    bool StaticObserver::_destroyingStatics = false;
+
 } // namespace mongo

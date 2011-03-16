@@ -33,24 +33,10 @@ namespace mongo {
     class Cursor;
     class CoveredIndexMatcher;
 
-    class CursorIterator {
-    public:
-        CursorIterator( shared_ptr<Cursor> c , BSONObj filter = BSONObj() );
-        BSONObj next();
-        bool hasNext();
-
-    private:
-        void _advance();
-
-        shared_ptr<Cursor> _cursor;
-        auto_ptr<CoveredIndexMatcher> _matcher;
-        BSONObj _o;
-    };
-
     /**
        all helpers assume locking is handled above them
      */
-    struct Helpers { 
+    struct Helpers {
 
         /* ensure the specified index exists.
 
@@ -68,7 +54,7 @@ namespace mongo {
         /* fetch a single object from collection ns that matches query.
            set your db SavedContext first.
 
-           @param query - the query to perform.  note this is the low level portion of query so "orderby : ..." 
+           @param query - the query to perform.  note this is the low level portion of query so "orderby : ..."
                           won't work.
 
            @param requireIndex if true, complain if no index for the query.  a way to guard against
@@ -77,20 +63,18 @@ namespace mongo {
            @return true if object found
         */
         static bool findOne(const char *ns, const BSONObj &query, BSONObj& result, bool requireIndex = false);
-        static DiskLoc findOne(const char *ns, const BSONObj &query, bool requireIndex);        
+        static DiskLoc findOne(const char *ns, const BSONObj &query, bool requireIndex);
 
         /**
          * @param foundIndex if passed in will be set to 1 if ns and index found
          * @return true if object found
          */
-        static bool findById(Client&, const char *ns, BSONObj query, BSONObj& result , 
+        static bool findById(Client&, const char *ns, BSONObj query, BSONObj& result ,
                              bool * nsFound = 0 , bool * indexFound = 0 );
 
-        /* uasserts if no _id index. 
+        /* uasserts if no _id index.
            @return null loc if not found */
         static DiskLoc findById(NamespaceDetails *d, BSONObj query);
-
-        static auto_ptr<CursorIterator> find( const char *ns , BSONObj query = BSONObj() , bool requireIndex = false );
 
         /** Get/put the first (or last) object from a collection.  Generally only useful if the collection
             only ever has a single object -- which is a "singleton collection".
@@ -103,7 +87,7 @@ namespace mongo {
         static void putSingleton(const char *ns, BSONObj obj);
         static void putSingletonGod(const char *ns, BSONObj obj, bool logTheOp);
         static bool getFirst(const char *ns, BSONObj& result) { return getSingleton(ns, result); }
-        static bool getLast(const char *ns, BSONObj& result); // get last object int he collection; e.g. {$natural : -1}        
+        static bool getLast(const char *ns, BSONObj& result); // get last object int he collection; e.g. {$natural : -1}
 
         /**
          * you have to lock
@@ -115,14 +99,14 @@ namespace mongo {
         /** You do not need to set the database before calling.
             @return true if collection is empty.
         */
-        static bool isEmpty(const char *ns);
+        static bool isEmpty(const char *ns, bool doAuth=true);
 
         // TODO: this should be somewhere else probably
         static BSONObj toKeyFormat( const BSONObj& o , BSONObj& key );
 
         class RemoveCallback {
         public:
-            virtual ~RemoveCallback(){}
+            virtual ~RemoveCallback() {}
             virtual void goingToDelete( const BSONObj& o ) = 0;
         };
         /* removeRange: operation is oplog'd */
@@ -163,13 +147,13 @@ namespace mongo {
         ~RemoveSaver();
 
         void goingToDelete( const BSONObj& o );
-        
+
     private:
         path _root;
         path _file;
         ofstream* _out;
-        
+
     };
 
-    
+
 } // namespace mongo

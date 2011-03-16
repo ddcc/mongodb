@@ -192,9 +192,6 @@
     <ClCompile Include="..\..\util\text.cpp">
       <Filter>shell</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\s\d_util.cpp">
-      <Filter>shared source files</Filter>
-    </ClCompile>
     <ClCompile Include="..\..\s\shardconnection.cpp">
       <Filter>shared source files</Filter>
     </ClCompile>
@@ -218,6 +215,15 @@
     </ClCompile>
     <ClCompile Include="..\..\util\log.cpp">
       <Filter>shared source files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\scripting\bench.cpp">
+      <Filter>scripting</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\bson\oid.cpp">
+      <Filter>bson</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\client\dbclient_rs.cpp">
+      <Filter>client</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -247,7 +253,6 @@
   <ItemGroup>
     <Library Include="..\..\..\js\js32d.lib" />
     <Library Include="..\..\..\js\js32r.lib" />
-    <Library Include="..\..\..\readline\lib\readline.lib" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\db\lasterror.h">

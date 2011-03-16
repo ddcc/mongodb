@@ -16,7 +16,7 @@
 
 #include "pch.h"
 #include "pdfile.h"
-#include "curop.h"
+#include "curop-inl.h"
 
 namespace mongo {
 
@@ -24,14 +24,17 @@ namespace mongo {
         killCurrentOp.checkForInterrupt();
         if ( eof() ) {
             if ( tailable_ && !last.isNull() ) {
-                curr = s->next( last );                    
-            } else {
+                curr = s->next( last );
+            }
+            else {
                 return false;
             }
-        } else {
+        }
+        else {
             last = curr;
             curr = s->next( curr );
         }
+        incNscanned();
         return ok();
     }
 
@@ -72,7 +75,7 @@ namespace mongo {
     }
 
     ForwardCappedCursor::ForwardCappedCursor( NamespaceDetails *_nsd, const DiskLoc &startLoc ) :
-            nsd( _nsd ) {
+        nsd( _nsd ) {
         if ( !nsd )
             return;
         DiskLoc start = startLoc;
@@ -89,6 +92,7 @@ namespace mongo {
         }
         curr = start;
         s = this;
+        incNscanned();
     }
 
     DiskLoc ForwardCappedCursor::next( const DiskLoc &prev ) const {
@@ -112,19 +116,21 @@ namespace mongo {
     }
 
     ReverseCappedCursor::ReverseCappedCursor( NamespaceDetails *_nsd, const DiskLoc &startLoc ) :
-            nsd( _nsd ) {
+        nsd( _nsd ) {
         if ( !nsd )
             return;
         DiskLoc start = startLoc;
         if ( start.isNull() ) {
             if ( !nsd->capLooped() ) {
                 start = nsd->lastRecord();
-            } else {
+            }
+            else {
                 start = nsd->capExtent.ext()->lastRecord;
             }
         }
         curr = start;
         s = this;
+        incNscanned();
     }
 
     DiskLoc ReverseCappedCursor::next( const DiskLoc &prev ) const {
@@ -138,7 +144,8 @@ namespace mongo {
             if ( i == nextLoop( nsd, nsd->capExtent.ext()->lastRecord ) ) {
                 return DiskLoc();
             }
-        } else {
+        }
+        else {
             if ( i == nsd->capExtent.ext()->firstRecord ) {
                 return DiskLoc();
             }

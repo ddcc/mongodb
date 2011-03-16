@@ -24,55 +24,109 @@
 namespace mongo {
 
     class Shard;
-    
-    struct PoolForHost {
+
+    /**
+     * not thread safe
+     * thread safety is handled by DBConnectionPool
+     */
+    class PoolForHost {
+    public:
         PoolForHost()
-            : created(0){}
-        PoolForHost( const PoolForHost& other ){
-            assert(other.pool.size() == 0);
-            created = other.created;
-            assert( created == 0 );
+            : _created(0) {}
+
+        PoolForHost( const PoolForHost& other ) {
+            assert(other._pool.size() == 0);
+            _created = other._created;
+            assert( _created == 0 );
         }
-            
-        std::stack<DBClientBase*> pool;
-        long long created;
+
+        ~PoolForHost();
+
+        int numAvailable() const { return (int)_pool.size(); }
+
+        void createdOne( DBClientBase * base);
+        long long numCreated() const { return _created; }
+
+        ConnectionString::ConnectionType type() const { assert(_created); return _type; }
+
+        /**
+         * gets a connection or return NULL
+         */
+        DBClientBase * get();
+
+        void done( DBClientBase * c );
+
+        void flush();
+
+        static void setMaxPerHost( unsigned max ) { _maxPerHost = max; }
+        static unsigned getMaxPerHost() { return _maxPerHost; }
+    private:
+
+        struct StoredConnection {
+            StoredConnection( DBClientBase * c );
+
+            bool ok( time_t now );
+
+            DBClientBase* conn;
+            time_t when;
+        };
+
+        std::stack<StoredConnection> _pool;
+        long long _created;
+        ConnectionString::ConnectionType _type;
+
+        static unsigned _maxPerHost;
     };
-    
+
     class DBConnectionHook {
     public:
-        virtual ~DBConnectionHook(){}
-        virtual void onCreate( DBClientBase * conn ){}
-        virtual void onHandedOut( DBClientBase * conn ){}
+        virtual ~DBConnectionHook() {}
+        virtual void onCreate( DBClientBase * conn ) {}
+        virtual void onHandedOut( DBClientBase * conn ) {}
     };
 
     /** Database connection pool.
 
         Generally, use ScopedDbConnection and do not call these directly.
 
-        This class, so far, is suitable for use with unauthenticated connections. 
-        Support for authenticated connections requires some adjustements: please 
+        This class, so far, is suitable for use with unauthenticated connections.
+        Support for authenticated connections requires some adjustements: please
         request...
 
         Usage:
-        
+
         {
            ScopedDbConnection c("myserver");
            c.conn()...
         }
     */
     class DBConnectionPool {
+        
+    public:
+
+        /** compares server namees, but is smart about replica set names */
+        struct serverNameCompare {
+            bool operator()( const string& a , const string& b ) const;
+        };
+
+    private:
+
         mongo::mutex _mutex;
-        map<string,PoolForHost> _pools; // servername -> pool
+        typedef map<string,PoolForHost,serverNameCompare> PoolMap; // servername -> pool
+        PoolMap _pools;
         list<DBConnectionHook*> _hooks;
+        string _name;
 
         DBClientBase* _get( const string& ident );
-        
+
         DBClientBase* _finishCreate( const string& ident , DBClientBase* conn );
 
-    public:        
-        DBConnectionPool() : _mutex("DBConnectionPool") { }
+    public:
+        DBConnectionPool() : _mutex("DBConnectionPool") , _name( "dbconnectionpool" ) { }
         ~DBConnectionPool();
 
+        /** right now just controls some asserts.  defaults to "dbconnectionpool" */
+        void setName( const string& name ) { _name = name; }
 
         void onCreate( DBClientBase * conn );
         void onHandedOut( DBClientBase * conn );
@@ -83,72 +137,78 @@ namespace mongo {
         DBClientBase *get(const ConnectionString& host);
 
         void release(const string& host, DBClientBase *c) {
-            if ( c->isFailed() ){
+            if ( c->isFailed() ) {
                 delete c;
                 return;
             }
             scoped_lock L(_mutex);
-            _pools[host].pool.push(c);
+            _pools[host].done(c);
         }
         void addHook( DBConnectionHook * hook );
         void appendInfo( BSONObjBuilder& b );
     };
-    
+
     extern DBConnectionPool pool;
 
     class AScopedConnection : boost::noncopyable {
     public:
-        virtual ~AScopedConnection(){}
+        AScopedConnection() { _numConnections++; }
+        virtual ~AScopedConnection() { _numConnections--; }
         virtual DBClientBase* get() = 0;
         virtual void done() = 0;
         virtual string getHost() const = 0;
+
+        /**
+         * @return total number of current instances of AScopedConnection
+         */
+        static int getNumConnections() { return _numConnections; }
+
+    private:
+        static AtomicUInt _numConnections;
     };
 
     /** Use to get a connection from the pool.  On exceptions things
-       clean up nicely.
+       clean up nicely (i.e. the socket gets closed automatically when the
+       scopeddbconnection goes out of scope).
     */
     class ScopedDbConnection : public AScopedConnection {
-        const string _host;
-        DBClientBase *_conn;
     public:
+        /** the main constructor you want to use
+            throws UserException if can't connect
+            */
+        explicit ScopedDbConnection(const string& host) : _host(host), _conn( pool.get(host) ) {}
+
+        ScopedDbConnection() : _host( "" ) , _conn(0) {}
+
+        /* @param conn - bind to an existing connection */
+        ScopedDbConnection(const string& host, DBClientBase* conn ) : _host( host ) , _conn( conn ) {}
+
+        /** throws UserException if can't connect */
+        explicit ScopedDbConnection(const ConnectionString& url ) : _host(url.toString()), _conn( pool.get(url) ) {}
+
+        /** throws UserException if can't connect */
+        explicit ScopedDbConnection(const Shard& shard );
+        explicit ScopedDbConnection(const Shard* shard );
+
+        ~ScopedDbConnection();
+
         /** get the associated connection object */
-        DBClientBase* operator->(){ 
-            uassert( 11004 ,  "did you call done already" , _conn );
-            return _conn; 
+        DBClientBase* operator->() {
+            uassert( 11004 ,  "connection was returned to the pool already" , _conn );
+            return _conn;
         }
-        
+
         /** get the associated connection object */
         DBClientBase& conn() {
-            uassert( 11005 ,  "did you call done already" , _conn );
+            uassert( 11005 ,  "connection was returned to the pool already" , _conn );
             return *_conn;
         }
 
         /** get the associated connection object */
         DBClientBase* get() {
-            uassert( 13102 ,  "did you call done already" , _conn );
+            uassert( 13102 ,  "connection was returned to the pool already" , _conn );
             return _conn;
         }
-        
-        ScopedDbConnection()
-            : _host( "" ) , _conn(0) {
-        }
-
-        /** throws UserException if can't connect */
-        ScopedDbConnection(const string& host)
-            : _host(host), _conn( pool.get(host) ) {
-        }
-        
-        ScopedDbConnection(const string& host, DBClientBase* conn )
-            : _host( host ) , _conn( conn ){
-        }
-        
-        ScopedDbConnection(const Shard& shard );
-        ScopedDbConnection(const Shard* shard );
-
-        ScopedDbConnection(const ConnectionString& url )
-            : _host(url.toString()), _conn( pool.get(url) ) {
-        }
-
 
         string getHost() const { return _host; }
 
@@ -161,8 +221,8 @@ namespace mongo {
         }
 
         /** Call this when you are done with the connection.
-            
-            If you do not call done() before this object goes out of scope, 
+
+            If you do not call done() before this object goes out of scope,
             we can't be sure we fully read all expected data of a reply on the socket.  so
             we don't try to reuse the connection in that situation.
         */
@@ -170,7 +230,7 @@ namespace mongo {
             if ( ! _conn )
                 return;
 
-            /* we could do this, but instead of assume one is using autoreconnect mode on the connection 
+            /* we could do this, but instead of assume one is using autoreconnect mode on the connection
             if ( _conn->isFailed() )
                 kill();
             else
@@ -178,10 +238,12 @@ namespace mongo {
             pool.release(_host, _conn);
             _conn = 0;
         }
-        
+
         ScopedDbConnection * steal();
 
-        ~ScopedDbConnection();
+    private:
+        const string _host;
+        DBClientBase *_conn;
 
     };
 
