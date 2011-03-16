@@ -1,4 +1,4 @@
-// sock.h
+// @file sock.h
 
 /*    Copyright 2009 10gen Inc.
  *
@@ -23,21 +23,18 @@
 #include <sstream>
 #include "goodies.h"
 #include "../db/jsobj.h"
+#include "../db/cmdline.h"
 
 namespace mongo {
 
     const int SOCK_FAMILY_UNKNOWN_ERROR=13078;
+    string getAddrInfoStrError(int code);
 
 #if defined(_WIN32)
 
     typedef short sa_family_t;
     typedef int socklen_t;
-    inline int getLastError() {
-        return WSAGetLastError();
-    }
-    inline const char* gai_strerror(int code) {
-        return ::gai_strerrorA(code);
-    }
+    inline int getLastError() { return WSAGetLastError(); }
     inline void disableNagle(int sock) {
         int x = 1;
         if ( setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char *) &x, sizeof(x)) )
@@ -45,8 +42,7 @@ namespace mongo {
         if ( setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (char *) &x, sizeof(x)) )
             out() << "ERROR: SO_KEEPALIVE failed" << endl;
     }
-    inline void prebindOptions( int sock ) {
-    }
+    inline void prebindOptions( int sock ) { }
 
     // This won't actually be used on windows
     struct sockaddr_un {
@@ -56,6 +52,8 @@ namespace mongo {
 
 #else
 
+    extern CmdLine cmdLine;
+    
 } // namespace mongo
 
 #include <sys/socket.h>
@@ -111,8 +109,8 @@ namespace mongo {
 
 #endif
 
-    inline string makeUnixSockPath(int port){
-        return "/tmp/mongodb-" + BSONObjBuilder::numStr(port) + ".sock";
+    inline string makeUnixSockPath(int port) {
+        return cmdLine.socket + "/mongodb-" + BSONObjBuilder::numStr(port) + ".sock";
     }
 
     inline void setSockTimeouts(int sock, double secs) {
@@ -148,7 +146,7 @@ namespace mongo {
         template <typename T>
         const T& as() const { return *(const T*)(&sa); }
 
-        string toString(bool includePort=true) const{
+        string toString(bool includePort=true) const {
             string out = getAddr();
             if (includePort && getType() != AF_UNIX && getType() != AF_UNSPEC)
                 out += ':' + BSONObjBuilder::numStr(getPort());
@@ -161,34 +159,34 @@ namespace mongo {
         }
 
         unsigned getPort() const {
-            switch (getType()){
-                case AF_INET:  return ntohs(as<sockaddr_in>().sin_port);
-                case AF_INET6: return ntohs(as<sockaddr_in6>().sin6_port);
-                case AF_UNIX: return 0;
-                case AF_UNSPEC: return 0;
-                default: massert(SOCK_FAMILY_UNKNOWN_ERROR, "unsupported address family", false); return 0;
+            switch (getType()) {
+            case AF_INET:  return ntohs(as<sockaddr_in>().sin_port);
+            case AF_INET6: return ntohs(as<sockaddr_in6>().sin6_port);
+            case AF_UNIX: return 0;
+            case AF_UNSPEC: return 0;
+            default: massert(SOCK_FAMILY_UNKNOWN_ERROR, "unsupported address family", false); return 0;
             }
         }
 
         string getAddr() const {
-            switch (getType()){
-                case AF_INET:
-                case AF_INET6: {
-                    const int buflen=128;
-                    char buffer[buflen];
-                    int ret = getnameinfo(raw(), addressSize, buffer, buflen, NULL, 0, NI_NUMERICHOST);
-                    massert(13082, gai_strerror(ret), ret == 0);
-                    return buffer;
-                }
+            switch (getType()) {
+            case AF_INET:
+            case AF_INET6: {
+                const int buflen=128;
+                char buffer[buflen];
+                int ret = getnameinfo(raw(), addressSize, buffer, buflen, NULL, 0, NI_NUMERICHOST);
+                massert(13082, getAddrInfoStrError(ret), ret == 0);
+                return buffer;
+            }
 
-                case AF_UNIX:  return (addressSize > 2 ? as<sockaddr_un>().sun_path : "anonymous unix socket");
-                case AF_UNSPEC: return "(NONE)";
-                default: massert(SOCK_FAMILY_UNKNOWN_ERROR, "unsupported address family", false); return "";
+            case AF_UNIX:  return (addressSize > 2 ? as<sockaddr_un>().sun_path : "anonymous unix socket");
+            case AF_UNSPEC: return "(NONE)";
+            default: massert(SOCK_FAMILY_UNKNOWN_ERROR, "unsupported address family", false); return "";
             }
         }
 
         bool isLocalHost() const;
-        
+
         bool operator==(const SockAddr& r) const {
             if (getType() != r.getType())
                 return false;
@@ -196,12 +194,12 @@ namespace mongo {
             if (getPort() != r.getPort())
                 return false;
 
-            switch (getType()){
-                case AF_INET:  return as<sockaddr_in>().sin_addr.s_addr == r.as<sockaddr_in>().sin_addr.s_addr;
-                case AF_INET6: return memcmp(as<sockaddr_in6>().sin6_addr.s6_addr, r.as<sockaddr_in6>().sin6_addr.s6_addr, sizeof(in6_addr)) == 0;
-                case AF_UNIX:  return strcmp(as<sockaddr_un>().sun_path, r.as<sockaddr_un>().sun_path) == 0;
-                case AF_UNSPEC: return true; // assume all unspecified addresses are the same
-                default: massert(SOCK_FAMILY_UNKNOWN_ERROR, "unsupported address family", false);
+            switch (getType()) {
+            case AF_INET:  return as<sockaddr_in>().sin_addr.s_addr == r.as<sockaddr_in>().sin_addr.s_addr;
+            case AF_INET6: return memcmp(as<sockaddr_in6>().sin6_addr.s6_addr, r.as<sockaddr_in6>().sin6_addr.s6_addr, sizeof(in6_addr)) == 0;
+            case AF_UNIX:  return strcmp(as<sockaddr_un>().sun_path, r.as<sockaddr_un>().sun_path) == 0;
+            case AF_UNSPEC: return true; // assume all unspecified addresses are the same
+            default: massert(SOCK_FAMILY_UNKNOWN_ERROR, "unsupported address family", false);
             }
         }
         bool operator!=(const SockAddr& r) const {
@@ -218,12 +216,12 @@ namespace mongo {
             else if (getPort() > r.getPort())
                 return false;
 
-            switch (getType()){
-                case AF_INET:  return as<sockaddr_in>().sin_addr.s_addr < r.as<sockaddr_in>().sin_addr.s_addr;
-                case AF_INET6: return memcmp(as<sockaddr_in6>().sin6_addr.s6_addr, r.as<sockaddr_in6>().sin6_addr.s6_addr, sizeof(in6_addr)) < 0;
-                case AF_UNIX:  return strcmp(as<sockaddr_un>().sun_path, r.as<sockaddr_un>().sun_path) < 0;
-                case AF_UNSPEC: return false;
-                default: massert(SOCK_FAMILY_UNKNOWN_ERROR, "unsupported address family", false);
+            switch (getType()) {
+            case AF_INET:  return as<sockaddr_in>().sin_addr.s_addr < r.as<sockaddr_in>().sin_addr.s_addr;
+            case AF_INET6: return memcmp(as<sockaddr_in6>().sin6_addr.s6_addr, r.as<sockaddr_in6>().sin6_addr.s6_addr, sizeof(in6_addr)) < 0;
+            case AF_UNIX:  return strcmp(as<sockaddr_un>().sun_path, r.as<sockaddr_un>().sun_path) < 0;
+            case AF_UNSPEC: return false;
+            default: massert(SOCK_FAMILY_UNKNOWN_ERROR, "unsupported address family", false);
             }
         }
 
@@ -231,7 +229,7 @@ namespace mongo {
         sockaddr* raw() {return (sockaddr*)&sa;}
 
         socklen_t addressSize;
-        private:
+    private:
         struct sockaddr_storage sa;
     };
 
@@ -253,32 +251,52 @@ namespace mongo {
 
     class ListeningSockets {
     public:
-        ListeningSockets() : _mutex("ListeningSockets"), _sockets( new set<int>() ) { }
-        void add( int sock ){
+        ListeningSockets()
+            : _mutex("ListeningSockets")
+            , _sockets( new set<int>() )
+            , _socketPaths( new set<string>() )
+        { }
+        void add( int sock ) {
             scoped_lock lk( _mutex );
             _sockets->insert( sock );
         }
-        void remove( int sock ){
+        void addPath( string path ) {
+            scoped_lock lk( _mutex );
+            _socketPaths->insert( path );
+        }
+        void remove( int sock ) {
             scoped_lock lk( _mutex );
             _sockets->erase( sock );
         }
-        void closeAll(){
-            set<int>* s;
+        void closeAll() {
+            set<int>* sockets;
+            set<string>* paths;
+
             {
                 scoped_lock lk( _mutex );
-                s = _sockets;
+                sockets = _sockets;
                 _sockets = new set<int>();
+                paths = _socketPaths;
+                _socketPaths = new set<string>();
             }
-            for ( set<int>::iterator i=s->begin(); i!=s->end(); i++ ) {
+
+            for ( set<int>::iterator i=sockets->begin(); i!=sockets->end(); i++ ) {
                 int sock = *i;
                 log() << "closing listening socket: " << sock << endl;
                 closesocket( sock );
-            }            
+            }
+
+            for ( set<string>::iterator i=paths->begin(); i!=paths->end(); i++ ) {
+                string path = *i;
+                log() << "removing socket file: " << path << endl;
+                ::remove( path.c_str() );
+            }
         }
         static ListeningSockets* get();
     private:
         mongo::mutex _mutex;
         set<int>* _sockets;
+        set<string>* _socketPaths; // for unix domain sockets
         static ListeningSockets* _instance;
     };
 

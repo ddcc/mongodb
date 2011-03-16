@@ -40,16 +40,16 @@
 
 namespace mongo {
 
-	/* replication slave? (possibly with slave or repl pair nonmaster)
+    /* replication slave? (possibly with slave or repl pair nonmaster)
        --slave cmd line setting -> SimpleSlave
-	*/
-	typedef enum { NotSlave=0, SimpleSlave, ReplPairSlave } SlaveTypes;
+    */
+    typedef enum { NotSlave=0, SimpleSlave, ReplPairSlave } SlaveTypes;
 
     class ReplSettings {
     public:
         SlaveTypes slave;
 
-        /* true means we are master and doing replication.  if we are not writing to oplog (no --master or repl pairing), 
+        /* true means we are master and doing replication.  if we are not writing to oplog (no --master or repl pairing),
            this won't be true.
         */
         bool master;
@@ -57,9 +57,9 @@ namespace mongo {
         int opIdMem;
 
         bool fastsync;
-        
+
         bool autoresync;
-        
+
         int slavedelay;
 
         ReplSettings()
@@ -69,14 +69,14 @@ namespace mongo {
     };
 
     extern ReplSettings replSettings;
-    
-    bool cloneFrom(const char *masterHost, string& errmsg, const string& fromdb, bool logForReplication, 
-				   bool slaveOk, bool useReplAuth, bool snapshot);
+
+    bool cloneFrom(const char *masterHost, string& errmsg, const string& fromdb, bool logForReplication,
+                   bool slaveOk, bool useReplAuth, bool snapshot);
 
     /* A replication exception */
     class SyncException : public DBException {
     public:
-        SyncException() : DBException( "sync exception" , 10001 ){}
+        SyncException() : DBException( "sync exception" , 10001 ) {}
     };
 
     /* A Source is a source from which we can pull (replicate) data.
@@ -94,11 +94,14 @@ namespace mongo {
 
         bool resync(string db);
 
-        /* pull some operations from the master's oplog, and apply them. */
+        /** @param alreadyLocked caller already put us in write lock if true */
+        void sync_pullOpLog_applyOperation(BSONObj& op, OpTime *localLogTail, bool alreadyLocked);
+
+        /* pull some operations from the master's oplog, and apply them.
+           calls sync_pullOpLog_applyOperation
+        */
         int sync_pullOpLog(int& nApplied);
 
-        void sync_pullOpLog_applyOperation(BSONObj& op, OpTime *localLogTail);
-        
         /* we only clone one database per pass, even if a lot need done.  This helps us
            avoid overflowing the master's transaction log by doing too much work before going
            back to read more transactions. (Imagine a scenario of slave startup where we try to
@@ -109,7 +112,7 @@ namespace mongo {
         set<string> incompleteCloneDbs;
 
         ReplSource();
-        
+
         // returns the dummy ns used to do the drop
         string resyncDrop( const char *db, const char *requester );
         // returns possibly unowned id spec for the operation.
@@ -127,7 +130,7 @@ namespace mongo {
         bool updateSetsWithLocalOps( OpTime &localLogTail, bool mayUnlock );
         string ns() const { return string( "local.oplog.$" ) + sourceName(); }
         unsigned _sleepAdviceTime;
-        
+
     public:
         OplogReader oplogReader;
 
@@ -136,9 +139,7 @@ namespace mongo {
         bool paired; // --pair in use
         string hostName;    // ip addr or hostname plus optionally, ":<port>"
         string _sourceName;  // a logical source name.
-        string sourceName() const {
-            return _sourceName.empty() ? "main" : _sourceName;
-        }
+        string sourceName() const { return _sourceName.empty() ? "main" : _sourceName; }
         string only; // only a certain db. note that in the sources collection, this may not be changed once you start replicating.
 
         /* the last time point we have already synced up to (in the remote/master's oplog). */
@@ -146,8 +147,8 @@ namespace mongo {
 
         /* This is for repl pairs.
            _lastSavedLocalTs is the most recent point in the local log that we know is consistent
-           with the remote log ( ie say the local op log has entries ABCDE and the remote op log 
-           has ABCXY, then _lastSavedLocalTs won't be greater than C until we have reconciled 
+           with the remote log ( ie say the local op log has entries ABCDE and the remote op log
+           has ABCXY, then _lastSavedLocalTs won't be greater than C until we have reconciled
            the DE-XY difference.)
         */
         OpTime _lastSavedLocalTs;
@@ -171,15 +172,15 @@ namespace mongo {
             return hostName == r.hostName && sourceName() == r.sourceName();
         }
         string toString() const { return sourceName() + "@" + hostName; }
-        
-        bool haveMoreDbsToSync() const { return !addDbNextPass.empty(); }        
+
+        bool haveMoreDbsToSync() const { return !addDbNextPass.empty(); }
         int sleepAdvice() const {
             if ( !_sleepAdviceTime )
                 return 0;
             int wait = _sleepAdviceTime - unsigned( time( 0 ) );
             return wait > 0 ? wait : 0;
         }
-        
+
         static bool throttledForceResyncDead( const char *requester );
         static void forceResyncDead( const char *requester );
         void forceResync( const char *requester );
@@ -200,7 +201,8 @@ namespace mongo {
                 if ( imp_[ ns ].insert( id.getOwned() ).second ) {
                     size_ += id.objsize() + sizeof( BSONObj );
                 }
-            } else {
+            }
+            else {
                 if ( imp_[ ns ].erase( id ) == 1 ) {
                     size_ -= id.objsize() + sizeof( BSONObj );
                 }
@@ -236,7 +238,7 @@ namespace mongo {
             // rename _id to id since there may be duplicates
             b.appendAs( id.firstElement(), "id" );
             return b.obj();
-        }        
+        }
         DbSet impl_;
     };
 
@@ -244,14 +246,14 @@ namespace mongo {
     // All functions must be called with db mutex held
     // Kind of sloppy class structure, for now just want to keep the in mem
     // version speedy.
-	// see http://www.mongodb.org/display/DOCS/Pairing+Internals
+    // see http://www.mongodb.org/display/DOCS/Pairing+Internals
     class IdTracker {
     public:
         IdTracker() :
-        dbIds_( "local.temp.replIds" ),
-        dbModIds_( "local.temp.replModIds" ),
-        inMem_( true ),
-        maxMem_( replSettings.opIdMem ) {
+            dbIds_( "local.temp.replIds" ),
+            dbModIds_( "local.temp.replModIds" ),
+            inMem_( true ),
+            maxMem_( replSettings.opIdMem ) {
         }
         void reset( int maxMem = replSettings.opIdMem ) {
             memIds_.reset();
@@ -309,7 +311,7 @@ namespace mongo {
         void upgrade( MemIds &a, DbIds &b ) {
             for( MemIds::IdSets::const_iterator i = a.imp_.begin(); i != a.imp_.end(); ++i ) {
                 for( BSONObjSetDefaultOrder::const_iterator j = i->second.begin(); j != i->second.end(); ++j ) {
-                    set( b, i->first.c_str(), *j, true );            
+                    set( b, i->first.c_str(), *j, true );
                     RARELY {
                         dbtemprelease t;
                     }
@@ -323,9 +325,9 @@ namespace mongo {
         bool inMem_;
         int maxMem_;
     };
-    
+
     bool anyReplEnabled();
     void appendReplicationInfo( BSONObjBuilder& result , bool authed , int level = 0 );
-    
-    
+
+
 } // namespace mongo

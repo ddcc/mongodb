@@ -24,7 +24,9 @@
 #include "../../util/mongoutils/html.h"
 #include "../../client/dbclient.h"
 
-namespace mongo { 
+using namespace bson;
+
+namespace mongo {
 
     void checkMembersUpForConfigChange(const ReplSetConfig& cfg, bool initial);
 
@@ -50,7 +52,7 @@ namespace mongo {
             }
 
             // may not need this, but if removed check all tests still work:
-            if( !check(errmsg, result) ) 
+            if( !check(errmsg, result) )
                 return false;
 
             if( cmdObj.hasElement("blind") ) {
@@ -61,6 +63,7 @@ namespace mongo {
         }
     } cmdReplSetTest;
 
+    /** get rollback id */
     class CmdReplSetGetRBID : public ReplSetCommand {
     public:
         /* todo: ideally this should only change on rollbacks NOT on mongod restarts also. fix... */
@@ -68,26 +71,28 @@ namespace mongo {
         virtual void help( stringstream &help ) const {
             help << "internal";
         }
-        CmdReplSetGetRBID() : ReplSetCommand("replSetGetRBID") { 
+        CmdReplSetGetRBID() : ReplSetCommand("replSetGetRBID") {
             rbid = (int) curTimeMillis();
         }
         virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            if( !check(errmsg, result) ) 
+            if( !check(errmsg, result) )
                 return false;
             result.append("rbid",rbid);
             return true;
         }
     } cmdReplSetRBID;
 
-    using namespace bson;
-    void incRBID() { 
+    /** we increment the rollback id on every rollback event. */
+    void incRBID() {
         cmdReplSetRBID.rbid++;
     }
-    int getRBID(DBClientConnection *c) { 
+
+    /** helper to get rollback id from another server. */
+    int getRBID(DBClientConnection *c) {
         bo info;
         c->simpleCommand("admin", &info, "replSetGetRBID");
         return info["rbid"].numberInt();
-    } 
+    }
 
     class CmdReplSetGetStatus : public ReplSetCommand {
     public:
@@ -98,7 +103,10 @@ namespace mongo {
         }
         CmdReplSetGetStatus() : ReplSetCommand("replSetGetStatus", true) { }
         virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            if( !check(errmsg, result) ) 
+            if ( cmdObj["forShell"].trueValue() )
+                lastError.disableForCommand();
+
+            if( !check(errmsg, result) )
                 return false;
             theReplSet->summarizeStatus(result);
             return true;
@@ -115,7 +123,7 @@ namespace mongo {
         }
         CmdReplSetReconfig() : ReplSetCommand("replSetReconfig"), mutex("rsreconfig") { }
         virtual bool run(const string& a, BSONObj& b, string& errmsg, BSONObjBuilder& c, bool d) {
-            try { 
+            try {
                 rwlock_try_write lk(mutex);
                 return _run(a,b,errmsg,c,d);
             }
@@ -125,16 +133,16 @@ namespace mongo {
         }
     private:
         bool _run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            if( !check(errmsg, result) ) 
+            if( !check(errmsg, result) )
                 return false;
-            if( !theReplSet->box.getState().primary() ) { 
+            if( !theReplSet->box.getState().primary() ) {
                 errmsg = "replSetReconfig command must be sent to the current replica set primary.";
                 return false;
             }
 
             {
-                // just make sure we can get a write lock before doing anything else.  we'll reacquire one 
-                // later.  of course it could be stuck then, but this check lowers the risk if weird things 
+                // just make sure we can get a write lock before doing anything else.  we'll reacquire one
+                // later.  of course it could be stuck then, but this check lowers the risk if weird things
                 // are up - we probably don't want a change to apply 30 minutes after the initial attempt.
                 time_t t = time(0);
                 writelock lk("");
@@ -159,7 +167,7 @@ namespace mongo {
 
                 log() << "replSet replSetReconfig config object parses ok, " << newConfig.members.size() << " members specified" << rsLog;
 
-                if( !ReplSetConfig::legalChange(theReplSet->getConfig(), newConfig, errmsg) ) { 
+                if( !ReplSetConfig::legalChange(theReplSet->getConfig(), newConfig, errmsg) ) {
                     return false;
                 }
 
@@ -170,7 +178,7 @@ namespace mongo {
                 theReplSet->haveNewConfig(newConfig, true);
                 ReplSet::startupStatusMsg = "replSetReconfig'd";
             }
-            catch( DBException& e ) { 
+            catch( DBException& e ) {
                 log() << "replSet replSetReconfig exception: " << e.what() << rsLog;
                 throw;
             }
@@ -182,8 +190,11 @@ namespace mongo {
     class CmdReplSetFreeze : public ReplSetCommand {
     public:
         virtual void help( stringstream &help ) const {
-            help << "Enable / disable failover for the set - locks current primary as primary even if issues occur.\nFor use during system maintenance.\n";
-            help << "{ replSetFreeze : <bool> }";
+            help << "{ replSetFreeze : <seconds> }";
+            help << "'freeze' state of member to the extent we can do that.  What this really means is that\n";
+            help << "this node will not attempt to become primary until the time period specified expires.\n";
+            help << "You can call again with {replSetFreeze:0} to unfreeze sooner.\n";
+            help << "A process restart unfreezes the member also.\n";
             help << "\nhttp://www.mongodb.org/display/DOCS/Replica+Set+Commands";
         }
 
@@ -191,15 +202,22 @@ namespace mongo {
         virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             if( !check(errmsg, result) )
                 return false;
-            errmsg = "not yet implemented"; /*TODO*/
-            return false;
+            int secs = (int) cmdObj.firstElement().numberInt();
+            if( theReplSet->freeze(secs) ) {
+                if( secs == 0 )
+                    result.append("info","unfreezing");
+            }
+            if( secs == 1 )
+                result.append("warning", "you really want to freeze for only 1 second?");
+            return true;
         }
     } cmdReplSetFreeze;
 
     class CmdReplSetStepDown: public ReplSetCommand {
     public:
         virtual void help( stringstream &help ) const {
-            help << "Step down as primary.  Will not try to reelect self or 1 minute.\n";
+            help << "{ replSetStepDown : <seconds> }\n";
+            help << "Step down as primary.  Will not try to reelect self for the specified time period (1 minute if no numeric secs value specified).\n";
             help << "(If another member with same priority takes over in the meantime, it will stay primary.)\n";
             help << "http://www.mongodb.org/display/DOCS/Replica+Set+Commands";
         }
@@ -212,7 +230,10 @@ namespace mongo {
                 errmsg = "not primary so can't step down";
                 return false;
             }
-            return theReplSet->stepDown();
+            int secs = (int) cmdObj.firstElement().numberInt();
+            if( secs == 0 )
+                secs = 60;
+            return theReplSet->stepDown(secs);
         }
     } cmdReplSetStepDown;
 
@@ -222,45 +243,46 @@ namespace mongo {
 
     class ReplSetHandler : public DbWebHandler {
     public:
-        ReplSetHandler() : DbWebHandler( "_replSet" , 1 , true ){}
+        ReplSetHandler() : DbWebHandler( "_replSet" , 1 , true ) {}
 
         virtual bool handles( const string& url ) const {
             return startsWith( url , "/_replSet" );
         }
 
-        virtual void handle( const char *rq, string url, 
+        virtual void handle( const char *rq, string url, BSONObj params,
                              string& responseMsg, int& responseCode,
-                             vector<string>& headers,  const SockAddr &from ){
-            
-            string s = str::after(url, "/_replSetOplog?");
-            if( !s.empty() )
-                responseMsg = _replSetOplog(s);
+                             vector<string>& headers,  const SockAddr &from ) {
+
+            if( url == "/_replSetOplog" ) {
+                responseMsg = _replSetOplog(params);
+            }
             else
                 responseMsg = _replSet();
             responseCode = 200;
         }
 
+        string _replSetOplog(bo parms) {
+            int _id = (int) str::toUnsigned( parms["_id"].String() );
 
-        string _replSetOplog(string parms) { 
             stringstream s;
             string t = "Replication oplog";
             s << start(t);
             s << p(t);
 
-            if( theReplSet == 0 ) { 
-                if( cmdLine._replSet.empty() ) 
+            if( theReplSet == 0 ) {
+                if( cmdLine._replSet.empty() )
                     s << p("Not using --replSet");
                 else  {
-                    s << p("Still starting up, or else set is not yet " + a("http://www.mongodb.org/display/DOCS/Replica+Set+Configuration#InitialSetup", "", "initiated") 
+                    s << p("Still starting up, or else set is not yet " + a("http://www.mongodb.org/display/DOCS/Replica+Set+Configuration#InitialSetup", "", "initiated")
                            + ".<br>" + ReplSet::startupStatusMsg);
                 }
             }
             else {
                 try {
-                    theReplSet->getOplogDiagsAsHtml(stringToNum(parms.c_str()), s);
+                    theReplSet->getOplogDiagsAsHtml(_id, s);
                 }
-                catch(std::exception& e) { 
-                    s << "error querying oplog: " << e.what() << '\n'; 
+                catch(std::exception& e) {
+                    s << "error querying oplog: " << e.what() << '\n';
                 }
             }
 
@@ -269,20 +291,20 @@ namespace mongo {
         }
 
         /* /_replSet show replica set status in html format */
-        string _replSet() { 
+        string _replSet() {
             stringstream s;
             s << start("Replica Set Status " + prettyHostName());
-            s << p( a("/", "back", "Home") + " | " + 
+            s << p( a("/", "back", "Home") + " | " +
                     a("/local/system.replset/?html=1", "", "View Replset Config") + " | " +
-                    a("/replSetGetStatus?text", "", "replSetGetStatus") + " | " +
+                    a("/replSetGetStatus?text=1", "", "replSetGetStatus") + " | " +
                     a("http://www.mongodb.org/display/DOCS/Replica+Sets", "", "Docs")
                   );
 
-            if( theReplSet == 0 ) { 
-                if( cmdLine._replSet.empty() ) 
+            if( theReplSet == 0 ) {
+                if( cmdLine._replSet.empty() )
                     s << p("Not using --replSet");
                 else  {
-                    s << p("Still starting up, or else set is not yet " + a("http://www.mongodb.org/display/DOCS/Replica+Set+Configuration#InitialSetup", "", "initiated") 
+                    s << p("Still starting up, or else set is not yet " + a("http://www.mongodb.org/display/DOCS/Replica+Set+Configuration#InitialSetup", "", "initiated")
                            + ".<br>" + ReplSet::startupStatusMsg);
                 }
             }

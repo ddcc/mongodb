@@ -1,4 +1,4 @@
-// d_logic.cpp
+// @file d_logic.cpp
 
 /**
 *    Copyright (C) 2008 10gen Inc.
@@ -37,32 +37,32 @@
 
 #include "shard.h"
 #include "d_logic.h"
+#include "d_writeback.h"
 
 using namespace std;
 
 namespace mongo {
 
-    bool handlePossibleShardedMessage( Message &m, DbResponse* dbresponse ){
-        if ( ! shardingState.enabled() )
-            return false;
+    bool _handlePossibleShardedMessage( Message &m, DbResponse* dbresponse ) {
+        DEV assert( shardingState.enabled() );
 
         int op = m.operation();
-        if ( op < 2000 
-             || op >= 3000 
-             || op == dbGetMore  // cursors are weird
-             )
+        if ( op < 2000
+                || op >= 3000
+                || op == dbGetMore  // cursors are weird
+           )
             return false;
-        
-        DbMessage d(m);        
+
+        DbMessage d(m);
         const char *ns = d.getns();
         string errmsg;
-        if ( shardVersionOk( ns , opIsWrite( op ) , errmsg ) ){
+        if ( shardVersionOk( ns , opIsWrite( op ) , errmsg ) ) {
             return false;
         }
 
         log(1) << "connection meta data too old - will retry ns:(" << ns << ") op:(" << opToString(op) << ") " << errmsg << endl;
-        
-        if ( doesOpGetAResponse( op ) ){
+
+        if ( doesOpGetAResponse( op ) ) {
             assert( dbresponse );
             BufBuilder b( 32768 );
             b.skip( sizeof( QueryResult ) );
@@ -70,7 +70,7 @@ namespace mongo {
                 BSONObj obj = BSON( "$err" << errmsg );
                 b.appendBuf( obj.objdata() , obj.objsize() );
             }
-            
+
             QueryResult *qr = (QueryResult*)b.buf();
             qr->_resultFlags() = ResultFlag_ErrSet | ResultFlag_ShardConfigStale;
             qr->len = b.len();
@@ -82,19 +82,19 @@ namespace mongo {
 
             Message * resp = new Message();
             resp->setData( qr , true );
-            
+
             dbresponse->response = resp;
             dbresponse->responseTo = m.header()->id;
             return true;
         }
-        
+
         OID writebackID;
         writebackID.init();
         lastError.getSafe()->writeback( writebackID );
 
         const OID& clientID = ShardedConnectionInfo::get(false)->getID();
         massert( 10422 ,  "write with bad shard config and no server id!" , clientID.isSet() );
-        
+
         log(1) << "got write with an old config - writing back ns: " << ns << endl;
         if ( logLevel ) log(1) << debugString( m ) << endl;
 
@@ -102,11 +102,12 @@ namespace mongo {
         b.appendBool( "writeBack" , true );
         b.append( "ns" , ns );
         b.append( "id" , writebackID );
+        b.append( "connectionId" , cc().getConnectionId() );
         b.appendTimestamp( "version" , shardingState.getVersion( ns ) );
         b.appendTimestamp( "yourVersion" , ShardedConnectionInfo::get( true )->getVersion( ns ) );
         b.appendBinData( "msg" , m.header()->len , bdtCustom , (char*)(m.singleData()) );
         log(2) << "writing back msg with len: " << m.header()->len << " op: " << m.operation() << endl;
-        queueWriteBack( clientID.str() , b.obj() );
+        writeBackManager.queueWriteBack( clientID.str() , b.obj() );
 
         return true;
     }

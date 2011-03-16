@@ -60,7 +60,7 @@ r = function( key , v ){
 correct = { a : 2 , b : 1 };
 
 function checkMR( t ){
-    var res = t.mapReduce( m , r );
+    var res = t.mapReduce( m , r , "basic1_out" );
     assert.eq( correct , res.convertToSingleObject() , "checkMR: " + tojson( t ) );
 }
 
@@ -68,7 +68,7 @@ function checkNumCollections( msg , diff ){
     if ( ! diff ) diff = 0;
     var m = am.getCollectionNames();
     var s = as.getCollectionNames();
-    assert.eq( m.length + diff , s.length , "lengths bad \n" + tojson( m ) + "\n" + tojson( s ) );
+    assert.eq( m.length + diff , s.length , msg + " lengths bad \n" + tojson( m ) + "\n" + tojson( s ) );
 }
 
 checkNumCollections( "MR1" );

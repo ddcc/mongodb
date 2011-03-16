@@ -81,10 +81,10 @@ assert.eq( 1 , db.foo3.count() , "eval pre1" );
 assert.eq( 1 , db.foo2.count() , "eval pre2" );
 
 assert.eq( 8 , db.eval( function(){ return db.foo3.findOne().a; } ), "eval 1 " );
-assert.throws( function(){ db.eval( function(){ return db.foo2.findOne().a; } ) } , "eval 2" )
+assert.throws( function(){ db.eval( function(){ return db.foo2.findOne().a; } ) } , null , "eval 2" )
 
 assert.eq( 1 , db.eval( function(){ return db.foo3.count(); } ), "eval 3 " );
-assert.throws( function(){ db.eval( function(){ return db.foo2.count(); } ) } , "eval 4" )
+assert.throws( function(){ db.eval( function(){ return db.foo2.count(); } ) } , null , "eval 4" )
 
 
 // ---- unique shard key ----
@@ -104,6 +104,14 @@ assert.eq( 2 , b.foo4.getIndexes().length , "ub2" );
 
 assert( a.foo4.getIndexes()[1].unique , "ua3" );
 assert( b.foo4.getIndexes()[1].unique , "ub3" );
+
+assert.eq( 2 , db.foo4.count() , "uc1" )
+db.foo4.save( { num : 7 } )
+assert.eq( 3 , db.foo4.count() , "uc2" )
+db.foo4.save( { num : 7 } )
+gle = db.getLastErrorObj();
+assert( gle.err , "uc3" )
+assert.eq( 3 , db.foo4.count() , "uc4" )
 
 // --- don't let you convertToCapped ----
 assert( ! db.foo4.isCapped() , "ca1" );
@@ -152,12 +160,22 @@ assert.throws( function(){ db.foo6.group( { key : { a : 1 } , initial : { count 
 // ---- can't shard non-empty collection without index -----
 
 db.foo8.save( { a : 1 } );
+db.getLastError();
 assert( ! s.admin.runCommand( { shardcollection : "test.foo8" , key : { a : 1 } } ).ok , "non-empty collection" );
+
+
+// ---- can't shard non-empty collection with null values in shard key ----
+
+db.foo9.save( { b : 1 } );
+db.getLastError();
+db.foo9.ensureIndex( { a : 1 } );
+assert( ! s.admin.runCommand( { shardcollection : "test.foo9" , key : { a : 1 } } ).ok , "entry with null value" );
+
 
 // --- listDatabases ---
 
 r = db.getMongo().getDBs()
-assert.eq( 4 , r.databases.length , "listDatabases 1 : " + tojson( r ) )
+assert.eq( 3 , r.databases.length , "listDatabases 1 : " + tojson( r ) )
 assert.lt( 10000 , r.totalSize , "listDatabases 2 : " + tojson( r ) );
 
 s.stop()

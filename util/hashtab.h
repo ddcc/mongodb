@@ -24,6 +24,7 @@
 
 #include "../pch.h"
 #include <map>
+#include "../db/dur.h"
 
 namespace mongo {
 
@@ -36,9 +37,8 @@ namespace mongo {
 
     template <
     class Key,
-    class Type,
-    class PTR
-    >
+          class Type
+          >
     class HashTable : boost::noncopyable {
     public:
         const char *name;
@@ -53,12 +53,13 @@ namespace mongo {
                 hash = 0;
             }
         };
-        PTR _buf;
+        void* _buf;
         int n;
         int maxChain;
 
         Node& nodes(int i) {
-            return *((Node*) _buf.at(i * sizeof(Node), sizeof(Node)));
+            Node *nodes = (Node *) _buf;
+            return nodes[i];
         }
 
         int _find(const Key& k, bool& found) {
@@ -87,10 +88,10 @@ namespace mongo {
                     out() << "error: hashtable " << name << " is full n:" << n << endl;
                     return -1;
                 }
-                if( chain >= maxChain ) { 
+                if( chain >= maxChain ) {
                     if ( firstNonUsed >= 0 )
                         return firstNonUsed;
-                    out() << "error: hashtable " << name << " max chain n:" << n << endl;
+                    out() << "error: hashtable " << name << " max chain reached:" << maxChain << endl;
                     return -1;
                 }
             }
@@ -98,7 +99,7 @@ namespace mongo {
 
     public:
         /* buf must be all zeroes on initialization. */
-        HashTable(PTR buf, int buflen, const char *_name) : name(_name) {
+        HashTable(void* buf, int buflen, const char *_name) : name(_name) {
             int m = sizeof(Node);
             // out() << "hashtab init, buflen:" << buflen << " m:" << m << endl;
             n = buflen / m;
@@ -108,7 +109,7 @@ namespace mongo {
             _buf = buf;
             //nodes = (Node *) buf;
 
-            if ( sizeof(Node) != 628 ){
+            if ( sizeof(Node) != 628 ) {
                 out() << "HashTable() " << _name << " sizeof(node):" << sizeof(Node) << " n:" << n << " sizeof(Key): " << sizeof(Key) << " sizeof(Type):" << sizeof(Type) << endl;
                 assert( sizeof(Node) == 628 );
             }
@@ -127,41 +128,34 @@ namespace mongo {
             bool found;
             int i = _find(k, found);
             if ( i >= 0 && found ) {
-                Node& n = nodes(i);
-                n.k.kill();
-                n.setUnused();
+                Node* n = &nodes(i);
+                n = getDur().writing(n);
+                n->k.kill();
+                n->setUnused();
             }
         }
-/*
-        void drop(const Key& k) {
-            bool found;
-            int i = _find(k, found);
-            if ( i >= 0 && found ) {
-                nodes[i].setUnused();
-            }
-        }
-*/
+
         /** returns false if too full */
         bool put(const Key& k, const Type& value) {
             bool found;
             int i = _find(k, found);
             if ( i < 0 )
                 return false;
-            Node& n = nodes(i);
+            Node* n = getDur().writing( &nodes(i) );
             if ( !found ) {
-                n.k = k;
-                n.hash = k.hash();
+                n->k = k;
+                n->hash = k.hash();
             }
             else {
-                assert( n.hash == k.hash() );
+                assert( n->hash == k.hash() );
             }
-            n.value = value;
+            n->value = value;
             return true;
         }
-        
+
         typedef void (*IteratorCallback)( const Key& k , Type& v );
-        void iterAll( IteratorCallback callback ){
-            for ( int i=0; i<n; i++ ){
+        void iterAll( IteratorCallback callback ) {
+            for ( int i=0; i<n; i++ ) {
                 if ( ! nodes(i).inUse() )
                     continue;
                 callback( nodes(i).k , nodes(i).value );
@@ -170,14 +164,14 @@ namespace mongo {
 
         // TODO: should probably use boost::bind for this, but didn't want to look at it
         typedef void (*IteratorCallback2)( const Key& k , Type& v , void * extra );
-        void iterAll( IteratorCallback2 callback , void * extra ){
-            for ( int i=0; i<n; i++ ){
+        void iterAll( IteratorCallback2 callback , void * extra ) {
+            for ( int i=0; i<n; i++ ) {
                 if ( ! nodes(i).inUse() )
                     continue;
                 callback( nodes(i).k , nodes(i).value , extra );
             }
         }
-    
+
     };
 
 #pragma pack()

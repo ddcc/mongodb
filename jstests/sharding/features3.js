@@ -1,4 +1,3 @@
-
 s = new ShardingTest( "features3" , 2 , 1 , 1 );
 s.adminCommand( { enablesharding : "test" } );
 
@@ -25,7 +24,7 @@ assert.eq( N / 2 , x.shards.shard0001.count , "count on shard0001" )
 start = new Date()
 
 print( "about to fork shell: " + Date() )
-join = startParallelShell( "db.foo.find( function(){ x = \"\"; for ( i=0; i<10000; i++ ){ x+=i; } return true; } ).itcount()" )
+join = startParallelShell( "db.foo.find( function(){ x = ''; for ( i=0; i<10000; i++ ){ x+=i; } return true; } ).itcount()" )
 print( "after forking shell: " + Date() )
 
 function getMine( printInprog ){

@@ -36,7 +36,7 @@ namespace mongo {
     template<typename T>
     class BSONFieldValue {
     public:
-        BSONFieldValue( const string& name , const T& t ){
+        BSONFieldValue( const string& name , const T& t ) {
             _name = name;
             _t = t;
         }
@@ -52,8 +52,8 @@ namespace mongo {
     template<typename T>
     class BSONField {
     public:
-        BSONField( const string& name , const string& longName="" ) 
-            : _name(name), _longName(longName){}
+        BSONField( const string& name , const string& longName="" )
+            : _name(name), _longName(longName) {}
         const string& name() const { return _name; }
         operator string() const { return _name; }
 
@@ -65,11 +65,11 @@ namespace mongo {
         BSONFieldValue<BSONObj> lt( const T& t ) const { return query( "$lt" , t ); }
 
         BSONFieldValue<BSONObj> query( const char * q , const T& t ) const;
-        
+
         BSONFieldValue<T> operator()( const T& t ) const {
             return BSONFieldValue<T>( _name , t );
         }
-        
+
     private:
         string _name;
         string _longName;
@@ -85,23 +85,27 @@ namespace mongo {
             _b.skip(4); /*leave room for size field*/
         }
 
+        /* dm why do we have this/need this? not clear to me, comment please tx. */
         /** @param baseBuilder construct a BSONObjBuilder using an existing BufBuilder */
         BSONObjBuilder( BufBuilder &baseBuilder ) : _b( baseBuilder ), _buf( 0 ), _offset( baseBuilder.len() ), _s( this ) , _tracker(0) , _doneCalled(false) {
             _b.skip( 4 );
         }
-        
+
         BSONObjBuilder( const BSONSizeTracker & tracker ) : _b(_buf) , _buf(tracker.getSize() ), _offset(0), _s( this ) , _tracker( (BSONSizeTracker*)(&tracker) ) , _doneCalled(false) {
             _b.skip( 4 );
         }
 
-        ~BSONObjBuilder(){
-            if ( !_doneCalled && _b.buf() && _buf.getSize() == 0 ){
+        ~BSONObjBuilder() {
+            if ( !_doneCalled && _b.buf() && _buf.getSize() == 0 ) {
                 _done();
             }
         }
 
         /** add all the fields from the object specified to this object */
         BSONObjBuilder& appendElements(BSONObj x);
+
+        /** add all the fields from the object specified to this object if they don't exist already */
+        BSONObjBuilder& appendElementsUnique( BSONObj x );
 
         /** append element to the object we are building */
         BSONObjBuilder& append( const BSONElement& e) {
@@ -111,7 +115,7 @@ namespace mongo {
         }
 
         /** append an element but with a new name */
-        BSONObjBuilder&  appendAs(const BSONElement& e, const StringData& fieldName) {
+        BSONObjBuilder& appendAs(const BSONElement& e, const StringData& fieldName) {
             assert( !e.eoo() ); // do not append eoo, that would corrupt us. the builder auto appends when done() is called.
             _b.appendNum((char) e.type());
             _b.appendStr(fieldName);
@@ -128,14 +132,14 @@ namespace mongo {
         }
 
         /** add a subobject as a member */
-        BSONObjBuilder& appendObject(const StringData& fieldName, const char * objdata , int size = 0 ){
+        BSONObjBuilder& appendObject(const StringData& fieldName, const char * objdata , int size = 0 ) {
             assert( objdata );
-            if ( size == 0 ){
+            if ( size == 0 ) {
                 size = *((int*)objdata);
             }
-            
+
             assert( size > 4 && size < 100000000 );
-            
+
             _b.appendNum((char) Object);
             _b.appendStr(fieldName);
             _b.appendBuf((void*)objdata, size );
@@ -150,7 +154,7 @@ namespace mongo {
             _b.appendStr(fieldName);
             return _b;
         }
-        
+
         /** add a subobject as a member with type Array.  Thus arr object should have "0", "1", ...
             style fields in it.
         */
@@ -160,9 +164,9 @@ namespace mongo {
             _b.appendBuf((void *) subObj.objdata(), subObj.objsize());
             return *this;
         }
-        BSONObjBuilder& append(const StringData& fieldName, BSONArray arr) { 
-            return appendArray(fieldName, arr); 
-        }    
+        BSONObjBuilder& append(const StringData& fieldName, BSONArray arr) {
+            return appendArray(fieldName, arr);
+        }
 
         /** add header for a new subarray and return bufbuilder for writing to
             the subarray's body */
@@ -171,7 +175,7 @@ namespace mongo {
             _b.appendStr(fieldName);
             return _b;
         }
-        
+
         /** Append a boolean element */
         BSONObjBuilder& appendBool(const StringData& fieldName, int val) {
             _b.appendNum((char) Bool);
@@ -184,10 +188,10 @@ namespace mongo {
         BSONObjBuilder& append(const StringData& fieldName, bool val) {
             _b.appendNum((char) Bool);
             _b.appendStr(fieldName);
-            _b.appendNum((char) (val?1:0));            
+            _b.appendNum((char) (val?1:0));
             return *this;
         }
-        
+
         /** Append a 32 bit integer element */
         BSONObjBuilder& append(const StringData& fieldName, int n) {
             _b.appendNum((char) NumberInt);
@@ -197,20 +201,20 @@ namespace mongo {
         }
 
         /** Append a 32 bit unsigned element - cast to a signed int. */
-        BSONObjBuilder& append(const StringData& fieldName, unsigned n) { 
-            return append(fieldName, (int) n); 
+        BSONObjBuilder& append(const StringData& fieldName, unsigned n) {
+            return append(fieldName, (int) n);
         }
 
         /** Append a NumberLong */
-        BSONObjBuilder& append(const StringData& fieldName, long long n) { 
+        BSONObjBuilder& append(const StringData& fieldName, long long n) {
             _b.appendNum((char) NumberLong);
             _b.appendStr(fieldName);
             _b.appendNum(n);
-            return *this; 
+            return *this;
         }
 
         /** appends a number.  if n < max(int)/2 then uses int, otherwise long long */
-        BSONObjBuilder& appendIntOrLL( const StringData& fieldName , long long n ){
+        BSONObjBuilder& appendIntOrLL( const StringData& fieldName , long long n ) {
             long long x = n;
             if ( x < 0 )
                 x = x * -1;
@@ -225,15 +229,26 @@ namespace mongo {
          * appendNumber is a series of method for appending the smallest sensible type
          * mostly for JS
          */
-        BSONObjBuilder& appendNumber( const StringData& fieldName , int n ){
+        BSONObjBuilder& appendNumber( const StringData& fieldName , int n ) {
             return append( fieldName , n );
         }
 
-        BSONObjBuilder& appendNumber( const StringData& fieldName , double d ){
+        BSONObjBuilder& appendNumber( const StringData& fieldName , double d ) {
             return append( fieldName , d );
         }
 
-        BSONObjBuilder& appendNumber( const StringData& fieldName , long long l ){
+        BSONObjBuilder& appendNumber( const StringData& fieldName , size_t n ) {
+            static size_t maxInt = (size_t)pow( 2.0 , 30.0 );
+
+            if ( n < maxInt )
+                append( fieldName , (int)n );
+            else
+                append( fieldName , (long long)n );
+            return *this;
+        }
+
+
+        BSONObjBuilder& appendNumber( const StringData& fieldName , long long l ) {
             static long long maxInt = (int)pow( 2.0 , 30.0 );
             static long long maxDouble = (long long)pow( 2.0 , 40.0 );
 
@@ -245,7 +260,7 @@ namespace mongo {
                 append( fieldName , l );
             return *this;
         }
-        
+
         /** Append a double element */
         BSONObjBuilder& append(const StringData& fieldName, double n) {
             _b.appendNum((char) NumberDouble);
@@ -259,8 +274,8 @@ namespace mongo {
          */
         bool appendAsNumber( const StringData& fieldName , const string& data );
 
-        /** Append a BSON Object ID (OID type). 
-            @deprecated Generally, it is preferred to use the append append(name, oid) 
+        /** Append a BSON Object ID (OID type).
+            @deprecated Generally, it is preferred to use the append append(name, oid)
             method for this.
         */
         BSONObjBuilder& appendOID(const StringData& fieldName, OID *oid = 0 , bool generateIfBlank = false ) {
@@ -279,8 +294,8 @@ namespace mongo {
             return *this;
         }
 
-        /** 
-        Append a BSON Object ID. 
+        /**
+        Append a BSON Object ID.
         @param fieldName Field name, e.g., "_id".
         @returns the builder object
         */
@@ -309,14 +324,14 @@ namespace mongo {
             _b.appendNum(static_cast<unsigned long long>(dt) * 1000);
             return *this;
         }
-        /** Append a date.  
-            @param dt a Java-style 64 bit date value, that is 
+        /** Append a date.
+            @param dt a Java-style 64 bit date value, that is
             the number of milliseconds since January 1, 1970, 00:00:00 GMT
         */
         BSONObjBuilder& appendDate(const StringData& fieldName, Date_t dt) {
             /* easy to pass a time_t to this and get a bad result.  thus this warning. */
 #if defined(_DEBUG) && defined(MONGO_EXPOSE_MACROS)
-            if( dt > 0 && dt <= 0xffffffff ) { 
+            if( dt > 0 && dt <= 0xffffffff ) {
                 static int n;
                 if( n++ == 0 )
                     log() << "DEV WARNING appendDate() called with a tiny (but nonzero) date" << endl;
@@ -335,27 +350,22 @@ namespace mongo {
             @param regex the regular expression pattern
             @param regex options such as "i" or "g"
         */
-        BSONObjBuilder& appendRegex(const StringData& fieldName, const char *regex, const char *options = "") {
+        BSONObjBuilder& appendRegex(const StringData& fieldName, const StringData& regex, const StringData& options = "") {
             _b.appendNum((char) RegEx);
             _b.appendStr(fieldName);
             _b.appendStr(regex);
             _b.appendStr(options);
             return *this;
         }
-        /** Append a regular expression value
-            @param regex the regular expression pattern
-            @param regex options such as "i" or "g"
-        */
-        BSONObjBuilder& appendRegex(const StringData& fieldName, string regex, string options = "") {
-            return appendRegex(fieldName, regex.c_str(), options.c_str());
-        }
-        BSONObjBuilder& appendCode(const StringData& fieldName, const char *code) {
+
+        BSONObjBuilder& appendCode(const StringData& fieldName, const StringData& code) {
             _b.appendNum((char) Code);
             _b.appendStr(fieldName);
-            _b.appendNum((int) strlen(code)+1);
+            _b.appendNum((int) code.size()+1);
             _b.appendStr(code);
             return *this;
         }
+
         /** Append a string element. len DOES include terminating nul */
         BSONObjBuilder& append(const StringData& fieldName, const char *str, int len) {
             _b.appendNum((char) String);
@@ -369,48 +379,51 @@ namespace mongo {
             return append(fieldName, str, (int) strlen(str)+1);
         }
         /** Append a string element */
-        BSONObjBuilder& append(const StringData& fieldName, string str) {
+        BSONObjBuilder& append(const StringData& fieldName, const string& str) {
             return append(fieldName, str.c_str(), (int) str.size()+1);
         }
-        BSONObjBuilder& appendSymbol(const StringData& fieldName, const char *symbol) {
+
+        BSONObjBuilder& appendSymbol(const StringData& fieldName, const StringData& symbol) {
             _b.appendNum((char) Symbol);
             _b.appendStr(fieldName);
-            _b.appendNum((int) strlen(symbol)+1);
+            _b.appendNum((int) symbol.size()+1);
             _b.appendStr(symbol);
-        return *this; }
+            return *this;
+        }
 
         /** Append a Null element to the object */
         BSONObjBuilder& appendNull( const StringData& fieldName ) {
             _b.appendNum( (char) jstNULL );
             _b.appendStr( fieldName );
-        return *this; }
+            return *this;
+        }
 
         // Append an element that is less than all other keys.
         BSONObjBuilder& appendMinKey( const StringData& fieldName ) {
             _b.appendNum( (char) MinKey );
             _b.appendStr( fieldName );
-            return *this; 
+            return *this;
         }
         // Append an element that is greater than all other keys.
         BSONObjBuilder& appendMaxKey( const StringData& fieldName ) {
             _b.appendNum( (char) MaxKey );
             _b.appendStr( fieldName );
-            return *this; 
+            return *this;
         }
-        
+
         // Append a Timestamp field -- will be updated to next OpTime on db insert.
         BSONObjBuilder& appendTimestamp( const StringData& fieldName ) {
             _b.appendNum( (char) Timestamp );
             _b.appendStr( fieldName );
             _b.appendNum( (unsigned long long) 0 );
-            return *this; 
+            return *this;
         }
 
         BSONObjBuilder& appendTimestamp( const StringData& fieldName , unsigned long long val ) {
             _b.appendNum( (char) Timestamp );
             _b.appendStr( fieldName );
             _b.appendNum( val );
-            return *this; 
+            return *this;
         }
 
         /**
@@ -419,24 +432,24 @@ namespace mongo {
         @param time - in millis (but stored in seconds)
         */
         BSONObjBuilder& appendTimestamp( const StringData& fieldName , unsigned long long time , unsigned int inc );
-        
+
         /*
         Append an element of the deprecated DBRef type.
-        @deprecated 
+        @deprecated
         */
-        BSONObjBuilder& appendDBRef( const StringData& fieldName, const char *ns, const OID &oid ) {
+        BSONObjBuilder& appendDBRef( const StringData& fieldName, const StringData& ns, const OID &oid ) {
             _b.appendNum( (char) DBRef );
             _b.appendStr( fieldName );
-            _b.appendNum( (int) strlen( ns ) + 1 );
+            _b.appendNum( (int) ns.size() + 1 );
             _b.appendStr( ns );
             _b.appendBuf( (void *) &oid, 12 );
-            return *this; 
+            return *this;
         }
 
-        /** Append a binary data element 
+        /** Append a binary data element
             @param fieldName name of the field
             @param len length of the binary data in bytes
-            @param subtype subtype information for the data. @see enum BinDataType in bsontypes.h.  
+            @param subtype subtype information for the data. @see enum BinDataType in bsontypes.h.
                    Use BinDataGeneral if you don't care about the type.
             @param data the byte array
         */
@@ -446,36 +459,36 @@ namespace mongo {
             _b.appendNum( len );
             _b.appendNum( (char) type );
             _b.appendBuf( (void *) data, len );
-            return *this; 
+            return *this;
         }
         BSONObjBuilder& appendBinData( const StringData& fieldName, int len, BinDataType type, const unsigned char *data ) {
             return appendBinData(fieldName, len, type, (const char *) data);
         }
-        
+
         /**
         Subtype 2 is deprecated.
         Append a BSON bindata bytearray element.
         @param data a byte array
         @param len the length of data
         */
-        BSONObjBuilder& appendBinDataArrayDeprecated( const char * fieldName , const char * data , int len ){
+        BSONObjBuilder& appendBinDataArrayDeprecated( const char * fieldName , const char * data , int len ) {
             _b.appendNum( (char) BinData );
             _b.appendStr( fieldName );
             _b.appendNum( len + 4 );
             _b.appendNum( (char)0x2 );
             _b.appendNum( len );
-            _b.appendBuf( (void *) data, len );            
-            return *this; 
+            _b.appendBuf( (void *) data, len );
+            return *this;
         }
 
-        /** Append to the BSON object a field of type CodeWScope.  This is a javascript code 
+        /** Append to the BSON object a field of type CodeWScope.  This is a javascript code
             fragment accompanied by some scope that goes with it.
         */
-        BSONObjBuilder& appendCodeWScope( const StringData& fieldName, const char *code, const BSONObj &scope ) {
+        BSONObjBuilder& appendCodeWScope( const StringData& fieldName, const StringData& code, const BSONObj &scope ) {
             _b.appendNum( (char) CodeWScope );
             _b.appendStr( fieldName );
-            _b.appendNum( ( int )( 4 + 4 + strlen( code ) + 1 + scope.objsize() ) );
-            _b.appendNum( ( int ) strlen( code ) + 1 );
+            _b.appendNum( ( int )( 4 + 4 + code.size() + 1 + scope.objsize() ) );
+            _b.appendNum( ( int ) code.size() + 1 );
             _b.appendStr( code );
             _b.appendBuf( ( void * )scope.objdata(), scope.objsize() );
             return *this;
@@ -485,15 +498,12 @@ namespace mongo {
             _b.appendNum( (char) Undefined );
             _b.appendStr( fieldName );
         }
-        
+
         /* helper function -- see Query::where() for primary way to do this. */
-        void appendWhere( const char *code, const BSONObj &scope ){
+        void appendWhere( const StringData& code, const BSONObj &scope ) {
             appendCodeWScope( "$where" , code , scope );
         }
-        void appendWhere( const string &code, const BSONObj &scope ){
-            appendWhere( code.c_str(), scope );
-        }
-        
+
         /**
            these are the min/max when comparing, not strict min/max elements for a given type
         */
@@ -507,7 +517,11 @@ namespace mongo {
         template < class T >
         BSONObjBuilder& append( const StringData& fieldName, const list< T >& vals );
 
-        /** The returned BSONObj will free the buffer when it is finished. */
+        /**
+         * destructive
+         * The returned BSONObj will free the buffer when it is finished.
+         * @return owned BSONObj
+        */
         BSONObj obj() {
             bool own = owned();
             massert( 10335 , "builder does not own memory", own );
@@ -516,12 +530,12 @@ namespace mongo {
         }
 
         /** Fetch the object we have built.
-			BSONObjBuilder still frees the object when the builder goes out of 
-			scope -- very important to keep in mind.  Use obj() if you 
-			would like the BSONObj to last longer than the builder.
+            BSONObjBuilder still frees the object when the builder goes out of
+            scope -- very important to keep in mind.  Use obj() if you
+            would like the BSONObj to last longer than the builder.
         */
         BSONObj done() {
-            return BSONObj(_done());
+            return BSONObj(_done(), /*ifree*/false);
         }
 
         // Like 'done' above, but does not construct a BSONObj to return to the caller.
@@ -591,25 +605,29 @@ namespace mongo {
         BSONObjBuilderValueStream& operator<<( const BSONField<T>& f ) {
             _s.endField( f.name().c_str() );
             return _s;
-        } 
+        }
 
         template<typename T>
         BSONObjBuilder& operator<<( const BSONFieldValue<T>& v ) {
             append( v.name().c_str() , v.value() );
             return *this;
-        } 
-        
+        }
+
 
         /** @return true if we are using our own bufbuilder, and not an alternate that was given to us in our constructor */
         bool owned() const { return &_b == &_buf; }
 
         BSONObjIterator iterator() const ;
-        
+
+        bool hasField( const StringData& name ) const ;
+
+        int len() const { return _b.len(); }
+
     private:
         char* _done() {
             if ( _doneCalled )
                 return _b.buf() + _offset;
-            
+
             _doneCalled = true;
             _s.endField();
             _b.appendNum((char) EOO);
@@ -635,82 +653,89 @@ namespace mongo {
     public:
         BSONArrayBuilder() : _i(0), _b() {}
         BSONArrayBuilder( BufBuilder &_b ) : _i(0), _b(_b) {}
+        BSONArrayBuilder( int initialSize ) : _i(0), _b(initialSize) {}
 
         template <typename T>
-        BSONArrayBuilder& append(const T& x){
-            _b.append(num().c_str(), x);
+        BSONArrayBuilder& append(const T& x) {
+            _b.append(num(), x);
             return *this;
         }
 
-        BSONArrayBuilder& append(const BSONElement& e){
+        BSONArrayBuilder& append(const BSONElement& e) {
             _b.appendAs(e, num());
             return *this;
         }
-        
+
         template <typename T>
-        BSONArrayBuilder& operator<<(const T& x){
+        BSONArrayBuilder& operator<<(const T& x) {
             return append(x);
         }
-        
+
         void appendNull() {
-            _b.appendNull(num().c_str());
+            _b.appendNull(num());
         }
 
-        BSONArray arr(){ return BSONArray(_b.obj()); }
-        
+        /**
+         * destructive - ownership moves to returned BSONArray
+         * @return owned BSONArray
+         */
+        BSONArray arr() { return BSONArray(_b.obj()); }
+
         BSONObj done() { return _b.done(); }
-        
+
         void doneFast() { _b.doneFast(); }
-        
+
         template <typename T>
-        BSONArrayBuilder& append(const StringData& name, const T& x){
+        BSONArrayBuilder& append(const StringData& name, const T& x) {
             fill( name );
             append( x );
             return *this;
         }
-        
-        BufBuilder &subobjStart( const char *name = "0" ) {
+
+        BufBuilder &subobjStart( const StringData& name = "0" ) {
             fill( name );
-            return _b.subobjStart( num().c_str() );
+            return _b.subobjStart( num() );
         }
 
         BufBuilder &subarrayStart( const char *name ) {
             fill( name );
-            return _b.subarrayStart( num().c_str() );
+            return _b.subarrayStart( num() );
         }
-        
+
         void appendArray( const StringData& name, BSONObj subObj ) {
             fill( name );
-            _b.appendArray( num().c_str(), subObj );
+            _b.appendArray( num(), subObj );
         }
-        
-        void appendAs( const BSONElement &e, const char *name ) {
+
+        void appendAs( const BSONElement &e, const char *name) {
             fill( name );
             append( e );
         }
-        
+
+        int len() const { return _b.len(); }
+
     private:
         void fill( const StringData& name ) {
             char *r;
-            int n = strtol( name.data(), &r, 10 );
+            long int n = strtol( name.data(), &r, 10 );
             if ( *r )
                 uasserted( 13048, (string)"can't append to array using string field name [" + name.data() + "]" );
             while( _i < n )
                 append( nullElt() );
         }
-        
+
         static BSONElement nullElt() {
             static BSONObj n = nullObj();
             return n.firstElement();
         }
-        
+
         static BSONObj nullObj() {
             BSONObjBuilder _b;
             _b.appendNull( "" );
             return _b.obj();
         }
-        
-        string num(){ return _b.numStr(_i++); }
+
+        string num() { return _b.numStr(_i++); }
         int _i;
         BSONObjBuilder _b;
     };
@@ -736,14 +761,14 @@ namespace mongo {
 
     // $or helper: OR(BSON("x" << GT << 7), BSON("y" << LT 6));
     inline BSONObj OR(const BSONObj& a, const BSONObj& b)
-        { return BSON( "$or" << BSON_ARRAY(a << b) ); }
+    { return BSON( "$or" << BSON_ARRAY(a << b) ); }
     inline BSONObj OR(const BSONObj& a, const BSONObj& b, const BSONObj& c)
-        { return BSON( "$or" << BSON_ARRAY(a << b << c) ); }
+    { return BSON( "$or" << BSON_ARRAY(a << b << c) ); }
     inline BSONObj OR(const BSONObj& a, const BSONObj& b, const BSONObj& c, const BSONObj& d)
-        { return BSON( "$or" << BSON_ARRAY(a << b << c << d) ); }
+    { return BSON( "$or" << BSON_ARRAY(a << b << c << d) ); }
     inline BSONObj OR(const BSONObj& a, const BSONObj& b, const BSONObj& c, const BSONObj& d, const BSONObj& e)
-        { return BSON( "$or" << BSON_ARRAY(a << b << c << d << e) ); }
+    { return BSON( "$or" << BSON_ARRAY(a << b << c << d << e) ); }
     inline BSONObj OR(const BSONObj& a, const BSONObj& b, const BSONObj& c, const BSONObj& d, const BSONObj& e, const BSONObj& f)
-        { return BSON( "$or" << BSON_ARRAY(a << b << c << d << e << f) ); }
-    
+    { return BSON( "$or" << BSON_ARRAY(a << b << c << d << e << f) ); }
+
 }

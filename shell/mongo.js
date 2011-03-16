@@ -12,7 +12,7 @@ if ( ! Mongo.prototype ){
 }
 
 if ( ! Mongo.prototype.find )
-    Mongo.prototype.find = function( ns , query , fields , limit , skip ){ throw "find not implemented"; }
+    Mongo.prototype.find = function( ns , query , fields , limit , skip , batchSize , options ){ throw "find not implemented"; }
 if ( ! Mongo.prototype.insert )
     Mongo.prototype.insert = function( ns , obj ){ throw "insert not implemented"; }
 if ( ! Mongo.prototype.remove )
@@ -34,8 +34,13 @@ Mongo.prototype.getDB = function( name ){
 
 Mongo.prototype.getDBs = function(){
     var res = this.getDB( "admin" ).runCommand( { "listDatabases" : 1 } );
-    assert( res.ok == 1 , "listDatabases failed:" + tojson( res ) );
+    if ( ! res.ok )
+        throw "listDatabases failed:" + tojson( res );
     return res;
+}
+
+Mongo.prototype.adminCommand = function( cmd ){
+    return this.getDB( "admin" ).runCommand( cmd );
 }
 
 Mongo.prototype.getDBNames = function(){

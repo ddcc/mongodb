@@ -29,10 +29,10 @@ namespace mongo {
         // parameter in lex ascending order.
         void prepareContext( string &name ) {
             int i = 1, n = _builders.size();
-            while( i < n && 
-                   name.substr( 0, _builders[ i ].first.length() ) == _builders[ i ].first && 
-                   ( name[ _builders[i].first.length() ] == '.' || name[ _builders[i].first.length() ] == 0 )
-                   ){
+            while( i < n &&
+                    name.substr( 0, _builders[ i ].first.length() ) == _builders[ i ].first &&
+                    ( name[ _builders[i].first.length() ] == '.' || name[ _builders[i].first.length() ] == 0 )
+                 ) {
                 name = name.substr( _builders[ i ].first.length() + 1 );
                 ++i;
             }
@@ -54,7 +54,7 @@ namespace mongo {
         }
         BufBuilder &subarrayStartAs( string name ) {
             prepareContext( name );
-            return back()->subarrayStart( name.c_str() );
+            return back()->subarrayStart( name );
         }
         void done() {
             while( ! _builderStorage.empty() )
@@ -72,7 +72,7 @@ namespace mongo {
 
     private:
         void addBuilder( const string &name ) {
-            shared_ptr< BSONObjBuilder > newBuilder( new BSONObjBuilder( back()->subobjStart( name.c_str() ) ) );
+            shared_ptr< BSONObjBuilder > newBuilder( new BSONObjBuilder( back()->subobjStart( name ) ) );
             _builders.push_back( make_pair( name, newBuilder.get() ) );
             _builderStorage.push_back( newBuilder );
         }
@@ -83,10 +83,10 @@ namespace mongo {
         }
 
         BSONObjBuilder *back() { return _builders.back().second; }
-        
+
         vector< pair< string, BSONObjBuilder * > > _builders;
         vector< shared_ptr< BSONObjBuilder > > _builderStorage;
 
     };
-    
+
 } //namespace mongo

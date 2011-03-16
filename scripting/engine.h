@@ -20,9 +20,22 @@
 #include "../pch.h"
 #include "../db/jsobj.h"
 
-extern const char * jsconcatcode; // TODO: change name to mongoJSCode
-
 namespace mongo {
+
+    struct JSFile {
+        const char* name;
+        const StringData& source;
+    };
+
+    namespace JSFiles {
+        extern const JSFile collection;
+        extern const JSFile db;
+        extern const JSFile mongo;
+        extern const JSFile mr;
+        extern const JSFile query;
+        extern const JSFile servers;
+        extern const JSFile utils;
+    }
 
     typedef unsigned long long ScriptingFunction;
     typedef BSONObj (*NativeFunction) ( const BSONObj &args );
@@ -31,20 +44,35 @@ namespace mongo {
     public:
         Scope();
         virtual ~Scope();
-        
+
         virtual void reset() = 0;
-        virtual void init( BSONObj * data ) = 0;
-        void init( const char * data ){
+        virtual void init( const BSONObj * data ) = 0;
+        void init( const char * data ) {
             BSONObj o( data , 0 );
             init( &o );
         }
-        
+
         virtual void localConnect( const char * dbName ) = 0;
         virtual void externalSetup() = 0;
-        
+
+        class NoDBAccess {
+            Scope * _s;
+        public:
+            NoDBAccess( Scope * s ) {
+                _s = s;
+            }
+            ~NoDBAccess() {
+                _s->rename( "____db____" , "db" );
+            }
+        };
+        NoDBAccess disableDBAccess( const char * why ) {
+            rename( "db" , "____db____" );
+            return NoDBAccess( this );
+        }
+
         virtual double getNumber( const char *field ) = 0;
-        virtual int getNumberInt( const char *field ){ return (int)getNumber( field ); }
-        virtual long long getNumberLongLong( const char *field ){ return (long long)getNumber( field ); }
+        virtual int getNumberInt( const char *field ) { return (int)getNumber( field ); }
+        virtual long long getNumberLongLong( const char *field ) { return (long long)getNumber( field ); }
         virtual string getString( const char *field ) = 0;
         virtual bool getBoolean( const char *field ) = 0;
         virtual BSONObj getObject( const char *field ) = 0;
@@ -59,52 +87,68 @@ namespace mongo {
         virtual void setObject( const char *field , const BSONObj& obj , bool readOnly=true ) = 0;
         virtual void setBoolean( const char *field , bool val ) = 0;
         virtual void setThis( const BSONObj * obj ) = 0;
-                    
+
         virtual ScriptingFunction createFunction( const char * code );
-        
+
+        virtual void rename( const char * from , const char * to ) = 0;
         /**
          * @return 0 on success
          */
         virtual int invoke( ScriptingFunction func , const BSONObj& args, int timeoutMs = 0 , bool ignoreReturn = false ) = 0;
-        void invokeSafe( ScriptingFunction func , const BSONObj& args, int timeoutMs = 0 ){
+        void invokeSafe( ScriptingFunction func , const BSONObj& args, int timeoutMs = 0 ) {
             int res = invoke( func , args , timeoutMs );
             if ( res == 0 )
                 return;
             throw UserException( 9004 , (string)"invoke failed: " + getError() );
         }
         virtual string getError() = 0;
-        
+
         int invoke( const char* code , const BSONObj& args, int timeoutMs = 0 );
-        void invokeSafe( const char* code , const BSONObj& args, int timeoutMs = 0 ){
+        void invokeSafe( const char* code , const BSONObj& args, int timeoutMs = 0 ) {
             if ( invoke( code , args , timeoutMs ) == 0 )
                 return;
             throw UserException( 9005 , (string)"invoke failed: " + getError() );
         }
 
-        virtual bool exec( const string& code , const string& name , bool printResult , bool reportError , bool assertOnError, int timeoutMs = 0 ) = 0;
-        virtual void execSetup( const string& code , const string& name = "setup" ){
+        virtual bool exec( const StringData& code , const string& name , bool printResult , bool reportError , bool assertOnError, int timeoutMs = 0 ) = 0;
+        virtual void execSetup( const StringData& code , const string& name = "setup" ) {
             exec( code , name , false , true , true , 0 );
         }
+
+        void execSetup( const JSFile& file) {
+            execSetup(file.source, file.name);
+        }
+
+        void execCoreFiles() {
+            // keeping same order as in SConstruct
+            execSetup(JSFiles::utils);
+            execSetup(JSFiles::db);
+            execSetup(JSFiles::mongo);
+            execSetup(JSFiles::mr);
+            execSetup(JSFiles::query);
+            execSetup(JSFiles::collection);
+        }
+
         virtual bool execFile( const string& filename , bool printResult , bool reportError , bool assertOnError, int timeoutMs = 0 );
-        
+
         virtual void injectNative( const char *field, NativeFunction func ) = 0;
 
         virtual void gc() = 0;
 
         void loadStored( bool ignoreNotConnected = false );
-        
+
         /**
          if any changes are made to .system.js, call this
          right now its just global - slightly inefficient, but a lot simpler
         */
         static void storedFuncMod();
-        
-        static int getNumScopes(){
+
+        static int getNumScopes() {
             return _numScopes;
         }
-        
+
         static void validateObjectIdString( const string &str );
-        
+
     protected:
 
         virtual ScriptingFunction _createFunction( const char * code ) = 0;
@@ -117,16 +161,16 @@ namespace mongo {
 
         static int _numScopes;
     };
-    
+
     void installGlobalUtils( Scope& scope );
 
     class DBClientWithCommands;
-    
+
     class ScriptEngine : boost::noncopyable {
     public:
         ScriptEngine();
         virtual ~ScriptEngine();
-        
+
         virtual Scope * newScope() {
             Scope *s = createScope();
             if ( s && _scopeInitCallback )
@@ -134,35 +178,63 @@ namespace mongo {
             installGlobalUtils( *s );
             return s;
         }
-        
+
         virtual void runTest() = 0;
-        
+
         virtual bool utf8Ok() const = 0;
 
         static void setup();
 
         auto_ptr<Scope> getPooledScope( const string& pool );
         void threadDone();
-        
+
         struct Unlocker { virtual ~Unlocker() {} };
         virtual auto_ptr<Unlocker> newThreadUnlocker() { return auto_ptr< Unlocker >( new Unlocker ); }
-        
+
         void setScopeInitCallback( void ( *func )( Scope & ) ) { _scopeInitCallback = func; }
         static void setConnectCallback( void ( *func )( DBClientWithCommands& ) ) { _connectCallback = func; }
         static void runConnectCallback( DBClientWithCommands &c ) {
             if ( _connectCallback )
                 _connectCallback( c );
         }
-        
+
+        // engine implementation may either respond to interrupt events or
+        // poll for interrupts
+
+        // the interrupt functions must not wait indefinitely on a lock
+        virtual void interrupt( unsigned opSpec ) {}
+        virtual void interruptAll() {}
+
+        static void setGetInterruptSpecCallback( unsigned ( *func )() ) { _getInterruptSpecCallback = func; }
+        static bool haveGetInterruptSpecCallback() { return _getInterruptSpecCallback; }
+        static unsigned getInterruptSpec() {
+            massert( 13474, "no _getInterruptSpecCallback", _getInterruptSpecCallback );
+            return _getInterruptSpecCallback();
+        }
+
+        static void setCheckInterruptCallback( const char * ( *func )() ) { _checkInterruptCallback = func; }
+        static bool haveCheckInterruptCallback() { return _checkInterruptCallback; }
+        static const char * checkInterrupt() {
+            return _checkInterruptCallback ? _checkInterruptCallback() : "";
+        }
+        static bool interrupted() {
+            const char *r = checkInterrupt();
+            return r && r[ 0 ];
+        }
+
     protected:
         virtual Scope * createScope() = 0;
-        
+
     private:
         void ( *_scopeInitCallback )( Scope & );
         static void ( *_connectCallback )( DBClientWithCommands & );
+        static const char * ( *_checkInterruptCallback )();
+        static unsigned ( *_getInterruptSpecCallback )();
     };
 
     bool hasJSReturn( const string& s );
+
+    const char * jsSkipWhiteSpace( const char * raw );
 
     extern ScriptEngine * globalScriptEngine;
 }

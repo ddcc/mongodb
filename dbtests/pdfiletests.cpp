@@ -31,7 +31,7 @@ namespace PdfileTests {
 
         class Base {
         public:
-            Base() : _context( ns() ){
+            Base() : _context( ns() ) {
             }
             virtual ~Base() {
                 if ( !nsd() )
@@ -71,6 +71,7 @@ namespace PdfileTests {
                 BSONObj o = b.done();
                 int len = o.objsize();
                 Extent *e = ext.ext();
+                e = getDur().writing(e);
                 int ofs;
                 if ( e->lastRecord.isNull() )
                     ofs = ext.getOfs() + ( e->_extentData - (char *)e );
@@ -78,6 +79,7 @@ namespace PdfileTests {
                     ofs = e->lastRecord.getOfs() + e->lastRecord.rec()->lengthWithHeaders;
                 DiskLoc dl( ext.a(), ofs );
                 Record *r = dl.rec();
+                r = (Record*) getDur().writingPtr(r, Record::HeaderSize + len);
                 r->lengthWithHeaders = Record::HeaderSize + len;
                 r->extentOfs = e->myLoc.getOfs();
                 r->nextOfs = DiskLoc::NullOfs;
@@ -86,7 +88,7 @@ namespace PdfileTests {
                 if ( e->firstRecord.isNull() )
                     e->firstRecord = dl;
                 else
-                    e->lastRecord.rec()->nextOfs = ofs;
+                    getDur().writingInt(e->lastRecord.rec()->nextOfs) = ofs;
                 e->lastRecord = dl;
                 return dl;
             }
@@ -110,7 +112,7 @@ namespace PdfileTests {
 
         class EmptyLooped : public Base {
             virtual void prepare() {
-                nsd()->capFirstNewRecord = DiskLoc();
+                nsd()->writingWithExtra()->capFirstNewRecord = DiskLoc();
             }
             virtual int count() const {
                 return 0;
@@ -119,7 +121,7 @@ namespace PdfileTests {
 
         class EmptyMultiExtentLooped : public Base {
             virtual void prepare() {
-                nsd()->capFirstNewRecord = DiskLoc();
+                nsd()->writingWithExtra()->capFirstNewRecord = DiskLoc();
             }
             virtual int count() const {
                 return 0;
@@ -131,7 +133,7 @@ namespace PdfileTests {
 
         class Single : public Base {
             virtual void prepare() {
-                nsd()->capFirstNewRecord = insert( nsd()->capExtent, 0 );
+                nsd()->writingWithExtra()->capFirstNewRecord = insert( nsd()->capExtent, 0 );
             }
             virtual int count() const {
                 return 1;
@@ -140,7 +142,8 @@ namespace PdfileTests {
 
         class NewCapFirst : public Base {
             virtual void prepare() {
-                nsd()->capFirstNewRecord = insert( nsd()->capExtent, 0 );
+                DiskLoc x = insert( nsd()->capExtent, 0 );
+                nsd()->writingWithExtra()->capFirstNewRecord = x;
                 insert( nsd()->capExtent, 1 );
             }
             virtual int count() const {
@@ -151,7 +154,7 @@ namespace PdfileTests {
         class NewCapLast : public Base {
             virtual void prepare() {
                 insert( nsd()->capExtent, 0 );
-                nsd()->capFirstNewRecord = insert( nsd()->capExtent, 1 );
+                nsd()->capFirstNewRecord.writing() = insert( nsd()->capExtent, 1 );
             }
             virtual int count() const {
                 return 2;
@@ -161,7 +164,7 @@ namespace PdfileTests {
         class NewCapMiddle : public Base {
             virtual void prepare() {
                 insert( nsd()->capExtent, 0 );
-                nsd()->capFirstNewRecord = insert( nsd()->capExtent, 1 );
+                nsd()->capFirstNewRecord.writing() = insert( nsd()->capExtent, 1 );
                 insert( nsd()->capExtent, 2 );
             }
             virtual int count() const {
@@ -173,7 +176,7 @@ namespace PdfileTests {
             virtual void prepare() {
                 insert( nsd()->capExtent, 0 );
                 insert( nsd()->lastExtent, 1 );
-                nsd()->capFirstNewRecord = insert( nsd()->capExtent, 2 );
+                nsd()->capFirstNewRecord.writing() = insert( nsd()->capExtent, 2 );
                 insert( nsd()->capExtent, 3 );
             }
             virtual int count() const {
@@ -186,10 +189,10 @@ namespace PdfileTests {
 
         class LastExtent : public Base {
             virtual void prepare() {
-                nsd()->capExtent = nsd()->lastExtent;
+                nsd()->capExtent.writing() = nsd()->lastExtent;
                 insert( nsd()->capExtent, 0 );
                 insert( nsd()->firstExtent, 1 );
-                nsd()->capFirstNewRecord = insert( nsd()->capExtent, 2 );
+                nsd()->capFirstNewRecord.writing() = insert( nsd()->capExtent, 2 );
                 insert( nsd()->capExtent, 3 );
             }
             virtual int count() const {
@@ -202,11 +205,11 @@ namespace PdfileTests {
 
         class MidExtent : public Base {
             virtual void prepare() {
-                nsd()->capExtent = nsd()->firstExtent.ext()->xnext;
+                nsd()->capExtent.writing() = nsd()->firstExtent.ext()->xnext;
                 insert( nsd()->capExtent, 0 );
                 insert( nsd()->lastExtent, 1 );
                 insert( nsd()->firstExtent, 2 );
-                nsd()->capFirstNewRecord = insert( nsd()->capExtent, 3 );
+                nsd()->capFirstNewRecord.writing() = insert( nsd()->capExtent, 3 );
                 insert( nsd()->capExtent, 4 );
             }
             virtual int count() const {
@@ -219,10 +222,10 @@ namespace PdfileTests {
 
         class AloneInExtent : public Base {
             virtual void prepare() {
-                nsd()->capExtent = nsd()->firstExtent.ext()->xnext;
+                nsd()->capExtent.writing() = nsd()->firstExtent.ext()->xnext;
                 insert( nsd()->lastExtent, 0 );
                 insert( nsd()->firstExtent, 1 );
-                nsd()->capFirstNewRecord = insert( nsd()->capExtent, 2 );
+                nsd()->capFirstNewRecord.writing() = insert( nsd()->capExtent, 2 );
             }
             virtual int count() const {
                 return 3;
@@ -234,10 +237,10 @@ namespace PdfileTests {
 
         class FirstInExtent : public Base {
             virtual void prepare() {
-                nsd()->capExtent = nsd()->firstExtent.ext()->xnext;
+                nsd()->capExtent.writing() = nsd()->firstExtent.ext()->xnext;
                 insert( nsd()->lastExtent, 0 );
                 insert( nsd()->firstExtent, 1 );
-                nsd()->capFirstNewRecord = insert( nsd()->capExtent, 2 );
+                nsd()->capFirstNewRecord.writing() = insert( nsd()->capExtent, 2 );
                 insert( nsd()->capExtent, 3 );
             }
             virtual int count() const {
@@ -250,11 +253,11 @@ namespace PdfileTests {
 
         class LastInExtent : public Base {
             virtual void prepare() {
-                nsd()->capExtent = nsd()->firstExtent.ext()->xnext;
+                nsd()->capExtent.writing() = nsd()->firstExtent.ext()->xnext;
                 insert( nsd()->capExtent, 0 );
                 insert( nsd()->lastExtent, 1 );
                 insert( nsd()->firstExtent, 2 );
-                nsd()->capFirstNewRecord = insert( nsd()->capExtent, 3 );
+                nsd()->capFirstNewRecord.writing() = insert( nsd()->capExtent, 3 );
             }
             virtual int count() const {
                 return 4;
@@ -265,11 +268,11 @@ namespace PdfileTests {
         };
 
     } // namespace ScanCapped
-    
+
     namespace Insert {
         class Base {
         public:
-            Base() : _context( ns() ){
+            Base() : _context( ns() ) {
             }
             virtual ~Base() {
                 if ( !nsd() )
@@ -288,7 +291,7 @@ namespace PdfileTests {
             dblock lk_;
             Client::Context _context;
         };
-        
+
         class UpdateDate : public Base {
         public:
             void run() {
@@ -301,12 +304,86 @@ namespace PdfileTests {
             }
         };
     } // namespace Insert
-    
+
+    class ExtentSizing {
+    public:
+        struct SmallFilesControl {
+            SmallFilesControl() {
+                old = cmdLine.smallfiles;
+                cmdLine.smallfiles = false;
+            }
+            ~SmallFilesControl() {
+                cmdLine.smallfiles = old;
+            }
+            bool old;
+        };
+        void run() {
+            SmallFilesControl c;
+            // test that no matter what we start with, we always get to max extent size
+            for ( int obj=16; obj<BSONObjMaxUserSize; obj += 111 ) {
+                int sz = Extent::initialSize( obj );
+                for ( int i=0; i<100; i++ ) {
+                    sz = Extent::followupSize( obj , sz );
+                }
+                ASSERT_EQUALS( Extent::maxSize() , sz );
+            }
+        }
+    };
+
+    class ExtentAllocOrder {
+    public:
+        void run() {
+            string dbname = "unittest_ex";
+
+            string c1 = dbname + ".x1";
+            string c2 = dbname + ".x2";
+
+            {
+                DBDirectClient db;
+                db.dropDatabase( dbname );
+            }
+
+            dblock mylock;
+            Client::Context cx( dbname );
+
+            bool isnew;
+            Database * d = dbHolder.getOrCreate( dbname , dbpath , isnew );
+            assert( d );
+
+            int big = 10 * 1024;
+            //int small = 1024;
+
+            unsigned long long l = 0;
+            int n = 0;
+            while ( 1 ) {
+                n++;
+                if( n == 5 && sizeof(void*)==4 )
+                    break;
+                MongoDataFile * f = d->addAFile( big , false );
+                cout << f->length() << ' ' << n << endl;
+                if ( f->length() == l )
+                    break;
+                l = f->length();
+            }
+
+            int start = d->numFiles();
+            for ( int i=0; i<start; i++ )
+                d->allocExtent( c1.c_str() , d->getFile( i )->getHeader()->unusedLength , false );
+            ASSERT_EQUALS( start , d->numFiles() );
+
+            {
+                DBDirectClient db;
+                db.dropDatabase( dbname );
+            }
+        }
+    };
+
+
     class All : public Suite {
     public:
-        All() : Suite( "pdfile" ){}
-        
-        void setupTests(){
+        All() : Suite( "pdfile" ) {}
+
+        void setupTests() {
             add< ScanCapped::Empty >();
             add< ScanCapped::EmptyLooped >();
             add< ScanCapped::EmptyMultiExtentLooped >();
@@ -321,6 +398,8 @@ namespace PdfileTests {
             add< ScanCapped::FirstInExtent >();
             add< ScanCapped::LastInExtent >();
             add< Insert::UpdateDate >();
+            add< ExtentSizing >();
+            add< ExtentAllocOrder >();
         }
     } myall;
 

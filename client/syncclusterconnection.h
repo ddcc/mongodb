@@ -16,6 +16,7 @@
  *    limitations under the License.
  */
 
+#pragma once
 
 #include "../pch.h"
 #include "dbclient.h"
@@ -26,15 +27,15 @@ namespace mongo {
     /**
      * This is a connection to a cluster of servers that operate as one
      * for super high durability.
-     * 
+     *
      * Write operations are two-phase.  First, all nodes are asked to fsync. If successful
-     * everywhere, the write is sent everywhere and then followed by an fsync.  There is no 
-     * rollback if a problem occurs during the second phase.  Naturally, with all these fsyncs, 
+     * everywhere, the write is sent everywhere and then followed by an fsync.  There is no
+     * rollback if a problem occurs during the second phase.  Naturally, with all these fsyncs,
      * these operations will be quite slow -- use sparingly.
-     * 
+     *
      * Read operations are sent to a single random node.
-     * 
-     * The class checks if a command is read or write style, and sends to a single 
+     *
+     * The class checks if a command is read or write style, and sends to a single
      * node if a read lock command and to all in two phases with a write style command.
      */
     class SyncClusterConnection : public DBClientBase {
@@ -46,7 +47,7 @@ namespace mongo {
         SyncClusterConnection( string commaSeparated );
         SyncClusterConnection( string a , string b , string c );
         ~SyncClusterConnection();
-        
+
         /**
          * @return true if all servers are up and ready for writes
          */
@@ -65,36 +66,34 @@ namespace mongo {
                                                const BSONObj *fieldsToReturn, int queryOptions, int batchSize );
 
         virtual auto_ptr<DBClientCursor> getMore( const string &ns, long long cursorId, int nToReturn, int options );
-        
+
         virtual void insert( const string &ns, BSONObj obj );
-        
+
         virtual void insert( const string &ns, const vector< BSONObj >& v );
 
         virtual void remove( const string &ns , Query query, bool justOne );
 
         virtual void update( const string &ns , Query query , BSONObj obj , bool upsert , bool multi );
 
-        virtual bool call( Message &toSend, Message &response, bool assertOk );
+        virtual bool call( Message &toSend, Message &response, bool assertOk , string * actualServer );
         virtual void say( Message &toSend );
         virtual void sayPiggyBack( Message &toSend );
 
         virtual void killCursor( long long cursorID );
-        
+
         virtual string getServerAddress() const { return _address; }
         virtual bool isFailed() const { return false; }
         virtual string toString() { return _toString(); }
 
-		virtual BSONObj getLastErrorDetailed();
+        virtual BSONObj getLastErrorDetailed();
 
         virtual bool callRead( Message& toSend , Message& response );
 
-        virtual ConnectionString::ConnectionType type() const { return ConnectionString::SYNC; }  
-
-        virtual bool isMember( const DBConnector * conn ) const;
+        virtual ConnectionString::ConnectionType type() const { return ConnectionString::SYNC; }
 
     private:
         SyncClusterConnection( SyncClusterConnection& prev );
-        string _toString() const;        
+        string _toString() const;
         bool _commandOnActive(const string &dbname, const BSONObj& cmd, BSONObj &info, int options=0);
         auto_ptr<DBClientCursor> _queryOnActive(const string &ns, Query query, int nToReturn, int nToSkip,
                                                 const BSONObj *fieldsToReturn, int queryOptions, int batchSize );
@@ -107,17 +106,17 @@ namespace mongo {
         vector<DBClientConnection*> _conns;
         map<string,int> _lockTypes;
         mongo::mutex _mutex;
-        
+
         vector<BSONObj> _lastErrors;
     };
-    
+
     class UpdateNotTheSame : public UserException {
     public:
         UpdateNotTheSame( int code , const string& msg , const vector<string>& addrs , const vector<BSONObj>& lastErrors )
-            : UserException( code , msg ) , _addrs( addrs ) , _lastErrors( lastErrors ){
+            : UserException( code , msg ) , _addrs( addrs ) , _lastErrors( lastErrors ) {
             assert( _addrs.size() == _lastErrors.size() );
         }
-        
+
         virtual ~UpdateNotTheSame() throw() {
         }
 
@@ -134,7 +133,7 @@ namespace mongo {
         vector<string> _addrs;
         vector<BSONObj> _lastErrors;
     };
-    
+
 };
 
 #include "undef_macros.h"

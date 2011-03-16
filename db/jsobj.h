@@ -1,4 +1,4 @@
-/** @file jsobj.h 
+/** @file jsobj.h
     BSON classes
 */
 
@@ -40,7 +40,7 @@
 #include "../bson/bsonmisc.h"
 #include "../bson/bsonobjbuilder.h"
 #include "../bson/bsonobjiterator.h"
-#include "../bson/bsoninlines.h"
+#include "../bson/bson-inl.h"
 #include "../bson/ordering.h"
 #include "../bson/stringdata.h"
 

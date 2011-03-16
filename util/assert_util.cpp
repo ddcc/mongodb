@@ -18,7 +18,7 @@
 #include "pch.h"
 #include "assert_util.h"
 #include "assert.h"
-#include "file.h"
+//#include "file.h"
 #include <cmath>
 using namespace std;
 
@@ -33,12 +33,12 @@ using namespace std;
 namespace mongo {
 
     AssertionCount assertionCount;
-    
+
     AssertionCount::AssertionCount()
-        : regular(0),warning(0),msg(0),user(0),rollovers(0){
+        : regular(0),warning(0),msg(0),user(0),rollovers(0) {
     }
 
-    void AssertionCount::rollover(){
+    void AssertionCount::rollover() {
         rollovers++;
         regular = 0;
         warning = 0;
@@ -46,7 +46,7 @@ namespace mongo {
         user = 0;
     }
 
-    void AssertionCount::condrollover( int newvalue ){
+    void AssertionCount::condrollover( int newvalue ) {
         static int max = (int)pow( 2.0 , 30 );
         if ( newvalue >= max )
             rollover();
@@ -57,22 +57,19 @@ namespace mongo {
             b.append( m , "unknown assertion" );
         else
             b.append( m , msg );
-        
+
         if ( code )
             b.append( c , code );
     }
 
-    
-	string getDbContext();
-	
-	Assertion lastAssert[4];
-	
-	/* "warning" assert -- safe to continue, so we don't throw exception. */
+
+    string getDbContext();
+
+    /* "warning" assert -- safe to continue, so we don't throw exception. */
     void wasserted(const char *msg, const char *file, unsigned line) {
         problem() << "Assertion failure " << msg << ' ' << file << ' ' << dec << line << endl;
         sayDbContext();
         raiseError(0,msg && *msg ? msg : "wassertion failure");
-        lastAssert[1].set(msg, getDbContext().c_str(), file, line);
         assertionCount.condrollover( ++assertionCount.warning );
     }
 
@@ -81,7 +78,6 @@ namespace mongo {
         problem() << "Assertion failure " << msg << ' ' << file << ' ' << dec << line << endl;
         sayDbContext();
         raiseError(0,msg && *msg ? msg : "assertion failure");
-        lastAssert[0].set(msg, getDbContext().c_str(), file, line);
         stringstream temp;
         temp << "assertion " << file << ":" << line;
         AssertionException e(temp.str(),0);
@@ -90,13 +86,11 @@ namespace mongo {
     }
 
     void uassert_nothrow(const char *msg) {
-        lastAssert[3].set(msg, getDbContext().c_str(), "", 0);
         raiseError(0,msg);
     }
 
     void uasserted(int msgid, const char *msg) {
         assertionCount.condrollover( ++assertionCount.user );
-        lastAssert[3].set(msg, getDbContext().c_str(), "", 0);
         raiseError(msgid,msg);
         throw UserException(msgid, msg);
     }
@@ -104,7 +98,6 @@ namespace mongo {
     void msgasserted(int msgid, const char *msg) {
         assertionCount.condrollover( ++assertionCount.warning );
         tlog() << "Assertion: " << msgid << ":" << msg << endl;
-        lastAssert[2].set(msg, getDbContext().c_str(), "", 0);
         raiseError(msgid,msg && *msg ? msg : "massert failure");
         breakpoint();
         printStackTrace();
@@ -114,40 +107,19 @@ namespace mongo {
     void msgassertedNoTrace(int msgid, const char *msg) {
         assertionCount.condrollover( ++assertionCount.warning );
         log() << "Assertion: " << msgid << ":" << msg << endl;
-        lastAssert[2].set(msg, getDbContext().c_str(), "", 0);
         raiseError(msgid,msg && *msg ? msg : "massert failure");
         throw MsgAssertionException(msgid, msg);
     }
 
-    void streamNotGood( int code , string msg , std::ios& myios ){
+    void streamNotGood( int code , string msg , std::ios& myios ) {
         stringstream ss;
         // errno might not work on all systems for streams
         // if it doesn't for a system should deal with here
         ss << msg << " stream invalid: " << errnoWithDescription();
         throw UserException( code , ss.str() );
     }
-    
-    mongo::mutex *Assertion::_mutex = new mongo::mutex("Assertion");
 
-    string Assertion::toString() {
-        if( _mutex == 0 )
-            return "";
-
-        scoped_lock lk(*_mutex);
-
-        if ( !isSet() )
-            return "";
-
-        stringstream ss;
-        ss << msg << '\n';
-        if ( *context )
-            ss << context << '\n';
-        if ( *file )
-            ss << file << ' ' << line << '\n';
-        return ss.str();
-    }	
-
-    string errnoWithPrefix( const char * prefix ){
+    string errnoWithPrefix( const char * prefix ) {
         stringstream ss;
         if ( prefix )
             ss << prefix << ": ";
@@ -155,23 +127,21 @@ namespace mongo {
         return ss.str();
     }
 
-
-    string demangleName( const type_info& typeinfo ){
+    string demangleName( const type_info& typeinfo ) {
 #ifdef _WIN32
         return typeinfo.name();
 #else
         int status;
-        
+
         char * niceName = abi::__cxa_demangle(typeinfo.name(), 0, 0, &status);
         if ( ! niceName )
             return typeinfo.name();
-        
+
         string s = niceName;
         free(niceName);
         return s;
 #endif
     }
-
 
 }
 

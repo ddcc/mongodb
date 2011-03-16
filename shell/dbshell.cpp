@@ -39,14 +39,11 @@ jmp_buf jbuf;
 #include "../util/password.h"
 #include "../util/version.h"
 #include "../util/goodies.h"
+#include "../db/repl/rs_member.h"
 
 using namespace std;
 using namespace boost::filesystem;
-
-using mongo::BSONObj;
-using mongo::BSONObjBuilder;
-using mongo::BSONObjIterator;
-using mongo::BSONElement;
+using namespace mongo;
 
 string historyFile;
 bool gotInterrupted = 0;
@@ -59,20 +56,25 @@ bool autoKillOp = false;
 #define CTRLC_HANDLE
 #endif
 
-mongo::Scope * shellMainScope;
+namespace mongo {
 
-void generateCompletions( const string& prefix , vector<string>& all ){
+    Scope * shellMainScope;
+
+    extern bool dbexitCalled;
+}
+
+void generateCompletions( const string& prefix , vector<string>& all ) {
     if ( prefix.find( '"' ) != string::npos )
         return;
-    shellMainScope->exec( "shellAutocomplete( \"" + prefix + "\" );" , "autocomplete help" , false , true , false );
-    
+
+    shellMainScope->invokeSafe("function(x) {shellAutocomplete(x)}", BSON("0" << prefix), 1000);
     BSONObjBuilder b;
     shellMainScope->append( b , "" , "__autocomplete__" );
     BSONObj res = b.obj();
     BSONObj arr = res.firstElement().Obj();
 
     BSONObjIterator i(arr);
-    while ( i.more() ){
+    while ( i.more() ) {
         BSONElement e = i.next();
         all.push_back( e.String() );
     }
@@ -80,44 +82,43 @@ void generateCompletions( const string& prefix , vector<string>& all ){
 }
 
 #ifdef USE_READLINE
-static char** completionHook(const char* text , int start ,int end ){
+static char** completionHook(const char* text , int start ,int end ) {
     static map<string,string> m;
-    
+
     vector<string> all;
-    
-    if ( start == 0 ){
-        generateCompletions( string(text,end) , all );
-    }
-    
-    if ( all.size() == 0 ){
-        rl_bind_key('\t',0);
+
+    generateCompletions( string(text,end) , all );
+
+    if ( all.size() == 0 ) {
         return 0;
     }
-    
+
     string longest = all[0];
-    for ( vector<string>::iterator i=all.begin(); i!=all.end(); ++i ){
+    for ( vector<string>::iterator i=all.begin(); i!=all.end(); ++i ) {
         string s = *i;
-        for ( unsigned j=0; j<s.size(); j++ ){
+        for ( unsigned j=0; j<s.size(); j++ ) {
             if ( longest[j] == s[j] )
                 continue;
             longest = longest.substr(0,j);
             break;
         }
     }
-    
+
     char ** matches = (char**)malloc( sizeof(char*) * (all.size()+2) );
     unsigned x=0;
     matches[x++] = strdup( longest.c_str() );
-    for ( unsigned i=0; i<all.size(); i++ ){
+    for ( unsigned i=0; i<all.size(); i++ ) {
         matches[x++] = strdup( all[i].c_str() );
     }
     matches[x++] = 0;
+
+    rl_completion_append_character = '\0'; // don't add a space after completions
 
     return matches;
 }
 #endif
 
-void shellHistoryInit(){
+void shellHistoryInit() {
 #ifdef USE_READLINE
     stringstream ss;
     char * h = getenv( "HOME" );
@@ -128,19 +129,19 @@ void shellHistoryInit(){
 
     using_history();
     read_history( historyFile.c_str() );
-    
+
     rl_attempted_completion_function = completionHook;
-        
+
 #else
     //cout << "type \"exit\" to exit" << endl;
 #endif
 }
-void shellHistoryDone(){
+void shellHistoryDone() {
 #ifdef USE_READLINE
     write_history( historyFile.c_str() );
 #endif
 }
-void shellHistoryAdd( const char * line ){
+void shellHistoryAdd( const char * line ) {
 #ifdef USE_READLINE
     if ( line[0] == '\0' )
         return;
@@ -156,7 +157,7 @@ void shellHistoryAdd( const char * line ){
 #endif
 }
 
-void intr( int sig ){
+void intr( int sig ) {
 #ifdef CTRLC_HANDLE
     longjmp( jbuf , 1 );
 #endif
@@ -170,33 +171,40 @@ void killOps() {
     if ( atPrompt )
         return;
 
-    if ( !autoKillOp ) {
-        cout << endl << "do you want to kill the current op on the server? (y/n): ";
-        cout.flush();
+    sleepmillis(10); // give current op a chance to finish
 
-        char yn;
-        cin >> yn;
+    for( map< string, set<string> >::const_iterator i = shellUtils::_allMyUris.begin(); i != shellUtils::_allMyUris.end(); ++i ) {
+        string errmsg;
+        ConnectionString cs = ConnectionString::parse(i->first, errmsg);
+        if (!cs.isValid()) continue;
+        boost::scoped_ptr<DBClientWithCommands> conn (cs.connect(errmsg));
+        if (!conn) continue;
 
-        if (yn != 'y' && yn != 'Y')
-            return;
-    }
+        const set<string>& uris = i->second;
 
+        BSONObj inprog =  conn->findOne("admin.$cmd.sys.inprog", Query())["inprog"].embeddedObject().getOwned();
+        BSONForEach(op, inprog) {
+            if ( uris.count(op["client"].String()) ) {
+                ONCE if ( !autoKillOp ) {
+                    cout << endl << "do you want to kill the current op(s) on the server? (y/n): ";
+                    cout.flush();
 
-    vector< string > uris;
-    for( map< const void*, string >::iterator i = mongo::shellUtils::_allMyUris.begin(); i != mongo::shellUtils::_allMyUris.end(); ++i )
-        uris.push_back( i->second );
-    mongo::BSONObj spec = BSON( "" << uris );
-    try {
-        auto_ptr< mongo::Scope > scope( mongo::globalScriptEngine->newScope() );        
-        scope->invoke( "function( x ) { killWithUris( x ); }", spec );
-    } catch ( ... ) {
-        mongo::rawOut( "exception while cleaning up any db ops started by this shell\n" );
+                    char yn;
+                    cin >> yn;
+
+                    if (yn != 'y' && yn != 'Y')
+                        return;
+                }
+
+                conn->findOne("admin.$cmd.sys.killop", QUERY("op"<< op["opid"]));
+            }
+        }
     }
 }
 
-void quitNicely( int sig ){
-    mongo::goingAway = true;
-    if ( sig == SIGINT && inMultiLine ){
+void quitNicely( int sig ) {
+    mongo::dbexitCalled = true;
+    if ( sig == SIGINT && inMultiLine ) {
         gotInterrupted = 1;
         return;
     }
@@ -207,15 +215,16 @@ void quitNicely( int sig ){
     exit(0);
 }
 #else
-void quitNicely( int sig ){
-    mongo::goingAway = true;
+void quitNicely( int sig ) {
+    mongo::dbexitCalled = true;
     //killOps();
     shellHistoryDone();
     exit(0);
 }
 #endif
 
-char * shellReadline( const char * prompt , int handlesigint = 0 ){
+char * shellReadline( const char * prompt , int handlesigint = 0 ) {
+
     atPrompt = true;
 #ifdef USE_READLINE
 
@@ -223,12 +232,12 @@ char * shellReadline( const char * prompt , int handlesigint = 0 ){
 
 
 #ifdef CTRLC_HANDLE
-    if ( ! handlesigint ){
+    if ( ! handlesigint ) {
         char* ret = readline( prompt );
         atPrompt = false;
         return ret;
     }
-    if ( setjmp( jbuf ) ){
+    if ( setjmp( jbuf ) ) {
         gotInterrupted = 1;
         sigrelse(SIGINT);
         signal( SIGINT , quitNicely );
@@ -269,6 +278,14 @@ void quitAbruptly( int sig ) {
     exit(14);
 }
 
+// this will be called in certain c++ error cases, for example if there are two active
+// exceptions
+void myterminate() {
+    mongo::rawOut( "terminate() called in shell, printing stack:" );
+    mongo::printStackTrace();
+    exit(14);
+}
+
 void setupSignals() {
     signal( SIGINT , quitNicely );
     signal( SIGTERM , quitNicely );
@@ -277,28 +294,29 @@ void setupSignals() {
     signal( SIGSEGV , quitAbruptly );
     signal( SIGBUS , quitAbruptly );
     signal( SIGFPE , quitAbruptly );
+    set_terminate( myterminate );
 }
 #else
 inline void setupSignals() {}
 #endif
 
-string fixHost( string url , string host , string port ){
+string fixHost( string url , string host , string port ) {
     //cout << "fixHost url: " << url << " host: " << host << " port: " << port << endl;
 
-    if ( host.size() == 0 && port.size() == 0 ){
-        if ( url.find( "/" ) == string::npos ){
+    if ( host.size() == 0 && port.size() == 0 ) {
+        if ( url.find( "/" ) == string::npos ) {
             // check for ips
             if ( url.find( "." ) != string::npos )
                 return url + "/test";
 
             if ( url.rfind( ":" ) != string::npos &&
-                 isdigit( url[url.rfind(":")+1] ) )
+                    isdigit( url[url.rfind(":")+1] ) )
                 return url + "/test";
         }
         return url;
     }
 
-    if ( url.find( "/" ) != string::npos ){
+    if ( url.find( "/" ) != string::npos ) {
         cerr << "url can't have host or port if you specify them individually" << endl;
         exit(-1);
     }
@@ -309,7 +327,7 @@ string fixHost( string url , string host , string port ){
     string newurl = host;
     if ( port.size() > 0 )
         newurl += ":" + port;
-    else if (host.find(':') == string::npos){
+    else if (host.find(':') == string::npos) {
         // need to add port with IPv6 addresses
         newurl += ":27017";
     }
@@ -319,14 +337,23 @@ string fixHost( string url , string host , string port ){
     return newurl;
 }
 
-bool isBalanced( string code ){
+static string OpSymbols = "~!%^&*-+=|:,<>/?";
+
+bool isOpSymbol( char c ) {
+    for ( size_t i = 0; i < OpSymbols.size(); i++ )
+        if ( OpSymbols[i] == c ) return true;
+    return false;
+}
+
+bool isBalanced( string code ) {
     int brackets = 0;
     int parens = 0;
+    bool danglingOp = false;
 
-    for ( size_t i=0; i<code.size(); i++ ){
-        switch( code[i] ){
+    for ( size_t i=0; i<code.size(); i++ ) {
+        switch( code[i] ) {
         case '/':
-            if ( i+1 < code.size() && code[i+1] == '/' ){
+            if ( i+1 < code.size() && code[i+1] == '/' ) {
                 while ( i<code.size() && code[i] != '\n' )
                     i++;
             }
@@ -343,17 +370,30 @@ bool isBalanced( string code ){
             i++;
             while ( i < code.size() && code[i] != '\'' ) i++;
             break;
+        case '\\':
+            if ( i+1 < code.size() && code[i+1] == '/') i++;
+            break;
+        case '+':
+        case '-':
+            if ( i+1 < code.size() && code[i+1] == code[i]) {
+                i++;
+                continue; // postfix op (++/--) can't be a dangling op
+            }
+            break;
         }
+
+        if ( isOpSymbol( code[i] )) danglingOp = true;
+        else if (! std::isspace( code[i] )) danglingOp = false;
     }
 
-    return brackets == 0 && parens == 0;
+    return brackets == 0 && parens == 0 && !danglingOp;
 }
 
 using mongo::asserted;
 
 struct BalancedTest : public mongo::UnitTest {
 public:
-    void run(){
+    void run() {
         assert( isBalanced( "x = 5" ) );
         assert( isBalanced( "function(){}" ) );
         assert( isBalanced( "function(){\n}" ) );
@@ -362,12 +402,19 @@ public:
         assert( isBalanced( "// {" ) );
         assert( ! isBalanced( "// \n {" ) );
         assert( ! isBalanced( "\"//\" {" ) );
-
+        assert( isBalanced( "{x:/x\\//}" ) );
+        assert( ! isBalanced( "{ \\/// }" ) );
+        assert( isBalanced( "x = 5 + y ") );
+        assert( ! isBalanced( "x = ") );
+        assert( ! isBalanced( "x = // hello") );
+        assert( ! isBalanced( "x = 5 +") );
+        assert( isBalanced( " x ++") );
+        assert( isBalanced( "-- x") );
     }
 } balnaced_test;
 
-string finishCode( string code ){
-    while ( ! isBalanced( code ) ){
+string finishCode( string code ) {
+    while ( ! isBalanced( code ) ) {
         inMultiLine = 1;
         code += "\n";
         char * line = shellReadline("... " , 1 );
@@ -375,6 +422,10 @@ string finishCode( string code ){
             return "";
         if ( ! line )
             return "";
+
+        while (startsWith(line, "... "))
+            line += 4;
+
         code += line;
     }
     return code;
@@ -395,18 +446,51 @@ void show_help_text(const char* name, po::options_description options) {
          << "unless --shell is specified" << endl;
 };
 
-bool fileExists( string file ){
+bool fileExists( string file ) {
     try {
         path p(file);
         return boost::filesystem::exists( file );
     }
-    catch (...){
+    catch (...) {
         return false;
     }
 }
 
 namespace mongo {
     extern bool isShell;
+    extern DBClientWithCommands *latestConn;
+}
+
+string stateToString(MemberState s) {
+    if( s.s == MemberState::RS_STARTUP ) return "STARTUP";
+    if( s.s == MemberState::RS_PRIMARY ) return "PRIMARY";
+    if( s.s == MemberState::RS_SECONDARY ) return "SECONDARY";
+    if( s.s == MemberState::RS_RECOVERING ) return "RECOVERING";
+    if( s.s == MemberState::RS_FATAL ) return "FATAL";
+    if( s.s == MemberState::RS_STARTUP2 ) return "STARTUP2";
+    if( s.s == MemberState::RS_ARBITER ) return "ARBITER";
+    if( s.s == MemberState::RS_DOWN ) return "DOWN";
+    if( s.s == MemberState::RS_ROLLBACK ) return "ROLLBACK";
+    return "";
+}
+string sayReplSetMemberState() {
+    try {
+        if( latestConn ) {
+            BSONObj info;
+            if( latestConn->runCommand("admin", BSON( "replSetGetStatus" << 1 << "forShell" << 1 ) , info ) ) {
+                stringstream ss;
+                ss << info["set"].String() << ':';
+                int s = info["myState"].Int();
+                MemberState ms(s);
+                ss << stateToString(ms);
+                return ss.str();
+            }
+        }
+    }
+    catch( std::exception& e ) {
+        log(1) << "error in sayReplSetMemberState:" << e.what() << endl;
+    }
+    return "";
 }
 
 int _main(int argc, char* argv[]) {
@@ -425,35 +509,36 @@ int _main(int argc, char* argv[]) {
 
     bool runShell = false;
     bool nodb = false;
-    
+
     string script;
 
     po::options_description shell_options("options");
     po::options_description hidden_options("Hidden options");
     po::options_description cmdline_options("Command line options");
     po::positional_options_description positional_options;
-    
+
     shell_options.add_options()
-        ("shell", "run the shell after executing files")
-        ("nodb", "don't connect to mongod on startup - no 'db address' arg expected")
-        ("quiet", "be less chatty" )
-        ("port", po::value<string>(&port), "port to connect to")
-        ("host", po::value<string>(&dbhost), "server to connect to")
-        ("eval", po::value<string>(&script), "evaluate javascript")
-        ("username,u", po::value<string>(&username), "username for authentication")
-        ("password,p", new mongo::PasswordValue(&password),
-         "password for authentication")
-        ("help,h", "show this usage information")
-        ("version", "show version information")
-        ("ipv6", "enable IPv6 support (disabled by default)")
-        ;
+    ("shell", "run the shell after executing files")
+    ("nodb", "don't connect to mongod on startup - no 'db address' arg expected")
+    ("quiet", "be less chatty" )
+    ("port", po::value<string>(&port), "port to connect to")
+    ("host", po::value<string>(&dbhost), "server to connect to")
+    ("eval", po::value<string>(&script), "evaluate javascript")
+    ("username,u", po::value<string>(&username), "username for authentication")
+    ("password,p", new mongo::PasswordValue(&password),
+     "password for authentication")
+    ("help,h", "show this usage information")
+    ("version", "show version information")
+    ("verbose", "increase verbosity")
+    ("ipv6", "enable IPv6 support (disabled by default)")
+    ;
 
     hidden_options.add_options()
-        ("dbaddress", po::value<string>(), "dbaddress")
-        ("files", po::value< vector<string> >(), "files")
-        ("nokillop", "nokillop") // for testing, kill op will also be disabled automatically if the tests starts a mongo program
-        ("autokillop", "autokillop") // for testing, will kill op without prompting
-        ;
+    ("dbaddress", po::value<string>(), "dbaddress")
+    ("files", po::value< vector<string> >(), "files")
+    ("nokillop", "nokillop") // for testing, kill op will also be disabled automatically if the tests starts a mongo program
+    ("autokillop", "autokillop") // for testing, will kill op without prompting
+    ;
 
     positional_options.add("dbaddress", 1);
     positional_options.add("files", -1);
@@ -474,17 +559,18 @@ int _main(int argc, char* argv[]) {
                   positional(positional_options).
                   style(command_line_style).run(), params);
         po::notify(params);
-    } catch (po::error &e) {
+    }
+    catch (po::error &e) {
         cout << "ERROR: " << e.what() << endl << endl;
         show_help_text(argv[0], shell_options);
         return mongo::EXIT_BADOPTIONS;
     }
 
     // hide password from ps output
-    for (int i=0; i < (argc-1); ++i){
-        if (!strcmp(argv[i], "-p") || !strcmp(argv[i], "--password")){
+    for (int i=0; i < (argc-1); ++i) {
+        if (!strcmp(argv[i], "-p") || !strcmp(argv[i], "--password")) {
             char* arg = argv[i+1];
-            while (*arg){
+            while (*arg) {
                 *arg++ = 'x';
             }
         }
@@ -516,7 +602,7 @@ int _main(int argc, char* argv[]) {
     if (params.count("autokillop")) {
         autoKillOp = true;
     }
-    
+
     /* This is a bit confusing, here are the rules:
      *
      * if nodb is set then all positional parameters are files
@@ -528,41 +614,46 @@ int _main(int argc, char* argv[]) {
         string dbaddress = params["dbaddress"].as<string>();
         if (nodb) {
             files.insert(files.begin(), dbaddress);
-        } else {
+        }
+        else {
             string basename = dbaddress.substr(dbaddress.find_last_of("/\\") + 1);
             if (basename.find_first_of('.') == string::npos ||
-                (basename.find(".js", basename.size() - 3) == string::npos && !fileExists(dbaddress))) {
+                    (basename.find(".js", basename.size() - 3) == string::npos && !fileExists(dbaddress))) {
                 url = dbaddress;
-            } else {
+            }
+            else {
                 files.insert(files.begin(), dbaddress);
             }
         }
     }
-    if (params.count("ipv6")){
+    if (params.count("ipv6")) {
         mongo::enableIPv6();
     }
-    
-    if ( ! mongo::cmdLine.quiet ) 
+    if (params.count("verbose")) {
+        logLevel = 1;
+    }
+
+    if ( ! mongo::cmdLine.quiet )
         cout << "MongoDB shell version: " << mongo::versionString << endl;
 
     mongo::UnitTest::runTests();
 
     if ( !nodb ) { // connect to db
         //if ( ! mongo::cmdLine.quiet ) cout << "url: " << url << endl;
-        
+
         stringstream ss;
         if ( mongo::cmdLine.quiet )
             ss << "__quiet = true;";
         ss << "db = connect( \"" << fixHost( url , dbhost , port ) << "\")";
-        
+
         mongo::shellUtils::_dbConnect = ss.str();
 
         if ( params.count( "password" )
-             && ( password.empty() ) ) {
+                && ( password.empty() ) ) {
             password = mongo::askPassword();
         }
 
-        if ( username.size() && password.size() ){
+        if ( username.size() && password.size() ) {
             stringstream ss;
             ss << "if ( ! db.auth( \"" << username << "\" , \"" << password << "\" ) ){ throw 'login failed'; }";
             mongo::shellUtils::_dbAuth = ss.str();
@@ -573,12 +664,12 @@ int _main(int argc, char* argv[]) {
     mongo::ScriptEngine::setConnectCallback( mongo::shellUtils::onConnect );
     mongo::ScriptEngine::setup();
     mongo::globalScriptEngine->setScopeInitCallback( mongo::shellUtils::initScope );
-    auto_ptr< mongo::Scope > scope( mongo::globalScriptEngine->newScope() );    
+    auto_ptr< mongo::Scope > scope( mongo::globalScriptEngine->newScope() );
     shellMainScope = scope.get();
 
     if( runShell )
         cout << "type \"help\" for help" << endl;
-    
+
     if ( !script.empty() ) {
         mongo::shellUtils::MongoProgramScope s;
         if ( ! scope->exec( script , "(shell eval)" , true , true , false ) )
@@ -591,7 +682,7 @@ int _main(int argc, char* argv[]) {
         if ( files.size() > 1 )
             cout << "loading file: " << files[i] << endl;
 
-        if ( ! scope->execFile( files[i] , false , true , false ) ){
+        if ( ! scope->execFile( files[i] , false , true , false ) ) {
             cout << "failed to load: " << files[i] << endl;
             return -3;
         }
@@ -601,7 +692,7 @@ int _main(int argc, char* argv[]) {
         runShell = true;
     }
 
-    if ( runShell ){
+    if ( runShell ) {
 
         mongo::shellUtils::MongoProgramScope s;
 
@@ -609,29 +700,38 @@ int _main(int argc, char* argv[]) {
 
         //v8::Handle<v8::Object> shellHelper = baseContext_->Global()->Get( v8::String::New( "shellHelper" ) )->ToObject();
 
-        while ( 1 ){
+        while ( 1 ) {
             inMultiLine = 0;
             gotInterrupted = 0;
-            char * line = shellReadline( "> " );
+//            shellMainScope->localConnect;
+            //DBClientWithCommands *c = getConnection( JSContext *cx, JSObject *obj );
 
-            if ( line )
+            string prompt(sayReplSetMemberState()+"> ");
+
+            char * line = shellReadline( prompt.c_str() );
+
+            if ( line ) {
+                while (startsWith(line, "> "))
+                    line += 2;
+
                 while ( line[0] == ' ' )
                     line++;
+            }
 
-            if ( ! line || ( strlen(line) == 4 && strstr( line , "exit" ) ) ){
+            if ( ! line || ( strlen(line) == 4 && strstr( line , "exit" ) ) ) {
                 cout << "bye" << endl;
                 break;
             }
 
             string code = line;
-            if ( code == "exit" || code == "exit;" ){
+            if ( code == "exit" || code == "exit;" ) {
                 break;
             }
             if ( code.size() == 0 )
                 continue;
 
             code = finishCode( code );
-            if ( gotInterrupted ){
+            if ( gotInterrupted ) {
                 cout << endl;
                 continue;
             }
@@ -645,32 +745,31 @@ int _main(int argc, char* argv[]) {
                 if ( cmd.find( " " ) > 0 )
                     cmd = cmd.substr( 0 , cmd.find( " " ) );
 
-                if ( cmd.find( "\"" ) == string::npos ){
+                if ( cmd.find( "\"" ) == string::npos ) {
                     try {
                         scope->exec( (string)"__iscmd__ = shellHelper[\"" + cmd + "\"];" , "(shellhelp1)" , false , true , true );
-                        if ( scope->getBoolean( "__iscmd__" )  ){
+                        if ( scope->getBoolean( "__iscmd__" )  ) {
                             scope->exec( (string)"shellHelper( \"" + cmd + "\" , \"" + code.substr( cmd.size() ) + "\");" , "(shellhelp2)" , false , true , false );
                             wascmd = true;
                         }
                     }
-                    catch ( std::exception& e ){
-                        cout << "error2:" << e.what() << endl;    
+                    catch ( std::exception& e ) {
+                        cout << "error2:" << e.what() << endl;
                         wascmd = true;
                     }
                 }
 
             }
 
-            if ( ! wascmd ){
+            if ( ! wascmd ) {
                 try {
                     if ( scope->exec( code.c_str() , "(shell)" , false , true , false ) )
                         scope->exec( "shellPrintHelper( __lastres__ );" , "(shell2)" , true , true , false );
                 }
-                catch ( std::exception& e ){
+                catch ( std::exception& e ) {
                     cout << "error:" << e.what() << endl;
                 }
             }
-
 
             shellHistoryAdd( line );
         }
@@ -678,7 +777,7 @@ int _main(int argc, char* argv[]) {
         shellHistoryDone();
     }
 
-    mongo::goingAway = true;
+    mongo::dbexitCalled = true;
     return 0;
 }
 
@@ -687,7 +786,7 @@ int main(int argc, char* argv[]) {
     try {
         return _main( argc , argv );
     }
-    catch ( mongo::DBException& e ){
+    catch ( mongo::DBException& e ) {
         cerr << "exception: " << e.what() << endl;
         return -1;
     }

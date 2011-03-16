@@ -53,7 +53,7 @@
       <PrecompiledHeader>Use</PrecompiledHeader>
       <WarningLevel>Level3</WarningLevel>
       <Optimization>Disabled</Optimization>
-      <PreprocessorDefinitions>USE_READLINE;XP_WIN;PCRE_STATIC;HAVE_CONFIG_H;OLDJS;MONGO_EXPOSE_MACROS;WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>XP_WIN;PCRE_STATIC;HAVE_CONFIG_H;OLDJS;MONGO_EXPOSE_MACROS;WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>\boost\</AdditionalIncludeDirectories>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <DisableSpecificWarnings>4355;4800;4267;4244;%(DisableSpecificWarnings)</DisableSpecificWarnings>
@@ -87,8 +87,10 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="..\..\bson\oid.cpp" />
     <ClCompile Include="..\..\client\clientOnly.cpp" />
     <ClCompile Include="..\..\client\connpool.cpp" />
+    <ClCompile Include="..\..\client\dbclient_rs.cpp" />
     <ClCompile Include="..\..\client\syncclusterconnection.cpp" />
     <ClCompile Include="..\..\db\commands.cpp" />
     <ClCompile Include="..\..\db\lasterror.cpp" />
@@ -111,9 +113,9 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\..\scripting\bench.cpp" />
     <ClCompile Include="..\..\scripting\engine_spidermonkey.cpp" />
     <ClCompile Include="..\..\scripting\utils.cpp" />
-    <ClCompile Include="..\..\s\d_util.cpp" />
     <ClCompile Include="..\..\s\shardconnection.cpp" />
     <ClCompile Include="..\..\util\background.cpp" />
     <ClCompile Include="..\..\util\log.cpp" />
@@ -239,7 +241,6 @@
     <Library Include="..\..\..\js\js32r.lib">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
     </Library>
-    <Library Include="..\..\..\readline\lib\readline.lib" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\db\lasterror.h" />

@@ -1,4 +1,4 @@
-/** @checksum.h */
+/** @file checksum.h */
 
 /*    Copyright 2009 10gen Inc.
  *
@@ -22,7 +22,7 @@ namespace mongoutils {
     /**
      * this is a silly temporary implementation
      */
-    inline int checksum( const char* x , int size ){
+    inline int checksum( const char* x , int size ) {
         int ck = 0;
         for ( int i=0; i<size; i++ )
             ck += ( (int)x[i] * ( i + 1 ) );

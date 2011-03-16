@@ -1,4 +1,4 @@
-// d_logic.h
+// @file d_logic.h
 /*
  *    Copyright (C) 2010 10gen Inc.
  *
@@ -19,38 +19,20 @@
 #pragma once
 
 #include "../pch.h"
+
 #include "../db/jsobj.h"
+
+#include "d_chunk_manager.h"
 #include "util.h"
 
 namespace mongo {
-    
-    class ShardingState;
-    
+
+    class Database;
+    class DiskLoc;
+
     typedef ShardChunkVersion ConfigVersion;
     typedef map<string,ConfigVersion> NSVersionMap;
 
-    // -----------
-
-    class ChunkMatcher {
-        typedef map<BSONObj,pair<BSONObj,BSONObj>,BSONObjCmp> MyMap;
-    public:
-        
-        bool belongsToMe( const BSONObj& key , const DiskLoc& loc ) const;
-
-    private:
-        ChunkMatcher( ConfigVersion version );
-        
-        void gotRange( const BSONObj& min , const BSONObj& max );
-        
-        ConfigVersion _version;
-        BSONObj _key;
-        MyMap _map;
-        
-        friend class ShardingState;
-    };
-
-    typedef shared_ptr<ChunkMatcher> ChunkMatcherPtr;
-    
     // --------------
     // --- global state ---
     // --------------
@@ -58,100 +40,182 @@ namespace mongo {
     class ShardingState {
     public:
         ShardingState();
-        
+
         bool enabled() const { return _enabled; }
         const string& getConfigServer() const { return _configServer; }
         void enable( const string& server );
 
         void gotShardName( const string& name );
-        void gotShardHost( const string& host );
-        
+        void gotShardHost( string host );
+
+        /** Reverts back to a state where this mongod is not sharded. */
+        void resetShardingState(); 
+
+        // versioning support
+
         bool hasVersion( const string& ns );
         bool hasVersion( const string& ns , ConfigVersion& version );
-        ConfigVersion& getVersion( const string& ns ); // TODO: this is dangeroues
-        void setVersion( const string& ns , const ConfigVersion& version );
-        
+        const ConfigVersion getVersion( const string& ns ) const;
+
+        /**
+         * Uninstalls the manager for a given collection. This should be used when the collection is dropped.
+         *
+         * NOTE:
+         *   An existing collection with no chunks on this shard will have a manager on version 0, which is different than a
+         *   a dropped collection, which will not have a manager.
+         *
+         * TODO
+         *   When sharding state is enabled, absolutely all collections should have a manager. (The non-sharded ones are
+         *   a be degenerate case of one-chunk collections).
+         *   For now, a dropped collection and an non-sharded one are indistinguishable (SERVER-1849)
+         *
+         * @param ns the collection to be dropped
+         */
+        void resetVersion( const string& ns );
+
+        /**
+         * Requests to access a collection at a certain version. If the collection's manager is not at that version it
+         * will try to update itself to the newest version. The request is only granted if the version is the current or
+         * the newest one.
+         *
+         * @param ns collection to be accessed
+         * @param version (IN) the client belive this collection is on and (OUT) the version the manager is actually in
+         * @return true if the access can be allowed at the provided version
+         */
+        bool trySetVersion( const string& ns , ConfigVersion& version );
+
         void appendInfo( BSONObjBuilder& b );
-        
-        ChunkMatcherPtr getChunkMatcher( const string& ns );
-        
+
+        // querying support
+
+        bool needShardChunkManager( const string& ns ) const;
+        ShardChunkManagerPtr getShardChunkManager( const string& ns );
+
+        // chunk migrate and split support
+
+        /**
+         * Creates and installs a new chunk manager for a given collection by "forgetting" about one of its chunks.
+         * The new manager uses the provided version, which has to be higher than the current manager's.
+         * One exception: if the forgotten chunk is the last one in this shard for the collection, version has to be 0.
+         *
+         * If it runs successfully, clients need to grab the new version to access the collection.
+         *
+         * @param ns the collection
+         * @param min max the chunk to eliminate from the current manager
+         * @param version at which the new manager should be at
+         */
+        void donateChunk( const string& ns , const BSONObj& min , const BSONObj& max , ShardChunkVersion version );
+
+        /**
+         * Creates and installs a new chunk manager for a given collection by reclaiming a previously donated chunk.
+         * The previous manager's version has to be provided.
+         *
+         * If it runs successfully, clients that became stale by the previous donateChunk will be able to access the
+         * collection again.
+         *
+         * @param ns the collection
+         * @param min max the chunk to reclaim and add to the current manager
+         * @param version at which the new manager should be at
+         */
+        void undoDonateChunk( const string& ns , const BSONObj& min , const BSONObj& max , ShardChunkVersion version );
+
+        /**
+         * Creates and installs a new chunk manager for a given collection by splitting one of its chunks in two or more.
+         * The version for the first split chunk should be provided. The subsequent chunks' version would be the latter with the
+         * minor portion incremented.
+         *
+         * The effect on clients will depend on the version used. If the major portion is the same as the current shards,
+         * clients shouldn't perceive the split.
+         *
+         * @param ns the collection
+         * @param min max the chunk that should be split
+         * @param splitKeys point in which to split
+         * @param version at which the new manager should be at
+         */
+        void splitChunk( const string& ns , const BSONObj& min , const BSONObj& max , const vector<BSONObj>& splitKeys ,
+                         ShardChunkVersion version );
+
         bool inCriticalMigrateSection();
+
     private:
-        
         bool _enabled;
-        
+
         string _configServer;
-        
+
         string _shardName;
         string _shardHost;
 
-        mongo::mutex _mutex;
-        NSVersionMap _versions;
-        map<string,ChunkMatcherPtr> _chunks;
+        // protects state below
+        mutable mongo::mutex _mutex;
+
+        // map from a namespace into the ensemble of chunk ranges that are stored in this mongod
+        // a ShardChunkManager carries all state we need for a collection at this shard, including its version information
+        typedef map<string,ShardChunkManagerPtr> ChunkManagersMap;
+        ChunkManagersMap _chunks;
     };
-    
+
     extern ShardingState shardingState;
 
-    // --------------
-    // --- per connection ---
-    // --------------
-    
+    /**
+     * one per connection from mongos
+     * holds version state for each namesapce
+     */
     class ShardedConnectionInfo {
     public:
         ShardedConnectionInfo();
-        
+
         const OID& getID() const { return _id; }
         bool hasID() const { return _id.isSet(); }
         void setID( const OID& id );
-        
-        ConfigVersion& getVersion( const string& ns ); // TODO: this is dangeroues
+
+        const ConfigVersion getVersion( const string& ns ) const;
         void setVersion( const string& ns , const ConfigVersion& version );
-        
+
         static ShardedConnectionInfo* get( bool create );
         static void reset();
-        
-        bool inForceMode() const { 
-            return _forceMode;
+
+        bool inForceVersionOkMode() const {
+            return _forceVersionOk;
         }
-        
-        void enterForceMode(){ _forceMode = true; }
-        void leaveForceMode(){ _forceMode = false; }
+
+        void enterForceVersionOkMode() { _forceVersionOk = true; }
+        void leaveForceVersionOkMode() { _forceVersionOk = false; }
 
     private:
-        
+
         OID _id;
         NSVersionMap _versions;
-        bool _forceMode;
+        bool _forceVersionOk; // if this is true, then chunk version #s aren't check, and all ops are allowed
 
         static boost::thread_specific_ptr<ShardedConnectionInfo> _tl;
     };
 
-    struct ShardForceModeBlock {
-        ShardForceModeBlock(){
+    struct ShardForceVersionOkModeBlock {
+        ShardForceVersionOkModeBlock() {
             info = ShardedConnectionInfo::get( false );
             if ( info )
-                info->enterForceMode();
+                info->enterForceVersionOkMode();
         }
-        ~ShardForceModeBlock(){
+        ~ShardForceVersionOkModeBlock() {
             if ( info )
-                info->leaveForceMode();
+                info->leaveForceVersionOkMode();
         }
 
         ShardedConnectionInfo * info;
     };
-    
+
     // -----------------
     // --- core ---
     // -----------------
 
     unsigned long long extractVersion( BSONElement e , string& errmsg );
 
-    
+
     /**
      * @return true if we have any shard info for the ns
      */
     bool haveLocalShardingInfo( const string& ns );
-    
+
     /**
      * @return true if the current threads shard version is ok, or not in sharded version
      */
@@ -160,15 +224,18 @@ namespace mongo {
     /**
      * @return true if we took care of the message and nothing else should be done
      */
-    bool handlePossibleShardedMessage( Message &m, DbResponse * dbresponse );
+    struct DbResponse;
+
+    bool _handlePossibleShardedMessage( Message &m, DbResponse * dbresponse );
+
+    /** What does this do? document please? */
+    inline bool handlePossibleShardedMessage( Message &m, DbResponse * dbresponse ) {
+        if( !shardingState.enabled() ) 
+            return false;
+        return _handlePossibleShardedMessage(m, dbresponse);
+    }
 
     void logOpForSharding( const char * opstr , const char * ns , const BSONObj& obj , BSONObj * patt );
-
-    // -----------------
-    // --- writeback ---
-    // -----------------
-
-    /* queue a write back on a remote server for a failed write */
-    void queueWriteBack( const string& remote , const BSONObj& o );
+    void aboutToDeleteForSharding( const Database* db , const DiskLoc& dl );
 
 }

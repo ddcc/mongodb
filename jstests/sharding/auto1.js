@@ -32,15 +32,19 @@ print( "datasize: " + tojson( s.getServer( "test" ).getDB( "admin" ).runCommand(
 for ( ; i<200; i++ ){
     coll.save( { num : i , s : bigString } );
 }
+db.getLastError();
 
 s.printChunks()
+s.printChangeLog()
 counts.push( s.config.chunks.count() );
 
 for ( ; i<400; i++ ){
     coll.save( { num : i , s : bigString } );
 }
+db.getLastError();
 
 s.printChunks();
+s.printChangeLog()
 counts.push( s.config.chunks.count() );
 
 for ( ; i<700; i++ ){
@@ -49,6 +53,7 @@ for ( ; i<700; i++ ){
 db.getLastError();
 
 s.printChunks();
+s.printChangeLog()
 counts.push( s.config.chunks.count() );
 
 assert( counts[counts.length-1] > counts[0] , "counts 1 : " + tojson( counts ) )

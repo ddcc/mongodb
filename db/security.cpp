@@ -20,19 +20,17 @@
 #include "security.h"
 #include "instance.h"
 #include "client.h"
-#include "curop.h"
+#include "curop-inl.h"
 #include "db.h"
 #include "dbhelpers.h"
 
 namespace mongo {
 
-    bool noauth = true;
-    
-	int AuthenticationInfo::warned = 0;
+    int AuthenticationInfo::warned = 0;
 
-    void AuthenticationInfo::print(){
+    void AuthenticationInfo::print() {
         cout << "AuthenticationInfo: " << this << '\n';
-        for ( map<string,Auth>::iterator i=m.begin(); i!=m.end(); i++ ){
+        for ( map<string,Auth>::iterator i=m.begin(); i!=m.end(); i++ ) {
             cout << "\t" << i->first << "\t" << i->second.level << '\n';
         }
         cout << "END" << endl;
@@ -40,16 +38,16 @@ namespace mongo {
 
 
     bool AuthenticationInfo::_isAuthorizedSpecialChecks( const string& dbname ) {
-        if ( cc().isGod() ){
+        if ( cc().isGod() ) {
             return true;
         }
-        
-        if ( isLocalHost ){
-            atleastreadlock l(""); 
+
+        if ( isLocalHost ) {
+            atleastreadlock l("");
             Client::GodScope gs;
             Client::Context c("admin.system.users");
             BSONObj result;
-            if( ! Helpers::getSingleton("admin.system.users", result) ){
+            if( ! Helpers::getSingleton("admin.system.users", result) ) {
                 if( warned == 0 ) {
                     warned++;
                     log() << "note: no users configured in admin.system.users, allowing localhost access" << endl;

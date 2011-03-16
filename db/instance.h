@@ -21,7 +21,7 @@
 
 
 #include "../client/dbclient.h"
-#include "curop.h"
+#include "curop-inl.h"
 #include "security.h"
 #include "cmdline.h"
 #include "client.h"
@@ -40,7 +40,7 @@ namespace mongo {
 
         DiagLog() : f(0) , level(0), mutex("DiagLog") { }
         void init() {
-            if ( ! f && level ){
+            if ( ! f && level ) {
                 log() << "diagLogging = " << level << endl;
                 stringstream ss;
                 ss << dbpath << "/diaglog." << hex << time(0);
@@ -55,20 +55,20 @@ namespace mongo {
         /**
          * @return old
          */
-        int setLevel( int newLevel ){
+        int setLevel( int newLevel ) {
             int old = level;
             level = newLevel;
             init();
             return old;
         }
         void flush() {
-            if ( level ){
+            if ( level ) {
                 scoped_lock lk(mutex);
                 f->flush();
             }
         }
         void write(char *data,int len) {
-            if ( level & 1 ){
+            if ( level & 1 ) {
                 scoped_lock lk(mutex);
                 f->write(data,len);
             }
@@ -77,7 +77,7 @@ namespace mongo {
             if ( level & 2 ) {
                 bool log = (level & 4) == 0;
                 OCCASIONALLY log = true;
-                if ( log ){
+                if ( log ) {
                     scoped_lock lk(mutex);
                     assert( f );
                     f->write(data,len);
@@ -102,52 +102,56 @@ namespace mongo {
         }
         ~DbResponse() { delete response; }
     };
-    
-    bool assembleResponse( Message &m, DbResponse &dbresponse, const SockAddr &client = unknownAddress );
+
+    void assembleResponse( Message &m, DbResponse &dbresponse, const SockAddr &client = unknownAddress );
 
     void getDatabaseNames( vector< string > &names , const string& usePath = dbpath );
 
-    /* returns true if there is no data on this server.  useful when starting replication. 
-       local database does NOT count. 
+    /* returns true if there is no data on this server.  useful when starting replication.
+       local database does NOT count.
     */
     bool replHasDatabases();
 
-// --- local client ---
-    
+    /** "embedded" calls to the local server directly. 
+        Caller does not need to lock, that is handled within.
+     */
     class DBDirectClient : public DBClientBase {
-        
     public:
         virtual auto_ptr<DBClientCursor> query(const string &ns, Query query, int nToReturn = 0, int nToSkip = 0,
                                                const BSONObj *fieldsToReturn = 0, int queryOptions = 0);
-        
+
         virtual bool isFailed() const {
             return false;
         }
         virtual string toString() {
             return "DBDirectClient";
         }
-        virtual string getServerAddress() const{
+        virtual string getServerAddress() const {
             return "localhost"; // TODO: should this have the port?
         }
-        virtual bool call( Message &toSend, Message &response, bool assertOk=true );
+        virtual bool call( Message &toSend, Message &response, bool assertOk=true , string * actualServer = 0 );
         virtual void say( Message &toSend );
         virtual void sayPiggyBack( Message &toSend ) {
             // don't need to piggy back when connected locally
             return say( toSend );
         }
-        
+
         virtual void killCursor( long long cursorID );
-        
-        virtual bool callRead( Message& toSend , Message& response ){
+
+        virtual bool callRead( Message& toSend , Message& response ) {
             return call( toSend , response );
         }
-
-        virtual ConnectionString::ConnectionType type() const { return ConnectionString::MASTER; }  
-        virtual bool isMember( const DBConnector * conn ) const { return this == conn; };
+        
+        virtual unsigned long long count(const string &ns, const BSONObj& query = BSONObj(), int options=0, int limit=0, int skip=0 );
+        
+        virtual ConnectionString::ConnectionType type() const { return ConnectionString::MASTER; }
     };
 
     extern int lockFile;
+#ifdef WIN32
+    extern HANDLE lockFileHandle;
+#endif
     void acquirePathLock();
     void maybeCreatePidFile();
-    
+
 } // namespace mongo
