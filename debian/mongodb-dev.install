@@ -1,2 +1,2 @@
-usr/include
-usr/lib
+debian/tmp/usr/include
+debian/tmp/usr/lib
