@@ -14,6 +14,7 @@ ifneq (,$(findstring nostrip,$(DEB_BUILD_OPTIONS)))
 	DEB_SCONS_OPTIONS := --d=DEBUGBUILD
 endif
 
+DEB_SCONS_BUILD_TARGET = all
 DEB_SCONS_INSTALL_OPTIONS += --prefix=$(CURDIR)/debian/tmp/usr --full
 DEB_SCONS_CHECK_TARGET = --smokedbprefix=$(CURDIR)/debian/tmp-test smoke
 
