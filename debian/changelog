@@ -1,3 +1,9 @@
+mongodb (1:1.8.0-2) unstable; urgency=low
+
+  * return empty TERM if not set (Closes: #620910)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Tue, 05 Apr 2011 10:21:26 +0200
+
 mongodb (1:1.8.0-1) unstable; urgency=low
 
   * Upstream 1.8.0

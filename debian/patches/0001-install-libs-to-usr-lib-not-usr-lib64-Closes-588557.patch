@@ -1,0 +1,22 @@
+From: Antonin Kral <a.kral@bobek.cz>
+Date: Tue, 5 Apr 2011 10:19:25 +0200
+Subject: install libs to /usr/lib not /usr/lib64 (Closes: #588557)
+
+---
+ SConstruct |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/SConstruct b/SConstruct
+index 41383b1..cb6019f 100644
+--- a/SConstruct
++++ b/SConstruct
+@@ -469,7 +469,7 @@ elif "linux2" == os.sys.platform:
+ 
+     if os.uname()[4] == "x86_64" and not force32:
+         linux64 = True
+-        nixLibPrefix = "lib64"
++        nixLibPrefix = "lib"
+         env.Append( LIBPATH=["/usr/lib64" , "/lib64" ] )
+         env.Append( LIBS=["pthread"] )
+ 
+-- 
