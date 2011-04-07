@@ -183,7 +183,7 @@ namespace mongo {
                 // remember intent. we will journal it in a bit
                 _wi.insertWriteIntent(p, len);
                 wassert( _wi._writes.size() <  2000000 );
-                assert(  _wi._writes.size() < 20000000 );
+                //assert(  _wi._writes.size() < 20000000 );
 
                 {
                     // a bit over conservative in counting pagebytes used
@@ -200,7 +200,9 @@ namespace mongo {
                                 log() << "debug nsincecommitifneeded:" << _nSinceCommitIfNeededCall << " bytes:" << _bytes << endl;
                         }
 #endif
-                        uassert(13623, "DR102 too much data written uncommitted", _bytes < UncommittedBytesLimit * 3);
+                        if ( _bytes >= UncommittedBytesLimit * 3 ) {
+                            wassert( ! "DR102 too much data written uncommitted" );
+                        }
                     }
                 }
             }
