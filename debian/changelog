@@ -1,3 +1,10 @@
+mongodb (1:1.8.1-1) unstable; urgency=low
+
+  * Upstream 1.8.1
+    http://jira.mongodb.org/browse/SERVER/fixforversion/10260
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 07 Apr 2011 07:38:17 +0200
+
 mongodb (1:1.8.0-2) unstable; urgency=low
 
   * return empty TERM if not set (Closes: #620910)
