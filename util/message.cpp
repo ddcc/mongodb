@@ -703,7 +703,6 @@ again:
 
 
     MSGID NextMsgId;
-    ThreadLocalValue<int> clientId;
 
     struct MsgStart {
         MsgStart() {
@@ -719,14 +718,6 @@ again:
 
     bool doesOpGetAResponse( int op ) {
         return op == dbQuery || op == dbGetMore;
-    }
-
-    void setClientId( int id ) {
-        clientId.set( id );
-    }
-
-    int getClientId() {
-        return clientId.get();
     }
 
     const int DEFAULT_MAX_CONN = 20000;

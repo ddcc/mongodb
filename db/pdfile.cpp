@@ -1198,8 +1198,10 @@ namespace mongo {
 
         log(1) << "\t fastBuildIndex dupsToDrop:" << dupsToDrop.size() << endl;
 
-        for( list<DiskLoc>::iterator i = dupsToDrop.begin(); i != dupsToDrop.end(); i++ )
+        for( list<DiskLoc>::iterator i = dupsToDrop.begin(); i != dupsToDrop.end(); i++ ){
             theDataFileMgr.deleteRecord( ns, i->rec(), *i, false, true );
+            getDur().commitIfNeeded();
+        }
 
         return n;
     }
@@ -1254,6 +1256,8 @@ namespace mongo {
                 n++;
                 progress.hit();
 
+                getDur().commitIfNeeded();
+
                 if ( n % 128 == 0 && !cc->yield() ) {
                     cc.release();
                     uasserted(12584, "cursor gone during bg index");
@@ -1287,7 +1291,7 @@ namespace mongo {
             prep(ns.c_str(), d);
             assert( idxNo == d->nIndexes );
             try {
-                idx.head = BtreeBucket::addBucket(idx);
+                idx.head.writing() = BtreeBucket::addBucket(idx);
                 n = addExistingToIndex(ns.c_str(), d, idx, idxNo);
             }
             catch(...) {
