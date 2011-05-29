@@ -17,20 +17,22 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include "../util/admin_access.h"
+
 namespace mongo {
 
     class Prioritizable {
     public:
-        Prioritizable( double p ) : _priority(p){}
+        Prioritizable( double p ) : _priority(p) {}
         double priority() const { return _priority; }
     private:
         double _priority;
     };
-    
+
     class DbWebHandler : public Prioritizable {
     public:
         DbWebHandler( const string& name , double priority , bool requiresREST );
-        virtual ~DbWebHandler(){}
+        virtual ~DbWebHandler() {}
 
         virtual bool handles( const string& url ) const { return url == _defaultUrl; }
 
@@ -38,20 +40,21 @@ namespace mongo {
 
         virtual void handle( const char *rq, // the full request
                              string url,
+                             BSONObj params,
                              // set these and return them:
                              string& responseMsg,
                              int& responseCode,
                              vector<string>& headers, // if completely empty, content-type: text/html will be added
                              const SockAddr &from
-                             ) = 0;
-        
+                           ) = 0;
+
         string toString() const { return _toString; }
         static DbWebHandler * findHandler( const string& url );
 
     private:
         string _name;
         bool _requiresREST;
-        
+
         string _defaultUrl;
         string _toString;
 
@@ -61,8 +64,8 @@ namespace mongo {
     class WebStatusPlugin : public Prioritizable {
     public:
         WebStatusPlugin( const string& secionName , double priority , const string& subheader = "" );
-        virtual ~WebStatusPlugin(){}
-        
+        virtual ~WebStatusPlugin() {}
+
         virtual void run( stringstream& ss ) = 0;
         /** called when web server stats up */
         virtual void init() = 0;
@@ -73,18 +76,10 @@ namespace mongo {
         string _name;
         string _subHeading;
         static vector<WebStatusPlugin*> * _plugins;
-        
+
     };
 
-    void webServerThread();
+    void webServerThread( const AdminAccess* admins );
     string prettyHostName();
-    
-    /** @return if there are any admin users.  this should not block for long and throw if can't get a lock if needed */
-    bool webHaveAdminUsers();
-    
-    /** @return admin user with this name.  this should not block for long and throw if can't get a lock if needed */
-    BSONObj webGetAdminUser( const string& username );
 
 };
-
-

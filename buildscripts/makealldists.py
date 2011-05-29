@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 
 from __future__ import with_statement
 import subprocess
@@ -184,14 +184,16 @@ def __main__():
     print "makedist output under: %s\ncombined repo: %s\n" % (outputroot, repodir)
     sys.stdout.flush()
     # Add more dist/version/architecture tuples as they're supported.
-    dists = (("ubuntu", "10.4"),
+    dists = (("ubuntu", "10.10"),
+             ("ubuntu", "10.4"),
              ("ubuntu", "9.10"),
              ("ubuntu", "9.4"),
-             ("ubuntu", "8.10"),
+             #("ubuntu", "8.10"),
              ("debian", "5.0"),
              ("centos", "5.4"),
-             ("fedora", "11"),
-             ("fedora", "12"))
+             #("fedora", "12"),
+             ("fedora", "13"),
+             ("fedora", "14"))
     arches = ("x86", "x86_64")
 #    mongos = branches.split(',')
     # Run a makedist for each distro/version/architecture tuple above.
@@ -202,7 +204,7 @@ def __main__():
     procs = []
     count = 0
     for ((distro, distro_version), arch, spec) in gen([dists, arches, [branches]]):
-        # FIXME: now x86 fedoras on RackSpace circa 04/10.
+        # FIXME: no x86 fedoras on RackSpace circa 04/10.
         if distro == "fedora" and arch == "x86":
             continue
         count+=1
@@ -264,9 +266,9 @@ def __main__():
         if r != 0:
             raise Exception("mergerepositories.py exited %d" % r)
         print repodir
-    pushrepo(repodir)
-    shutil.rmtree(outputroot)
-    shutil.rmtree(repodir)
+    #pushrepo(repodir)
+    #shutil.rmtree(outputroot)
+    #shutil.rmtree(repodir)
 
     return 0
 

@@ -68,7 +68,7 @@
     <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(SolutionDir)$(Configuration)\</OutDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(Configuration)\</IntDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(Configuration)\</IntDir>
-    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</LinkIncremental>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">false</LinkIncremental>
     <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</LinkIncremental>
     <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">$(SolutionDir)$(Configuration)\</OutDir>
     <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(SolutionDir)$(Configuration)\</OutDir>
@@ -88,6 +88,10 @@
     <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
     <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" />
     <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
+    <IncludePath Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">..;$(IncludePath)</IncludePath>
+    <IncludePath Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">..;$(IncludePath)</IncludePath>
+    <IncludePath Condition="'$(Configuration)|$(Platform)'=='Release|x64'">..;$(IncludePath)</IncludePath>
+    <IncludePath Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">..;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -100,7 +104,7 @@
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <WarningLevel>Level3</WarningLevel>
-      <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <DisableSpecificWarnings>4355;4800;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
@@ -112,13 +116,14 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Console</SubSystem>
       <TargetMachine>MachineX86</TargetMachine>
+      <Profile>true</Profile>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <Optimization>Disabled</Optimization>
       <AdditionalIncludeDirectories>..\..\js\src;..\pcre-7.4;C:\boost;\boost;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>_UNICODE;UNICODE;SUPPORT_UCP;SUPPORT_UTF8;MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;WIN32;_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DURABLE;_UNICODE;UNICODE;SUPPORT_UCP;SUPPORT_UTF8;MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;WIN32;_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <PrecompiledHeader>Use</PrecompiledHeader>
@@ -191,16 +196,17 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\..\boostw\boost_1_34_1\boost\config\auto_link.hpp" />
+    <ClInclude Include="..\db\dur.h" />
+    <ClInclude Include="..\db\durop.h" />
+    <ClInclude Include="..\db\dur_journal.h" />
+    <ClInclude Include="..\db\jsobjmanipulator.h" />
+    <ClInclude Include="..\db\mongommf.h" />
+    <ClInclude Include="..\db\mongomutex.h" />
     <ClInclude Include="..\pcre-7.4\pcrecpp.h" />
     <ClInclude Include="..\targetver.h" />
     <ClInclude Include="..\..\boostw\boost_1_34_1\boost\version.hpp" />
     <ClInclude Include="..\pcre-7.4\config.h" />
     <ClInclude Include="..\pcre-7.4\pcre.h" />
-    <ClInclude Include="..\db\rec.h" />
-    <ClInclude Include="..\db\reccache.h" />
-    <ClInclude Include="..\db\reci.h" />
-    <ClInclude Include="..\db\recstore.h" />
-    <ClInclude Include="..\db\storage.h" />
     <ClInclude Include="..\client\connpool.h" />
     <ClInclude Include="..\client\dbclient.h" />
     <ClInclude Include="..\client\model.h" />
@@ -244,6 +250,7 @@
     <ClInclude Include="..\util\hashtab.h" />
     <ClInclude Include="..\db\lasterror.h" />
     <ClInclude Include="..\util\log.h" />
+    <ClInclude Include="..\util\logfile.h" />
     <ClInclude Include="..\util\lruishmap.h" />
     <ClInclude Include="..\util\md5.h" />
     <ClInclude Include="..\util\md5.hpp" />
@@ -253,14 +260,28 @@
     <ClInclude Include="..\util\unittest.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\bson\oid.cpp" />
     <ClCompile Include="..\client\dbclientcursor.cpp" />
+    <ClCompile Include="..\client\dbclient_rs.cpp" />
     <ClCompile Include="..\client\distlock.cpp" />
     <ClCompile Include="..\client\gridfs.cpp" />
     <ClCompile Include="..\client\model.cpp" />
     <ClCompile Include="..\client\parallel.cpp" />
     <ClCompile Include="..\db\cap.cpp" />
+    <ClCompile Include="..\db\commands\isself.cpp" />
+    <ClCompile Include="..\db\compact.cpp" />
+    <ClCompile Include="..\db\dbcommands_generic.cpp" />
+    <ClCompile Include="..\db\dur.cpp" />
+    <ClCompile Include="..\db\durop.cpp" />
+    <ClCompile Include="..\db\dur_commitjob.cpp" />
+    <ClCompile Include="..\db\dur_journal.cpp" />
+    <ClCompile Include="..\db\dur_preplogbuffer.cpp" />
+    <ClCompile Include="..\db\dur_recover.cpp" />
+    <ClCompile Include="..\db\dur_writetodatafiles.cpp" />
     <ClCompile Include="..\db\geo\2d.cpp" />
     <ClCompile Include="..\db\geo\haystack.cpp" />
+    <ClCompile Include="..\db\mongommf.cpp" />
+    <ClCompile Include="..\db\projection.cpp" />
     <ClCompile Include="..\db\repl\consensus.cpp" />
     <ClCompile Include="..\db\repl\heartbeat.cpp" />
     <ClCompile Include="..\db\repl\manager.cpp" />
@@ -270,6 +291,7 @@
     <ClCompile Include="..\db\repl\rs_rollback.cpp" />
     <ClCompile Include="..\db\repl\rs_sync.cpp" />
     <ClCompile Include="..\db\restapi.cpp" />
+    <ClCompile Include="..\db\security_key.cpp" />
     <ClCompile Include="..\pcre-7.4\pcrecpp.cc">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
@@ -510,7 +532,6 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\db\storage.cpp" />
     <ClCompile Include="..\client\connpool.cpp" />
     <ClCompile Include="..\client\dbclient.cpp" />
     <ClCompile Include="..\client\syncclusterconnection.cpp" />
@@ -542,21 +563,29 @@
     <ClCompile Include="..\db\json.cpp" />
     <ClCompile Include="..\db\lasterror.cpp" />
     <ClCompile Include="..\db\matcher.cpp" />
+    <ClCompile Include="..\scripting\bench.cpp" />
     <ClCompile Include="..\s\chunk.cpp" />
     <ClCompile Include="..\s\config.cpp" />
+    <ClCompile Include="..\s\d_chunk_manager.cpp" />
     <ClCompile Include="..\s\d_migrate.cpp" />
     <ClCompile Include="..\s\d_split.cpp" />
     <ClCompile Include="..\s\d_state.cpp" />
-    <ClCompile Include="..\s\d_util.cpp" />
     <ClCompile Include="..\s\d_writeback.cpp" />
     <ClCompile Include="..\s\grid.cpp" />
     <ClCompile Include="..\s\shard.cpp" />
     <ClCompile Include="..\s\shardconnection.cpp" />
     <ClCompile Include="..\s\shardkey.cpp" />
+    <ClCompile Include="..\util\alignedbuilder.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\util\concurrency\spin_lock.cpp" />
+    <ClCompile Include="..\util\concurrency\synchronization.cpp" />
     <ClCompile Include="..\util\concurrency\task.cpp" />
     <ClCompile Include="..\util\concurrency\thread_pool.cpp" />
     <ClCompile Include="..\util\concurrency\vars.cpp" />
+    <ClCompile Include="..\util\file_allocator.cpp" />
     <ClCompile Include="..\util\log.cpp" />
+    <ClCompile Include="..\util\logfile.cpp" />
     <ClCompile Include="..\util\mmap_win.cpp" />
     <ClCompile Include="..\db\namespace.cpp" />
     <ClCompile Include="..\db\nonce.cpp" />
@@ -564,7 +593,6 @@
     <ClCompile Include="..\db\query.cpp" />
     <ClCompile Include="..\db\queryoptimizer.cpp" />
     <ClCompile Include="..\util\processinfo.cpp" />
-    <ClCompile Include="..\util\ramstore.cpp" />
     <ClCompile Include="..\db\repl.cpp" />
     <ClCompile Include="..\db\security.cpp" />
     <ClCompile Include="..\db\security_commands.cpp" />
@@ -598,7 +626,6 @@
     <ClCompile Include="..\util\message_server_port.cpp" />
     <ClCompile Include="..\util\miniwebserver.cpp" />
     <ClCompile Include="..\util\mmap.cpp" />
-    <ClCompile Include="..\util\ntservice.cpp" />
     <ClCompile Include="..\util\processinfo_win32.cpp" />
     <ClCompile Include="..\util\sock.cpp" />
     <ClCompile Include="..\util\stringutils.cpp" />
@@ -610,8 +637,7 @@
     <ClCompile Include="..\shell\mongo_vstudio.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-      </PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -624,14 +650,17 @@
     <ClCompile Include="clienttests.cpp" />
     <ClCompile Include="cursortests.cpp" />
     <ClCompile Include="dbtests.cpp" />
+    <ClCompile Include="directclienttests.cpp" />
     <ClCompile Include="framework.cpp" />
     <ClCompile Include="jsobjtests.cpp" />
     <ClCompile Include="jsontests.cpp" />
     <ClCompile Include="jstests.cpp" />
     <ClCompile Include="matchertests.cpp" />
+    <ClCompile Include="mmaptests.cpp" />
     <ClCompile Include="namespacetests.cpp" />
     <ClCompile Include="pairingtests.cpp" />
     <ClCompile Include="pdfiletests.cpp" />
+    <ClCompile Include="perftests.cpp" />
     <ClCompile Include="queryoptimizertests.cpp" />
     <ClCompile Include="querytests.cpp" />
     <ClCompile Include="repltests.cpp" />

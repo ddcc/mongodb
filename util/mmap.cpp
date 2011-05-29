@@ -19,48 +19,59 @@
 #include "mmap.h"
 #include "processinfo.h"
 #include "concurrency/rwlock.h"
+#include "../db/namespace.h"
 
 namespace mongo {
 
-    /*static*/ void MemoryMappedFile::updateLength( const char *filename, long &length ) {
+    set<MongoFile*> MongoFile::mmfiles;
+    map<string,MongoFile*> MongoFile::pathToFile;
+
+    /* Create. Must not exist.
+    @param zero fill file with zeros when true
+    */
+    void* MemoryMappedFile::create(string filename, unsigned long long len, bool zero) {
+        uassert( 13468, string("can't create file already exists ") + filename, !exists(filename) );
+        void *p = map(filename.c_str(), len);
+        if( p && zero ) {
+            size_t sz = (size_t) len;
+            assert( len == sz );
+            memset(p, 0, sz);
+        }
+        return p;
+    }
+
+    /*static*/ void MemoryMappedFile::updateLength( const char *filename, unsigned long long &length ) {
         if ( !boost::filesystem::exists( filename ) )
             return;
         // make sure we map full length if preexisting file.
         boost::uintmax_t l = boost::filesystem::file_size( filename );
-        assert( l <= 0x7fffffff );
-        length = (long) l;
+        length = l;
     }
 
     void* MemoryMappedFile::map(const char *filename) {
-        boost::uintmax_t l = boost::filesystem::file_size( filename );
-        assert( l <= 0x7fffffff );
-        long i = (long)l;
-        return map( filename , i );
+        unsigned long long l = boost::filesystem::file_size( filename );
+        return map( filename , l );
     }
-
-    void printMemInfo( const char * where ){
-        cout << "mem info: ";
-        if ( where ) 
-            cout << where << " "; 
-        ProcessInfo pi;
-        if ( ! pi.supported() ){
-            cout << " not supported" << endl;
-            return;
-        }
-        
-        cout << "vsize: " << pi.getVirtualMemorySize() << " resident: " << pi.getResidentSize() << " mapped: " << ( MemoryMappedFile::totalMappedLength() / ( 1024 * 1024 ) ) << endl;
+    void* MemoryMappedFile::mapWithOptions(const char *filename, int options) {
+        unsigned long long l = boost::filesystem::file_size( filename );
+        return map( filename , l, options );
     }
 
     /* --- MongoFile -------------------------------------------------
-       this is the administrative stuff 
+       this is the administrative stuff
     */
 
-    static set<MongoFile*> mmfiles;
-    static RWLock mmmutex("rw:mmmutex");
+    RWLock MongoFile::mmmutex("rw:mmmutex");
 
+    /* subclass must call in destructor (or at close).
+        removes this from pathToFile and other maps
+        safe to call more than once, albeit might be wasted work
+        ideal to call close to the close, if the close is well before object destruction
+    */
     void MongoFile::destroyed() {
         rwlock lk( mmmutex , true );
         mmfiles.erase(this);
+        pathToFile.erase( filename() );
     }
 
     /*static*/
@@ -75,17 +86,17 @@ namespace mongo {
         rwlock lk( mmmutex , true );
 
         ProgressMeter pm( mmfiles.size() , 2 , 1 );
-        for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
+        for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ) {
             (*i)->close();
             pm.hit();
         }
-        message << "    closeAllFiles() finished" << endl;
+        message << "closeAllFiles() finished";
         --closingAllFiles;
     }
 
-    /*static*/ long long MongoFile::totalMappedLength(){
+    /*static*/ long long MongoFile::totalMappedLength() {
         unsigned long long total = 0;
-        
+
         rwlock lk( mmmutex , false );
         for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ )
             total += (*i)->length();
@@ -93,28 +104,41 @@ namespace mongo {
         return total;
     }
 
-    /*static*/ int MongoFile::flushAll( bool sync ){
-        if ( ! sync ){
+    void nullFunc() { }
+
+    // callback notifications
+    void (*MongoFile::notifyPreFlush)() = nullFunc;
+    void (*MongoFile::notifyPostFlush)() = nullFunc;
+
+    /*static*/ int MongoFile::flushAll( bool sync ) {
+        notifyPreFlush();
+        int x = _flushAll(sync);
+        notifyPostFlush();
+        return x;
+    }
+
+    /*static*/ int MongoFile::_flushAll( bool sync ) {
+        if ( ! sync ) {
             int num = 0;
             rwlock lk( mmmutex , false );
-            for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
+            for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ) {
                 num++;
                 MongoFile * mmf = *i;
                 if ( ! mmf )
                     continue;
-                
+
                 mmf->flush( sync );
             }
             return num;
         }
-        
+
         // want to do it sync
         set<MongoFile*> seen;
-        while ( true ){
+        while ( true ) {
             auto_ptr<Flushable> f;
             {
                 rwlock lk( mmmutex , false );
-                for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
+                for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ) {
                     MongoFile * mmf = *i;
                     if ( ! mmf )
                         continue;
@@ -127,34 +151,41 @@ namespace mongo {
             }
             if ( ! f.get() )
                 break;
-            
+
             f->flush();
         }
         return seen.size();
     }
 
-    void MongoFile::created(){
+    void MongoFile::created() {
         rwlock lk( mmmutex , true );
         mmfiles.insert(this);
     }
 
-#ifdef _DEBUG
+    void MongoFile::setFilename(string fn) {
+        rwlock( mmmutex, true );
+        assert( _filename.empty() );
+        _filename = fn;
+        MongoFile *&ptf = pathToFile[fn];
+        massert(13617, "MongoFile : multiple opens of same filename", ptf == 0);
+        ptf = this;
+    }
 
-    void MongoFile::lockAll() {
+#if defined(_DEBUG)
+    void MongoFile::markAllWritable() {
         rwlock lk( mmmutex , false );
-        for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
+        for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ) {
             MongoFile * mmf = *i;
             if (mmf) mmf->_lock();
         }
     }
 
-    void MongoFile::unlockAll() {
+    void MongoFile::unmarkAllWritable() {
         rwlock lk( mmmutex , false );
-        for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
+        for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ) {
             MongoFile * mmf = *i;
             if (mmf) mmf->_unlock();
         }
     }
 #endif
-
 } // namespace mongo

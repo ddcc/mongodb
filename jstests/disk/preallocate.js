@@ -2,7 +2,7 @@
 
 port = allocatePorts( 1 )[ 0 ];
 
-var baseName = "jstests_preallocate2";
+var baseName = "jstests_preallocate";
 
 var m = startMongod( "--port", port, "--dbpath", "/data/db/" + baseName );
 
@@ -10,7 +10,11 @@ assert.eq( 0, m.getDBs().totalSize );
 
 m.getDB( baseName ).createCollection( baseName + "1" );
 
-assert.soon( function() { return m.getDBs().totalSize > 100000000; }, "expected second file to bring total size over 100MB" );
+expectedMB = 100;
+if ( m.getDB( baseName ).serverBits() < 64 )
+    expectedMB /= 4;
+
+assert.soon( function() { return m.getDBs().totalSize > expectedMB * 1000000; }, "\n\n\nFAIL preallocate.js expected second file to bring total size over " + expectedMB + "MB" );
 
 stopMongod( port );
 

@@ -1,3 +1,35 @@
+mongodb (1:1.8.1-1) unstable; urgency=low
+
+  * Upstream 1.8.1
+    http://jira.mongodb.org/browse/SERVER/fixforversion/10260
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 07 Apr 2011 07:38:17 +0200
+
+mongodb (1:1.8.0-2) unstable; urgency=low
+
+  * return empty TERM if not set (Closes: #620910)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Tue, 05 Apr 2011 10:21:26 +0200
+
+mongodb (1:1.8.0-1) unstable; urgency=low
+
+  * Upstream 1.8.0
+    http://blog.mongodb.org/post/3903149313/mongodb-1-8-released
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 17 Mar 2011 00:10:27 +0100
+
+mongodb (1:1.6.5-3) unstable; urgency=low
+
+  [ Jérémy Lal ]
+  * Switch to cdbs, cleanup.
+  * Use debian/gbp.conf to filter out debian/* files from upstream tarball.
+
+  [ Antonin Kral ]
+  * [ab13e0b] added Vcs-* to debian/control
+  * [eb35fc8] added Jeremy as co-maintainer
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 24 Feb 2011 08:36:10 +0100
+
 mongodb (1:1.6.5-2) unstable; urgency=low
 
   * Clean up Boost packages in Build-Depends

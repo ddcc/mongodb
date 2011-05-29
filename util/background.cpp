@@ -1,4 +1,4 @@
-//background.cpp
+// @file background.cpp
 
 /*    Copyright 2009 10gen Inc.
  *
@@ -16,103 +16,105 @@
  */
 
 #include "pch.h"
-#include "goodies.h"
+
+#include "concurrency/mutex.h"
+
 #include "background.h"
-#include <list>
+
+#include "mongoutils/str.h"
 
 namespace mongo {
 
-    BackgroundJob *BackgroundJob::grab = 0;
-    mongo::mutex BackgroundJob::mutex("BackgroundJob");
+    // both the BackgroundJob and the internal thread point to JobStatus
+    struct BackgroundJob::JobStatus {
+        JobStatus( bool delFlag )
+            : deleteSelf(delFlag), m("backgroundJob"), state(NotStarted) { }
 
-    /* static */
-    void BackgroundJob::thr() {
-        assert( grab );
-        BackgroundJob *us = grab;
-        assert( us->state == NotStarted );
-        us->state = Running;
-        grab = 0;
+        const bool deleteSelf;
 
+        mongo::mutex m;  // protects state below
+        boost::condition finished; // means _state == Done
+        State state;
+    };
+
+    BackgroundJob::BackgroundJob( bool selfDelete ) {
+        _status.reset( new JobStatus( selfDelete ) );
+    }
+
+    // Background object can be only be destroyed after jobBody() ran
+    void BackgroundJob::jobBody( boost::shared_ptr<JobStatus> status ) {
+        LOG(1) << "BackgroundJob starting: " << name() << endl;
         {
-            string nm = us->name();
-            setThreadName(nm.c_str());
+            scoped_lock l( status->m );
+            massert( 13643 , mongoutils::str::stream() << "backgroundjob already started: " << name() , status->state == NotStarted );
+            status->state = Running;
         }
+
+        const string threadName = name();
+        if( ! threadName.empty() )
+            setThreadName( threadName.c_str() );
 
         try {
-            us->run();
+            run();
         }
-        catch ( std::exception& e ){
-            log( LL_ERROR ) << "backgroundjob error: " << e.what() << endl;
+        catch ( std::exception& e ) {
+            log( LL_ERROR ) << "backgroundjob " << name() << "error: " << e.what() << endl;
         }
         catch(...) {
-            log( LL_ERROR ) << "uncaught exception in BackgroundJob" << endl;
+            log( LL_ERROR ) << "uncaught exception in BackgroundJob " << name() << endl;
         }
-        us->state = Done;
-        bool delSelf = us->deleteSelf;
-        us->ending();
-        if( delSelf ) 
-            delete us;
+
+        {
+            scoped_lock l( status->m );
+            status->state = Done;
+            status->finished.notify_all();
+        }
+
+        if( status->deleteSelf )
+            delete this;
     }
 
     BackgroundJob& BackgroundJob::go() {
-        scoped_lock bl(mutex);
-        assert( grab == 0 );
-        grab = this;
-        boost::thread t(thr);
-        while ( grab )
-            sleepmillis(2);
+        boost::thread t( boost::bind( &BackgroundJob::jobBody , this, _status ) );
         return *this;
     }
 
-    bool BackgroundJob::wait(int msMax, unsigned maxsleep) {
-        unsigned ms = 1;
-        Date_t start = jsTime();
-        while ( state != Done ) {
-            sleepmillis(ms);
-            if( ms*2<maxsleep ) ms*=2;
-            if ( msMax && ( int( jsTime() - start ) > msMax) )
-                return false;
+    bool BackgroundJob::wait( unsigned msTimeOut ) {
+        scoped_lock l( _status->m );
+        while ( _status->state != Done ) {
+            if ( msTimeOut ) {
+                // add msTimeOut millisecond to current time
+                boost::xtime xt;
+                boost::xtime_get( &xt, boost::TIME_UTC );
+
+                unsigned long long ns = msTimeOut * 1000000ULL; // milli to nano
+                if ( xt.nsec + ns < 1000000000 ) {
+                    xt.nsec = (xtime::xtime_nsec_t) (xt.nsec + ns);
+                }
+                else {
+                    xt.sec += 1 + ns / 1000000000;
+                    xt.nsec = ( ns + xt.nsec ) % 1000000000;
+                }
+
+                if ( ! _status->finished.timed_wait( l.boost() , xt ) )
+                    return false;
+
+            }
+            else {
+                _status->finished.wait( l.boost() );
+            }
         }
         return true;
     }
 
-    void BackgroundJob::go(list<BackgroundJob*>& L) {
-        for( list<BackgroundJob*>::iterator i = L.begin(); i != L.end(); i++ )
-            (*i)->go();
+    BackgroundJob::State BackgroundJob::getState() const {
+        scoped_lock l( _status->m);
+        return _status->state;
     }
 
-    /* wait for several jobs to finish. */
-    void BackgroundJob::wait(list<BackgroundJob*>& L, unsigned maxsleep) {
-        unsigned ms = 1;
-        {
-            x:
-            sleepmillis(ms);
-            if( ms*2<maxsleep ) ms*=2;
-            for( list<BackgroundJob*>::iterator i = L.begin(); i != L.end(); i++ ) { 
-                assert( (*i)->state != NotStarted );
-                if( (*i)->state != Done )
-                    goto x;
-            }
-        }
-    }
-    
-    void PeriodicBackgroundJob::run(){
-        // want to handle first one differently so inShutdown is obeyed nicely
-        sleepmillis( _millis );
-        
-        while ( ! inShutdown() ){
-            try {
-                runLoop();
-            }
-            catch ( std::exception& e ){
-                log( LL_ERROR ) << "PeriodicBackgroundJob [" << name() << "] error: " << e.what() << endl;
-            }
-            catch ( ... ){
-                log( LL_ERROR ) << "PeriodicBackgroundJob [" << name() << "] unknown error" << endl;
-            }
-            
-            sleepmillis( _millis );
-        }
+    bool BackgroundJob::running() const {
+        scoped_lock l( _status->m);
+        return _status->state == Running;
     }
 
 } // namespace mongo

@@ -26,19 +26,6 @@ namespace mongo {
 
 //    void jniCallback(Message& m, Message& out);
 
-    /* Note the limit here is rather arbitrary and is simply a standard. generally the code works
-       with any object that fits in ram.
-
-       Also note that the server has some basic checks to enforce this limit but those checks are not exhaustive
-       for example need to check for size too big after
-         update $push (append) operation
-         various db.eval() type operations
-
-       Note also we sometimes do work with objects slightly larger - an object in the replication local.oplog
-       could be slightly larger.
-    */
-    const int MaxBSONObjectSize = 4 * 1024 * 1024;
-    
     /**
      * class to hold path + dbname -> Database
      * might be able to optimizer further
@@ -48,8 +35,7 @@ namespace mongo {
         typedef map<string,Database*> DBs;
         typedef map<string,DBs> Paths;
 
-        DatabaseHolder() : _size(0){
-        }
+        DatabaseHolder() : _size(0) { }
 
         bool isLoaded( const string& ns , const string& path ) const {
             dbMutex.assertAtLeastReadLocked();
@@ -57,29 +43,29 @@ namespace mongo {
             if ( x == _paths.end() )
                 return false;
             const DBs& m = x->second;
-            
+
             string db = _todb( ns );
 
             DBs::const_iterator it = m.find(db);
             return it != m.end();
         }
-        
+
         Database * get( const string& ns , const string& path ) const {
             dbMutex.assertAtLeastReadLocked();
             Paths::const_iterator x = _paths.find( path );
             if ( x == _paths.end() )
                 return 0;
             const DBs& m = x->second;
-            
+
             string db = _todb( ns );
 
             DBs::const_iterator it = m.find(db);
-            if ( it != m.end() ) 
+            if ( it != m.end() )
                 return it->second;
             return 0;
         }
-        
-        void put( const string& ns , const string& path , Database * db ){
+
+        void put( const string& ns , const string& path , Database * db ) {
             dbMutex.assertWriteLocked();
             DBs& m = _paths[path];
             Database*& d = m[_todb(ns)];
@@ -87,35 +73,10 @@ namespace mongo {
                 _size++;
             d = db;
         }
-        
-        Database* getOrCreate( const string& ns , const string& path , bool& justCreated ){
-            dbMutex.assertWriteLocked();
-            DBs& m = _paths[path];
-            
-            string dbname = _todb( ns );
 
-            Database* & db = m[dbname];
-            if ( db ){
-                justCreated = false;
-                return db;
-            }
-            
-            log(1) << "Accessing: " << dbname << " for the first time" << endl;
-            try {
-                db = new Database( dbname.c_str() , justCreated , path );
-            }
-            catch ( ... ){
-                m.erase( dbname );
-                throw;
-            }
-            _size++;
-            return db;
-        }
-        
+        Database* getOrCreate( const string& ns , const string& path , bool& justCreated );
 
-
-
-        void erase( const string& ns , const string& path ){
+        void erase( const string& ns , const string& path ) {
             dbMutex.assertWriteLocked();
             DBs& m = _paths[path];
             _size -= (int)m.erase( _todb( ns ) );
@@ -124,71 +85,77 @@ namespace mongo {
         /* force - force close even if something underway - use at shutdown */
         bool closeAll( const string& path , BSONObjBuilder& result, bool force );
 
-        int size(){
+        int size() {
             return _size;
         }
-        
+
+        void forEach(boost::function<void(Database *)> f) const {
+            dbMutex.assertAtLeastReadLocked();
+            for ( Paths::const_iterator i=_paths.begin(); i!=_paths.end(); i++ ) {
+                DBs m = i->second;
+                for( DBs::const_iterator j=m.begin(); j!=m.end(); j++ ) {
+                    f(j->second);
+                }
+            }
+        }
+
         /**
          * gets all unique db names, ignoring paths
          */
         void getAllShortNames( set<string>& all ) const {
             dbMutex.assertAtLeastReadLocked();
-            for ( Paths::const_iterator i=_paths.begin(); i!=_paths.end(); i++ ){
+            for ( Paths::const_iterator i=_paths.begin(); i!=_paths.end(); i++ ) {
                 DBs m = i->second;
-                for( DBs::const_iterator j=m.begin(); j!=m.end(); j++ ){
+                for( DBs::const_iterator j=m.begin(); j!=m.end(); j++ ) {
                     all.insert( j->first );
                 }
             }
         }
 
     private:
-        
+
         string _todb( const string& ns ) const {
             string d = __todb( ns );
-            uassert( 13280 , (string)"invalid db name: " + ns , Database::validDBName( d ) );            
+            uassert( 13280 , (string)"invalid db name: " + ns , Database::validDBName( d ) );
             return d;
         }
 
         string __todb( const string& ns ) const {
             size_t i = ns.find( '.' );
-            if ( i == string::npos ){
+            if ( i == string::npos ) {
                 uassert( 13074 , "db name can't be empty" , ns.size() );
                 return ns;
             }
             uassert( 13075 , "db name can't be empty" , i > 0 );
             return ns.substr( 0 , i );
         }
-        
+
         Paths _paths;
         int _size;
-        
+
     };
 
     extern DatabaseHolder dbHolder;
 
-    // shared functionality for removing references to a database from this program instance
-    // does not delete the files on disk
-    void closeDatabase( const char *cl, const string& path = dbpath );
-    
     struct dbtemprelease {
         Client::Context * _context;
         int _locktype;
-        
+
         dbtemprelease() {
             _context = cc().getContext();
             _locktype = dbMutex.getState();
             assert( _locktype );
-            
+
             if ( _locktype > 0 ) {
-				massert( 10298 , "can't temprelease nested write lock", _locktype == 1);
+                massert( 10298 , "can't temprelease nested write lock", _locktype == 1);
                 if ( _context ) _context->unlocked();
                 dbMutex.unlock();
-			}
+            }
             else {
-				massert( 10299 , "can't temprelease nested read lock", _locktype == -1);
+                massert( 10299 , "can't temprelease nested read lock", _locktype == -1);
                 if ( _context ) _context->unlocked();
                 dbMutex.unlock_shared();
-			}
+            }
 
         }
         ~dbtemprelease() {
@@ -196,11 +163,11 @@ namespace mongo {
                 dbMutex.lock();
             else
                 dbMutex.lock_shared();
-            
+
             if ( _context ) _context->relocked();
         }
     };
-    
+
 
     /**
        only does a temp release if we're not nested and have a lock
@@ -208,22 +175,22 @@ namespace mongo {
     struct dbtempreleasecond {
         dbtemprelease * real;
         int locktype;
-        
-        dbtempreleasecond(){
+
+        dbtempreleasecond() {
             real = 0;
             locktype = dbMutex.getState();
             if ( locktype == 1 || locktype == -1 )
                 real = new dbtemprelease();
         }
-        
-        ~dbtempreleasecond(){
-            if ( real ){
+
+        ~dbtempreleasecond() {
+            if ( real ) {
                 delete real;
                 real = 0;
             }
         }
-        
-        bool unlocked(){
+
+        bool unlocked() {
             return real > 0;
         }
     };

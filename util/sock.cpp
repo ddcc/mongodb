@@ -1,4 +1,4 @@
-// sock.cpp
+// @file sock.cpp
 
 /*    Copyright 2009 10gen Inc.
  *
@@ -26,6 +26,15 @@ namespace mongo {
     void enableIPv6(bool state) { ipv6 = state; }
     bool IPv6Enabled() { return ipv6; }
 
+    string getAddrInfoStrError(int code) {
+#if !defined(_WIN32)
+        return gai_strerror(code);
+#else
+        /* gai_strerrorA is not threadsafe on windows. don't use it. */
+        return errnoWithDescription(code);
+#endif
+    }
+
     SockAddr::SockAddr(int sourcePort) {
         memset(as<sockaddr_in>().sin_zero, 0, sizeof(as<sockaddr_in>().sin_zero));
         as<sockaddr_in>().sin_family = AF_INET;
@@ -38,7 +47,7 @@ namespace mongo {
         if (!strcmp(iporhost, "localhost"))
             iporhost = "127.0.0.1";
 
-        if (strchr(iporhost, '/')){
+        if (strchr(iporhost, '/')) {
 #ifdef _WIN32
             uassert(13080, "no unix socket support on windows", false);
 #endif
@@ -46,21 +55,37 @@ namespace mongo {
             as<sockaddr_un>().sun_family = AF_UNIX;
             strcpy(as<sockaddr_un>().sun_path, iporhost);
             addressSize = sizeof(sockaddr_un);
-        }else{
+        }
+        else {
             addrinfo* addrs = NULL;
             addrinfo hints;
             memset(&hints, 0, sizeof(addrinfo));
             hints.ai_socktype = SOCK_STREAM;
             //hints.ai_flags = AI_ADDRCONFIG; // This is often recommended but don't do it. SERVER-1579
+            hints.ai_flags |= AI_NUMERICHOST; // first pass tries w/o DNS lookup
             hints.ai_family = (IPv6Enabled() ? AF_UNSPEC : AF_INET);
 
             stringstream ss;
             ss << port;
             int ret = getaddrinfo(iporhost, ss.str().c_str(), &hints, &addrs);
-            if (ret){
+
+            // old C compilers on IPv6-capable hosts return EAI_NODATA error
+#ifdef EAI_NODATA
+            int nodata = (ret == EAI_NODATA);
+#else
+            int nodata = false;
+#endif
+            if (ret == EAI_NONAME || nodata) {
+                // iporhost isn't an IP address, allow DNS lookup
+                hints.ai_flags &= ~AI_NUMERICHOST;
+                ret = getaddrinfo(iporhost, ss.str().c_str(), &hints, &addrs);
+            }
+
+            if (ret) {
                 log() << "getaddrinfo(\"" << iporhost << "\") failed: " << gai_strerror(ret) << endl;
-                *this = SockAddr(port); 
-            }else{
+                *this = SockAddr(port);
+            }
+            else {
                 //TODO: handle other addresses in linked list;
                 assert(addrs->ai_addrlen <= sizeof(sa));
                 memcpy(&sa, addrs->ai_addr, addrs->ai_addrlen);
@@ -69,13 +94,13 @@ namespace mongo {
             }
         }
     }
- 
+
     bool SockAddr::isLocalHost() const {
-        switch (getType()){
-            case AF_INET: return getAddr() == "127.0.0.1";
-            case AF_INET6: return getAddr() == "::1";
-            case AF_UNIX: return true;
-            default: return false;
+        switch (getType()) {
+        case AF_INET: return getAddr() == "127.0.0.1";
+        case AF_INET6: return getAddr() == "::1";
+        case AF_UNIX: return true;
+        default: return false;
         }
         assert(false);
         return false;
@@ -191,19 +216,20 @@ namespace mongo {
     SockAddr unknownAddress( "0.0.0.0", 0 );
 
     ListeningSockets* ListeningSockets::_instance = new ListeningSockets();
-    
-    ListeningSockets* ListeningSockets::get(){
+
+    ListeningSockets* ListeningSockets::get() {
         return _instance;
     }
 
-    
-    string getHostNameCached(){
-        static string host;
-        if ( host.empty() ){
-            string s = getHostName();
-            host = s;
-        }
-        return host;
+    string _hostNameCached;
+    static void _hostNameCachedInit() {
+        _hostNameCached = getHostName();
+    }
+    boost::once_flag _hostNameCachedInitFlags = BOOST_ONCE_INIT;
+
+    string getHostNameCached() {
+        boost::call_once( _hostNameCachedInit , _hostNameCachedInitFlags );
+        return _hostNameCached;
     }
 
 } // namespace mongo

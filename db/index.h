@@ -25,20 +25,27 @@
 
 namespace mongo {
 
-	/* Details about a particular index. There is one of these effectively for each object in 
-	   system.namespaces (although this also includes the head pointer, which is not in that 
-	   collection).
+    /* Details about a particular index. There is one of these effectively for each object in
+       system.namespaces (although this also includes the head pointer, which is not in that
+       collection).
 
        ** MemoryMapped Record ** (i.e., this is on disk data)
-	 */
+     */
     class IndexDetails {
     public:
-        DiskLoc head; /* btree head disk location */
+        /**
+         * btree head disk location
+         * TODO We should make this variable private, since btree operations
+         * may change its value and we don't want clients to rely on an old
+         * value.  If we create a btree class, we can provide a btree object
+         * to clients instead of 'head'.
+         */
+        DiskLoc head;
 
         /* Location of index info object. Format:
 
              { name:"nameofindex", ns:"parentnsname", key: {keypattobject}
-               [, unique: <bool>, background: <bool>] 
+               [, unique: <bool>, background: <bool>]
              }
 
            This object is in the system.indexes collection.  Note that since we
@@ -70,6 +77,13 @@ namespace mongo {
             return info.obj().getObjectField("key");
         }
 
+        /**
+         * @return offset into keyPattern for key
+                   -1 if doesn't exist
+         */
+        int keyPatternOffset( const string& key ) const;
+        bool inKeyPattern( const string& key ) const { return keyPatternOffset( key ) >= 0; }
+
         /* true if the specified key is in the index */
         bool hasKey(const BSONObj& key);
         bool wouldCreateDup(const BSONObj& key, DiskLoc self);
@@ -96,11 +110,11 @@ namespace mongo {
             BSONObjIterator i(pattern);
             BSONElement e = i.next();
             if( strcmp(e.fieldName(), "_id") != 0 ) return false;
-            return i.next().eoo();            
+            return i.next().eoo();
         }
-        
+
         /* returns true if this is the _id index. */
-        bool isIdIndex() const { 
+        bool isIdIndex() const {
             return isIdIndexPattern( keyPattern() );
         }
 
@@ -112,11 +126,11 @@ namespace mongo {
             return io.getStringField("ns");
         }
 
-        bool unique() const { 
+        bool unique() const {
             BSONObj io = info.obj();
-            return io["unique"].trueValue() || 
-                /* temp: can we juse make unique:true always be there for _id and get rid of this? */
-                isIdIndex();
+            return io["unique"].trueValue() ||
+                   /* temp: can we juse make unique:true always be there for _id and get rid of this? */
+                   isIdIndex();
         }
 
         /* if set, when building index, if any duplicates, drop the duplicating object */
@@ -128,7 +142,7 @@ namespace mongo {
            (system.indexes or system.namespaces) -- only NamespaceIndex.
         */
         void kill_idx();
-        
+
         const IndexSpec& getSpec() const;
 
         string toString() const {
@@ -136,13 +150,13 @@ namespace mongo {
         }
     };
 
-    struct IndexChanges/*on an update*/ {
+    struct IndexChanges { /*on an update*/
         BSONObjSetDefaultOrder oldkeys;
         BSONObjSetDefaultOrder newkeys;
         vector<BSONObj*> removed; // these keys were removed as part of the change
         vector<BSONObj*> added;   // these keys were added as part of the change
 
-        /** @curObjLoc - the object we want to add's location.  if it is already in the 
+        /** @curObjLoc - the object we want to add's location.  if it is already in the
                          index, that is allowed here (for bg indexing case).
         */
         void dupCheck(IndexDetails& idx, DiskLoc curObjLoc) {

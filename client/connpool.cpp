@@ -26,162 +26,240 @@
 
 namespace mongo {
 
-    DBConnectionPool pool;
-    
-    DBClientBase* DBConnectionPool::_get(const string& ident) {
-        scoped_lock L(_mutex);
-        
-        PoolForHost& p = _pools[ident];
-        if ( p.pool.empty() )
-            return 0;
-        
-        DBClientBase *c = p.pool.top();
-        p.pool.pop();
-        return c;
+    // ------ PoolForHost ------
+
+    PoolForHost::~PoolForHost() {
+        while ( ! _pool.empty() ) {
+            StoredConnection sc = _pool.top();
+            delete sc.conn;
+            _pool.pop();
+        }
     }
 
-    DBClientBase* DBConnectionPool::_finishCreate( const string& host , DBClientBase* conn ){
+    void PoolForHost::done( DBClientBase * c ) {
+        if ( _pool.size() >= _maxPerHost ) {
+            delete c;
+        }
+        else {
+            _pool.push(c);
+        }
+    }
+
+    DBClientBase * PoolForHost::get() {
+
+        time_t now = time(0);
+
+        while ( ! _pool.empty() ) {
+            StoredConnection sc = _pool.top();
+            _pool.pop();
+            if ( sc.ok( now ) )
+                return sc.conn;
+            delete sc.conn;
+        }
+
+        return NULL;
+    }
+
+    void PoolForHost::flush() {
+        vector<StoredConnection> all;
+        while ( ! _pool.empty() ) {
+            StoredConnection c = _pool.top();
+            _pool.pop();
+            all.push_back( c );
+            bool res;
+            c.conn->isMaster( res );
+        }
+
+        for ( vector<StoredConnection>::iterator i=all.begin(); i != all.end(); ++i ) {
+            _pool.push( *i );
+        }
+    }
+
+    PoolForHost::StoredConnection::StoredConnection( DBClientBase * c ) {
+        conn = c;
+        when = time(0);
+    }
+
+    bool PoolForHost::StoredConnection::ok( time_t now ) {
+        // if connection has been idle for an hour, kill it
+        return ( now - when ) < 3600;
+    }
+
+    void PoolForHost::createdOne( DBClientBase * base) {
+        if ( _created == 0 )
+            _type = base->type();
+        _created++;
+    }
+
+    unsigned PoolForHost::_maxPerHost = 50;
+
+    // ------ DBConnectionPool ------
+
+    DBConnectionPool pool;
+
+    DBClientBase* DBConnectionPool::_get(const string& ident) {
+        scoped_lock L(_mutex);
+        PoolForHost& p = _pools[ident];
+        return p.get();
+    }
+
+    DBClientBase* DBConnectionPool::_finishCreate( const string& host , DBClientBase* conn ) {
         {
             scoped_lock L(_mutex);
             PoolForHost& p = _pools[host];
-            p.created++;
+            p.createdOne( conn );
         }
 
         onCreate( conn );
         onHandedOut( conn );
-        
+
         return conn;
     }
 
     DBClientBase* DBConnectionPool::get(const ConnectionString& url) {
         DBClientBase * c = _get( url.toString() );
-        if ( c ){
+        if ( c ) {
             onHandedOut( c );
             return c;
         }
-        
+
         string errmsg;
         c = url.connect( errmsg );
-        uassert( 13328 ,  (string)"dbconnectionpool: connect failed " + url.toString() + " : " + errmsg , c );
-        
+        uassert( 13328 ,  _name + ": connect failed " + url.toString() + " : " + errmsg , c );
+
         return _finishCreate( url.toString() , c );
     }
-    
+
     DBClientBase* DBConnectionPool::get(const string& host) {
         DBClientBase * c = _get( host );
-        if ( c ){
+        if ( c ) {
             onHandedOut( c );
             return c;
         }
-        
+
         string errmsg;
         ConnectionString cs = ConnectionString::parse( host , errmsg );
         uassert( 13071 , (string)"invalid hostname [" + host + "]" + errmsg , cs.isValid() );
-        
+
         c = cs.connect( errmsg );
-        uassert( 11002 ,  (string)"dbconnectionpool: connect failed " + host + " : " + errmsg , c );
+        if ( ! c )
+            throw SocketException( SocketException::CONNECT_ERROR , host , 11002 , str::stream() << _name << " error: " << errmsg );
         return _finishCreate( host , c );
     }
 
-    DBConnectionPool::~DBConnectionPool(){
-        for ( map<string,PoolForHost>::iterator i = _pools.begin(); i != _pools.end(); i++ ){
-            PoolForHost& p = i->second;
-
-            while ( ! p.pool.empty() ){
-                DBClientBase * c = p.pool.top();
-                delete c;
-                p.pool.pop();
-            }
-        }
+    DBConnectionPool::~DBConnectionPool() {
+        // connection closing is handled by ~PoolForHost
     }
 
-    void DBConnectionPool::flush(){
+    void DBConnectionPool::flush() {
         scoped_lock L(_mutex);
-        for ( map<string,PoolForHost>::iterator i = _pools.begin(); i != _pools.end(); i++ ){
+        for ( PoolMap::iterator i = _pools.begin(); i != _pools.end(); i++ ) {
             PoolForHost& p = i->second;
-
-            vector<DBClientBase*> all;
-            while ( ! p.pool.empty() ){
-                DBClientBase * c = p.pool.top();
-                p.pool.pop();
-                all.push_back( c );
-                bool res;
-                c->isMaster( res );
-            }
-            
-            for ( vector<DBClientBase*>::iterator i=all.begin(); i != all.end(); i++ ){
-                p.pool.push( *i );
-            }
+            p.flush();
         }
     }
 
-    void DBConnectionPool::addHook( DBConnectionHook * hook ){
+    void DBConnectionPool::addHook( DBConnectionHook * hook ) {
         _hooks.push_back( hook );
     }
 
-    void DBConnectionPool::onCreate( DBClientBase * conn ){
+    void DBConnectionPool::onCreate( DBClientBase * conn ) {
         if ( _hooks.size() == 0 )
             return;
-        
-        for ( list<DBConnectionHook*>::iterator i = _hooks.begin(); i != _hooks.end(); i++ ){
+
+        for ( list<DBConnectionHook*>::iterator i = _hooks.begin(); i != _hooks.end(); i++ ) {
             (*i)->onCreate( conn );
         }
     }
 
-    void DBConnectionPool::onHandedOut( DBClientBase * conn ){
+    void DBConnectionPool::onHandedOut( DBClientBase * conn ) {
         if ( _hooks.size() == 0 )
             return;
-        
-        for ( list<DBConnectionHook*>::iterator i = _hooks.begin(); i != _hooks.end(); i++ ){
+
+        for ( list<DBConnectionHook*>::iterator i = _hooks.begin(); i != _hooks.end(); i++ ) {
             (*i)->onHandedOut( conn );
         }
     }
 
-    void DBConnectionPool::appendInfo( BSONObjBuilder& b ){
-        scoped_lock lk( _mutex );
+    void DBConnectionPool::appendInfo( BSONObjBuilder& b ) {
         BSONObjBuilder bb( b.subobjStart( "hosts" ) );
-        for ( map<string,PoolForHost>::iterator i=_pools.begin(); i!=_pools.end(); ++i ){
-            string s = i->first;
-            BSONObjBuilder temp( bb.subobjStart( s.c_str() ) );
-            temp.append( "available" , (int)(i->second.pool.size()) );
-            temp.appendNumber( "created" , i->second.created );
-            temp.done();
+        int avail = 0;
+        long long created = 0;
+
+
+        map<ConnectionString::ConnectionType,long long> createdByType;
+
+        {
+            scoped_lock lk( _mutex );
+            for ( PoolMap::iterator i=_pools.begin(); i!=_pools.end(); ++i ) {
+                string s = i->first;
+                BSONObjBuilder temp( bb.subobjStart( s ) );
+                temp.append( "available" , i->second.numAvailable() );
+                temp.appendNumber( "created" , i->second.numCreated() );
+                temp.done();
+
+                avail += i->second.numAvailable();
+                created += i->second.numCreated();
+
+                long long& x = createdByType[i->second.type()];
+                x += i->second.numCreated();
+            }
         }
         bb.done();
+
+        {
+            BSONObjBuilder temp( bb.subobjStart( "createdByType" ) );
+            for ( map<ConnectionString::ConnectionType,long long>::iterator i=createdByType.begin(); i!=createdByType.end(); ++i ) {
+                temp.appendNumber( ConnectionString::typeToString( i->first ) , i->second );
+            }
+            temp.done();
+        }
+
+        b.append( "totalAvailable" , avail );
+        b.appendNumber( "totalCreated" , created );
     }
 
-    ScopedDbConnection * ScopedDbConnection::steal(){
+    bool DBConnectionPool::serverNameCompare::operator()( const string& a , const string& b ) const{
+        string ap = str::before( a , "/" );
+        string bp = str::before( b , "/" );
+        
+        return ap < bp;
+    }
+
+    // ------ ScopedDbConnection ------
+
+    ScopedDbConnection * ScopedDbConnection::steal() {
         assert( _conn );
         ScopedDbConnection * n = new ScopedDbConnection( _host , _conn );
         _conn = 0;
         return n;
     }
-    
+
     ScopedDbConnection::~ScopedDbConnection() {
-        if ( _conn ){
+        if ( _conn ) {
             if ( ! _conn->isFailed() ) {
                 /* see done() comments above for why we log this line */
-                log() << "~ScopedDBConnection: _conn != null" << endl;
+                log() << "~ScopedDbConnection: _conn != null" << endl;
             }
             kill();
         }
     }
 
     ScopedDbConnection::ScopedDbConnection(const Shard& shard )
-        : _host( shard.getConnString() ) , _conn( pool.get(_host) ){
+        : _host( shard.getConnString() ) , _conn( pool.get(_host) ) {
     }
-    
+
     ScopedDbConnection::ScopedDbConnection(const Shard* shard )
-        : _host( shard->getConnString() ) , _conn( pool.get(_host) ){
+        : _host( shard->getConnString() ) , _conn( pool.get(_host) ) {
     }
 
 
     class PoolFlushCmd : public Command {
     public:
-        PoolFlushCmd() : Command( "connPoolSync" , false , "connpoolsync" ){}
+        PoolFlushCmd() : Command( "connPoolSync" , false , "connpoolsync" ) {}
         virtual void help( stringstream &help ) const { help<<"internal"; }
         virtual LockType locktype() const { return NONE; }
-        virtual bool run(const string&, mongo::BSONObj&, std::string&, mongo::BSONObjBuilder& result, bool){
+        virtual bool run(const string&, mongo::BSONObj&, std::string&, mongo::BSONObjBuilder& result, bool) {
             pool.flush();
             return true;
         }
@@ -193,11 +271,13 @@ namespace mongo {
 
     class PoolStats : public Command {
     public:
-        PoolStats() : Command( "connPoolStats" ){}
+        PoolStats() : Command( "connPoolStats" ) {}
         virtual void help( stringstream &help ) const { help<<"stats about connection pool"; }
         virtual LockType locktype() const { return NONE; }
-        virtual bool run(const string&, mongo::BSONObj&, std::string&, mongo::BSONObjBuilder& result, bool){
+        virtual bool run(const string&, mongo::BSONObj&, std::string&, mongo::BSONObjBuilder& result, bool) {
             pool.appendInfo( result );
+            result.append( "numDBClientConnection" , DBClientConnection::getNumConnections() );
+            result.append( "numAScopedConnection" , AScopedConnection::getNumConnections() );
             return true;
         }
         virtual bool slaveOk() const {
@@ -206,5 +286,6 @@ namespace mongo {
 
     } poolStatsCmd;
 
+    AtomicUInt AScopedConnection::_numConnections;
 
 } // namespace mongo

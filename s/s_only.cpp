@@ -16,6 +16,8 @@
  */
 
 #include "pch.h"
+#include "request.h"
+#include "client.h"
 #include "../client/dbclient.h"
 #include "../db/dbhelpers.h"
 #include "../db/matcher.h"
@@ -27,53 +29,54 @@
  */
 namespace mongo {
 
-    auto_ptr<CursorIterator> Helpers::find( const char *ns , BSONObj query , bool requireIndex ){
-        uassert( 10196 ,  "Helpers::find can't be used in mongos" , 0 );
-        auto_ptr<CursorIterator> i;
-        return i;
-    }
-
     boost::thread_specific_ptr<Client> currentClient;
 
-    Client::Client(const char *desc , MessagingPort *p) : 
-      _context(0),
-      _shutdown(false),
-      _desc(desc),
-      _god(0),
-      _lastOp(0),
-      _mp(p)
-    {
+    Client::Client(const char *desc , MessagingPort *p) :
+        _context(0),
+        _shutdown(false),
+        _desc(desc),
+        _god(0),
+        _lastOp(0),
+        _mp(p) {
     }
-    Client::~Client(){}
-    bool Client::shutdown(){ return true; }
+    Client::~Client() {}
+    bool Client::shutdown() { return true; }
 
-    bool webHaveAdminUsers(){
-        return false;
+    Client& Client::initThread(const char *desc, MessagingPort *mp) {
+        setThreadName(desc);
+        assert( currentClient.get() == 0 );
+        Client *c = new Client(desc, mp);
+        currentClient.reset(c);
+        mongo::lastError.initThread();
+        return *c;
     }
 
-    BSONObj webGetAdminUser( const string& username ){
-        return BSONObj();
+    string Client::clientAddress(bool includePort) const {
+        ClientInfo * ci = ClientInfo::get();
+        if ( ci )
+            return ci->getRemote();
+        return "";
     }
-    
+
     bool execCommand( Command * c ,
-                      Client& client , int queryOptions , 
-                      const char *ns, BSONObj& cmdObj , 
-                      BSONObjBuilder& result, 
-                      bool fromRepl ){
+                      Client& client , int queryOptions ,
+                      const char *ns, BSONObj& cmdObj ,
+                      BSONObjBuilder& result,
+                      bool fromRepl ) {
         assert(c);
-    
+
         string dbname = nsToDatabase( ns );
-         
-        if ( cmdObj["help"].trueValue() ){
+
+        if ( cmdObj["help"].trueValue() ) {
             stringstream ss;
             ss << "help for: " << c->name << " ";
             c->help( ss );
             result.append( "help" , ss.str() );
             result.append( "lockType" , c->locktype() );
             return true;
-        } 
+        }
 
-        if ( c->adminOnly() ){
+        if ( c->adminOnly() ) {
             if ( dbname != "admin" ) {
                 result.append( "errmsg" ,  "access denied- use admin db" );
                 log() << "command denied: " << cmdObj.toString() << endl;

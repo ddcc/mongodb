@@ -1,4 +1,4 @@
-// shard.h
+// @file shard.h
 
 /**
 *    Copyright (C) 2008 10gen Inc.
@@ -26,48 +26,56 @@ namespace mongo {
     class ShardConnection;
     class ShardStatus;
 
+    /*
+     * A "shard" is a database (replica pair typically) which represents
+     * one partition of the overall database.
+     */
+
     class Shard {
     public:
         Shard()
-            : _name("") , _addr("") , _maxSize(0) , _isDraining( false ){
+            : _name("") , _addr("") , _maxSize(0) , _isDraining( false ) {
         }
 
         Shard( const string& name , const string& addr, long long maxSize = 0 , bool isDraining = false )
-            : _name(name) , _addr( addr ) , _maxSize( maxSize ) , _isDraining( isDraining ){
+            : _name(name) , _addr( addr ) , _maxSize( maxSize ) , _isDraining( isDraining ) {
+            _setAddr( addr );
         }
 
-        Shard( const string& ident ){
+        Shard( const string& ident ) {
             reset( ident );
         }
 
         Shard( const Shard& other )
-            : _name( other._name ) , _addr( other._addr ) , _maxSize( other._maxSize ) , _isDraining( other._isDraining ){
+            : _name( other._name ) , _addr( other._addr ) , _cs( other._cs ) , 
+              _maxSize( other._maxSize ) , _isDraining( other._isDraining ) , _rs( other._rs ) {
         }
 
         Shard( const Shard* other )
-            : _name( other->_name ) , _addr( other->_addr ), _maxSize( other->_maxSize ) , _isDraining( other->_isDraining ){
+            : _name( other->_name ) , _addr( other->_addr ), _cs( other->_cs ) , 
+              _maxSize( other->_maxSize ) , _isDraining( other->_isDraining ) , _rs( other->_rs ) {
         }
-        
-        static Shard make( const string& ident ){
+
+        static Shard make( const string& ident ) {
             Shard s;
             s.reset( ident );
             return s;
         }
 
-        static bool isAShard( const string& ident );
-        
         /**
          * @param ident either name or address
          */
         void reset( const string& ident );
+
+        void setAddress( const ConnectionString& cs );
         
-        void setAddress( const string& addr , bool authoritative = false );
+        ConnectionString getAddress() const { return _cs; }
 
         string getName() const {
             assert( _name.size() );
             return _name;
         }
-        
+
         string getConnString() const {
             assert( _addr.size() );
             return _addr;
@@ -92,7 +100,7 @@ namespace mongo {
         bool operator==( const Shard& s ) const {
             bool n = _name == s._name;
             bool a = _addr == s._addr;
-            
+
             assert( n == a ); // names and address are 1 to 1
             return n;
         }
@@ -107,7 +115,7 @@ namespace mongo {
         bool operator==( const string& s ) const {
             return _name == s || _addr == s;
         }
-        
+
         bool operator!=( const string& s ) const {
             return _name != s && _addr != s;
         }
@@ -115,44 +123,58 @@ namespace mongo {
         bool operator<(const Shard& o) const {
             return _name < o._name;
         }
-        
+
         bool ok() const {
             return _addr.size() > 0 && _addr.size() > 0;
         }
-        
+
         BSONObj runCommand( const string& db , const string& simple ) const {
             return runCommand( db , BSON( simple << 1 ) );
         }
         BSONObj runCommand( const string& db , const BSONObj& cmd ) const ;
-        
+
         ShardStatus getStatus() const ;
         
+        /**
+         * mostly for replica set
+         * retursn true if node is the shard 
+         * of if the replica set contains node
+         */
+        bool containsNode( const string& node ) const;
+
         static void getAllShards( vector<Shard>& all );
         static void printShardInfo( ostream& out );
-
-        /**
-         * picks a Shard for more load
-         */
-        static Shard pick();
         
+        /**
+         * @parm current - shard where the chunk/database currently lives in
+         * @return the currently emptiest shard, if best then current, or EMPTY
+         */
+        static Shard pick( const Shard& current = EMPTY );
+
         static void reloadShardInfo();
 
         static void removeShard( const string& name );
 
-        static bool isMember( const string& addr );
+        static bool isAShardNode( const string& ident );
 
         static Shard EMPTY;
-
+        
     private:
+        
+	void _rsInit();
+        void _setAddr( const string& addr );
+        
         string    _name;
         string    _addr;
-        long long _maxSize;    // in MBytes, 0 is unlimited 
+        ConnectionString _cs;
+        long long _maxSize;    // in MBytes, 0 is unlimited
         bool      _isDraining; // shard is currently being removed
+        ReplicaSetMonitorPtr _rs;
     };
 
     class ShardStatus {
     public:
-        
+
         ShardStatus( const Shard& shard , const BSONObj& obj );
 
         friend ostream& operator << (ostream& out, const ShardStatus& s) {
@@ -162,14 +184,14 @@ namespace mongo {
 
         string toString() const {
             stringstream ss;
-            ss << "shard: " << _shard << " mapped: " << _mapped << " writeLock: " << _writeLock; 
+            ss << "shard: " << _shard << " mapped: " << _mapped << " writeLock: " << _writeLock;
             return ss.str();
         }
 
-        bool operator<( const ShardStatus& other ) const{
+        bool operator<( const ShardStatus& other ) const {
             return _mapped < other._mapped;
         }
-        
+
         Shard shard() const {
             return _shard;
         }
@@ -178,9 +200,14 @@ namespace mongo {
             return _mapped;
         }
 
+        bool hasOpsQueued() const {
+            return _hasOpsQueued;
+        }
+
     private:
         Shard _shard;
         long long _mapped;
+        bool _hasOpsQueued;  // true if 'writebacks' are pending
         double _writeLock;
     };
 
@@ -195,19 +222,19 @@ namespace mongo {
         void done();
         void kill();
 
-        DBClientBase& conn(){
+        DBClientBase& conn() {
             _finishInit();
             assert( _conn );
             return *_conn;
         }
-        
-        DBClientBase* operator->(){
+
+        DBClientBase* operator->() {
             _finishInit();
             assert( _conn );
             return _conn;
         }
 
-        DBClientBase* get(){
+        DBClientBase* get() {
             _finishInit();
             assert( _conn );
             return _conn;
@@ -224,7 +251,7 @@ namespace mongo {
 
         static void sync();
 
-        void donotCheckVersion(){
+        void donotCheckVersion() {
             _setVersion = false;
             _finishedInit = true;
         }
@@ -236,11 +263,11 @@ namespace mongo {
 
         /** checks all of my thread local connections for the version of this ns */
         static void checkMyConnectionVersions( const string & ns );
-        
+
     private:
         void _init();
         void _finishInit();
-        
+
         bool _finishedInit;
 
         string _addr;

@@ -23,29 +23,38 @@
 #include "message_server.h"
 
 #include "../db/cmdline.h"
+#include "../db/lasterror.h"
+#include "../db/stats/counters.h"
 
 namespace mongo {
 
     namespace pms {
 
         MessageHandler * handler;
-        
-        void threadRun( MessagingPort * inPort){
-            assert( inPort );
-            
-            setThreadName( "conn" );
-            TicketHolderReleaser connTicketReleaser( &connTicketHolder );
 
-            auto_ptr<MessagingPort> p( inPort );
-        
+        void threadRun( MessagingPort * inPort) {
+            TicketHolderReleaser connTicketReleaser( &connTicketHolder );
+            
+            assert( inPort );
+
+            setThreadName( "conn" );
+
+            scoped_ptr<MessagingPort> p( inPort );
+
             string otherSide;
-    
+
             Message m;
             try {
+                LastError * le = new LastError();
+                lastError.reset( le ); // lastError now has ownership
+
                 otherSide = p->farEnd.toString();
 
-                while ( 1 ){
+                handler->connected( p.get() );
+
+                while ( 1 ) {
                     m.reset();
+                    p->clearCounters();
 
                     if ( ! p->recv(m) ) {
                         if( !cmdLine.quiet )
@@ -53,20 +62,21 @@ namespace mongo {
                         p->shutdown();
                         break;
                     }
-                    
-                    handler->process( m , p.get() );
+
+                    handler->process( m , p.get() , le );
+                    networkCounter.hit( p->getBytesIn() , p->getBytesOut() );
                 }
             }
-            catch ( const SocketException& ){
+            catch ( const SocketException& ) {
                 log() << "unclean socket shutdown from: " << otherSide << endl;
             }
-            catch ( const std::exception& e ){
+            catch ( const std::exception& e ) {
                 problem() << "uncaught exception (" << e.what() << ")(" << demangleName( typeid(e) ) <<") in PortMessageServer::threadRun, closing connection" << endl;
             }
-            catch ( ... ){
+            catch ( ... ) {
                 problem() << "uncaught exception in PortMessageServer::threadRun, closing connection" << endl;
-            }            
-            
+            }
+
             handler->disconnected( p.get() );
         }
 
@@ -74,16 +84,16 @@ namespace mongo {
 
     class PortMessageServer : public MessageServer , public Listener {
     public:
-            PortMessageServer(  const MessageServer::Options& opts, MessageHandler * handler ) :
-            Listener( opts.ipList, opts.port ){
-            
+        PortMessageServer(  const MessageServer::Options& opts, MessageHandler * handler ) :
+            Listener( opts.ipList, opts.port ) {
+
             uassert( 10275 ,  "multiple PortMessageServer not supported" , ! pms::handler );
             pms::handler = handler;
         }
-        
+
         virtual void accepted(MessagingPort * p) {
-            
-            if ( ! connTicketHolder.tryAcquire() ){
+
+            if ( ! connTicketHolder.tryAcquire() ) {
                 log() << "connection refused because too many open connections: " << connTicketHolder.used() << endl;
 
                 // TODO: would be nice if we notified them...
@@ -97,7 +107,8 @@ namespace mongo {
             try {
                 boost::thread thr( boost::bind( &pms::threadRun , p ) );
             }
-            catch ( boost::thread_resource_error& ){
+            catch ( boost::thread_resource_error& ) {
+                connTicketHolder.release();
                 log() << "can't create new thread, closing connection" << endl;
 
                 p->shutdown();
@@ -106,21 +117,21 @@ namespace mongo {
                 sleepmillis(2);
             }
         }
-        
-        virtual void setAsTimeTracker(){
+
+        virtual void setAsTimeTracker() {
             Listener::setAsTimeTracker();
         }
 
-        void run(){
+        void run() {
             initAndListen();
         }
 
     };
 
 
-    MessageServer * createServer( const MessageServer::Options& opts , MessageHandler * handler ){
+    MessageServer * createServer( const MessageServer::Options& opts , MessageHandler * handler ) {
         return new PortMessageServer( opts , handler );
-    }    
+    }
 
 }
 

@@ -25,11 +25,13 @@
 #include "../pch.h"
 
 namespace mongo {
-    
+
     class MessageHandler {
     public:
-        virtual ~MessageHandler(){}
-        virtual void process( Message& m , AbstractMessagingPort* p ) = 0;
+        virtual ~MessageHandler() {}
+
+        virtual void connected( AbstractMessagingPort* p ) = 0;
+        virtual void process( Message& m , AbstractMessagingPort* p , LastError * err ) = 0;
         virtual void disconnected( AbstractMessagingPort* p ) = 0;
     };
 
@@ -39,14 +41,14 @@ namespace mongo {
             int port;                   // port to bind to
             string ipList;             // addresses to bind to
 
-            Options() : port(0), ipList(""){} 
+            Options() : port(0), ipList("") {}
         };
 
-        virtual ~MessageServer(){}
+        virtual ~MessageServer() {}
         virtual void run() = 0;
         virtual void setAsTimeTracker() = 0;
     };
 
-    // TODO use a factory here to decide between port and asio variations 
+    // TODO use a factory here to decide between port and asio variations
     MessageServer * createServer( const MessageServer::Options& opts , MessageHandler * handler );
 }

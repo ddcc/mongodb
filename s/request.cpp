@@ -1,7 +1,4 @@
-/* dbgrid/request.cpp
-
-   Top level handling of requests (operations such as query, insert, ...)
-*/
+// s/request.cpp
 
 /**
 *    Copyright (C) 2008 10gen Inc.
@@ -34,53 +31,55 @@
 #include "stats.h"
 #include "cursors.h"
 #include "grid.h"
+#include "client.h"
 
 namespace mongo {
 
-    Request::Request( Message& m, AbstractMessagingPort* p ) : 
-        _m(m) , _d( m ) , _p(p) , _didInit(false){
-        
+    Request::Request( Message& m, AbstractMessagingPort* p ) :
+        _m(m) , _d( m ) , _p(p) , _didInit(false) {
+
         assert( _d.getns() );
         _id = _m.header()->id;
-        
-        _clientId = p ? p->getClientId() : 0;
-        _clientInfo = ClientInfo::get( _clientId );
+
+        _clientInfo = ClientInfo::get();
         _clientInfo->newRequest( p );
-        
+
     }
-    
-    void Request::init(){
+
+    void Request::init() {
         if ( _didInit )
             return;
         _didInit = true;
         reset();
     }
-    
-    void Request::reset( bool reload ){
-        if ( _m.operation() == dbKillCursors ){
+
+    void Request::reset( bool reload ) {
+        if ( _m.operation() == dbKillCursors ) {
             return;
         }
-        
+
+        uassert( 13644 , "can't use 'local' database through mongos" , ! str::startsWith( getns() , "local." ) );
+
         _config = grid.getDBConfig( getns() );
         if ( reload )
             uassert( 10192 ,  "db config reload failed!" , _config->reload() );
 
-        if ( _config->isSharded( getns() ) ){
+        if ( _config->isSharded( getns() ) ) {
             _chunkManager = _config->getChunkManager( getns() , reload );
             uassert( 10193 ,  (string)"no shard info for: " + getns() , _chunkManager );
         }
         else {
             _chunkManager.reset();
-        }        
+        }
 
         _m.header()->id = _id;
-        
+        _clientInfo->clearCurrentShards();
     }
-    
+
     Shard Request::primaryShard() const {
         assert( _didInit );
-            
-        if ( _chunkManager ){
+
+        if ( _chunkManager ) {
             if ( _chunkManager->numChunks() > 1 )
                 throw UserException( 8060 , "can't call primaryShard on a sharded collection" );
             return _chunkManager->findChunk( _chunkManager->getShardKey().globalMin() )->getShard();
@@ -89,26 +88,26 @@ namespace mongo {
         uassert( 10194 ,  "can't call primaryShard on a sharded collection!" , s.ok() );
         return s;
     }
-    
-    void Request::process( int attempt ){
+
+    void Request::process( int attempt ) {
         init();
         int op = _m.operation();
         assert( op > dbMsg );
-        
-        if ( op == dbKillCursors ){
+
+        if ( op == dbKillCursors ) {
             cursorCache.gotKillCursors( _m );
             return;
         }
-        
+
 
         log(3) << "Request::process ns: " << getns() << " msg id:" << (int)(_m.header()->id) << " attempt: " << attempt << endl;
-        
+
         Strategy * s = SINGLE;
         _counter = &opsNonSharded;
-        
+
         _d.markSet();
-        
-        if ( _chunkManager ){
+
+        if ( _chunkManager ) {
             s = SHARDED;
             _counter = &opsSharded;
         }
@@ -119,7 +118,7 @@ namespace mongo {
             try {
                 s->queryOp( *this );
             }
-            catch ( StaleConfigException& staleConfig ){
+            catch ( StaleConfigException& staleConfig ) {
                 log() << staleConfig.what() << " attempt: " << attempt << endl;
                 uassert( 10195 ,  "too many attempts to update config, failing" , attempt < 5 );
                 ShardConnection::checkMyConnectionVersions( getns() );
@@ -141,115 +140,31 @@ namespace mongo {
         globalOpCounters.gotOp( op , iscmd );
         _counter->gotOp( op , iscmd );
     }
-    
+
     bool Request::isCommand() const {
         int x = _d.getQueryNToReturn();
         return ( x == 1 || x == -1 ) && strstr( getns() , ".$cmd" );
     }
 
-    void Request::gotInsert(){
+    void Request::gotInsert() {
         globalOpCounters.gotInsert();
         _counter->gotInsert();
     }
 
-    void Request::reply( Message & response , const string& fromServer ){
+    void Request::reply( Message & response , const string& fromServer ) {
         assert( _didInit );
         long long cursor =response.header()->getCursor();
-        if ( cursor ){
-            cursorCache.storeRef( fromServer , cursor );
+        if ( cursor ) {
+            if ( fromServer.size() ) {
+                cursorCache.storeRef( fromServer , cursor );
+            }
+            else {
+                // probably a getMore
+                // make sure we have a ref for this
+                assert( cursorCache.getRef( cursor ).size() );
+            }
         }
         _p->reply( _m , response , _id );
     }
-    
-    ClientInfo::ClientInfo( int clientId ) : _id( clientId ){
-        _cur = &_a;
-        _prev = &_b;
-        newRequest();
-    }
-    
-    ClientInfo::~ClientInfo(){
-        if ( _lastAccess ){
-            scoped_lock lk( _clientsLock );
-            ClientCache::iterator i = _clients.find( _id );
-            if ( i != _clients.end() ){
-                _clients.erase( i );
-            }
-        }
-    }
-    
-    void ClientInfo::addShard( const string& shard ){
-        _cur->insert( shard );
-        _sinceLastGetError.insert( shard );
-    }
-    
-    void ClientInfo::newRequest( AbstractMessagingPort* p ){
-
-        if ( p ){
-            string r = p->remote().toString();
-            if ( _remote == "" )
-                _remote = r;
-            else if ( _remote != r ){
-                stringstream ss;
-                ss << "remotes don't match old [" << _remote << "] new [" << r << "]";
-                throw UserException( 13134 , ss.str() );
-            }
-        }
-        
-        _lastAccess = (int) time(0);
-        
-        set<string> * temp = _cur;
-        _cur = _prev;
-        _prev = temp;
-        _cur->clear();
-    }
-    
-    void ClientInfo::disconnect(){
-        _lastAccess = 0;
-    }
-        
-    ClientInfo * ClientInfo::get( int clientId , bool create ){
-        
-        if ( ! clientId )
-            clientId = getClientId();
-        
-        if ( ! clientId ){
-            ClientInfo * info = _tlInfo.get();
-            if ( ! info ){
-                info = new ClientInfo( 0 );
-                _tlInfo.reset( info );
-            }
-            info->newRequest();
-            return info;
-        }
-        
-        scoped_lock lk( _clientsLock );
-        ClientCache::iterator i = _clients.find( clientId );
-        if ( i != _clients.end() )
-            return i->second;
-        if ( ! create )
-            return 0;
-        ClientInfo * info = new ClientInfo( clientId );
-        _clients[clientId] = info;
-        return info;
-    }
-        
-    void ClientInfo::disconnect( int clientId ){
-        if ( ! clientId )
-            return;
-
-        scoped_lock lk( _clientsLock );
-        ClientCache::iterator i = _clients.find( clientId );
-        if ( i == _clients.end() )
-            return;
-
-        ClientInfo* ci = i->second;
-        ci->disconnect();
-        delete ci;
-        _clients.erase( i );
-    }
-
-    ClientCache& ClientInfo::_clients = *(new ClientCache());
-    mongo::mutex ClientInfo::_clientsLock("_clientsLock");
-    boost::thread_specific_ptr<ClientInfo> ClientInfo::_tlInfo;
 
 } // namespace mongo

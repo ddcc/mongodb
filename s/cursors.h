@@ -16,7 +16,7 @@
  */
 
 
-#pragma once 
+#pragma once
 
 #include "../pch.h"
 
@@ -35,21 +35,21 @@ namespace mongo {
         virtual ~ShardedClientCursor();
 
         long long getId();
-        
+
         /**
          * @return whether there is more data left
          */
-        bool sendNextBatch( Request& r ){ return sendNextBatch( r , _ntoreturn ); }
+        bool sendNextBatch( Request& r ) { return sendNextBatch( r , _ntoreturn ); }
         bool sendNextBatch( Request& r , int ntoreturn );
-        
+
         void accessed();
         /** @return idle time in ms */
         long long idleTime( long long now );
 
     protected:
-        
+
         ClusteredCursor * _cursor;
-        
+
         int _skip;
         int _ntoreturn;
 
@@ -62,10 +62,10 @@ namespace mongo {
     };
 
     typedef boost::shared_ptr<ShardedClientCursor> ShardedClientCursorPtr;
-    
+
     class CursorCache {
     public:
-        
+
         static long long TIMEOUT;
 
         typedef map<long long,ShardedClientCursorPtr> MapSharded;
@@ -73,29 +73,34 @@ namespace mongo {
 
         CursorCache();
         ~CursorCache();
-        
-        ShardedClientCursorPtr get( long long id );
+
+        ShardedClientCursorPtr get( long long id ) const;
         void store( ShardedClientCursorPtr cursor );
         void remove( long long id );
 
         void storeRef( const string& server , long long id );
 
+        /** @return the server for id or "" */
+        string getRef( long long id ) const ;
+        
         void gotKillCursors(Message& m );
-        
-        void appendInfo( BSONObjBuilder& result );
-        
+
+        void appendInfo( BSONObjBuilder& result ) const ;
+
         long long genId();
 
         void doTimeouts();
         void startTimeoutThread();
     private:
-        mutex _mutex;
+        mutable mongo::mutex _mutex;
 
         MapSharded _cursors;
         MapNormal _refs;
-        
+
         long long _shardedTotal;
+
+        static int _myLogLevel;
     };
-    
+
     extern CursorCache cursorCache;
 }

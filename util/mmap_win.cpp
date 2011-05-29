@@ -19,21 +19,36 @@
 #include "mmap.h"
 #include "text.h"
 #include <windows.h>
+#include "../db/mongommf.h"
+#include "../db/concurrency.h"
 
 namespace mongo {
 
-    MemoryMappedFile::MemoryMappedFile() {
+    mutex mapViewMutex("mapView");
+    ourbitset writable;
+
+    /** notification on unmapping so we can clear writable bits */
+    void MemoryMappedFile::clearWritableBits(void *p) {
+        for( unsigned i = ((size_t)p)/ChunkSize; i <= (((size_t)p)+len)/ChunkSize; i++ ) {
+            writable.clear(i);
+            assert( !writable.get(i) );
+        }
+    }
+
+    MemoryMappedFile::MemoryMappedFile()
+        : _flushMutex(new mutex("flushMutex")) {
         fd = 0;
         maphandle = 0;
-        view = 0;
         len = 0;
         created();
     }
 
     void MemoryMappedFile::close() {
-        if ( view )
-            UnmapViewOfFile(view);
-        view = 0;
+        for( vector<void*>::iterator i = views.begin(); i != views.end(); i++ ) {
+            clearWritableBits(*i);
+            UnmapViewOfFile(*i);
+        }
+        views.clear();
         if ( maphandle )
             CloseHandle(maphandle);
         maphandle = 0;
@@ -41,22 +56,37 @@ namespace mongo {
             CloseHandle(fd);
         fd = 0;
     }
-    
-    unsigned mapped = 0;
 
-    void* MemoryMappedFile::map(const char *filenameIn, long &length, int options) {
-        _filename = filenameIn;
+    unsigned long long mapped = 0;
+
+    void* MemoryMappedFile::createReadOnlyMap() {
+        assert( maphandle );
+        scoped_lock lk(mapViewMutex);
+        void *p = MapViewOfFile(maphandle, FILE_MAP_READ, /*f ofs hi*/0, /*f ofs lo*/ 0, /*dwNumberOfBytesToMap 0 means to eof*/0);
+        if ( p == 0 ) {
+            DWORD e = GetLastError();
+            log() << "FILE_MAP_READ MapViewOfFile failed " << filename() << " " << errnoWithDescription(e) << endl;
+        }
+        else {
+            views.push_back(p);
+        }
+        return p;
+    }
+
+    void* MemoryMappedFile::map(const char *filenameIn, unsigned long long &length, int options) {
+        assert( fd == 0 && len == 0 ); // can't open more than once
+        setFilename(filenameIn);
         /* big hack here: Babble uses db names with colons.  doesn't seem to work on windows.  temporary perhaps. */
         char filename[256];
         strncpy(filename, filenameIn, 255);
         filename[255] = 0;
-        { 
+        {
             size_t len = strlen( filename );
-            for ( size_t i=len-1; i>=0; i-- ){
+            for ( size_t i=len-1; i>=0; i-- ) {
                 if ( filename[i] == '/' ||
-                     filename[i] == '\\' )
+                        filename[i] == '\\' )
                     break;
-                
+
                 if ( filename[i] == ':' )
                     filename[i] = '_';
             }
@@ -64,78 +94,104 @@ namespace mongo {
 
         updateLength( filename, length );
 
-        DWORD createOptions = FILE_ATTRIBUTE_NORMAL;
-        if ( options & SEQUENTIAL )
-            createOptions |= FILE_FLAG_SEQUENTIAL_SCAN;
-
-        fd = CreateFile(
-                 toNativeString(filename).c_str(),
-                 GENERIC_WRITE | GENERIC_READ, FILE_SHARE_READ,
-                 NULL, OPEN_ALWAYS, createOptions , NULL);
-        if ( fd == INVALID_HANDLE_VALUE ) {
-            out() << "Create/OpenFile failed " << filename << ' ' << GetLastError() << endl;
-            return 0;
+        {
+            DWORD createOptions = FILE_ATTRIBUTE_NORMAL;
+            if ( options & SEQUENTIAL )
+                createOptions |= FILE_FLAG_SEQUENTIAL_SCAN;
+            DWORD rw = GENERIC_READ | GENERIC_WRITE;
+            fd = CreateFile(
+                     toNativeString(filename).c_str(),
+                     rw, // desired access
+                     FILE_SHARE_WRITE | FILE_SHARE_READ, // share mode
+                     NULL, // security
+                     OPEN_ALWAYS, // create disposition
+                     createOptions , // flags
+                     NULL); // hTempl
+            if ( fd == INVALID_HANDLE_VALUE ) {
+                DWORD e = GetLastError();
+                log() << "Create/OpenFile failed " << filename << " errno:" << e << endl;
+                return 0;
+            }
         }
 
         mapped += length;
 
-        maphandle = CreateFileMapping(fd, NULL, PAGE_READWRITE, 0, length, NULL);
-        if ( maphandle == NULL ) {
-            out() << "CreateFileMapping failed " << filename << ' ' << GetLastError() << endl;
-            return 0;
+        {
+            DWORD flProtect = PAGE_READWRITE; //(options & READONLY)?PAGE_READONLY:PAGE_READWRITE;
+            maphandle = CreateFileMapping(fd, NULL, flProtect,
+                                          length >> 32 /*maxsizehigh*/,
+                                          (unsigned) length /*maxsizelow*/,
+                                          NULL/*lpName*/);
+            if ( maphandle == NULL ) {
+                DWORD e = GetLastError(); // log() call was killing lasterror before we get to that point in the stream
+                log() << "CreateFileMapping failed " << filename << ' ' << errnoWithDescription(e) << endl;
+                close();
+                return 0;
+            }
         }
 
-        view = MapViewOfFile(maphandle, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+        void *view = 0;
+        {
+            scoped_lock lk(mapViewMutex);
+            DWORD access = (options&READONLY)? FILE_MAP_READ : FILE_MAP_ALL_ACCESS;
+            view = MapViewOfFile(maphandle, access, /*f ofs hi*/0, /*f ofs lo*/ 0, /*dwNumberOfBytesToMap 0 means to eof*/0);
+        }
         if ( view == 0 ) {
-            out() << "MapViewOfFile failed " << filename << " " << errnoWithDescription() << " ";
-            out() << GetLastError();
-            out() << endl;
+            DWORD e = GetLastError();
+            log() << "MapViewOfFile failed " << filename << " " << errnoWithDescription(e) << endl;
+            close();
+        }
+        else {
+            views.push_back(view);
         }
         len = length;
+
         return view;
     }
 
     class WindowsFlushable : public MemoryMappedFile::Flushable {
     public:
-        WindowsFlushable( void * view , HANDLE fd , string filename )
-            : _view(view) , _fd(fd) , _filename(filename){
-            
-        }
-        
-        void flush(){
-            if (!_view || !_fd) 
+        WindowsFlushable( void * view , HANDLE fd , string filename , boost::shared_ptr<mutex> flushMutex )
+            : _view(view) , _fd(fd) , _filename(filename) , _flushMutex(flushMutex)
+        {}
+
+        void flush() {
+            if (!_view || !_fd)
                 return;
 
+            scoped_lock lk(*_flushMutex);
+
             bool success = FlushViewOfFile(_view, 0); // 0 means whole mapping
-            if (!success){
+            if (!success) {
                 int err = GetLastError();
                 out() << "FlushViewOfFile failed " << err << " file: " << _filename << endl;
             }
-            
+
             success = FlushFileBuffers(_fd);
-            if (!success){
+            if (!success) {
                 int err = GetLastError();
                 out() << "FlushFileBuffers failed " << err << " file: " << _filename << endl;
             }
         }
-        
+
         void * _view;
         HANDLE _fd;
         string _filename;
-        
+        boost::shared_ptr<mutex> _flushMutex;
     };
-    
+
     void MemoryMappedFile::flush(bool sync) {
         uassert(13056, "Async flushing not supported on windows", sync);
-        
-        WindowsFlushable f( view , fd , _filename );
-        f.flush();
+        if( !views.empty() ) {
+            WindowsFlushable f( views[0] , fd , filename() , _flushMutex);
+            f.flush();
+        }
     }
 
-    MemoryMappedFile::Flushable * MemoryMappedFile::prepareFlush(){
-        return new WindowsFlushable( view , fd , _filename );
+    MemoryMappedFile::Flushable * MemoryMappedFile::prepareFlush() {
+        return new WindowsFlushable( views.empty() ? 0 : views[0] , fd , filename() , _flushMutex );
     }
     void MemoryMappedFile::_lock() {}
     void MemoryMappedFile::_unlock() {}
 
-} 
+}

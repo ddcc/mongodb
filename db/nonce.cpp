@@ -17,22 +17,25 @@
 
 #include "pch.h"
 #include "nonce.h"
+#include "../util/time_support.h"
 
 extern int do_md5_test(void);
 
 namespace mongo {
-    
-	Security::Security() {
-		static int n;
-		massert( 10352 , "Security is a singleton class", ++n == 1);
-		init(); 
-	}
 
-    void Security::init(){
-		if( _initialized ) return;
-		_initialized = true;
+    BOOST_STATIC_ASSERT( sizeof(nonce) == 8 );
 
-#if defined(__linux__) || defined(__sunos__)
+    Security::Security() {
+        static int n;
+        massert( 10352 , "Security is a singleton class", ++n == 1);
+        init();
+    }
+
+    void Security::init() {
+        if( _initialized ) return;
+        _initialized = true;
+
+#if defined(__linux__) || defined(__sunos__) || defined(__APPLE__)
         _devrandom = new ifstream("/dev/urandom", ios::binary|ios::in);
         massert( 10353 ,  "can't open dev/urandom", _devrandom->is_open() );
 #elif defined(_WIN32)
@@ -40,36 +43,41 @@ namespace mongo {
 #else
         srandomdev();
 #endif
-        assert( sizeof(nonce) == 8 );
-        
+
 #ifndef NDEBUG
         if ( do_md5_test() )
-	    massert( 10354 , "md5 unit test fails", false);
+            massert( 10354 , "md5 unit test fails", false);
 #endif
     }
-    
-    nonce Security::getNonce(){
+
+    nonce Security::getNonce() {
         static mongo::mutex m("getNonce");
         scoped_lock lk(m);
+        
+        if ( ! _initialized )
+            init();
 
-		/* question/todo: /dev/random works on OS X.  is it better 
-		   to use that than random() / srandom()?
-		*/
+        /* question/todo: /dev/random works on OS X.  is it better
+           to use that than random() / srandom()?
+        */
 
         nonce n;
-#if defined(__linux__) || defined(__sunos__)
+#if defined(__linux__) || defined(__sunos__) || defined(__APPLE__)
         _devrandom->read((char*)&n, sizeof(n));
         massert( 10355 , "devrandom failed", !_devrandom->fail());
 #elif defined(_WIN32)
-        n = (((unsigned long long)rand())<<32) | rand();
+        unsigned a=0, b=0;
+        assert( rand_s(&a) == 0 );
+        assert( rand_s(&b) == 0 );
+        n = (((unsigned long long)a)<<32) | b;
 #else
         n = (((unsigned long long)random())<<32) | random();
 #endif
         return n;
     }
     unsigned getRandomNumber() { return (unsigned) security.getNonce(); }
-    
-	bool Security::_initialized;
+
+    bool Security::_initialized;
     Security security;
-        
+
 } // namespace mongo

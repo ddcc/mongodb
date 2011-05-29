@@ -32,7 +32,7 @@ namespace NamespaceTests {
             dblock lk;
             Client::Context _context;
         public:
-            Base() : _context(ns()){
+            Base() : _context(ns()) {
             }
             virtual ~Base() {
                 if ( id_.info.isNull() )
@@ -323,7 +323,7 @@ namespace NamespaceTests {
                 return k.obj();
             }
         };
-        
+
         class ArraySubobjectSingleMissing : public Base {
         public:
             void run() {
@@ -336,7 +336,7 @@ namespace NamespaceTests {
                     elts.push_back( simpleBC( i ) );
                 BSONObjBuilder b;
                 b.append( "a", elts );
-                
+
                 BSONObjSetDefaultOrder keys;
                 id().getKeysFromObject( b.done(), keys );
                 checkSize( 4, keys );
@@ -353,7 +353,7 @@ namespace NamespaceTests {
                 return aDotB();
             }
         };
-        
+
         class ArraySubobjectMissing : public Base {
         public:
             void run() {
@@ -376,7 +376,7 @@ namespace NamespaceTests {
                 return aDotB();
             }
         };
-        
+
         class MissingField : public Base {
         public:
             void run() {
@@ -391,7 +391,7 @@ namespace NamespaceTests {
                 return BSON( "a" << 1 );
             }
         };
-        
+
         class SubobjectMissing : public Base {
         public:
             void run() {
@@ -406,12 +406,12 @@ namespace NamespaceTests {
                 return aDotB();
             }
         };
-        
+
         class CompoundMissing : public Base {
         public:
-            void run(){
+            void run() {
                 create();
-                
+
                 {
                     BSONObjSetDefaultOrder keys;
                     id().getKeysFromObject( fromjson( "{x:'a',y:'b'}" ) , keys );
@@ -428,16 +428,16 @@ namespace NamespaceTests {
                     b.appendNull( "" );
                     assertEquals( b.obj() , *keys.begin() );
                 }
-                
+
             }
 
         private:
             virtual BSONObj key() const {
                 return BSON( "x" << 1 << "y" << 1 );
             }
-            
+
         };
-        
+
         class ArraySubelementComplex : public Base {
         public:
             void run() {
@@ -508,17 +508,17 @@ namespace NamespaceTests {
                 return aDotB();
             }
         };
-        
+
         class EmptyArray : Base {
         public:
-            void run(){
+            void run() {
                 create();
 
                 BSONObjSetDefaultOrder keys;
                 id().getKeysFromObject( fromjson( "{a:[1,2]}" ), keys );
                 checkSize(2, keys );
                 keys.clear();
-                
+
                 id().getKeysFromObject( fromjson( "{a:[1]}" ), keys );
                 checkSize(1, keys );
                 keys.clear();
@@ -535,14 +535,14 @@ namespace NamespaceTests {
 
         class MultiEmptyArray : Base {
         public:
-            void run(){
+            void run() {
                 create();
 
                 BSONObjSetDefaultOrder keys;
                 id().getKeysFromObject( fromjson( "{a:1,b:[1,2]}" ), keys );
                 checkSize(2, keys );
                 keys.clear();
-                
+
                 id().getKeysFromObject( fromjson( "{a:1,b:[1]}" ), keys );
                 checkSize(1, keys );
                 keys.clear();
@@ -551,7 +551,7 @@ namespace NamespaceTests {
                 //cout << "YO : " << *(keys.begin()) << endl;
                 checkSize(1, keys );
                 keys.clear();
-                
+
                 id().getKeysFromObject( fromjson( "{a:1,b:[]}" ), keys );
                 checkSize(1, keys );
                 //cout << "YO : " << *(keys.begin()) << endl;
@@ -600,11 +600,11 @@ namespace NamespaceTests {
                     if ( fileNo == -1 )
                         continue;
                     for ( int j = i.ext()->firstRecord.getOfs(); j != DiskLoc::NullOfs;
-                          j = DiskLoc( fileNo, j ).rec()->nextOfs ) {
+                            j = DiskLoc( fileNo, j ).rec()->nextOfs ) {
                         ++count;
                     }
                 }
-                ASSERT_EQUALS( count, nsd()->nrecords );
+                ASSERT_EQUALS( count, nsd()->stats.nrecords );
                 return count;
             }
             int nExtents() const {
@@ -620,7 +620,7 @@ namespace NamespaceTests {
                 return ns_;
             }
             NamespaceDetails *nsd() const {
-                return nsdetails( ns() );
+                return nsdetails( ns() )->writingWithExtra();
             }
             static BSONObj bigObj() {
                 string as( 187, 'a' );
@@ -700,7 +700,7 @@ namespace NamespaceTests {
             }
         };
 
-        /* test  NamespaceDetails::cappedTruncateAfter(const char *ns, DiskLoc loc) 
+        /* test  NamespaceDetails::cappedTruncateAfter(const char *ns, DiskLoc loc)
         */
         class TruncateCapped : public Base {
             virtual string spec() const {
@@ -737,9 +737,9 @@ namespace NamespaceTests {
                 }
 
                 DiskLoc d = l[6];
-                long long n = nsd->nrecords;
+                long long n = nsd->stats.nrecords;
                 nsd->cappedTruncateAfter(ns(), d, false);
-                ASSERT_EQUALS( nsd->nrecords , n-1 );
+                ASSERT_EQUALS( nsd->stats.nrecords , n-1 );
 
                 {
                     ForwardCappedCursor c(nsd);
@@ -770,7 +770,7 @@ namespace NamespaceTests {
             void run() {
                 create();
                 nsd()->deletedList[ 2 ] = nsd()->cappedListOfAllDeletedRecords().drec()->nextDeleted.drec()->nextDeleted;
-                nsd()->cappedListOfAllDeletedRecords().drec()->nextDeleted.drec()->nextDeleted = DiskLoc();
+                nsd()->cappedListOfAllDeletedRecords().drec()->nextDeleted.drec()->nextDeleted.writing() = DiskLoc();
                 nsd()->cappedLastDelRecLastExtent().Null();
                 NamespaceDetails *d = nsd();
                 zero( &d->capExtent );
@@ -820,15 +820,15 @@ namespace NamespaceTests {
                 ASSERT_EQUALS( 496U, sizeof( NamespaceDetails ) );
             }
         };
-        
+
     } // namespace NamespaceDetailsTests
 
     class All : public Suite {
     public:
-        All() : Suite( "namespace" ){
+        All() : Suite( "namespace" ) {
         }
 
-        void setupTests(){
+        void setupTests() {
             add< IndexDetailsTests::Create >();
             add< IndexDetailsTests::GetKeysFromObjectSimple >();
             add< IndexDetailsTests::GetKeysFromObjectDotted >();

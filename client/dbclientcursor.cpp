@@ -26,14 +26,14 @@ namespace mongo {
 
     void assembleRequest( const string &ns, BSONObj query, int nToReturn, int nToSkip, const BSONObj *fieldsToReturn, int queryOptions, Message &toSend );
 
-    int DBClientCursor::nextBatchSize(){
+    int DBClientCursor::nextBatchSize() {
 
         if ( nToReturn == 0 )
             return batchSize;
 
         if ( batchSize == 0 )
             return nToReturn;
-        
+
         return batchSize < nToReturn ? batchSize : nToReturn;
     }
 
@@ -41,7 +41,8 @@ namespace mongo {
         Message toSend;
         if ( !cursorId ) {
             assembleRequest( ns, query, nextBatchSize() , nToSkip, fieldsToReturn, opts, toSend );
-        } else {
+        }
+        else {
             BufBuilder b;
             b.appendNum( opts );
             b.appendStr( ns );
@@ -49,10 +50,16 @@ namespace mongo {
             b.appendNum( cursorId );
             toSend.setData( dbGetMore, b.buf(), b.len() );
         }
-        if ( !connector->call( toSend, *m, false ) )
+        if ( !_client->call( toSend, *m, false ) ) {
+            // log msg temp?
+            log() << "DBClientCursor::init call() failed" << endl;
             return false;
-        if ( m->empty() )
+        }
+        if ( m->empty() ) {
+            // log msg temp?
+            log() << "DBClientCursor::init message from call() was empty" << endl;
             return false;
+        }
         dataReceived();
         return true;
     }
@@ -60,7 +67,7 @@ namespace mongo {
     void DBClientCursor::requestMore() {
         assert( cursorId && pos == nReturned );
 
-        if (haveLimit){
+        if (haveLimit) {
             nToReturn -= nReturned;
             assert(nToReturn > 0);
         }
@@ -69,13 +76,13 @@ namespace mongo {
         b.appendStr(ns);
         b.appendNum(nextBatchSize());
         b.appendNum(cursorId);
-        
+
         Message toSend;
         toSend.setData(dbGetMore, b.buf(), b.len());
         auto_ptr<Message> response(new Message());
-        
-        if ( connector ){
-            connector->call( toSend, *response );
+
+        if ( _client ) {
+            _client->call( toSend, *response );
             m = response;
             dataReceived();
         }
@@ -83,10 +90,10 @@ namespace mongo {
             assert( _scopedHost.size() );
             ScopedDbConnection conn( _scopedHost );
             conn->call( toSend , *response );
-            connector = conn.get();
+            _client = conn.get();
             m = response;
             dataReceived();
-            connector = 0;
+            _client = 0;
             conn.done();
         }
     }
@@ -96,8 +103,8 @@ namespace mongo {
         assert( cursorId && pos == nReturned );
         assert( !haveLimit );
         auto_ptr<Message> response(new Message());
-        assert( connector );
-        connector->recv(*response);
+        assert( _client );
+        _client->recv(*response);
         m = response;
         dataReceived();
     }
@@ -105,7 +112,7 @@ namespace mongo {
     void DBClientCursor::dataReceived() {
         QueryResult *qr = (QueryResult *) m->singleData();
         resultFlags = qr->resultFlags();
-        
+
         if ( qr->resultFlags() & ResultFlag_CursorNotFound ) {
             // cursor id no longer valid at the server.
             assert( qr->cursorId == 0 );
@@ -113,7 +120,7 @@ namespace mongo {
             if ( ! ( opts & QueryOption_CursorTailable ) )
                 throw UserException( 13127 , "getMore: cursor didn't exist on server, possible restart or timeout?" );
         }
-        
+
         if ( cursorId == 0 || ! ( opts & QueryOption_CursorTailable ) ) {
             // only set initially: we don't want to kill it on end of data
             // if it's a tailable cursor
@@ -124,7 +131,7 @@ namespace mongo {
         pos = 0;
         data = qr->data();
 
-        connector->checkResponse( data, nReturned );
+        _client->checkResponse( data, nReturned );
         /* this assert would fire the way we currently work:
             assert( nReturned || cursorId == 0 );
         */
@@ -136,7 +143,7 @@ namespace mongo {
 
         if ( !_putBack.empty() )
             return true;
-        
+
         if (haveLimit && pos >= nToReturn)
             return false;
 
@@ -171,7 +178,7 @@ namespace mongo {
         int m = atMost;
 
         /*
-        for( stack<BSONObj>::iterator i = _putBack.begin(); i != _putBack.end(); i++ ) { 
+        for( stack<BSONObj>::iterator i = _putBack.begin(); i != _putBack.end(); i++ ) {
             if( m == 0 )
                 return;
             v.push_back(*i);
@@ -190,13 +197,22 @@ namespace mongo {
             v.push_back(o);
         }
     }
-
-    void DBClientCursor::attach( AScopedConnection * conn ){
+    
+    void DBClientCursor::attach( AScopedConnection * conn ) {
         assert( _scopedHost.size() == 0 );
-        assert( conn->get()->isMember( connector ) );
-        _scopedHost = conn->getHost();
+        assert( conn );
+        assert( conn->get() );
+
+        if ( conn->get()->type() == ConnectionString::SET ||
+             conn->get()->type() == ConnectionString::SYNC ) {
+            _scopedHost = _client->getServerAddress();
+        }
+        else {
+            _scopedHost = conn->getHost();
+        }
+        
         conn->done();
-        connector = 0;
+        _client = 0;
     }
 
     DBClientCursor::~DBClientCursor() {
@@ -205,28 +221,28 @@ namespace mongo {
 
         DESTRUCTOR_GUARD (
 
-            if ( cursorId && _ownCursor ) {
-                BufBuilder b;
-                b.appendNum( (int)0 ); // reserved
-                b.appendNum( (int)1 ); // number
-                b.appendNum( cursorId );
+        if ( cursorId && _ownCursor ) {
+        BufBuilder b;
+        b.appendNum( (int)0 ); // reserved
+            b.appendNum( (int)1 ); // number
+            b.appendNum( cursorId );
 
-                Message m;
-                m.setData( dbKillCursors , b.buf() , b.len() );
-                
-                if ( connector ){
-                    connector->sayPiggyBack( m );
-                }
-                else {
-                    assert( _scopedHost.size() );
-                    ScopedDbConnection conn( _scopedHost );
-                    conn->sayPiggyBack( m );
-                    conn.done();
-                }
+            Message m;
+            m.setData( dbKillCursors , b.buf() , b.len() );
+
+            if ( _client ) {
+                _client->sayPiggyBack( m );
             }
+            else {
+                assert( _scopedHost.size() );
+                ScopedDbConnection conn( _scopedHost );
+                conn->sayPiggyBack( m );
+                conn.done();
+            }
+        }
 
         );
     }
 
-    
+
 } // namespace mongo

@@ -85,6 +85,10 @@
     <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
     <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" />
     <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
+    <IncludePath Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">..;$(IncludePath)</IncludePath>
+    <IncludePath Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">..;$(IncludePath)</IncludePath>
+    <IncludePath Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">..;$(IncludePath)</IncludePath>
+    <IncludePath Condition="'$(Configuration)|$(Platform)'=='Release|x64'">..;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -183,20 +187,31 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="..\bson\oid.cpp" />
     <ClCompile Include="..\client\dbclientcursor.cpp" />
+    <ClCompile Include="..\client\dbclient_rs.cpp" />
     <ClCompile Include="..\client\distlock.cpp" />
     <ClCompile Include="..\db\dbwebserver.cpp" />
+    <ClCompile Include="..\db\security_key.cpp" />
+    <ClCompile Include="..\scripting\bench.cpp" />
+    <ClCompile Include="..\util\alignedbuilder.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\util\concurrency\spin_lock.cpp" />
+    <ClCompile Include="..\util\concurrency\task.cpp" />
     <ClCompile Include="..\util\concurrency\thread_pool.cpp" />
     <ClCompile Include="..\util\concurrency\vars.cpp" />
     <ClCompile Include="..\util\log.cpp" />
     <ClCompile Include="..\util\miniwebserver.cpp" />
     <ClCompile Include="..\util\processinfo.cpp" />
+    <ClCompile Include="..\util\signal_handlers.cpp" />
     <ClCompile Include="..\util\stringutils.cpp" />
     <ClCompile Include="..\util\text.cpp" />
     <ClCompile Include="..\util\version.cpp" />
     <ClCompile Include="balance.cpp" />
     <ClCompile Include="balancer_policy.cpp" />
     <ClCompile Include="chunk.cpp" />
+    <ClCompile Include="client.cpp" />
     <ClCompile Include="commands_admin.cpp" />
     <ClCompile Include="commands_public.cpp" />
     <ClCompile Include="config.cpp" />
@@ -212,6 +227,7 @@
     <ClCompile Include="grid.cpp" />
     <ClCompile Include="request.cpp" />
     <ClCompile Include="shardconnection.cpp" />
+    <ClCompile Include="shard_version.cpp" />
     <ClCompile Include="s_only.cpp" />
     <ClCompile Include="server.cpp" />
     <ClCompile Include="shard.cpp" />
@@ -512,9 +528,11 @@
     <ClCompile Include="..\util\sock.cpp" />
     <ClCompile Include="..\client\syncclusterconnection.cpp" />
     <ClCompile Include="..\util\util.cpp" />
+    <ClCompile Include="writeback_listener.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\util\processinfo.h" />
+    <ClInclude Include="..\util\signal_handlers.h" />
     <ClInclude Include="..\util\version.h" />
     <ClInclude Include="balancer_policy.h" />
     <ClInclude Include="grid.h" />

@@ -19,6 +19,7 @@
 #include "../pch.h"
 #include "../client/dbclient.h"
 #include "../util/mmap.h"
+#include "../util/version.h"
 #include "tool.h"
 
 #include <boost/program_options.hpp>
@@ -29,21 +30,26 @@ using namespace mongo;
 
 namespace po = boost::program_options;
 
+namespace {
+    const char* OPLOG_SENTINEL = "$oplog";  // compare by ptr not strcmp
+}
+
 class Restore : public BSONTool {
 public:
-    
-    bool _drop;
-    bool _indexesLast;
-    const char * _curns;
 
-    Restore() : BSONTool( "restore" ) , _drop(false){
+    bool _drop;
+    string _curns;
+    string _curdb;
+
+    Restore() : BSONTool( "restore" ) , _drop(false) {
         add_options()
-            ("drop" , "drop each collection before import" )
-            ("indexesLast" , "wait to add indexes (faster if data isn't inserted in index order)" )
-            ;
+        ("drop" , "drop each collection before import" )
+        ("oplogReplay" , "replay oplog for point-in-time restore")
+        ;
         add_hidden_options()
-            ("dir", po::value<string>()->default_value("dump"), "directory to restore from")
-            ;
+        ("dir", po::value<string>()->default_value("dump"), "directory to restore from")
+        ("indexesLast" , "wait to add indexes (now default)") // left in for backwards compatibility
+        ;
         addPositionArg("dir", 1);
     }
 
@@ -51,11 +57,44 @@ public:
         out << "usage: " << _name << " [options] [directory or filename to restore from]" << endl;
     }
 
-    virtual int doRun(){
+    virtual int doRun() {
         auth();
         path root = getParam("dir");
+
+        // check if we're actually talking to a machine that can write
+        if (!isMaster()) {
+            return -1;
+        }
+
         _drop = hasParam( "drop" );
-        _indexesLast = hasParam("indexesLast");
+
+        bool doOplog = hasParam( "oplogReplay" );
+        if (doOplog) {
+            // fail early if errors
+
+            if (_db != "") {
+                cout << "Can only replay oplog on full restore" << endl;
+                return -1;
+            }
+
+            if ( ! exists(root / "oplog.bson") ) {
+                cout << "No oplog file to replay. Make sure you run mongodump with --oplog." << endl;
+                return -1;
+            }
+
+
+            BSONObj out;
+            if (! conn().simpleCommand("admin", &out, "buildinfo")) {
+                cout << "buildinfo command failed: " << out["errmsg"].String() << endl;
+                return -1;
+            }
+
+            StringData version = out["version"].valuestr();
+            if (versionCmp(version, "1.7.4-pre-") < 0) {
+                cout << "Can only replay oplog to server version >= 1.7.4" << endl;
+                return -1;
+            }
+        }
 
         /* If _db is not "" then the user specified a db name to restore as.
          *
@@ -66,13 +105,24 @@ public:
          * given either a root directory that contains only a single
          * .bson file, or a single .bson file itself (a collection).
          */
-        drillDown(root, _db != "", _coll != "");
+        drillDown(root, _db != "", _coll != "", true);
         conn().getLastError();
+
+        if (doOplog) {
+            out() << "\t Replaying oplog" << endl;
+            _curns = OPLOG_SENTINEL;
+            processFile( root / "oplog.bson" );
+        }
+
         return EXIT_CLEAN;
     }
 
-    void drillDown( path root, bool use_db = false, bool use_coll = false ) {
+    void drillDown( path root, bool use_db, bool use_coll, bool top_level=false ) {
         log(2) << "drillDown: " << root.string() << endl;
+
+        // skip hidden files and directories
+        if (root.leaf()[0] == '.' && root.leaf() != ".")
+            return;
 
         if ( is_directory( root ) ) {
             directory_iterator end;
@@ -100,7 +150,11 @@ public:
                     }
                 }
 
-                if ( _indexesLast && p.leaf() == "system.indexes.bson" )
+                // don't insert oplog
+                if (top_level && !use_db && p.leaf() == "oplog.bson")
+                    continue;
+
+                if ( p.leaf() == "system.indexes.bson" )
                     indexes = p;
                 else
                     drillDown(p, use_db, use_coll);
@@ -120,7 +174,7 @@ public:
 
         log() << root.string() << endl;
 
-        if ( root.leaf() == "system.profile.bson" ){
+        if ( root.leaf() == "system.profile.bson" ) {
             log() << "\t skipping" << endl;
             return;
         }
@@ -128,23 +182,24 @@ public:
         string ns;
         if (use_db) {
             ns += _db;
-        } 
+        }
         else {
             string dir = root.branch_path().string();
             if ( dir.find( "/" ) == string::npos )
                 ns += dir;
             else
                 ns += dir.substr( dir.find_last_of( "/" ) + 1 );
-            
+
             if ( ns.size() == 0 )
                 ns = "test";
         }
-        
+
         assert( ns.size() );
 
         if (use_coll) {
             ns += "." + _coll;
-        } else {
+        }
+        else {
             string l = root.leaf();
             l = l.substr( 0 , l.find_last_of( "." ) );
             ns += "." + l;
@@ -152,20 +207,65 @@ public:
 
         out() << "\t going into namespace [" << ns << "]" << endl;
 
-        if ( _drop ){
+        if ( _drop ) {
             out() << "\t dropping" << endl;
             conn().dropCollection( ns );
         }
-        
+
         _curns = ns.c_str();
+        _curdb = NamespaceString(_curns).db;
         processFile( root );
     }
 
-    virtual void gotObject( const BSONObj& obj ){
-        conn().insert( _curns , obj );
+    virtual void gotObject( const BSONObj& obj ) {
+        if (_curns == OPLOG_SENTINEL) { // intentional ptr compare
+            if (obj["op"].valuestr()[0] == 'n') // skip no-ops
+                return;
+
+            string db = obj["ns"].valuestr();
+            db = db.substr(0, db.find('.'));
+
+            BSONObj cmd = BSON( "applyOps" << BSON_ARRAY( obj ) );
+            BSONObj out;
+            conn().runCommand(db, cmd, out);
+        }
+        else if ( endsWith( _curns.c_str() , ".system.indexes" )) {
+            /* Index construction is slightly special: when restoring
+               indexes, we must ensure that the ns attribute is
+               <dbname>.<indexname>, where <dbname> might be different
+               at restore time than what was dumped.  Also, we're
+               stricter about errors for indexes than for regular
+               data. */
+            BSONObjBuilder bo;
+            BSONObjIterator i(obj);
+            while ( i.more() ) {
+                BSONElement e = i.next();
+                if (strcmp(e.fieldName(), "ns") == 0) {
+                    NamespaceString n(e.String());
+                    string s = _curdb + "." + n.coll;
+                    bo.append("ns", s);
+                }
+                else {
+                    bo.append(e);
+                }
+            }
+            BSONObj o = bo.obj();
+            log(0) << o << endl;
+            conn().insert( _curns ,  o );
+            BSONObj err = conn().getLastErrorDetailed();
+            if ( ! ( err["err"].isNull() ) ) {
+                cerr << "Error creating index " << o["ns"].String();
+                cerr << ": " << err["code"].Int() << " " << err["err"].String() << endl;
+                cerr << "To resume index restoration, run " << _name << " on file" << _fileName << " manually." << endl;
+                abort();
+            }
+        }
+        else {
+            conn().insert( _curns , obj );
+        }
     }
 
-    
+
 };
 
 int main( int argc , char ** argv ) {

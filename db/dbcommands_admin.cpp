@@ -25,34 +25,36 @@
 #include "pch.h"
 #include "jsobj.h"
 #include "pdfile.h"
-#include "namespace.h"
+#include "namespace-inl.h"
 #include "commands.h"
 #include "cmdline.h"
 #include "btree.h"
-#include "curop.h"
+#include "curop-inl.h"
 #include "../util/background.h"
+#include "../util/logfile.h"
+#include "../util/alignedbuilder.h"
 #include "../scripting/engine.h"
 
 namespace mongo {
 
     class CleanCmd : public Command {
     public:
-        CleanCmd() : Command( "clean" ){}
+        CleanCmd() : Command( "clean" ) {}
 
         virtual bool slaveOk() const { return true; }
-        virtual LockType locktype() const { return WRITE; } 
-        
+        virtual LockType locktype() const { return WRITE; }
+
         virtual void help(stringstream& h) const { h << "internal"; }
 
-        bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
+        bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
             string dropns = dbname + "." + cmdObj.firstElement().valuestrsafe();
-            
+
             if ( !cmdLine.quiet )
                 tlog() << "CMD: clean " << dropns << endl;
-            
+
             NamespaceDetails *d = nsdetails(dropns.c_str());
-            
-            if ( ! d ){
+
+            if ( ! d ) {
                 errmsg = "ns not found";
                 return 0;
             }
@@ -63,39 +65,108 @@ namespace mongo {
             result.append("ns", dropns.c_str());
             return 1;
         }
-        
+
     } cleanCmd;
-    
+
+    namespace dur {
+        filesystem::path getJournalDir();
+    }
+ 
+    class JournalLatencyTestCmd : public Command {
+    public:
+        JournalLatencyTestCmd() : Command( "journalLatencyTest" ) {}
+
+        virtual bool slaveOk() const { return true; }
+        virtual LockType locktype() const { return NONE; }
+        virtual bool adminOnly() const { return true; }
+        virtual void help(stringstream& h) const { h << "test how long to write and fsync to a test file in the journal/ directory"; }
+
+        bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
+            filesystem::path p = dur::getJournalDir();
+            p /= "journalLatencyTest";
+        
+            // remove file if already present
+            try { 
+                remove(p);
+            }
+            catch(...) { }
+
+            BSONObjBuilder bb[2];
+            for( int pass = 0; pass < 2; pass++ ) {
+                LogFile f(p.string());
+                AlignedBuilder b(1024 * 1024);
+                {
+                    Timer t;
+                    for( int i = 0 ; i < 100; i++ ) { 
+                        f.synchronousAppend(b.buf(), 8192);
+                    }
+                    bb[pass].append("8KB", t.millis() / 100.0);
+                }
+                {
+                    const int N = 50;
+                    Timer t2;
+                    long long x = 0;
+                    for( int i = 0 ; i < N; i++ ) { 
+                        Timer t;
+                        f.synchronousAppend(b.buf(), 8192);
+                        x += t.micros();
+                        sleepmillis(4);
+                    }
+                    long long y = t2.micros() - 4*N*1000;
+                    // not really trusting the timer granularity on all platforms so whichever is higher of x and y
+                    bb[pass].append("8KBWithPauses", max(x,y) / (N*1000.0));
+                }
+                {
+                    Timer t;
+                    for( int i = 0 ; i < 20; i++ ) { 
+                        f.synchronousAppend(b.buf(), 1024 * 1024);
+                    }
+                    bb[pass].append("1MB", t.millis() / 20.0);
+                }
+                // second time around, we are prealloced.
+            }
+            result.append("timeMillis", bb[0].obj());
+            result.append("timeMillisWithPrealloc", bb[1].obj());
+
+            try { 
+                remove(p);
+            }
+            catch(...) { }
+
+            return 1;
+        }
+    } journalLatencyTestCmd;
+
     class ValidateCmd : public Command {
     public:
-        ValidateCmd() : Command( "validate" ){}
+        ValidateCmd() : Command( "validate" ) {}
 
         virtual bool slaveOk() const {
             return true;
         }
-        
+
         virtual void help(stringstream& h) const { h << "Validate contents of a namespace by scanning its data structures for correctness.  Slow."; }
 
-        virtual LockType locktype() const { return READ; } 
+        virtual LockType locktype() const { return READ; }
         //{ validate: "collectionnamewithoutthedbpart" [, scandata: <bool>] } */
-        
-        bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
+
+        bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
             string ns = dbname + "." + cmdObj.firstElement().valuestrsafe();
             NamespaceDetails * d = nsdetails( ns.c_str() );
             if ( !cmdLine.quiet )
                 tlog() << "CMD: validate " << ns << endl;
 
-            if ( ! d ){
+            if ( ! d ) {
                 errmsg = "ns not found";
                 return 0;
             }
-            
+
             result.append( "ns", ns );
             result.append( "result" , validateNS( ns.c_str() , d, &cmdObj ) );
             return 1;
         }
-                    
-        
+
+
         string validateNS(const char *ns, NamespaceDetails *d, BSONObj *cmdObj) {
             bool scanData = true;
             if( cmdObj && cmdObj->hasElement("scandata") && !cmdObj->getBoolField("scandata") )
@@ -106,13 +177,13 @@ namespace mongo {
             //ss << "  details: " << hex << d << " ofs:" << nsindex(ns)->detailsOffset(d) << dec << endl;
             if ( d->capped )
                 ss << "  capped:" << d->capped << " max:" << d->max << '\n';
-            
-            ss << "  firstExtent:" << d->firstExtent.toString() << " ns:" << d->firstExtent.ext()->nsDiagnostic.buf << '\n';
-            ss << "  lastExtent:" << d->lastExtent.toString()    << " ns:" << d->lastExtent.ext()->nsDiagnostic.buf << '\n';
+
+            ss << "  firstExtent:" << d->firstExtent.toString() << " ns:" << d->firstExtent.ext()->nsDiagnostic.toString()<< '\n';
+            ss << "  lastExtent:" << d->lastExtent.toString()    << " ns:" << d->lastExtent.ext()->nsDiagnostic.toString() << '\n';
             try {
                 d->firstExtent.ext()->assertOk();
                 d->lastExtent.ext()->assertOk();
-                
+
                 DiskLoc el = d->firstExtent;
                 int ne = 0;
                 while( !el.isNull() ) {
@@ -123,12 +194,13 @@ namespace mongo {
                     killCurrentOp.checkForInterrupt();
                 }
                 ss << "  # extents:" << ne << '\n';
-            } catch (...) {
+            }
+            catch (...) {
                 valid=false;
                 ss << " extent asserted ";
             }
 
-            ss << "  datasize?:" << d->datasize << " nrecords?:" << d->nrecords << " lastExtentSize:" << d->lastExtentSize << '\n';
+            ss << "  datasize?:" << d->stats.datasize << " nrecords?:" << d->stats.nrecords << " lastExtentSize:" << d->lastExtentSize << '\n';
             ss << "  padding:" << d->paddingFactor << '\n';
             try {
 
@@ -175,7 +247,7 @@ namespace mongo {
                         else ss << " (OK)";
                         ss << '\n';
                     }
-                    ss << "  " << n << " objects found, nobj:" << d->nrecords << '\n';
+                    ss << "  " << n << " objects found, nobj:" << d->stats.nrecords << '\n';
                     ss << "  " << len << " bytes data w/headers\n";
                     ss << "  " << nlen << " bytes data wout/headers\n";
                 }
@@ -198,7 +270,7 @@ namespace mongo {
                             ndel++;
 
                             if ( loc.questionable() ) {
-                                if( d->capped && !loc.isValid() && i == 1 ) { 
+                                if( d->capped && !loc.isValid() && i == 1 ) {
                                     /* the constructor for NamespaceDetails intentionally sets deletedList[1] to invalid
                                        see comments in namespace.h
                                     */
@@ -218,7 +290,8 @@ namespace mongo {
                             k++;
                             killCurrentOp.checkForInterrupt();
                         }
-                    } catch (...) {
+                    }
+                    catch (...) {
                         ss <<"    ?exception in deleted chain for bucket " << i << endl;
                         valid = false;
                     }
@@ -236,7 +309,7 @@ namespace mongo {
                     while( i.more() ) {
                         IndexDetails& id = i.next();
                         ss << "    " << id.indexNamespace() << " keys:" <<
-                            id.head.btree()->fullValidate(id.head, id.keyPattern()) << endl;
+                           id.head.btree()->fullValidate(id.head, id.keyPattern()) << endl;
                     }
                 }
                 catch (...) {
@@ -261,36 +334,36 @@ namespace mongo {
     extern unsigned lockedForWriting;
     extern mongo::mutex lockedForWritingMutex;
 
-/*
-    class UnlockCommand : public Command { 
-    public:
-        UnlockCommand() : Command( "unlock" ) { }
-        virtual bool readOnly() { return true; }
-        virtual bool slaveOk() const { return true; }
-        virtual bool adminOnly() const { return true; }
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            if( lockedForWriting ) { 
-				log() << "command: unlock requested" << endl;
-                errmsg = "unlock requested";
-                unlockRequested = true;
+    /*
+        class UnlockCommand : public Command {
+        public:
+            UnlockCommand() : Command( "unlock" ) { }
+            virtual bool readOnly() { return true; }
+            virtual bool slaveOk() const { return true; }
+            virtual bool adminOnly() const { return true; }
+            virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+                if( lockedForWriting ) {
+                    log() << "command: unlock requested" << endl;
+                    errmsg = "unlock requested";
+                    unlockRequested = true;
+                }
+                else {
+                    errmsg = "not locked, so cannot unlock";
+                    return 0;
+                }
+                return 1;
             }
-            else { 
-                errmsg = "not locked, so cannot unlock";
-                return 0;
-            }
-            return 1;
-        }
-        
-    } unlockCommand;
-*/
+
+        } unlockCommand;
+    */
     /* see unlockFsync() for unlocking:
        db.$cmd.sys.unlock.findOne()
     */
     class FSyncCommand : public Command {
-        class LockDBJob : public BackgroundJob { 
+        class LockDBJob : public BackgroundJob {
         protected:
-            string name() { return "lockdbjob"; }
-            void run() { 
+            virtual string name() const { return "lockdbjob"; }
+            void run() {
                 Client::initThread("fsyncjob");
                 Client& c = cc();
                 {
@@ -301,8 +374,8 @@ namespace mongo {
                 MemoryMappedFile::flushAll(true);
                 log() << "db is now locked for snapshotting, no writes allowed. use db.$cmd.sys.unlock.findOne() to unlock" << endl;
                 _ready = true;
-                while( 1 ) { 
-                    if( unlockRequested ) { 
+                while( 1 ) {
+                    if( unlockRequested ) {
                         unlockRequested = false;
                         break;
                     }
@@ -316,54 +389,70 @@ namespace mongo {
             }
         public:
             bool& _ready;
-            LockDBJob(bool& ready) : _ready(ready) {
-                deleteSelf = true;
+            LockDBJob(bool& ready) : BackgroundJob( true /* delete self */ ), _ready(ready) {
                 _ready = false;
             }
         };
     public:
-        FSyncCommand() : Command( "fsync" ){}
-        virtual LockType locktype() const { return WRITE; } 
+        FSyncCommand() : Command( "fsync" ) {}
+        virtual LockType locktype() const { return WRITE; }
         virtual bool slaveOk() const { return true; }
         virtual bool adminOnly() const { return true; }
-        /*virtual bool localHostOnlyIfNoAuth(const BSONObj& cmdObj) { 
+        /*virtual bool localHostOnlyIfNoAuth(const BSONObj& cmdObj) {
             string x = cmdObj["exec"].valuestrsafe();
             return !x.empty();
         }*/
         virtual void help(stringstream& h) const { h << "http://www.mongodb.org/display/DOCS/fsync+Command"; }
         virtual bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            /* async means do an fsync, but return immediately */
-            bool sync = ! cmdObj["async"].trueValue();
+            bool sync = !cmdObj["async"].trueValue(); // async means do an fsync, but return immediately
             bool lock = cmdObj["lock"].trueValue();
             log() << "CMD fsync:  sync:" << sync << " lock:" << lock << endl;
 
-            if( lock ) { 
+            if( lock ) {
+                // fsync and lock variation 
+
                 uassert(12034, "fsync: can't lock while an unlock is pending", !unlockRequested);
                 uassert(12032, "fsync: sync option must be true when using lock", sync);
-                /* With releaseEarly(), we must be extremely careful we don't do anything 
-                   where we would have assumed we were locked.  profiling is one of those things. 
-                   Perhaps at profile time we could check if we released early -- however, 
+                /* With releaseEarly(), we must be extremely careful we don't do anything
+                   where we would have assumed we were locked.  profiling is one of those things.
+                   Perhaps at profile time we could check if we released early -- however,
                    we need to be careful to keep that code very fast it's a very common code path when on.
                 */
                 uassert(12033, "fsync: profiling must be off to enter locked mode", cc().database()->profile == 0);
+
+                // todo future: Perhaps we could do this in the background thread.  As is now, writes may interleave between 
+                //              the releaseEarly below and the acquisition of the readlock in the background thread. 
+                //              However the real problem is that it seems complex to unlock here and then have a window for 
+                //              writes before the bg job -- can be done correctly but harder to reason about correctness.
+                //              If this command ran within a read lock in the first place, would it work, and then that 
+                //              would be quite easy?
+                //              Or, could we downgrade the write lock to a read lock, wait for ready, then release?
+                getDur().syncDataAndTruncateJournal();
+
                 bool ready = false;
                 LockDBJob *l = new LockDBJob(ready);
+
                 dbMutex.releaseEarly();
+
                 l->go();
-                // don't return until background thread has acquired the write lock
-                while( !ready ) { 
+                // don't return until background thread has acquired the read lock
+                while( !ready ) {
                     sleepmillis(10);
                 }
                 result.append("info", "now locked against writes, use db.$cmd.sys.unlock.findOne() to unlock");
             }
             else {
+                // the simple fsync command case
+
+                if (sync)
+                    getDur().commitNow();
                 result.append( "numFiles" , MemoryMappedFile::flushAll( sync ) );
             }
             return 1;
         }
-        
+
     } fsyncCmd;
-    
+
 
 
 }
