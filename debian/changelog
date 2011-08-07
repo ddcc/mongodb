@@ -1,10 +1,11 @@
 mongodb (1:1.8.2-2) unstable; urgency=low
 
-  * [e439291] bumped standards
   * [2e1c3ff] (Closes: #625401) ignore unused-but-set-{variable,parameter}
   * [0e9611d] (Closes: #572870, #631054) switch to v8 as javascript engine
+  * [bbf5935] (Closes: #634484) use dbpath and logpath from config file
+    not forcing in init.d
 
- -- Antonin Kral <A.Kral@sh.cvut.cz>  Sun, 07 Aug 2011 19:30:21 +0200
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Sun, 07 Aug 2011 20:14:39 +0200
 
 mongodb (1:1.8.2-1) unstable; urgency=low
 
