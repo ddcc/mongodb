@@ -6,7 +6,7 @@ include /usr/share/cdbs/1/rules/debhelper.mk
 
 DEB_DH_INSTALLINIT_ARGS = --name=mongodb
 
-DEB_SCONS_OPTIONS := 
+DEB_SCONS_OPTIONS := --usev8=USEV8
 ifneq (,$(findstring debug,$(DEB_BUILD_OPTIONS)))
 	DEB_SCONS_OPTIONS := --d=DEBUGBUILD
 endif
