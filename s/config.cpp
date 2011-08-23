@@ -20,6 +20,8 @@
 #include "../util/message.h"
 #include "../util/stringutils.h"
 #include "../util/unittest.h"
+#include "../util/timer.h"
+
 #include "../client/connpool.h"
 #include "../client/model.h"
 #include "../db/pdfile.h"
@@ -53,8 +55,15 @@ namespace mongo {
     DBConfig::CollectionInfo::CollectionInfo( const BSONObj& in ) {
         _dirty = false;
         _dropped = in["dropped"].trueValue();
-        if ( in["key"].isABSONObj() )
+        if ( in["key"].isABSONObj() ) {
+            Timer t;
             shard( in["_id"].String() , in["key"].Obj() , in["unique"].trueValue() );
+            log() << "creating ChunkManager ns: " << in["_id"] 
+                  << " took: " << t.millis() << "ms" 
+                  << " sequenceNumber: " << _cm->getSequenceNumber()
+                  << endl;
+            _dirty = false;
+        }
     }
 
 
@@ -85,6 +94,32 @@ namespace mongo {
         uassert( 13473 , (string)"failed to save collection (" + ns + "): " + err , err.size() == 0 );
 
         _dirty = false;
+    }
+
+    bool DBConfig::CollectionInfo::needsReloading( DBClientBase * conn , const BSONObj& collectionInfo ) {
+        if ( ! _cm ) {
+            return true;
+        }
+
+        if ( _dirty || _dropped ) {
+            return true;
+        }
+
+        if ( collectionInfo["dropped"].trueValue() ) {
+            return true;
+        }
+        
+        BSONObj newest = conn->findOne( ShardNS::chunk , 
+                                        Query( BSON( "ns" << collectionInfo["_id"].String() ) ).sort( "lastmod" , -1 ) );
+        
+        if ( newest.isEmpty() ) {
+            // either a drop or something else weird
+            return true;
+        }
+        
+        ShardChunkVersion fromdb = newest["lastmod"];
+        ShardChunkVersion inmemory = _cm->getVersion();
+        return fromdb != inmemory;
     }
 
     bool DBConfig::isSharded( const string& ns ) {
@@ -232,13 +267,20 @@ namespace mongo {
         unserialize( o );
 
         BSONObjBuilder b;
-        b.appendRegex( "_id" , (string)"^" + _name + "." );
+        b.appendRegex( "_id" , (string)"^" + _name + "\\." );
 
         auto_ptr<DBClientCursor> cursor = conn->query( ShardNS::collection ,b.obj() );
         assert( cursor.get() );
         while ( cursor->more() ) {
             BSONObj o = cursor->next();
-            _collections[o["_id"].String()] = CollectionInfo( o );
+            string ns = o["_id"].String();
+
+            Collections::iterator i = _collections.find( ns );
+            if ( i != _collections.end() && ! i->second.needsReloading( conn.get() , o ) ) {
+                continue;
+            }
+
+            _collections[ns] = CollectionInfo( o );
         }
 
         conn.done();

@@ -46,6 +46,7 @@
 # include "../util/ntservice.h"
 #else
 # include <sys/file.h>
+# include <sys/resource.h>
 #endif
 
 namespace mongo {
@@ -108,7 +109,36 @@ namespace mongo {
             }
 
             try {
+#ifndef __linux__  // TODO: consider making this ifdef _WIN32
                 boost::thread thr(boost::bind(&connThread,mp));
+#else
+                pthread_attr_t attrs;
+                pthread_attr_init(&attrs);
+                pthread_attr_setdetachstate(&attrs, PTHREAD_CREATE_DETACHED);
+
+                static const size_t STACK_SIZE = 4*1024*1024;
+
+                struct rlimit limits;
+                assert(getrlimit(RLIMIT_STACK, &limits) == 0);
+                if (limits.rlim_cur > STACK_SIZE) {
+                    pthread_attr_setstacksize(&attrs, (DEBUG_BUILD
+                                                        ? (STACK_SIZE / 2)
+                                                        : STACK_SIZE));
+                }
+                else if (limits.rlim_cur < 1024*1024) {
+                    warning() << "Stack size set to " << (limits.rlim_cur/1024) << "KB. We suggest at least 1MB" << endl;
+                }
+
+                pthread_t thread;
+                int failed = pthread_create(&thread, &attrs, (void*(*)(void*)) &connThread, mp);
+
+                pthread_attr_destroy(&attrs);
+
+                if (failed) {
+                    log() << "pthread_create failed: " << errnoWithDescription(failed) << endl;
+                    throw boost::thread_resource_error(); // for consistency with boost::thread
+                }
+#endif
             }
             catch ( boost::thread_resource_error& ) {
                 log() << "can't create new thread, closing connection" << endl;
@@ -699,6 +729,7 @@ int main(int argc, char* argv[]) {
     ("pairwith", po::value<string>(), "address of server to pair with DEPRECATED")
     ("arbiter", po::value<string>(), "address of replica pair arbiter server DEPRECATED")
     ("nodur", "disable journaling (currently the default)")
+    ("nojournal", "disable journaling (currently the default)")
     ("appsrvpath", po::value<string>(), "root directory for the babble app server")
     ("nocursors", "diagnostic/debugging option that turns off cursors DO NOT USE IN PRODUCTION")
     ("nohints", "ignore query hints")
@@ -798,6 +829,9 @@ int main(int argc, char* argv[]) {
             cmdLine.quotaFiles = params["quotaFiles"].as<int>() - 1;
         }
         if( params.count("nodur") ) {
+            cmdLine.dur = false;
+        }
+        if( params.count("nojournal") ) {
             cmdLine.dur = false;
         }
         if( params.count("dur") || params.count( "journal" ) ) {
