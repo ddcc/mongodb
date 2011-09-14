@@ -12,7 +12,7 @@ Homepage: http://www.mongodb.org
 Package: mongodb
 Architecture: i386 amd64
 Depends: mongodb-server, mongodb-dev, ${shlibs:Depends}, ${misc:Depends}
-Description: An object/document-oriented database (metapackage)
+Description: object/document-oriented database (metapackage)
  MongoDB is a high-performance, open source, schema-free
  document-oriented  data store that's easy to deploy, manage
  and use. It's network accessible, written in C++ and offers
@@ -37,7 +37,7 @@ Description: An object/document-oriented database (metapackage)
 Package: mongodb-server
 Architecture: i386 amd64
 Depends: mongodb-clients, ${shlibs:Depends}, ${misc:Depends}, adduser
-Description: An object/document-oriented database (server package)
+Description: object/document-oriented database (server package)
  MongoDB is a high-performance, open source, schema-free
  document-oriented  data store that's easy to deploy, manage
  and use. It's network accessible, written in C++ and offers
@@ -62,7 +62,7 @@ Description: An object/document-oriented database (server package)
 Package: mongodb-clients
 Architecture: i386 amd64
 Depends: ${shlibs:Depends}, ${misc:Depends}
-Description: An object/document-oriented database (client apps)
+Description: object/document-oriented database (client apps)
  MongoDB is a high-performance, open source, schema-free
  document-oriented  data store that's easy to deploy, manage
  and use. It's network accessible, written in C++ and offers
@@ -88,7 +88,7 @@ Package: mongodb-dev
 Section: libdevel
 Architecture: i386 amd64
 Depends: mongodb-server, libboost-dev, ${shlibs:Depends}, ${misc:Depends}
-Description: An object/document-oriented database (development)
+Description: object/document-oriented database (development)
  MongoDB is a high-performance, open source, schema-free
  document-oriented  data store that's easy to deploy, manage
  and use. It's network accessible, written in C++ and offers
