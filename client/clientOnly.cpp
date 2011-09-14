@@ -17,7 +17,6 @@
 
 #include "pch.h"
 #include "../client/dbclient.h"
-#include "../db/dbhelpers.h"
 #include "../db/cmdline.h"
 #include "../s/shard.h"
 
@@ -28,6 +27,10 @@ namespace mongo {
     const char * curNs = "in client mode";
 
     bool dbexitCalled = false;
+
+    void exitCleanly( ExitCode code ) {
+        dbexit( code );
+    }
 
     void dbexit( ExitCode returnCode, const char *whyMsg , bool tryToGetLock ) {
         dbexitCalled = true;

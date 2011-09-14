@@ -33,6 +33,7 @@
 #include "../util/background.h"
 #include "../util/logfile.h"
 #include "../util/alignedbuilder.h"
+#include "../util/paths.h"
 #include "../scripting/engine.h"
 
 namespace mongo {
@@ -46,7 +47,7 @@ namespace mongo {
 
         virtual void help(stringstream& h) const { h << "internal"; }
 
-        bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
+        bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
             string dropns = dbname + "." + cmdObj.firstElement().valuestrsafe();
 
             if ( !cmdLine.quiet )
@@ -81,7 +82,7 @@ namespace mongo {
         virtual bool adminOnly() const { return true; }
         virtual void help(stringstream& h) const { h << "test how long to write and fsync to a test file in the journal/ directory"; }
 
-        bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
+        bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
             filesystem::path p = dur::getJournalDir();
             p /= "journalLatencyTest";
         
@@ -133,6 +134,11 @@ namespace mongo {
             }
             catch(...) { }
 
+            try {
+                result.append("onSamePartition", onSamePartition(dur::getJournalDir().string(), dbpath));
+            }
+            catch(...) { }
+
             return 1;
         }
     } journalLatencyTestCmd;
@@ -145,12 +151,13 @@ namespace mongo {
             return true;
         }
 
-        virtual void help(stringstream& h) const { h << "Validate contents of a namespace by scanning its data structures for correctness.  Slow."; }
+        virtual void help(stringstream& h) const { h << "Validate contents of a namespace by scanning its data structures for correctness.  Slow.\n"
+                                                        "Add full:true option to do a more thorough check"; }
 
         virtual LockType locktype() const { return READ; }
-        //{ validate: "collectionnamewithoutthedbpart" [, scandata: <bool>] } */
+        //{ validate: "collectionnamewithoutthedbpart" [, scandata: <bool>] [, full: <bool> } */
 
-        bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
+        bool run(const string& dbname , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
             string ns = dbname + "." + cmdObj.firstElement().valuestrsafe();
             NamespaceDetails * d = nsdetails( ns.c_str() );
             if ( !cmdLine.quiet )
@@ -162,24 +169,27 @@ namespace mongo {
             }
 
             result.append( "ns", ns );
-            result.append( "result" , validateNS( ns.c_str() , d, &cmdObj ) );
+            validateNS( ns.c_str() , d, cmdObj, result);
             return 1;
         }
 
+    private:
+        void validateNS(const char *ns, NamespaceDetails *d, const BSONObj& cmdObj, BSONObjBuilder& result) {
+            const bool full = cmdObj["full"].trueValue();
+            const bool scanData = full || cmdObj["scandata"].trueValue();
 
-        string validateNS(const char *ns, NamespaceDetails *d, BSONObj *cmdObj) {
-            bool scanData = true;
-            if( cmdObj && cmdObj->hasElement("scandata") && !cmdObj->getBoolField("scandata") )
-                scanData = false;
             bool valid = true;
-            stringstream ss;
-            ss << "\nvalidate\n";
-            //ss << "  details: " << hex << d << " ofs:" << nsindex(ns)->detailsOffset(d) << dec << endl;
-            if ( d->capped )
-                ss << "  capped:" << d->capped << " max:" << d->max << '\n';
+            BSONArrayBuilder errors; // explanation(s) for why valid = false
+            if ( d->capped ){
+                result.append("capped", d->capped);
+                result.append("max", d->max);
+            }
 
-            ss << "  firstExtent:" << d->firstExtent.toString() << " ns:" << d->firstExtent.ext()->nsDiagnostic.toString()<< '\n';
-            ss << "  lastExtent:" << d->lastExtent.toString()    << " ns:" << d->lastExtent.ext()->nsDiagnostic.toString() << '\n';
+            result.append("firstExtent", str::stream() << d->firstExtent.toString() << " ns:" << d->firstExtent.ext()->nsDiagnostic.toString());
+            result.append( "lastExtent", str::stream() <<  d->lastExtent.toString() << " ns:" <<  d->lastExtent.ext()->nsDiagnostic.toString());
+            
+            BSONArrayBuilder extentData;
+
             try {
                 d->firstExtent.ext()->assertOk();
                 d->lastExtent.ext()->assertOk();
@@ -191,32 +201,46 @@ namespace mongo {
                     e->assertOk();
                     el = e->xnext;
                     ne++;
+                    if ( full )
+                        extentData << e->dump();
+                    
                     killCurrentOp.checkForInterrupt();
                 }
-                ss << "  # extents:" << ne << '\n';
+                result.append("extentCount", ne);
             }
             catch (...) {
                 valid=false;
-                ss << " extent asserted ";
+                errors << "extent asserted";
             }
 
-            ss << "  datasize?:" << d->stats.datasize << " nrecords?:" << d->stats.nrecords << " lastExtentSize:" << d->lastExtentSize << '\n';
-            ss << "  padding:" << d->paddingFactor << '\n';
+            if ( full )
+                result.appendArray( "extents" , extentData.arr() );
+
+            
+            result.appendNumber("datasize", d->stats.datasize);
+            result.appendNumber("nrecords", d->stats.nrecords);
+            result.appendNumber("lastExtentSize", d->lastExtentSize);
+            result.appendNumber("padding", d->paddingFactor);
+            
+
             try {
 
                 try {
-                    ss << "  first extent:\n";
-                    d->firstExtent.ext()->dump(ss);
-                    valid = valid && d->firstExtent.ext()->validates();
+                    result.append("firstExtentDetails", d->firstExtent.ext()->dump());
+
+                    valid = valid && d->firstExtent.ext()->validates() && 
+                        d->firstExtent.ext()->xprev.isNull();
                 }
                 catch (...) {
-                    ss << "\n    exception firstextent\n" << endl;
+                    errors << "exception firstextent";
+                    valid = false;
                 }
 
                 set<DiskLoc> recs;
                 if( scanData ) {
                     shared_ptr<Cursor> c = theDataFileMgr.findAll(ns);
                     int n = 0;
+                    int nInvalid = 0;
                     long long len = 0;
                     long long nlen = 0;
                     int outOfOrder = 0;
@@ -236,27 +260,54 @@ namespace mongo {
                         Record *r = c->_current();
                         len += r->lengthWithHeaders;
                         nlen += r->netLength();
+
+                        if (full){
+                            BSONObj obj(r);
+                            if (!obj.isValid() || !obj.valid()){ // both fast and deep checks
+                                valid = false;
+                                if (nInvalid == 0) // only log once;
+                                    errors << "invalid bson object detected (see logs for more info)";
+
+                                nInvalid++;
+                                if (strcmp("_id", obj.firstElementFieldName()) == 0){
+                                    try {
+                                        obj.firstElement().validate(); // throws on error
+                                        log() << "Invalid bson detected in " << ns << " with _id: " << obj.firstElement().toString(false) << endl;
+                                    }
+                                    catch(...){
+                                        log() << "Invalid bson detected in " << ns << " with corrupt _id" << endl;
+                                    }
+                                }
+                                else {
+                                    log() << "Invalid bson detected in " << ns << " and couldn't find _id" << endl;
+                                }
+                            }
+                        }
+
                         c->advance();
                     }
                     if ( d->capped && !d->capLooped() ) {
-                        ss << "  capped outOfOrder:" << outOfOrder;
+                        result.append("cappedOutOfOrder", outOfOrder);
                         if ( outOfOrder > 1 ) {
                             valid = false;
-                            ss << " ???";
+                            errors << "too many out of order records";
                         }
-                        else ss << " (OK)";
-                        ss << '\n';
                     }
-                    ss << "  " << n << " objects found, nobj:" << d->stats.nrecords << '\n';
-                    ss << "  " << len << " bytes data w/headers\n";
-                    ss << "  " << nlen << " bytes data wout/headers\n";
+                    result.append("objectsFound", n);
+
+                    if (full) {
+                        result.append("invalidObjects", nInvalid);
+                    }
+
+                    result.appendNumber("bytesWithHeaders", len);
+                    result.appendNumber("bytesWithoutHeaders", nlen);
                 }
 
-                ss << "  deletedList: ";
+                BSONArrayBuilder deletedListArray;
                 for ( int i = 0; i < Buckets; i++ ) {
-                    ss << (d->deletedList[i].isNull() ? '0' : '1');
+                    deletedListArray << d->deletedList[i].isNull();
                 }
-                ss << endl;
+
                 int ndel = 0;
                 long long delSize = 0;
                 int incorrect = 0;
@@ -278,7 +329,9 @@ namespace mongo {
                                 }
 
                                 if ( loc.a() <= 0 || strstr(ns, "hudsonSmall") == 0 ) {
-                                    ss << "    ?bad deleted loc: " << loc.toString() << " bucket:" << i << " k:" << k << endl;
+                                    string err (str::stream() << "bad deleted loc: " << loc.toString() << " bucket:" << i << " k:" << k);
+                                    errors << err;
+
                                     valid = false;
                                     break;
                                 }
@@ -292,47 +345,60 @@ namespace mongo {
                         }
                     }
                     catch (...) {
-                        ss <<"    ?exception in deleted chain for bucket " << i << endl;
+                        errors << ("exception in deleted chain for bucket " + BSONObjBuilder::numStr(i));
                         valid = false;
                     }
                 }
-                ss << "  deleted: n: " << ndel << " size: " << delSize << endl;
+                result.appendNumber("deletedCount", ndel);
+                result.appendNumber("deletedSize", delSize);
+
                 if ( incorrect ) {
-                    ss << "    ?corrupt: " << incorrect << " records from datafile are in deleted list\n";
+                    errors << (BSONObjBuilder::numStr(incorrect) + " records from datafile are in deleted list");
                     valid = false;
                 }
 
                 int idxn = 0;
                 try  {
-                    ss << "  nIndexes:" << d->nIndexes << endl;
+                    result.append("nIndexes", d->nIndexes);
+                    BSONObjBuilder indexes; // not using subObjStart to be exception safe
                     NamespaceDetails::IndexIterator i = d->ii();
                     while( i.more() ) {
                         IndexDetails& id = i.next();
-                        ss << "    " << id.indexNamespace() << " keys:" <<
-                           id.head.btree()->fullValidate(id.head, id.keyPattern()) << endl;
+                        long long keys = id.idxInterface().fullValidate(id.head, id.keyPattern());
+                        indexes.appendNumber(id.indexNamespace(), keys);
                     }
+                    result.append("keysPerIndex", indexes.done());
                 }
                 catch (...) {
-                    ss << "\n    exception during index validate idxn:" << idxn << endl;
+                    errors << ("exception during index validate idxn " + BSONObjBuilder::numStr(idxn));
                     valid=false;
                 }
 
             }
             catch (AssertionException) {
-                ss << "\n    exception during validate\n" << endl;
+                errors << "exception during validate";
                 valid = false;
             }
 
-            if ( !valid )
-                ss << " ns corrupt, requires dbchk\n";
+            result.appendBool("valid", valid);
+            result.append("errors", errors.arr());
 
-            return ss.str();
+            if ( !full ){
+                result.append("warning", "Some checks omitted for speed. use {full:true} option to do more thorough scan.");
+            }
+            
+            if ( !valid ) {
+                result.append("advice", "ns corrupt, requires repair");
+            }
+
         }
     } validateCmd;
 
-    extern bool unlockRequested;
-    extern unsigned lockedForWriting;
-    extern mongo::mutex lockedForWritingMutex;
+    bool lockedForWriting = false; // read from db/instance.cpp
+    static bool unlockRequested = false;
+    static mongo::mutex fsyncLockMutex("fsyncLock");
+    static boost::condition fsyncLockCondition;
+    static OID fsyncLockID; // identifies the current lock job
 
     /*
         class UnlockCommand : public Command {
@@ -360,6 +426,7 @@ namespace mongo {
        db.$cmd.sys.unlock.findOne()
     */
     class FSyncCommand : public Command {
+        static const char* url() { return  "http://www.mongodb.org/display/DOCS/fsync+Command"; }
         class LockDBJob : public BackgroundJob {
         protected:
             virtual string name() const { return "lockdbjob"; }
@@ -367,23 +434,26 @@ namespace mongo {
                 Client::initThread("fsyncjob");
                 Client& c = cc();
                 {
-                    scoped_lock lk(lockedForWritingMutex);
-                    lockedForWriting++;
+                    scoped_lock lk(fsyncLockMutex);
+                    while (lockedForWriting){ // there is a small window for two LockDBJob's to be active. This prevents it.
+                        fsyncLockCondition.wait(lk.boost());
+                    }
+                    lockedForWriting = true;
+                    fsyncLockID.init();
                 }
                 readlock lk("");
                 MemoryMappedFile::flushAll(true);
-                log() << "db is now locked for snapshotting, no writes allowed. use db.$cmd.sys.unlock.findOne() to unlock" << endl;
+                log() << "db is now locked for snapshotting, no writes allowed. db.fsyncUnlock() to unlock" << endl;
+                log() << "    For more info see " << FSyncCommand::url() << endl;
                 _ready = true;
-                while( 1 ) {
-                    if( unlockRequested ) {
-                        unlockRequested = false;
-                        break;
-                    }
-                    sleepmillis(20);
-                }
                 {
-                    scoped_lock lk(lockedForWritingMutex);
-                    lockedForWriting--;
+                    scoped_lock lk(fsyncLockMutex);
+                    while( !unlockRequested ) {
+                        fsyncLockCondition.wait(lk.boost());
+                    }
+                    unlockRequested = false;
+                    lockedForWriting = false;
+                    fsyncLockCondition.notify_all();
                 }
                 c.shutdown();
             }
@@ -402,8 +472,8 @@ namespace mongo {
             string x = cmdObj["exec"].valuestrsafe();
             return !x.empty();
         }*/
-        virtual void help(stringstream& h) const { h << "http://www.mongodb.org/display/DOCS/fsync+Command"; }
-        virtual bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual void help(stringstream& h) const { h << url(); }
+        virtual bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             bool sync = !cmdObj["async"].trueValue(); // async means do an fsync, but return immediately
             bool lock = cmdObj["lock"].trueValue();
             log() << "CMD fsync:  sync:" << sync << " lock:" << lock << endl;
@@ -433,13 +503,19 @@ namespace mongo {
                 LockDBJob *l = new LockDBJob(ready);
 
                 dbMutex.releaseEarly();
+                
+                // There is a narrow window for another lock request to come in
+                // here before the LockDBJob grabs the readlock. LockDBJob will
+                // ensure that the requests are serialized and never running
+                // concurrently
 
                 l->go();
                 // don't return until background thread has acquired the read lock
                 while( !ready ) {
                     sleepmillis(10);
                 }
-                result.append("info", "now locked against writes, use db.$cmd.sys.unlock.findOne() to unlock");
+                result.append("info", "now locked against writes, use db.fsyncUnlock() to unlock");
+                result.append("seeAlso", url());
             }
             else {
                 // the simple fsync command case
@@ -453,7 +529,21 @@ namespace mongo {
 
     } fsyncCmd;
 
-
-
+    // Note that this will only unlock the current lock.  If another thread
+    // relocks before we return we still consider the unlocking successful.
+    // This is imporant because if two scripts are trying to fsync-lock, each
+    // one must be assured that between the fsync return and the call to unlock
+    // that the database is fully locked
+    void unlockFsyncAndWait(){
+        scoped_lock lk(fsyncLockMutex);
+        if (lockedForWriting) { // could have handled another unlock before we grabbed the lock
+            OID curOp = fsyncLockID;
+            unlockRequested = true;
+            fsyncLockCondition.notify_all();
+            while (lockedForWriting && fsyncLockID == curOp){
+                fsyncLockCondition.wait( lk.boost() );
+            }
+        }
+    }
 }
 

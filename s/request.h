@@ -19,7 +19,7 @@
 #pragma once
 
 #include "../pch.h"
-#include "../util/message.h"
+#include "../util/net/message.h"
 #include "../db/dbmessage.h"
 #include "config.h"
 #include "util.h"
@@ -69,6 +69,8 @@ namespace mongo {
         ClientInfo * getClientInfo() const {
             return _clientInfo;
         }
+
+        void checkAuth() const;
 
         // ---- remote location info -----
 

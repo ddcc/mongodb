@@ -31,26 +31,33 @@
 # define _CRT_SECURE_NO_WARNINGS
 #endif
 
-// [dm] i am not sure why we need this.
-#if defined(WIN32)
-# ifndef _WIN32
-# define _WIN32
-# endif
-#endif
-
 #if defined(_WIN32)
 // for rand_s() usage:
 # define _CRT_RAND_S
 # ifndef NOMINMAX
 #  define NOMINMAX
 # endif
+#define WIN32_LEAN_AND_MEAN
 # include <winsock2.h> //this must be included before the first windows.h include
 # include <ws2tcpip.h>
 # include <wspiapi.h>
 # include <windows.h>
 #endif
 
+#if defined(__linux__) && defined(MONGO_EXPOSE_MACROS)
+// glibc's optimized versions are better than g++ builtins
+# define __builtin_strcmp strcmp
+# define __builtin_strlen strlen
+# define __builtin_memchr memchr
+# define __builtin_memcmp memcmp
+# define __builtin_memcpy memcpy
+# define __builtin_memset memset
+# define __builtin_memmove memmove
+#endif
+
+
 #include <ctime>
+#include <cstring>
 #include <sstream>
 #include <string>
 #include <memory>
@@ -69,9 +76,9 @@
 #include "string.h"
 #include "limits.h"
 
-#include <boost/any.hpp>
+//#include <boost/any.hpp>
 #include "boost/thread/once.hpp"
-#include <boost/archive/iterators/transform_width.hpp>
+//#include <boost/archive/iterators/transform_width.hpp>
 #define BOOST_FILESYSTEM_VERSION 2
 #include <boost/filesystem/convenience.hpp>
 #include <boost/filesystem/exception.hpp>
@@ -144,7 +151,11 @@ namespace mongo {
     void asserted(const char *msg, const char *file, unsigned line);
 }
 
-#define MONGO_assert(_Expression) (void)( (!!(_Expression)) || (mongo::asserted(#_Expression, __FILE__, __LINE__), 0) )
+
+
+// TODO: Rework the headers so we don't need this craziness
+#include "bson/inline_decls.h"
+#define MONGO_assert(_Expression) (void)( MONGO_likely(!!(_Expression)) || (mongo::asserted(#_Expression, __FILE__, __LINE__), 0) )
 
 #include "util/debug_util.h"
 #include "util/goodies.h"
@@ -161,6 +172,11 @@ namespace mongo {
 
     using boost::uint32_t;
     using boost::uint64_t;
+
+    /** called by mongos, mongod, test. do not call from clients and such. 
+        invoked before about everything except global var construction.
+     */
+    void doPreServerStatupInits();
 
 } // namespace mongo
 

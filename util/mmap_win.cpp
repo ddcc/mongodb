@@ -18,7 +18,6 @@
 #include "pch.h"
 #include "mmap.h"
 #include "text.h"
-#include <windows.h>
 #include "../db/mongommf.h"
 #include "../db/concurrency.h"
 
@@ -26,6 +25,9 @@ namespace mongo {
 
     mutex mapViewMutex("mapView");
     ourbitset writable;
+
+    MAdvise::MAdvise(void *,unsigned, Advice) { }
+    MAdvise::~MAdvise() { }
 
     /** notification on unmapping so we can clear writable bits */
     void MemoryMappedFile::clearWritableBits(void *p) {
@@ -44,6 +46,7 @@ namespace mongo {
     }
 
     void MemoryMappedFile::close() {
+        mmmutex.assertExclusivelyLocked();
         for( vector<void*>::iterator i = views.begin(); i != views.end(); i++ ) {
             clearWritableBits(*i);
             UnmapViewOfFile(*i);
@@ -55,6 +58,7 @@ namespace mongo {
         if ( fd )
             CloseHandle(fd);
         fd = 0;
+        destroyed(); // cleans up from the master list of mmaps
     }
 
     unsigned long long mapped = 0;
@@ -138,7 +142,8 @@ namespace mongo {
         }
         if ( view == 0 ) {
             DWORD e = GetLastError();
-            log() << "MapViewOfFile failed " << filename << " " << errnoWithDescription(e) << endl;
+            log() << "MapViewOfFile failed " << filename << " " << errnoWithDescription(e) << 
+                ((sizeof(void*)==4)?" (32 bit build)":"") << endl;
             close();
         }
         else {
@@ -183,13 +188,13 @@ namespace mongo {
     void MemoryMappedFile::flush(bool sync) {
         uassert(13056, "Async flushing not supported on windows", sync);
         if( !views.empty() ) {
-            WindowsFlushable f( views[0] , fd , filename() , _flushMutex);
+            WindowsFlushable f( viewForFlushing() , fd , filename() , _flushMutex);
             f.flush();
         }
     }
 
     MemoryMappedFile::Flushable * MemoryMappedFile::prepareFlush() {
-        return new WindowsFlushable( views.empty() ? 0 : views[0] , fd , filename() , _flushMutex );
+        return new WindowsFlushable( viewForFlushing() , fd , filename() , _flushMutex );
     }
     void MemoryMappedFile::_lock() {}
     void MemoryMappedFile::_unlock() {}

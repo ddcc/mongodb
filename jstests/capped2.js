@@ -8,7 +8,7 @@ function debug( x ) {
 
 var val = new Array( 2000 );
 var c = "";
-for( i = 0; i < 2000; ++i, c += "-" ) {
+for( i = 0; i < 2000; ++i, c += "---" ) { // bigger and bigger objects through the array...
     val[ i ] = { a: c };
 }
 
@@ -47,16 +47,16 @@ function checkDecreasing( i ) {
 
 for( i = 0 ;; ++i ) {
     debug( "capped 2: " + i );
-    tzz.save( val[ i ] );
+    tzz.insert( val[ i ] );
     if ( tzz.count() == 0 ) {
-	assert( i > 100, "K" );
-	break;
+    	assert( i > 100, "K" );
+        break;
     }
     checkIncreasing( i );
 }
 
 for( i = 600 ; i >= 0 ; --i ) {
     debug( "capped 2: " + i );
-    tzz.save( val[ i ] );
+    tzz.insert( val[ i ] );
     checkDecreasing( i );
 }

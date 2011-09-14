@@ -7,7 +7,7 @@ checkArrs = function( a, b, m ) {
     bStr = [];
     a.forEach( function( x ) { aStr.push( tojson( x ) ); } );
     b.forEach( function( x ) { bStr.push( tojson( x ) ); } );
-    for ( i in aStr ) {
+    for ( i = 0; i < aStr.length; ++i ) {
         assert( -1 != bStr.indexOf( aStr[ i ] ), m );
     }
 }
@@ -29,7 +29,6 @@ doTest = function( index ) {
     assert.throws( function() { t.find( { x:0,$or:"a" } ).toArray(); } );
     assert.throws( function() { t.find( { x:0,$or:[] } ).toArray(); } );
     assert.throws( function() { t.find( { x:0,$or:[ "a" ] } ).toArray(); } );
-    assert.throws( function() { t.find( { x:0,$or:[ {x:0,$or:[{x:0}]} ] } ).toArray(); } );
     
     a1 = t.find( { x:0, $or: [ { a : 1 } ] } ).toArray();
     checkArrs( [ { _id:0, x:0, a:1 } ], a1 );

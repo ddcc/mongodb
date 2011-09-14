@@ -25,7 +25,49 @@ namespace mongo {
     public:
         CmdReplSetFresh() : ReplSetCommand("replSetFresh") { }
     private:
-        virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+
+        bool shouldVeto(const BSONObj& cmdObj, string& errmsg) {
+            unsigned id = cmdObj["id"].Int();
+            const Member* primary = theReplSet->box.getPrimary();
+            const Member* hopeful = theReplSet->findById(id);
+            const Member *highestPriority = theReplSet->getMostElectable();
+
+            if( !hopeful ) {
+                errmsg = str::stream() << "replSet couldn't find member with id " << id;
+                return true;
+            }
+            else if( theReplSet->isPrimary() && theReplSet->lastOpTimeWritten >= hopeful->hbinfo().opTime ) {
+                // hbinfo is not updated, so we have to check the primary's last optime separately
+                errmsg = str::stream() << "I am already primary, " << hopeful->fullName() <<
+                    " can try again once I've stepped down";
+                return true;
+            }
+            else if( primary && primary->hbinfo().opTime >= hopeful->hbinfo().opTime ) {
+                // other members might be aware of more up-to-date nodes
+                errmsg = str::stream() << hopeful->fullName() << " is trying to elect itself but " <<
+                    primary->fullName() << " is already primary and more up-to-date";
+                return true;
+            }
+            else if( highestPriority && highestPriority->config().priority > hopeful->config().priority) {
+                errmsg = str::stream() << hopeful->fullName() << " has lower priority than " << highestPriority->fullName();
+                return true;
+            }
+
+            // don't veto older versions
+            if (cmdObj["id"].eoo()) {
+                // they won't be looking for the veto field
+                return false;
+            }
+
+            if (!hopeful || !theReplSet->isElectable(id) ||
+                (highestPriority && highestPriority->config().priority > hopeful->config().priority)) {
+                return true;
+            }
+
+            return false;
+        }
+
+        virtual bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             if( !check(errmsg, result) )
                 return false;
 
@@ -43,11 +85,15 @@ namespace mongo {
                 result.append("info", "config version stale");
                 weAreFresher = true;
             }
-            else if( opTime < theReplSet->lastOpTimeWritten )  {
+            // check not only our own optime, but any other member we can reach
+            else if( opTime < theReplSet->lastOpTimeWritten ||
+                     opTime < theReplSet->lastOtherOpTime())  {
                 weAreFresher = true;
             }
             result.appendDate("opTime", theReplSet->lastOpTimeWritten.asDate());
             result.append("fresher", weAreFresher);
+            result.append("veto", shouldVeto(cmdObj, errmsg));
+
             return true;
         }
     } cmdReplSetFresh;
@@ -56,11 +102,9 @@ namespace mongo {
     public:
         CmdReplSetElect() : ReplSetCommand("replSetElect") { }
     private:
-        virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             if( !check(errmsg, result) )
                 return false;
-            //task::lam f = boost::bind(&Consensus::electCmdReceived, &theReplSet->elect, cmdObj, &result);
-            //theReplSet->mgr->call(f);
             theReplSet->elect.electCmdReceived(cmdObj, &result);
             return true;
         }
@@ -91,6 +135,10 @@ namespace mongo {
             if( dt < T )
                 vUp += m->config().votes;
         }
+
+        // the manager will handle calling stepdown if another node should be
+        // primary due to priority
+
         return !( vUp * 2 > totalVotes() );
     }
 
@@ -98,17 +146,19 @@ namespace mongo {
 
     const time_t LeaseTime = 30;
 
+    mutex Consensus::lyMutex("ly");
+
     unsigned Consensus::yea(unsigned memberId) { /* throws VoteException */
-        Atomic<LastYea>::tran t(ly);
-        LastYea &ly = t.ref();
+        mutex::scoped_lock lk(lyMutex);
+        LastYea &L = this->ly.ref(lk);
         time_t now = time(0);
-        if( ly.when + LeaseTime >= now && ly.who != memberId ) {
-            log(1) << "replSet not voting yea for " << memberId <<
-                   " voted for " << ly.who << ' ' << now-ly.when << " secs ago" << rsLog;
+        if( L.when + LeaseTime >= now && L.who != memberId ) {
+            LOG(1) << "replSet not voting yea for " << memberId <<
+                   " voted for " << L.who << ' ' << now-L.when << " secs ago" << rsLog;
             throw VoteException();
         }
-        ly.when = now;
-        ly.who = memberId;
+        L.when = now;
+        L.who = memberId;
         return rs._self->config().votes;
     }
 
@@ -116,8 +166,8 @@ namespace mongo {
        place instead of leaving it for a long time.
        */
     void Consensus::electionFailed(unsigned meid) {
-        Atomic<LastYea>::tran t(ly);
-        LastYea &L = t.ref();
+        mutex::scoped_lock lk(lyMutex);
+        LastYea &L = ly.ref(lk);
         DEV assert( L.who == meid ); // this may not always always hold, so be aware, but adding for now as a quick sanity test
         if( L.who == meid )
             L.when = 0;
@@ -127,7 +177,7 @@ namespace mongo {
     void Consensus::electCmdReceived(BSONObj cmd, BSONObjBuilder* _b) {
         BSONObjBuilder& b = *_b;
         DEV log() << "replSet received elect msg " << cmd.toString() << rsLog;
-        else log(2) << "replSet received elect msg " << cmd.toString() << rsLog;
+        else LOG(2) << "replSet received elect msg " << cmd.toString() << rsLog;
         string set = cmd["set"].String();
         unsigned whoid = cmd["whoid"].Int();
         int cfgver = cmd["cfgver"].Int();
@@ -136,22 +186,22 @@ namespace mongo {
 
         const Member* primary = rs.box.getPrimary();
         const Member* hopeful = rs.findById(whoid);
+        const Member* highestPriority = rs.getMostElectable();
 
         int vote = 0;
         if( set != rs.name() ) {
             log() << "replSet error received an elect request for '" << set << "' but our set name is '" << rs.name() << "'" << rsLog;
-
         }
         else if( myver < cfgver ) {
             // we are stale.  don't vote
         }
         else if( myver > cfgver ) {
             // they are stale!
-            log() << "replSet info got stale version # during election" << rsLog;
+            log() << "replSet electCmdReceived info got stale version # during election" << rsLog;
             vote = -10000;
         }
         else if( !hopeful ) {
-            log() << "couldn't find member with id " << whoid << rsLog;
+            log() << "replSet electCmdReceived couldn't find member with id " << whoid << rsLog;
             vote = -10000;
         }
         else if( primary && primary == rs._self && rs.lastOpTimeWritten >= hopeful->hbinfo().opTime ) {
@@ -166,14 +216,19 @@ namespace mongo {
                   primary->fullName() << " is already primary and more up-to-date" << rsLog;
             vote = -10000;
         }
+        else if( highestPriority && highestPriority->config().priority > hopeful->config().priority) {
+            log() << hopeful->fullName() << " has lower priority than " << highestPriority->fullName();
+            vote = -10000;
+        }
         else {
             try {
                 vote = yea(whoid);
+                dassert( hopeful->id() == whoid );
                 rs.relinquish();
-                log() << "replSet info voting yea for " << whoid << rsLog;
+                log() << "replSet info voting yea for " <<  hopeful->fullName() << " (" << whoid << ')' << rsLog;
             }
             catch(VoteException&) {
-                log() << "replSet voting no already voted for another" << rsLog;
+                log() << "replSet voting no for " << hopeful->fullName() << " already voted for another" << rsLog;
             }
         }
 
@@ -212,7 +267,8 @@ namespace mongo {
                           "set" << rs.name() <<
                           "opTime" << Date_t(ord.asDate()) <<
                           "who" << rs._self->fullName() <<
-                          "cfgver" << rs._cfg->version );
+                          "cfgver" << rs._cfg->version <<
+                          "id" << rs._self->id());
         list<Target> L;
         int ver;
         /* the following queries arbiters, even though they are never fresh.  wonder if that makes sense.
@@ -228,19 +284,33 @@ namespace mongo {
         for( list<Target>::iterator i = L.begin(); i != L.end(); i++ ) {
             if( i->ok ) {
                 nok++;
-                if( i->result["fresher"].trueValue() )
+                if( i->result["fresher"].trueValue() ) {
+                    log() << "not electing self, we are not freshest" << rsLog;
                     return false;
+                }
                 OpTime remoteOrd( i->result["opTime"].Date() );
                 if( remoteOrd == ord )
                     nTies++;
                 assert( remoteOrd <= ord );
+
+                if( i->result["veto"].trueValue() ) {
+                    BSONElement msg = i->result["errmsg"];
+                    if (!msg.eoo()) {
+                        log() << "not electing self, " << i->toHost << " would veto with '" <<
+                            msg.String() << "'" << rsLog;
+                    }
+                    else {
+                        log() << "not electing self, " << i->toHost << " would veto" << rsLog;
+                    }
+                    return false;
+                }
             }
             else {
                 DEV log() << "replSet freshest returns " << i->result.toString() << rsLog;
                 allUp = false;
             }
         }
-        log(1) << "replSet dev we are freshest of up nodes, nok:" << nok << " nTies:" << nTies << rsLog;
+        LOG(1) << "replSet dev we are freshest of up nodes, nok:" << nok << " nTies:" << nTies << rsLog;
         assert( ord <= theReplSet->lastOpTimeWritten ); // <= as this may change while we are working...
         return true;
     }
@@ -267,7 +337,6 @@ namespace mongo {
         bool allUp;
         int nTies;
         if( !weAreFreshest(allUp, nTies) ) {
-            log() << "replSet info not electing self, we are not freshest" << rsLog;
             return;
         }
 
@@ -324,7 +393,6 @@ namespace mongo {
             multiCommand(electCmd, L);
 
             {
-                RSBase::lock lk(&rs);
                 for( list<Target>::iterator i = L.begin(); i != L.end(); i++ ) {
                     DEV log() << "replSet elect res: " << i->result.toString() << rsLog;
                     if( i->ok ) {

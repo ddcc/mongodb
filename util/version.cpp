@@ -23,11 +23,63 @@
 #include <string>
 #include "unittest.h"
 #include "version.h"
+#include "stringutils.h"
+#include "../db/jsobj.h"
 #include "file.h"
+#include "ramlog.h"
+#include "../db/cmdline.h"
 
 namespace mongo {
 
-    const char versionString[] = "1.8.3";
+    /* Approved formats for versionString:
+     *      1.2.3
+     *      1.2.3-pre-
+     *      1.2.3-rc4 (up to rc9)
+     *      1.2.3-rc4-pre-
+     * If you really need to do something else you'll need to fix _versionArray()
+     */
+    const char versionString[] = "2.0.0";
+
+    // See unit test for example outputs
+    static BSONArray _versionArray(const char* version){
+        // this is inefficient, but cached so it doesn't matter
+        BSONArrayBuilder b;
+        string curPart;
+        const char* c = version;
+        int finalPart = 0; // 0 = final release, -100 = pre, -10 to -1 = -10 + X for rcX
+        do { //walks versionString including NUL byte
+            if (!(*c == '.' || *c == '-' || *c == '\0')){
+                curPart += *c;
+                continue;
+            }
+
+            try {
+                unsigned num = stringToNum(curPart.c_str());
+                b.append((int) num);
+            }
+            catch (...){ // not a number
+                if (curPart.empty()){
+                    assert(*c == '\0');
+                    break;
+                }
+                else if (startsWith(curPart, "rc")){
+                    finalPart = -10 + stringToNum(curPart.c_str()+2);
+                    break;
+                }
+                else if (curPart == "pre"){
+                    finalPart = -100;
+                    break;
+                }
+            }
+
+            curPart = "";
+        } while (*c++);
+
+        b.append(finalPart);
+        return b.arr();
+    }
+
+    const BSONArray versionArray = _versionArray(versionString);
 
     string mongodVersion() {
         stringstream ss;
@@ -61,38 +113,42 @@ namespace mongo {
 #endif
 
     void printSysInfo() {
-        log() << "build sys info: " << sysInfo() << endl;
+        log() << "build info: " << sysInfo() << endl;
     }
 
+
+    static Tee * startupWarningsLog = new RamLog("startupWarnings"); //intentionally leaked
+
     //
-    // 32 bit systems warning
+    // system warnings
     //
     void show_warnings() {
-        // each message adds a leading but not a trailing newline
+        // each message adds a leading and a trailing newline
 
         bool warned = false;
         {
             const char * foo = strchr( versionString , '.' ) + 1;
             int bar = atoi( foo );
             if ( ( 2 * ( bar / 2 ) ) != bar ) {
-                cout << "\n** NOTE: This is a development version (" << versionString << ") of MongoDB.";
-                cout << "\n**       Not recommended for production." << endl;
+                log() << startupWarningsLog;
+                log() << "** NOTE: This is a development version (" << versionString << ") of MongoDB." << startupWarningsLog;
+                log() << "**       Not recommended for production." << startupWarningsLog;
                 warned = true;
             }
         }
 
         if ( sizeof(int*) == 4 ) {
-            cout << endl;
-            cout << "** NOTE: when using MongoDB 32 bit, you are limited to about 2 gigabytes of data" << endl;
-            cout << "**       see http://blog.mongodb.org/post/137788967/32-bit-limitations" << endl;
-            cout << "**       with --dur, the limit is lower" << endl;
+            log() << startupWarningsLog;
+            log() << "** NOTE: when using MongoDB 32 bit, you are limited to about 2 gigabytes of data" << startupWarningsLog;
+            log() << "**       see http://blog.mongodb.org/post/137788967/32-bit-limitations" << startupWarningsLog;
+            log() << "**       with --journal, the limit is lower" << startupWarningsLog;
             warned = true;
         }
 
 #ifdef __linux__
         if (boost::filesystem::exists("/proc/vz") && !boost::filesystem::exists("/proc/bc")) {
-            cout << endl;
-            cout << "** WARNING: You are running in OpenVZ. This is known to be broken!!!" << endl;
+            log() << startupWarningsLog;
+            log() << "** WARNING: You are running in OpenVZ. This is known to be broken!!!" << startupWarningsLog;
             warned = true;
         }
 
@@ -122,22 +178,49 @@ namespace mongo {
                 const char* space = strchr(line, ' ');
                 
                 if ( ! space ) {
-                    cout << "** WARNING: cannot parse numa_maps" << endl;
+                    log() << startupWarningsLog;
+                    log() << "** WARNING: cannot parse numa_maps" << startupWarningsLog;
                     warned = true;
                 }
                 else if ( ! startsWith(space+1, "interleave") ) {
-                    cout << endl;
-                    cout << "** WARNING: You are running on a NUMA machine." << endl;
-                    cout << "**          We suggest launching mongod like this to avoid performance problems:" << endl;
-                    cout << "**              numactl --interleave=all mongod [other options]" << endl;
+                    log() << startupWarningsLog;
+                    log() << "** WARNING: You are running on a NUMA machine." << startupWarningsLog;
+                    log() << "**          We suggest launching mongod like this to avoid performance problems:" << startupWarningsLog;
+                    log() << "**              numactl --interleave=all mongod [other options]" << startupWarningsLog;
                     warned = true;
                 }
             }
         }
+
+        if (cmdLine.dur){
+            fstream f ("/proc/sys/vm/overcommit_memory", ios_base::in);
+            unsigned val;
+            f >> val;
+
+            if (val == 2) {
+                log() << startupWarningsLog;
+                log() << "** WARNING: /proc/sys/vm/overcommit_memory is " << val << startupWarningsLog;
+                log() << "**          Journaling works best with it set to 0 or 1" << startupWarningsLog;
+            }
+        }
+
+        if (boost::filesystem::exists("/proc/sys/vm/zone_reclaim_mode")){
+            fstream f ("/proc/sys/vm/zone_reclaim_mode", ios_base::in);
+            unsigned val;
+            f >> val;
+
+            if (val != 0) {
+                log() << startupWarningsLog;
+                log() << "** WARNING: /proc/sys/vm/zone_reclaim_mode is " << val << startupWarningsLog;
+                log() << "**          We suggest setting it to 0" << startupWarningsLog;
+                log() << "**          http://www.kernel.org/doc/Documentation/sysctl/vm.txt" << startupWarningsLog;
+            }
+        }
 #endif
 
-        if (warned)
-            cout << endl;
+        if (warned) {
+            log() << startupWarningsLog;
+        }
     }
 
     int versionCmp(StringData rhs, StringData lhs) {
@@ -174,4 +257,28 @@ namespace mongo {
             log(1) << "versionCmpTest passed" << endl;
         }
     } versionCmpTest;
+
+    class VersionArrayTest : public UnitTest {
+    public:
+        void run() {
+            assert( _versionArray("1.2.3") == BSON_ARRAY(1 << 2 << 3 << 0) );
+            assert( _versionArray("1.2.0") == BSON_ARRAY(1 << 2 << 0 << 0) );
+            assert( _versionArray("2.0.0") == BSON_ARRAY(2 << 0 << 0 << 0) );
+
+            assert( _versionArray("1.2.3-pre-") == BSON_ARRAY(1 << 2 << 3 << -100) );
+            assert( _versionArray("1.2.0-pre-") == BSON_ARRAY(1 << 2 << 0 << -100) );
+            assert( _versionArray("2.0.0-pre-") == BSON_ARRAY(2 << 0 << 0 << -100) );
+
+            assert( _versionArray("1.2.3-rc0") == BSON_ARRAY(1 << 2 << 3 << -10) );
+            assert( _versionArray("1.2.0-rc1") == BSON_ARRAY(1 << 2 << 0 << -9) );
+            assert( _versionArray("2.0.0-rc2") == BSON_ARRAY(2 << 0 << 0 << -8) );
+
+            // Note that the pre of an rc is the same as the rc itself
+            assert( _versionArray("1.2.3-rc3-pre-") == BSON_ARRAY(1 << 2 << 3 << -7) );
+            assert( _versionArray("1.2.0-rc4-pre-") == BSON_ARRAY(1 << 2 << 0 << -6) );
+            assert( _versionArray("2.0.0-rc5-pre-") == BSON_ARRAY(2 << 0 << 0 << -5) );
+
+            log(1) << "versionArrayTest passed" << endl;
+        }
+    } versionArrayTest;
 }

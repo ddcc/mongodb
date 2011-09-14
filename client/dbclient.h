@@ -1,4 +1,7 @@
-/** @file dbclient.h - connect to a Mongo database as a database, from C++ */
+/** @file dbclient.h
+
+    Core MongoDB C++ driver interfaces are defined here.
+*/
 
 /*    Copyright 2009 10gen Inc.
  *
@@ -18,7 +21,8 @@
 #pragma once
 
 #include "../pch.h"
-#include "../util/message.h"
+#include "../util/net/message.h"
+#include "../util/net/message_port.h"
 #include "../db/jsobj.h"
 #include "../db/json.h"
 #include <stack>
@@ -100,6 +104,15 @@ namespace mongo {
         RemoveOption_Broadcast = 1 << 1
     };
 
+    
+    /** 
+     * need to put in DbMesssage::ReservedOptions as well
+     */
+    enum InsertOptions {
+        /** With muli-insert keep processing inserts if one fails */
+        InsertOption_ContinueOnError = 1 << 0
+    };
+
     class DBClientBase;
 
     /**
@@ -174,7 +187,7 @@ namespace mongo {
 
         string toString() const { return _string; }
         
-        DBClientBase* connect( string& errmsg ) const;
+        DBClientBase* connect( string& errmsg, double socketTimeout = 0 ) const;
 
         string getSetName() const { return _setName; }
 
@@ -296,7 +309,7 @@ namespace mongo {
         Query& where(const string &jscode) { return where(jscode, BSONObj()); }
 
         /**
-         * if this query has an orderby, hint, or some other field
+         * @return true if this query has an orderby, hint, or some other field
          */
         bool isComplex( bool * hasDollar = 0 ) const;
 
@@ -332,12 +345,15 @@ namespace mongo {
         virtual ~DBConnector() {}
         /** actualServer is set to the actual server where they call went if there was a choice (SlaveOk) */
         virtual bool call( Message &toSend, Message &response, bool assertOk=true , string * actualServer = 0 ) = 0;
-        virtual void say( Message &toSend ) = 0;
+        virtual void say( Message &toSend, bool isRetry = false ) = 0;
         virtual void sayPiggyBack( Message &toSend ) = 0;
-        virtual void checkResponse( const char* data, int nReturned ) {}
-
         /* used by QueryOption_Exhaust.  To use that your subclass must implement this. */
-        virtual void recv( Message& m ) { assert(false); }
+        virtual bool recv( Message& m ) { assert(false); return false; }
+        // In general, for lazy queries, we'll need to say, recv, then checkResponse
+        virtual void checkResponse( const char* data, int nReturned, bool* retry = NULL, string* targetHost = NULL ) {
+            if( retry ) *retry = false; if( targetHost ) *targetHost = "";
+        }
+        virtual bool lazySupported() const = 0;
     };
 
     /**
@@ -348,12 +364,9 @@ namespace mongo {
         virtual auto_ptr<DBClientCursor> query(const string &ns, Query query, int nToReturn = 0, int nToSkip = 0,
                                                const BSONObj *fieldsToReturn = 0, int queryOptions = 0 , int batchSize = 0 ) = 0;
 
-        /** don't use this - called automatically by DBClientCursor for you */
-        virtual auto_ptr<DBClientCursor> getMore( const string &ns, long long cursorId, int nToReturn = 0, int options = 0 ) = 0;
+        virtual void insert( const string &ns, BSONObj obj , int flags=0) = 0;
 
-        virtual void insert( const string &ns, BSONObj obj ) = 0;
-
-        virtual void insert( const string &ns, const vector< BSONObj >& v ) = 0;
+        virtual void insert( const string &ns, const vector< BSONObj >& v , int flags=0) = 0;
 
         virtual void remove( const string &ns , Query query, bool justOne = 0 ) = 0;
 
@@ -367,8 +380,15 @@ namespace mongo {
         */
         virtual BSONObj findOne(const string &ns, const Query& query, const BSONObj *fieldsToReturn = 0, int queryOptions = 0);
 
+        /** query N objects from the database into an array.  makes sense mostly when you want a small number of results.  if a huge number, use 
+            query() and iterate the cursor. 
+        */
+        void findN(vector<BSONObj>& out, const string&ns, Query query, int nToReturn, int nToSkip = 0, const BSONObj *fieldsToReturn = 0, int queryOptions = 0);
+
         virtual string getServerAddress() const = 0;
 
+        /** don't use this - called automatically by DBClientCursor for you */
+        virtual auto_ptr<DBClientCursor> getMore( const string &ns, long long cursorId, int nToReturn = 0, int options = 0 ) = 0;
     };
 
     /**
@@ -449,15 +469,19 @@ namespace mongo {
         */
         bool createCollection(const string &ns, long long size = 0, bool capped = false, int max = 0, BSONObj *info = 0);
 
-        /** Get error result from the last operation on this connection.
+        /** Get error result from the last write operation (insert/update/delete) on this connection.
             @return error message text, or empty string if no error.
         */
         string getLastError();
-        /** Get error result from the last operation on this connection.
+
+        /** Get error result from the last write operation (insert/update/delete) on this connection.
             @return full error object.
         */
         virtual BSONObj getLastErrorDetailed();
 
+        /** Can be called with the returned value from getLastErrorDetailed to extract an error string. 
+            If all you need is the string, just call getLastError() instead.
+        */
         static string getLastErrorString( const BSONObj& res );
 
         /** Return the last error which has occurred, even if not the very last operation.
@@ -640,13 +664,15 @@ namespace mongo {
            @param ns collection to be indexed
            @param keys the "key pattern" for the index.  e.g., { name : 1 }
            @param unique if true, indicates that key uniqueness should be enforced for this index
-           @param name if not isn't specified, it will be created from the keys (recommended)
+           @param name if not specified, it will be created from the keys automatically (which is recommended)
            @param cache if set to false, the index cache for the connection won't remember this call
+           @param background build index in the background (see mongodb docs/wiki for details)
+           @param v index version. leave at default value. (unit tests set this parameter.)
            @return whether or not sent message to db.
              should be true on first call, false on subsequent unless resetIndexCache was called
          */
         virtual bool ensureIndex( const string &ns , BSONObj keys , bool unique = false, const string &name = "",
-                                  bool cache = true );
+                                  bool cache = true, bool background = false, int v = -1 );
 
         /**
            clears the index cache, so the subsequent call to ensureIndex for any index will go to the server
@@ -748,12 +774,12 @@ namespace mongo {
         /**
            insert an object into the database
          */
-        virtual void insert( const string &ns , BSONObj obj );
+        virtual void insert( const string &ns , BSONObj obj , int flags=0);
 
         /**
            insert a vector of objects into the database
          */
-        virtual void insert( const string &ns, const vector< BSONObj >& v );
+        virtual void insert( const string &ns, const vector< BSONObj >& v , int flags=0);
 
         /**
            remove matching objects from the database
@@ -772,9 +798,10 @@ namespace mongo {
 
         virtual bool callRead( Message& toSend , Message& response ) = 0;
         // virtual bool callWrite( Message& toSend , Message& response ) = 0; // TODO: add this if needed
-        virtual void say( Message& toSend  ) = 0;
-
+        
         virtual ConnectionString::ConnectionType type() const = 0;
+        
+        virtual double getSoTimeout() const = 0;
 
     }; // DBClientBase
 
@@ -798,7 +825,7 @@ namespace mongo {
            Connect timeout is fixed, but short, at 5 seconds.
          */
         DBClientConnection(bool _autoReconnect=false, DBClientReplicaSet* cp=0, double so_timeout=0) :
-            clientSet(cp), failed(false), autoReconnect(_autoReconnect), lastReconnectTry(0), _so_timeout(so_timeout) {
+            clientSet(cp), _failed(false), autoReconnect(_autoReconnect), lastReconnectTry(0), _so_timeout(so_timeout) {
             _numConnections++;
         }
 
@@ -869,14 +896,14 @@ namespace mongo {
            @return true if this connection is currently in a failed state.  When autoreconnect is on,
                    a connection will transition back to an ok state after reconnecting.
          */
-        bool isFailed() const { return failed; }
+        bool isFailed() const { return _failed; }
 
-        MessagingPort& port() { return *p; }
+        MessagingPort& port() { assert(p); return *p; }
 
         string toStringLong() const {
             stringstream ss;
             ss << _serverString;
-            if ( failed ) ss << " failed";
+            if ( _failed ) ss << " failed";
             return ss.str();
         }
 
@@ -887,11 +914,15 @@ namespace mongo {
 
         virtual void killCursor( long long cursorID );
         virtual bool callRead( Message& toSend , Message& response ) { return call( toSend , response ); }
-        virtual void say( Message &toSend );
+        virtual void say( Message &toSend, bool isRetry = false );
+        virtual bool recv( Message& m );
+        virtual void checkResponse( const char *data, int nReturned, bool* retry = NULL, string* host = NULL );
         virtual bool call( Message &toSend, Message &response, bool assertOk = true , string * actualServer = 0 );
         virtual ConnectionString::ConnectionType type() const { return ConnectionString::MASTER; }
-        virtual void checkResponse( const char *data, int nReturned );
         void setSoTimeout(double to) { _so_timeout = to; }
+        double getSoTimeout() const { return _so_timeout; }
+
+        virtual bool lazySupported() const { return true; }
 
         static int getNumConnections() {
             return _numConnections;
@@ -899,16 +930,15 @@ namespace mongo {
         
         static void setLazyKillCursor( bool lazy ) { _lazyKillCursor = lazy; }
         static bool getLazyKillCursor() { return _lazyKillCursor; }
-
+        
     protected:
         friend class SyncClusterConnection;
-        virtual void recv( Message& m );
         virtual void sayPiggyBack( Message &toSend );
 
         DBClientReplicaSet *clientSet;
         boost::scoped_ptr<MessagingPort> p;
         boost::scoped_ptr<SockAddr> server;
-        bool failed;
+        bool _failed;
         const bool autoReconnect;
         time_t lastReconnectTry;
         HostAndPort _server; // remember for reconnects
@@ -916,7 +946,7 @@ namespace mongo {
         void _checkConnection();
 
         // throws SocketException if in failed state and not reconnecting or if waiting to reconnect
-        void checkConnection() { if( failed ) _checkConnection(); }
+        void checkConnection() { if( _failed ) _checkConnection(); }
 
         map< string, pair<string,string> > authCache;
         double _so_timeout;
@@ -924,6 +954,11 @@ namespace mongo {
 
         static AtomicUInt _numConnections;
         static bool _lazyKillCursor; // lazy means we piggy back kill cursors on next op
+
+#ifdef MONGO_SSL
+        static SSLManager* sslManager();
+        static SSLManager* _sslManager;
+#endif
     };
 
     /** pings server to check if it's up
@@ -931,6 +966,9 @@ namespace mongo {
     bool serverAlive( const string &uri );
 
     DBClientBase * createDirectClient();
+
+    BSONElement getErrField( const BSONObj& result );
+    bool hasErrField( const BSONObj& result );
 
 } // namespace mongo
 

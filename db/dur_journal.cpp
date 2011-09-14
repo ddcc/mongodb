@@ -25,7 +25,7 @@
 #include "../util/logfile.h"
 #include "../util/timer.h"
 #include "../util/alignedbuilder.h"
-#include "../util/message.h" // getelapsedtimemillis
+#include "../util/net/listen.h" // getelapsedtimemillis
 #include "../util/concurrency/race.h"
 #include <boost/static_assert.hpp>
 #undef assert
@@ -33,6 +33,8 @@
 #include "../util/mongoutils/str.h"
 #include "dur_journalimpl.h"
 #include "../util/file.h"
+#include "../util/checksum.h"
+#include "../util/compress.h"
 
 using namespace mongoutils;
 
@@ -40,7 +42,25 @@ namespace mongo {
 
     class AlignedBuilder;
 
+    unsigned goodRandomNumberSlow();
+
     namespace dur {
+        // Rotate after reaching this data size in a journal (j._<n>) file
+        // We use a smaller size for 32 bit as the journal is mmapped during recovery (only)
+        // Note if you take a set of datafiles, including journal files, from 32->64 or vice-versa, it must 
+        // work.  (and should as-is)
+        // --smallfiles makes the limit small.
+
+#if defined(_DEBUG)
+        unsigned long long DataLimitPerJournalFile = 128 * 1024 * 1024;
+#elif defined(__APPLE__)
+        // assuming a developer box if OS X
+        unsigned long long DataLimitPerJournalFile = 256 * 1024 * 1024;
+#else
+        unsigned long long DataLimitPerJournalFile = (sizeof(void*)==4) ? 256 * 1024 * 1024 : 1 * 1024 * 1024 * 1024;
+#endif
+
+        BOOST_STATIC_ASSERT( sizeof(Checksum) == 16 );
         BOOST_STATIC_ASSERT( sizeof(JHeader) == 8192 );
         BOOST_STATIC_ASSERT( sizeof(JSectHeader) == 20 );
         BOOST_STATIC_ASSERT( sizeof(JSectFooter) == 32 );
@@ -61,8 +81,6 @@ namespace mongo {
             return getJournalDir()/"lsn";
         }
 
-        extern CodeBlock durThreadMain;
-
         /** this should be called when something really bad happens so that we can flag appropriately
         */
         void journalingFailure(const char *msg) {
@@ -75,6 +93,35 @@ namespace mongo {
             assert(false);
         }
 
+        JSectFooter::JSectFooter() { 
+            memset(this, 0, sizeof(*this));
+            sentinel = JEntry::OpCode_Footer;
+        }
+
+        JSectFooter::JSectFooter(const void* begin, int len) { // needs buffer to compute hash
+            sentinel = JEntry::OpCode_Footer;
+            reserved = 0;
+            magic[0] = magic[1] = magic[2] = magic[3] = '\n';
+
+            Checksum c;
+            c.gen(begin, (unsigned) len);
+            memcpy(hash, c.bytes, sizeof(hash));
+        }
+
+        bool JSectFooter::checkHash(const void* begin, int len) const {
+            if( !magicOk() ) { 
+                log() << "journal footer not valid" << endl;
+                return false;
+            }
+            Checksum c;
+            c.gen(begin, len);
+            DEV log() << "checkHash len:" << len << " hash:" << toHex(hash, 16) << " current:" << toHex(c.bytes, 16) << endl;
+            if( memcmp(hash, c.bytes, sizeof(hash)) == 0 ) 
+                return true;
+            log() << "journal checkHash mismatch, got: " << toHex(c.bytes, 16) << " expected: " << toHex(hash,16) << endl;
+            return false;
+        }
+
         JHeader::JHeader(string fname) {
             magic[0] = 'j'; magic[1] = '\n';
             _version = CurrentVersion;
@@ -85,14 +132,12 @@ namespace mongo {
             strncpy(dbpath, fname.c_str(), sizeof(dbpath)-1);
             {
                 fileId = t&0xffffffff;
-                fileId |= ((unsigned long long)getRandomNumber()) << 32;
+                fileId |= ((unsigned long long)goodRandomNumberSlow()) << 32;
             }
             memset(reserved3, 0, sizeof(reserved3));
             txt2[0] = txt2[1] = '\n';
             n1 = n2 = n3 = n4 = '\n';
         }
-
-        // class Journal
 
         Journal j;
 
@@ -100,6 +145,7 @@ namespace mongo {
 
         Journal::Journal() :
             _curLogFileMutex("JournalLfMutex") {
+            _ageOut = true;
             _written = 0;
             _nextFileNumber = 0;
             _curLogFile = 0;
@@ -163,15 +209,20 @@ namespace mongo {
                 throw;
             }
             assert(!haveJournalFiles());
+
+            flushMyDirectory(getJournalDir() / "file"); // flushes parent of argument (in this case journal dir)
+
             log(1) << "removeJournalFiles end" << endl;
         }
 
         /** at clean shutdown */
         bool okToCleanUp = false; // successful recovery would set this to true
-        void Journal::cleanup() {
+        void Journal::cleanup(bool _log) {
             if( !okToCleanUp )
                 return;
 
+            if( _log )
+                log() << "journalCleanup..." << endl;
             try {
                 scoped_lock lk(_curLogFileMutex);
                 closeCurrentJournalFile();
@@ -182,7 +233,7 @@ namespace mongo {
                 throw;
             }
         }
-        void journalCleanup() { j.cleanup(); }
+        void journalCleanup(bool log) { j.cleanup(log); }
 
         bool _preallocateIsFaster() {
             bool faster = false;
@@ -215,21 +266,45 @@ namespace mongo {
             return faster;
         }
         bool preallocateIsFaster() {
-            return _preallocateIsFaster() && _preallocateIsFaster() && _preallocateIsFaster(); 
+            Timer t;
+            bool res = false;
+            if( _preallocateIsFaster() && _preallocateIsFaster() ) { 
+                // maybe system is just super busy at the moment? sleep a second to let it calm down.  
+                // deciding to to prealloc is a medium big decision:
+                sleepsecs(1);
+                res = _preallocateIsFaster();
+            }
+            if( t.millis() > 3000 ) 
+                log() << "preallocateIsFaster check took " << t.millis()/1000.0 << " secs" << endl;
+            return res;
         }
 
         // throws
         void preallocateFile(filesystem::path p, unsigned long long len) {
             if( exists(p) ) 
                 return;
+            
+            log() << "preallocating a journal file " << p.string() << endl;
 
             const unsigned BLKSZ = 1024 * 1024;
-            log() << "preallocating a journal file " << p.string() << endl;
-            LogFile f(p.string());
-            AlignedBuilder b(BLKSZ);
-            for( unsigned long long x = 0; x < len; x += BLKSZ ) { 
-                f.synchronousAppend(b.buf(), BLKSZ);
+            assert( len % BLKSZ == 0 );
+
+            AlignedBuilder b(BLKSZ);            
+            memset((void*)b.buf(), 0, BLKSZ);
+
+            ProgressMeter m(len, 3/*secs*/, 10/*hits between time check (once every 6.4MB)*/);
+
+            File f;
+            f.open( p.string().c_str() , /*read-only*/false , /*direct-io*/false );
+            assert( f.is_open() );
+            fileofs loc = 0;
+            while ( loc < len ) {
+                f.write( loc , b.buf() , BLKSZ );
+                loc += BLKSZ;
+                m.hit(BLKSZ);
             }
+            assert( loc == len );
+            f.fsync();
         }
 
         // throws
@@ -238,7 +313,7 @@ namespace mongo {
                 string fn = str::stream() << "prealloc." << i;
                 filesystem::path filepath = getJournalDir() / fn;
 
-                unsigned long long limit = Journal::DataLimit;
+                unsigned long long limit = DataLimitPerJournalFile;
                 if( debug && i == 1 ) { 
                     // moving 32->64, the prealloc files would be short.  that is "ok", but we want to exercise that 
                     // case, so we force exercising here when _DEBUG is set by arbitrarily stopping prealloc at a low 
@@ -251,14 +326,14 @@ namespace mongo {
         }
 
         void preallocateFiles() {
-            if( preallocateIsFaster() ||
-                exists(getJournalDir()/"prealloc.0") || // if enabled previously, keep using
-                exists(getJournalDir()/"prealloc.1") ) {
+            if( exists(getJournalDir()/"prealloc.0") || // if enabled previously, keep using
+                exists(getJournalDir()/"prealloc.1") ||
+                ( cmdLine.preallocj && preallocateIsFaster() ) ) {
                     usingPreallocate = true;
                     try {
                         _preallocateFiles();
                     }
-                    catch(...) { 
+                    catch(...) {
                         log() << "warning caught exception in preallocateFiles, continuing" << endl;
                     }
             }
@@ -273,7 +348,19 @@ namespace mongo {
                         filesystem::path filepath = getJournalDir() / fn;
                         if( !filesystem::exists(filepath) ) {
                             // we can recycle this file into this prealloc file location
-                            boost::filesystem::rename(p, filepath);
+                            filesystem::path temppath = getJournalDir() / (fn+".temp");
+                            boost::filesystem::rename(p, temppath);
+                            {
+                                // zero the header
+                                File f;
+                                f.open(temppath.string().c_str(), false, false);
+                                char buf[8192];
+                                memset(buf, 0, 8192);
+                                f.write(0, buf, 8192);
+                                f.truncate(DataLimitPerJournalFile);
+                                f.fsync();
+                            }
+                            boost::filesystem::rename(temppath, filepath);
                             return;
                         }
                     }
@@ -385,7 +472,7 @@ namespace mongo {
             if something highly surprising, throws to abort
         */
         unsigned long long LSNFile::get() {
-            uassert(13614, "unexpected version number of lsn file in journal/ directory", ver == 0);
+            uassert(13614, str::stream() << "unexpected version number of lsn file in journal/ directory got: " << ver , ver == 0);
             if( ~lsn != checkbytes ) {
                 log() << "lsnfile not valid. recovery will be from log start. lsn: " << hex << lsn << " checkbytes: " << hex << checkbytes << endl;
                 return 0;
@@ -396,12 +483,6 @@ namespace mongo {
         /** called during recovery (the error message text below assumes that)
         */
         unsigned long long journalReadLSN() {
-            if( !debug ) {
-                // in nondebug build, for now, be conservative until more tests written, and apply the whole journal.
-                // however we will still write the lsn file to exercise that code, and use in _DEBUG build.
-                return 0;
-            }
-
             if( !MemoryMappedFile::exists(lsnPath()) ) {
                 log() << "info no lsn file in journal/ directory" << endl;
                 return 0;
@@ -414,6 +495,11 @@ namespace mongo {
                 File f;
                 f.open(lsnPath().string().c_str());
                 assert(f.is_open());
+                if( f.len() == 0 ) { 
+                    // this could be 'normal' if we crashed at the right moment
+                    log() << "info lsn file is zero bytes long" << endl;
+                    return 0;
+                }
                 f.read(0,(char*)&L, sizeof(L));
                 unsigned long long lsn = L.get();
                 return lsn;
@@ -434,7 +520,6 @@ namespace mongo {
         void Journal::updateLSNFile() {
             if( !_writeToLSNNeeded )
                 return;
-            durThreadMain.assertWithin();
             _writeToLSNNeeded = false;
             try {
                 // os can flush as it likes.  if it flushes slowly, we will just do extra work on recovery.
@@ -446,10 +531,12 @@ namespace mongo {
                     log() << "warning: open of lsn file failed" << endl;
                     return;
                 }
-                log() << "lsn set " << _lastFlushTime << endl;
+                LOG(1) << "lsn set " << _lastFlushTime << endl;
                 LSNFile lsnf;
                 lsnf.set(_lastFlushTime);
                 f.write(0, (char*)&lsnf, sizeof(lsnf));
+				// do we want to fsync here? if we do it probably needs to be async so the durthread
+				// is not delayed.
             }
             catch(std::exception& e) {
                 log() << "warning: write to lsn file failed " << e.what() << endl;
@@ -502,32 +589,29 @@ namespace mongo {
             }
         }
 
-        /** check if time to rotate files.  assure a file is open.
-            done separately from the journal() call as we can do this part
-            outside of lock.
-            thread: durThread()
-         */
-        void journalRotate() {
-            j.rotate();
+        /*int getAgeOutJournalFiles() {
+            mutex::try_lock lk(j._curLogFileMutex, 4000);
+            if( !lk.ok )
+                return -1;
+            return j._ageOut ? 1 : 0;
+        }*/
+        void setAgeOutJournalFiles(bool a) {
+            scoped_lock lk(j._curLogFileMutex);
+            j._ageOut = a;
         }
-        void Journal::rotate() {
-            assert( !dbMutex.atLeastReadLocked() );
-            durThreadMain.assertWithin();
 
-            scoped_lock lk(_curLogFileMutex);
-
+        void Journal::_rotate() {
             if ( inShutdown() || !_curLogFile )
                 return;
 
             j.updateLSNFile();
 
-            if( _curLogFile && _written < DataLimit )
+            if( _curLogFile && _written < DataLimitPerJournalFile )
                 return;
 
             if( _curLogFile ) {
-
+                _curLogFile->truncate();
                 closeCurrentJournalFile();
-
                 removeUnneededJournalFiles();
             }
 
@@ -545,24 +629,74 @@ namespace mongo {
             }
         }
 
-        /** write to journal
+        /** write (append) the buffer we have built to the journal and fsync it.
+            outside of dbMutex lock as this could be slow.
+            @param uncompressed - a buffer that will be written to the journal after compression
+            will not return until on disk
         */
-        void journal(const AlignedBuilder& b) {
-            j.journal(b);
+        void WRITETOJOURNAL(JSectHeader h, AlignedBuilder& uncompressed) {
+            Timer t;
+            j.journal(h, uncompressed);
+            stats.curr->_writeToJournalMicros += t.micros();
         }
-        void Journal::journal(const AlignedBuilder& b) {
+        void Journal::journal(const JSectHeader& h, const AlignedBuilder& uncompressed) {
+            RACECHECK
+            static AlignedBuilder b(32*1024*1024);
+            /* buffer to journal will be
+               JSectHeader
+               compressed operations
+               JSectFooter
+            */
+            const unsigned headTailSize = sizeof(JSectHeader) + sizeof(JSectFooter);
+            const unsigned max = maxCompressedLength(uncompressed.len()) + headTailSize;
+            b.reset(max);
+
+            {
+                dassert( h.sectionLen() == (unsigned) 0xffffffff ); // we will backfill later
+                b.appendStruct(h);
+            }
+
+            size_t compressedLength = 0;
+            rawCompress(uncompressed.buf(), uncompressed.len(), b.cur(), &compressedLength);
+            assert( compressedLength < 0xffffffff );
+            assert( compressedLength < max );
+            b.skip(compressedLength);
+
+            // footer
+            unsigned L = 0xffffffff;
+            {
+                // pad to alignment, and set the total section length in the JSectHeader
+                assert( 0xffffe000 == (~(Alignment-1)) );
+                unsigned lenUnpadded = b.len() + sizeof(JSectFooter);
+                L = (lenUnpadded + Alignment-1) & (~(Alignment-1));
+                dassert( L >= lenUnpadded );
+
+                ((JSectHeader*)b.atOfs(0))->setSectionLen(lenUnpadded);
+
+                JSectFooter f(b.buf(), b.len()); // computes checksum
+                b.appendStruct(f);
+                dassert( b.len() == lenUnpadded );
+
+                b.skip(L - lenUnpadded);
+                dassert( b.len() % Alignment == 0 );
+            }
+
             try {
                 mutex::scoped_lock lk(_curLogFileMutex);
 
                 // must already be open -- so that _curFileId is correct for previous buffer building
                 assert( _curLogFile );
 
-                stats.curr->_journaledBytes += b.len();
-                _written += b.len();
-                _curLogFile->synchronousAppend((void *) b.buf(), b.len());
+                stats.curr->_uncompressedBytes += b.len();
+                unsigned w = b.len();
+                _written += w;
+                assert( w <= L );
+                stats.curr->_journaledBytes += L;
+                _curLogFile->synchronousAppend((const void *) b.buf(), L);
+                _rotate();
             }
             catch(std::exception& e) {
-                log() << "warning exception in dur::journal " << e.what() << endl;
+                log() << "error exception in dur::journal " << e.what() << endl;
                 throw;
             }
         }

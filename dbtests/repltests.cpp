@@ -25,6 +25,8 @@
 #include "../db/json.h"
 
 #include "dbtests.h"
+#include "../db/oplog.h"
+#include "../db/queryoptimizer.h"
 
 namespace mongo {
     void createOplog();
@@ -1012,120 +1014,94 @@ namespace ReplTests {
             ASSERT( !one( BSON( "_id" << 2 ) ).isEmpty() );
         }
     };
-
-    class DbIdsTest {
+    
+    class DatabaseIgnorerBasic {
     public:
         void run() {
-            Client::Context ctx( "unittests.repltest.DbIdsTest" );
-
-            s_.reset( new DbIds( "local.temp.DbIdsTest" ) );
-            s_->reset();
-            check( false, false, false );
-
-            s_->set( "a", BSON( "_id" << 4 ), true );
-            check( true, false, false );
-            s_->set( "a", BSON( "_id" << 4 ), false );
-            check( false, false, false );
-
-            s_->set( "b", BSON( "_id" << 4 ), true );
-            check( false, true, false );
-            s_->set( "b", BSON( "_id" << 4 ), false );
-            check( false, false, false );
-
-            s_->set( "a", BSON( "_id" << 5 ), true );
-            check( false, false, true );
-            s_->set( "a", BSON( "_id" << 5 ), false );
-            check( false, false, false );
-
-            s_->set( "a", BSON( "_id" << 4 ), true );
-            s_->set( "b", BSON( "_id" << 4 ), true );
-            s_->set( "a", BSON( "_id" << 5 ), true );
-            check( true, true, true );
-
-            s_->reset();
-            check( false, false, false );
-
-            s_->set( "a", BSON( "_id" << 4 ), true );
-            s_->set( "a", BSON( "_id" << 4 ), true );
-            check( true, false, false );
-            s_->set( "a", BSON( "_id" << 4 ), false );
-            check( false, false, false );
+            DatabaseIgnorer d;
+            ASSERT( !d.ignoreAt( "a", OpTime( 4, 0 ) ) );
+            d.doIgnoreUntilAfter( "a", OpTime( 5, 0 ) );
+            ASSERT( d.ignoreAt( "a", OpTime( 4, 0 ) ) );
+            ASSERT( !d.ignoreAt( "b", OpTime( 4, 0 ) ) );
+            ASSERT( d.ignoreAt( "a", OpTime( 4, 10 ) ) );
+            ASSERT( d.ignoreAt( "a", OpTime( 5, 0 ) ) );
+            ASSERT( !d.ignoreAt( "a", OpTime( 5, 1 ) ) );
+            // Ignore state is expired.
+            ASSERT( !d.ignoreAt( "a", OpTime( 4, 0 ) ) );
         }
-    private:
-        void check( bool one, bool two, bool three ) {
-            ASSERT_EQUALS( one, s_->get( "a", BSON( "_id" << 4 ) ) );
-            ASSERT_EQUALS( two, s_->get( "b", BSON( "_id" << 4 ) ) );
-            ASSERT_EQUALS( three, s_->get( "a", BSON( "_id" << 5 ) ) );
-        }
-        dblock lk_;
-        auto_ptr< DbIds > s_;
     };
 
-    class MemIdsTest {
+    class DatabaseIgnorerUpdate {
     public:
         void run() {
-            int n = sizeof( BSONObj ) + BSON( "_id" << 4 ).objsize();
+            DatabaseIgnorer d;
+            d.doIgnoreUntilAfter( "a", OpTime( 5, 0 ) );
+            d.doIgnoreUntilAfter( "a", OpTime( 6, 0 ) );
+            ASSERT( d.ignoreAt( "a", OpTime( 5, 5 ) ) );
+            ASSERT( d.ignoreAt( "a", OpTime( 6, 0 ) ) );
+            ASSERT( !d.ignoreAt( "a", OpTime( 6, 1 ) ) );
 
-            s_.reset();
-            ASSERT_EQUALS( 0, s_.roughSize() );
-            ASSERT( !s_.get( "a", BSON( "_id" << 4 ) ) );
-            ASSERT( !s_.get( "b", BSON( "_id" << 4 ) ) );
-            s_.set( "a", BSON( "_id" << 4 ), true );
-            ASSERT_EQUALS( n, s_.roughSize() );
-            ASSERT( s_.get( "a", BSON( "_id" << 4 ) ) );
-            ASSERT( !s_.get( "b", BSON( "_id" << 4 ) ) );
-            s_.set( "a", BSON( "_id" << 4 ), false );
-            ASSERT_EQUALS( 0, s_.roughSize() );
-            ASSERT( !s_.get( "a", BSON( "_id" << 4 ) ) );
-
-            s_.set( "a", BSON( "_id" << 4 ), true );
-            s_.set( "b", BSON( "_id" << 4 ), true );
-            s_.set( "b", BSON( "_id" << 100 ), true );
-            s_.set( "b", BSON( "_id" << 101 ), true );
-            ASSERT_EQUALS( n * 4, s_.roughSize() );
+            d.doIgnoreUntilAfter( "a", OpTime( 5, 0 ) );
+            d.doIgnoreUntilAfter( "a", OpTime( 6, 0 ) );
+            d.doIgnoreUntilAfter( "a", OpTime( 6, 0 ) );
+            d.doIgnoreUntilAfter( "a", OpTime( 5, 0 ) );
+            ASSERT( d.ignoreAt( "a", OpTime( 5, 5 ) ) );
+            ASSERT( d.ignoreAt( "a", OpTime( 6, 0 ) ) );
+            ASSERT( !d.ignoreAt( "a", OpTime( 6, 1 ) ) );            
         }
-    private:
-        MemIds s_;
     };
-
-    class IdTrackerTest {
+    
+    /**
+     * Check against oldest document in the oplog before scanning backward
+     * from the newest document.
+     */
+    class FindingStartCursorStale : public Base {
     public:
         void run() {
-            Client::Context ctx( "unittests.repltests.IdTrackerTest" );
-
-            ASSERT( s_.inMem() );
-            s_.reset( 4 * sizeof( BSONObj ) - 1 );
-            s_.haveId( "a", BSON( "_id" << 0 ), true );
-            s_.haveId( "a", BSON( "_id" << 1 ), true );
-            s_.haveId( "b", BSON( "_id" << 0 ), true );
-            s_.haveModId( "b", BSON( "_id" << 0 ), true );
-            ASSERT( s_.inMem() );
-            check();
-            s_.mayUpgradeStorage();
-            ASSERT( !s_.inMem() );
-            check();
-
-            s_.haveId( "a", BSON( "_id" << 1 ), false );
-            ASSERT( !s_.haveId( "a", BSON( "_id" << 1 ) ) );
-            s_.haveId( "a", BSON( "_id" << 1 ), true );
-            check();
-            ASSERT( !s_.inMem() );
-
-            s_.reset( 4 * sizeof( BSONObj ) - 1 );
-            s_.mayUpgradeStorage();
-            ASSERT( s_.inMem() );
+            for( int i = 0; i < 10; ++i ) {
+                client()->insert( ns(), BSON( "_id" << i ) );
+            }
+            dblock lk;
+            Client::Context ctx( cllNS() );
+            NamespaceDetails *nsd = nsdetails( cllNS() );
+            BSONObjBuilder b;
+            b.appendTimestamp( "$gte" );
+            BSONObj query = BSON( "ts" << b.obj() );
+            FieldRangeSetPair frsp( cllNS(), query );
+            BSONObj order = BSON( "$natural" << 1 );
+            QueryPlan qp( nsd, -1, frsp, &frsp, query, order );
+            FindingStartCursor fsc( qp );
+            ASSERT( fsc.done() );
+            ASSERT_EQUALS( 0, fsc.cursor()->current()[ "o" ].Obj()[ "_id" ].Int() );
         }
-    private:
-        void check() {
-            ASSERT( s_.haveId( "a", BSON( "_id" << 0 ) ) );
-            ASSERT( s_.haveId( "a", BSON( "_id" << 1 ) ) );
-            ASSERT( s_.haveId( "b", BSON( "_id" << 0 ) ) );
-            ASSERT( s_.haveModId( "b", BSON( "_id" << 0 ) ) );
-        }
-        dblock lk_;
-        IdTracker s_;
     };
-
+    
+    /** Check unsuccessful yield recovery with FindingStartCursor */
+    class FindingStartCursorYield : public Base {
+    public:
+        void run() {
+            for( int i = 0; i < 10; ++i ) {
+                client()->insert( ns(), BSON( "_id" << i ) );
+            }
+            Date_t ts = client()->query( "local.oplog.$main", Query().sort( BSON( "$natural" << 1 ) ), 1, 4 )->next()[ "ts" ].date();
+            Client::Context ctx( cllNS() );
+            NamespaceDetails *nsd = nsdetails( cllNS() );
+            BSONObjBuilder b;
+            b.appendDate( "$gte", ts );
+            BSONObj query = BSON( "ts" << b.obj() );
+            FieldRangeSetPair frsp( cllNS(), query );
+            BSONObj order = BSON( "$natural" << 1 );
+            QueryPlan qp( nsd, -1, frsp, &frsp, query, order );
+            FindingStartCursor fsc( qp );
+            ASSERT( !fsc.done() );
+            fsc.next();
+            ASSERT( !fsc.done() );
+            ASSERT( fsc.prepareToYield() );
+            ClientCursor::invalidate( "local.oplog.$main" );
+            ASSERT_EXCEPTION( fsc.recoverFromYield(), MsgAssertionException );
+        }
+    };
+    
     class All : public Suite {
     public:
         All() : Suite( "repl" ) {
@@ -1178,9 +1154,10 @@ namespace ReplTests {
             add< Idempotence::RenameOverwrite >();
             add< Idempotence::NoRename >();
             add< DeleteOpIsIdBased >();
-            add< DbIdsTest >();
-            add< MemIdsTest >();
-            add< IdTrackerTest >();
+            add< DatabaseIgnorerBasic >();
+            add< DatabaseIgnorerUpdate >();
+            add< FindingStartCursorStale >();
+            add< FindingStartCursorYield >();
         }
     } myall;
 

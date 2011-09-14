@@ -48,7 +48,7 @@ namespace mongo {
                 op = shared_ptr<DurOp>( new DropDbOp(br) );
                 break;
             default:
-                massert(13546, (str::stream() << "dur recover unrecognized opcode in journal " << opcode), false);
+                massert(13546, (str::stream() << "journal recover: unrecognized opcode in journal " << opcode), false);
             }
             return op;
         }
@@ -152,6 +152,7 @@ namespace mongo {
                 ofs += w;
             }
             f.fsync();
+            flushMyDirectory(full);
             massert(13628, str::stream() << "recover failure writing file " << full, !f.bad() );
         }
 

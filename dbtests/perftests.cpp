@@ -23,18 +23,33 @@
  */
 
 #include "pch.h"
-#include "../db/query.h"
+#include "../db/ops/query.h"
 #include "../db/db.h"
 #include "../db/instance.h"
 #include "../db/json.h"
 #include "../db/lasterror.h"
-#include "../db/update.h"
+#include "../db/ops/update.h"
 #include "../db/taskqueue.h"
 #include "../util/timer.h"
 #include "dbtests.h"
 #include "../db/dur_stats.h"
+#include "../util/checksum.h"
+#include "../util/version.h"
+#include "../db/key.h"
+#include "../util/compress.h"
+
+using namespace bson;
+
+namespace mongo {
+    namespace regression {
+        extern unsigned perfHist;
+    }
+}
 
 namespace PerfTests {
+
+    const bool profiling = false;
+
     typedef DBDirectClient DBClientType;
     //typedef DBClientConnection DBClientType;
 
@@ -92,29 +107,173 @@ namespace PerfTests {
     };
     int TaskQueueTest::tot;
 
-    class CappedTest : public ClientBase {
-    };
-
     class B : public ClientBase {
         string _ns;
     protected:
         const char *ns() { return _ns.c_str(); }
-        virtual void prep() = 0;
+
+        // anything you want to do before being timed
+        virtual void prep() { }
 
         virtual void timed() = 0;
 
         // optional 2nd test phase to be timed separately
         // return name of it
-        virtual const char * timed2() { return 0; }
+        virtual string timed2() { return ""; }
 
         virtual void post() { }
+
         virtual string name() = 0;
-        virtual unsigned long long expectation() = 0;
-        virtual int howLongMillis() { return 5000; }
+        virtual unsigned long long expectation() { return 0; }
+        virtual int expectationTimeMillis() { return -1; }
+
+        // how long to run test.  0 is a sentinel which means just run the timed() method once and time it.
+        virtual int howLongMillis() { return profiling ? 60000 : 5000; } 
+
+        /* override if your test output doesn't need that */
+        virtual bool showDurStats() { return true; }
+
+        static DBClientConnection *conn;
+        static unsigned once;
+
     public:
+        /* if you want recording of the timings, place the password for the perf database 
+            in ./../settings.py:
+                pstatspassword="<pwd>"
+        */
+        void connect() { 
+            if( once )
+                return;
+            ++once;
+
+            // no writing to perf db if _DEBUG
+            DEV return;
+            
+            const char *fn = "../../settings.py";
+            if( !exists(fn) ) { 
+                if( exists("settings.py") )
+                    fn = "settings.py";
+                else {
+                    cout << "no ../../settings.py or ./settings.py file found. will not write perf stats to pstats db." << endl;
+                    cout << "it is recommended this be enabled even on dev boxes" << endl;
+                    return;
+                }
+            }
+
+            try {
+                if( conn == 0 ) {
+                    MemoryMappedFile f;
+                    const char *p = (const char *) f.mapWithOptions(fn, MongoFile::READONLY);
+                    string pwd;
+
+                    {
+                        const char *q = str::after(p, "pstatspassword=\"");
+                        if( *q == 0 ) {
+                            cout << "info perftests.cpp: no pstatspassword= in settings.py" << endl;
+                            return;
+                        }
+                        else {
+                            pwd = str::before(q, '\"');
+                        }
+                    }
+
+                    DBClientConnection *c = new DBClientConnection(false, 0, 10);
+                    string err;
+                    if( c->connect("perfdb.10gen.cc", err) ) { 
+                        if( !c->auth("perf", "perf", pwd, err) ) { 
+                            cout << "info: authentication with stats db failed: " << err << endl;
+                            assert(false);
+                        }
+                        conn = c;
+                    }
+                    else { 
+                        cout << err << " (to log perfstats)" << endl;
+                    }
+                }
+            }
+            catch(...) { }
+        }
+
+        virtual unsigned batchSize() { return 50; }
+
         void say(unsigned long long n, int ms, string s) {
-            cout << setw(36) << left << s << ' ' << right << setw(7) << n*1000/ms << "/sec   " << setw(4) << ms << "ms" << endl;
-            cout << dur::stats.curr->_asObj().toString() << endl;
+            unsigned long long rps = n*1000/ms;
+            cout << "stats " << setw(33) << left << s << ' ' << right << setw(9) << rps << ' ' << right << setw(5) << ms << "ms ";
+            if( showDurStats() )
+                cout << dur::stats.curr->_asCSV();
+            cout << endl;
+
+            connect();
+
+            if( conn && !conn->isFailed() ) { 
+                const char *ns = "perf.pstats";
+                if( perfHist ) {
+                    static bool needver = true;
+                    try {
+                        // try to report rps from last time */
+                        Query q;
+                        {
+                            BSONObjBuilder b;
+                            b.append("host",getHostName()).append("test",s).append("dur",cmdLine.dur);
+                            DEV { b.append("info.DEBUG",true); }
+                            else b.appendNull("info.DEBUG");
+                            if( sizeof(int*) == 4 ) 
+                                b.append("info.bits", 32);
+                            else 
+                                b.appendNull("info.bits");
+                            q = Query(b.obj()).sort("when",-1);
+                        }
+                        BSONObj fields = BSON( "rps" << 1 << "info" << 1 );
+                        vector<BSONObj> v;
+                        conn->findN(v, ns, q, perfHist, 0, &fields);
+                        for( vector<BSONObj>::iterator i = v.begin(); i != v.end(); i++ ) {
+                            BSONObj o = *i;
+                            double lastrps = o["rps"].Number();
+                            if( lastrps ) {
+                                cout << "stats " << setw(33) << right << "new/old:" << ' ' << setw(9);
+                                cout << fixed << setprecision(2) << rps / lastrps;
+                                if( needver ) {
+                                    cout << "         " << o.getFieldDotted("info.git").toString();
+                                }
+                                cout << '\n';
+                            }
+                        }
+                    } catch(...) { }
+                    cout.flush();
+                    needver = false;
+                }
+                {
+                    bob b;
+                    b.append("host", getHostName());
+                    b.appendTimeT("when", time(0));
+                    b.append("test", s);
+                    b.append("rps", (int) rps);
+                    b.append("millis", ms);
+                    b.appendBool("dur", cmdLine.dur);
+                    if( showDurStats() && cmdLine.dur ) 
+                        b.append("durStats", dur::stats.curr->_asObj());
+                    {
+                        bob inf;
+                        inf.append("version", versionString);
+                        if( sizeof(int*) == 4 ) inf.append("bits", 32);
+                        DEV inf.append("DEBUG", true);
+#if defined(_WIN32)
+                        inf.append("os", "win");
+#endif
+                        inf.append("git", gitVersion());
+                        inf.append("boost", BOOST_VERSION);
+                        b.append("info", inf.obj());
+                    }
+                    BSONObj o = b.obj();
+                    //cout << "inserting " << o.toString() << endl;
+                    try {
+                        conn->insert(ns, o);
+                    }
+                    catch ( std::exception& e ) {
+                        warning() << "couldn't save perf results: " << e.what() << endl;
+                    }
+                }
+            }
         }
         void run() {
             _ns = string("perftest.") + name();
@@ -123,33 +282,54 @@ namespace PerfTests {
             prep();
 
             int hlm = howLongMillis();
+            DEV { 
+                // don't run very long with _DEBUG - not very meaningful anyway on that build
+                hlm = min(hlm, 500);
+            }
 
             dur::stats._intervalMicros = 0; // no auto rotate
             dur::stats.curr->reset();
-            Timer t;
+            mongo::Timer t;
             unsigned long long n = 0;
-            const unsigned Batch = 50;
-            do {
-                unsigned i;
-                for( i = 0; i < Batch; i++ )
-                    timed();
-                n += i;
+            const unsigned Batch = batchSize();
+
+            if( hlm == 0 ) { 
+                // means just do once
+                timed();
             }
-            while( t.millis() < hlm );
+            else {
+                do {
+                    unsigned i;
+                    for( i = 0; i < Batch; i++ )
+                        timed();
+                    n += i;
+                } while( t.millis() < hlm );
+            }
+
             client().getLastError(); // block until all ops are finished
             int ms = t.millis();
+
             say(n, ms, name());
 
-            if( n < expectation() ) {
-                cout << "\ntest " << name() << " seems slow n:" << n << " ops/sec but expect greater than:" << expectation() << endl;
-                cout << endl;
+            int etm = expectationTimeMillis();
+            DEV { 
+            }
+            else if( etm > 0 ) { 
+                if( ms > etm*2 ) { 
+                    cout << "test  " << name() << " seems slow expected ~" << etm << "ms" << endl;
+                }
+            }
+            else if( n < expectation() ) {
+                cout << "test  " << name() << " seems slow n:" << n << " ops/sec but expect greater than:" << expectation() << endl;
             }
 
+            post();
+
             {
-                const char *test2name = timed2();
-                if( test2name ) {
+                string test2name = timed2();
+                if( test2name.size() != 0 ) {
                     dur::stats.curr->reset();
-                    Timer t;
+                    mongo::Timer t;
                     unsigned long long n = 0;
                     while( 1 ) {
                         unsigned i;
@@ -166,12 +346,374 @@ namespace PerfTests {
         }
     };
 
+    DBClientConnection *B::conn;
+    unsigned B::once;
+
+    unsigned dontOptimizeOutHopefully;
+
+    class NonDurTest : public B { 
+    public:
+        virtual int howLongMillis() { return 3000; } 
+        virtual bool showDurStats() { return false; }
+    };
+
+    class BSONIter : public NonDurTest { 
+    public:
+        int n;
+        bo b, sub;
+        string name() { return "BSONIter"; }
+        BSONIter() { 
+            n = 0;
+            bo sub = bob().appendTimeT("t", time(0)).appendBool("abool", true).appendBinData("somebin", 3, BinDataGeneral, "abc").appendNull("anullone").obj();
+            b = BSON( "_id" << OID() << "x" << 3 << "yaaaaaa" << 3.00009 << "zz" << 1 << "q" << false << "obj" << sub << "zzzzzzz" << "a string a string" );
+        }
+        void timed() { 
+            for( bo::iterator i = b.begin(); i.more(); )
+                if( i.next().fieldName() )
+                    n++;
+            for( bo::iterator i = sub.begin(); i.more(); )
+                if( i.next().fieldName() )
+                    n++;
+        }
+    };
+
+    class BSONGetFields1 : public NonDurTest { 
+    public:
+        int n;
+        bo b, sub;
+        string name() { return "BSONGetFields1By1"; }
+        BSONGetFields1() { 
+            n = 0;
+            bo sub = bob().appendTimeT("t", time(0)).appendBool("abool", true).appendBinData("somebin", 3, BinDataGeneral, "abc").appendNull("anullone").obj();
+            b = BSON( "_id" << OID() << "x" << 3 << "yaaaaaa" << 3.00009 << "zz" << 1 << "q" << false << "obj" << sub << "zzzzzzz" << "a string a string" );
+        }
+        void timed() {
+            if( b["x"].eoo() )
+                n++;
+            if( b["q"].eoo() )
+                n++;
+            if( b["zzz"].eoo() )
+                n++;
+        }
+    };
+
+    class BSONGetFields2 : public BSONGetFields1 { 
+    public:
+        string name() { return "BSONGetFields"; }
+        void timed() {
+            static const char *names[] = { "x", "q", "zzz" };
+            BSONElement elements[3];
+            b.getFields(3, names, elements);
+            if( elements[0].eoo() )
+                n++;
+            if( elements[1].eoo() )
+                n++;
+            if( elements[2].eoo() )
+                n++;
+        }
+    };
+
+    class KeyTest : public B { 
+    public:
+        KeyV1Owned a,b,c;
+        string name() { return "Key-woequal"; }
+        virtual int howLongMillis() { return 3000; } 
+        KeyTest() : 
+          a(BSON("a"<<1<<"b"<<3.0<<"c"<<"qqq")), 
+          b(BSON("a"<<1<<"b"<<3.0<<"c"<<"qqq")), 
+          c(BSON("a"<<1<<"b"<<3.0<<"c"<<"qqqb"))
+          {}
+        virtual bool showDurStats() { return false; }
+        void timed() { 
+            assert( a.woEqual(b) );
+            assert( !a.woEqual(c) );
+        }
+    };
+
+    unsigned long long aaa;
+
+    class Timer : public B { 
+    public:
+        string name() { return "Timer"; }
+        virtual int howLongMillis() { return 1000; } 
+        virtual bool showDurStats() { return false; }
+        void timed() {
+            mongo::Timer t;
+            aaa += t.millis();
+        }
+    };
+
+    RWLock lk("testrw");
+    SimpleMutex m("simptst");
+    mongo::mutex mtest("mtest");
+    SpinLock s;
+
+    class mutexspeed : public B { 
+    public:
+        string name() { return "mutex"; }
+        virtual int howLongMillis() { return 500; } 
+        virtual bool showDurStats() { return false; }
+        void timed() {
+            mongo::mutex::scoped_lock lk(mtest);
+        }
+    };    
+    class simplemutexspeed : public B { 
+    public:
+        string name() { return "simplemutex"; }
+        virtual int howLongMillis() { return 500; } 
+        virtual bool showDurStats() { return false; }
+        void timed() {
+            SimpleMutex::scoped_lock lk(m);
+        }
+    };    
+    class spinlockspeed : public B { 
+    public:
+        string name() { return "spinlock"; }
+        virtual int howLongMillis() { return 500; } 
+        virtual bool showDurStats() { return false; }
+        void timed() {
+            mongo::scoped_spinlock lk(s);
+        }
+    };    
+
+    class rlock : public B { 
+    public:
+        string name() { return "rlock"; }
+        virtual int howLongMillis() { return 500; } 
+        virtual bool showDurStats() { return false; }
+        void timed() {
+            lk.lock_shared();
+            lk.unlock_shared();
+        }
+    };
+    class wlock : public B { 
+    public:
+        string name() { return "wlock"; }
+        virtual int howLongMillis() { return 500; } 
+        virtual bool showDurStats() { return false; }
+        void timed() {
+            lk.lock();
+            lk.unlock();
+        }
+    };
+    
+#if 0
+    class ulock : public B { 
+    public:
+        string name() { return "ulock"; }
+        virtual int howLongMillis() { return 500; } 
+        virtual bool showDurStats() { return false; }
+        void timed() {
+            lk.lockAsUpgradable();
+            lk.unlockFromUpgradable();
+        }
+    };
+#endif
+
+    class CTM : public B { 
+    public:
+        CTM() : last(0), delts(0), n(0) { }
+        string name() { return "curTimeMillis64"; }
+        virtual int howLongMillis() { return 500; } 
+        virtual bool showDurStats() { return false; }
+        unsigned long long last;
+        unsigned long long delts;
+        unsigned n;
+        void timed() {
+            unsigned long long x = curTimeMillis64();
+            aaa += x;
+            if( last ) { 
+                unsigned long long delt = x-last;
+                if( delt ) {
+                    delts += delt;
+                    n++;
+                }
+            }
+            last = x;
+        }
+        void post() {
+            // we need to know if timing is highly ungranular - that could be relevant in some places
+            if( n )
+                cout << "      avg timer granularity: " << ((double)delts)/n << "ms " << endl;
+        }
+    };
+
+    class Bldr : public B { 
+    public:
+        int n;
+        string name() { return "BufBuilder"; }
+        Bldr() { 
+        }
+        virtual int howLongMillis() { return 3000; } 
+        virtual bool showDurStats() { return false; }
+        void timed() {
+            BufBuilder b;
+            b.appendNum(3);
+            b.appendUChar(' ');
+            b.appendStr("abcd");
+            n += b.len();
+        }
+    };
+
+    class StkBldr : public B { 
+    public:
+        virtual int howLongMillis() { return 3000; } 
+        int n;
+        string name() { return "StackBufBuilder"; }
+        virtual bool showDurStats() { return false; }
+        void timed() {
+            StackBufBuilder b;
+            b.appendNum(3);
+            b.appendUChar(' ');
+            b.appendStr("abcd");
+            n += b.len();
+        }
+    };
+
+    // if a test is this fast, it was optimized out
+    class Dummy : public B {
+    public:
+        Dummy() { }
+        virtual int howLongMillis() { return 3000; } 
+        string name() { return "dummy"; }
+        void timed() {
+            dontOptimizeOutHopefully++;
+        }
+        unsigned long long expectation() { return 1000000; }
+        virtual bool showDurStats() { return false; }
+    };
+
+    // test thread local speed
+    class TLS : public B {
+    public:
+        TLS() { }
+        virtual int howLongMillis() { return 3000; } 
+        string name() { return "thread-local-storage"; }
+        void timed() {
+            if( &cc() )
+                dontOptimizeOutHopefully++;
+        }
+        unsigned long long expectation() { return 1000000; }
+        virtual bool showDurStats() { return false; }
+    };
+
+    class Malloc : public B {
+    public:
+        Malloc() { }
+        virtual int howLongMillis() { return 4000; } 
+        string name() { return "malloc"; }
+        void timed() {
+            char *p = new char[128];
+            if( dontOptimizeOutHopefully++ > 0 )
+                delete p;
+        }
+        unsigned long long expectation() { return 1000000; }
+        virtual bool showDurStats() { return false; }
+    };
+
+    class Compress : public B {
+    public:
+        const unsigned sz;
+        void *p;
+        Compress() : sz(1024*1024*100+3) { }
+        virtual unsigned batchSize() { return 1; }
+        string name() { return "compress"; }
+        virtual bool showDurStats() { return false; }
+        virtual int howLongMillis() { return 4000; } 
+        unsigned long long expectation() { return 1000000; }
+        void prep() { 
+            p = malloc(sz);
+            // this isn't a fair test as it is mostly rands but we just want a rough perf check
+            static int last;
+            for (unsigned i = 0; i<sz; i++) {
+                int r = rand();
+                if( (r & 0x300) == 0x300 )
+                    r = last;
+                ((char*)p)[i] = r;
+                last = r;
+            }
+        }
+        size_t last;
+        string res;
+        void timed() {
+            mongo::Timer t;
+            string out;
+            size_t len = compress((const char *) p, sz, &out);
+            bool ok = uncompress(out.c_str(), out.size(), &res);
+            ASSERT(ok);
+            static unsigned once;
+            if( once++ == 0 )
+                cout << "compress round trip " << sz/(1024.0*1024) / (t.millis()/1000.0) << "MB/sec\n";
+            //cout << len / (1024.0/1024) << " compressed" << endl;
+            (void)len; //fix unused error while above line is commented out
+        }
+        void post() {
+            ASSERT( memcmp(res.c_str(), p, sz) == 0 );
+            free(p);
+        }
+    };
+
+    // test speed of checksum method
+    class ChecksumTest : public B {
+    public:
+        const unsigned sz;
+        ChecksumTest() : sz(1024*1024*100+3) { }
+        string name() { return "checksum"; }
+        virtual int howLongMillis() { return 2000; } 
+        int expectationTimeMillis() { return 5000; }
+        virtual bool showDurStats() { return false; }
+        virtual unsigned batchSize() { return 1; }
+
+        void *p;
+
+        void prep() { 
+            {
+                // the checksum code assumes 'standard' rollover on addition overflows. let's check that:
+                unsigned long long x = 0xffffffffffffffffULL;
+                ASSERT( x+2 == 1 );
+            }
+
+            p = malloc(sz);
+            for (unsigned i = 0; i<sz; i++)
+                ((char*)p)[i] = rand();
+        }
+
+        Checksum last;
+
+        void timed() {
+            static int i;
+            Checksum c;
+            c.gen(p, sz);
+            if( i == 0 )
+                last = c;
+            else if( i == 1 ) {
+                ASSERT( c == last ); 
+            }
+        }
+        void post() {
+            {
+                mongo::Checksum c;
+                c.gen(p, sz-1);
+                ASSERT( c != last );
+                ((char *&)p)[0]++; // check same data, different order, doesn't give same checksum
+                ((char *&)p)[1]--;
+                c.gen(p, sz);
+                ASSERT( c != last );
+                ((char *&)p)[1]++; // check same data, different order, doesn't give same checksum (different longwords case)
+                ((char *&)p)[8]--;
+                c.gen(p, sz);
+                ASSERT( c != last );
+            }
+            free(p);
+        }
+    };
+
     class InsertDup : public B {
         const BSONObj o;
     public:
         InsertDup() : o( BSON("_id" << 1) ) { } // dup keys
         string name() {
-            return "insert duplicate _ids";
+            return "insert-duplicate-_ids";
         }
         void prep() {
             client().insert( ns(), o );
@@ -185,21 +727,32 @@ namespace PerfTests {
         unsigned long long expectation() { return 1000; }
     };
 
-    class Insert1 : public InsertDup {
+    class Insert1 : public B {
         const BSONObj x;
+        OID oid;
+        BSONObj query;
     public:
-        Insert1() : x( BSON("x" << 99) ) { }
-        string name() { return "insert simple"; }
+        Insert1() : x( BSON("x" << 99) ) { 
+            oid.init();
+            query = BSON("_id" << oid);
+        }
+        string name() { return "insert-simple"; }
         void timed() {
             client().insert( ns(), x );
         }
+        string timed2() {
+            client().findOne(ns(), query);
+            return "findOne_by_id";
+        }
         void post() {
-            assert( client().count(ns()) > 100 );
+#if !defined(_DEBUG)
+            assert( client().count(ns()) > 50 );
+#endif
         }
         unsigned long long expectation() { return 1000; }
     };
 
-    class InsertBig : public InsertDup {
+    class InsertBig : public B {
         BSONObj x;
         virtual int howLongMillis() {
             if( sizeof(void*) == 4 )
@@ -214,7 +767,7 @@ namespace PerfTests {
             b.appendBinData("bin", 200000, (BinDataType) 129, buf);
             x = b.obj();
         }
-        string name() { return "insert big"; }
+        string name() { return "insert-big"; }
         void timed() {
             client().insert( ns(), x );
         }
@@ -223,7 +776,7 @@ namespace PerfTests {
 
     class InsertRandom : public B {
     public:
-        string name() { return "random inserts"; }
+        string name() { return "random-inserts"; }
         void prep() {
             client().insert( ns(), BSONObj() );
             client().ensureIndex(ns(), BSON("x"<<1));
@@ -232,8 +785,6 @@ namespace PerfTests {
             int x = rand();
             BSONObj y = BSON("x" << x << "y" << rand() << "z" << 33);
             client().insert(ns(), y);
-        }
-        void post() {
         }
         unsigned long long expectation() { return 1000; }
     };
@@ -246,7 +797,7 @@ namespace PerfTests {
         static int rand() {
             return std::rand() & 0x7fff;
         }
-        string name() { return "random upserts"; }
+        virtual string name() { return "random-upserts"; }
         void prep() {
             client().insert( ns(), BSONObj() );
             client().ensureIndex(ns(), BSON("x"<<1));
@@ -258,7 +809,7 @@ namespace PerfTests {
             client().update(ns(), q, y, /*upsert*/true);
         }
 
-        const char * timed2() {
+        virtual string timed2() {
             static BSONObj I = BSON( "$inc" << BSON( "y" << 1 ) );
 
             // test some $inc's
@@ -267,23 +818,31 @@ namespace PerfTests {
             BSONObj q = BSON("x" << x);
             client().update(ns(), q, I);
 
-            return "inc";
+            return name()+"-inc";
         }
 
-        void post() {
-        }
         unsigned long long expectation() { return 1000; }
     };
 
     template <typename T>
     class MoreIndexes : public T {
     public:
-        string name() { return T::name() + " with more indexes"; }
+        string name() { return T::name() + "-with-more-indexes"; }
         void prep() {
             T::prep();
             this->client().ensureIndex(this->ns(), BSON("y"<<1));
             this->client().ensureIndex(this->ns(), BSON("z"<<1));
         }
+        
+        /*
+        virtual string timed2() {
+            string x = T::timed2();
+            if ( x.size() == 0 )
+                return x;
+            
+            return x + "-with-more-indexes";
+        }
+        */        
     };
 
     void t() {
@@ -310,11 +869,8 @@ namespace PerfTests {
 
     class All : public Suite {
     public:
-        All() : Suite( "perf" )
-        {
-        }
-        ~All() { 
-        }
+        All() : Suite( "perf" ) { }
+
         Result * run( const string& filter ) { 
             boost::thread a(t);
             Result * res = Suite::run(filter); 
@@ -323,14 +879,41 @@ namespace PerfTests {
         }
 
         void setupTests() {
-            add< TaskQueueTest >();
-            add< InsertDup >();
-            add< Insert1 >();
-            add< InsertRandom >();
-            add< MoreIndexes<InsertRandom> >();
-            add< Update1 >();
-            add< MoreIndexes<Update1> >();
-            add< InsertBig >();
+            cout
+                << "stats test                              rps------  time-- "
+                << dur::stats.curr->_CSVHeader() << endl;
+            if( profiling ) { 
+                add< Update1 >();
+            }
+            else {
+                add< Dummy >();
+                add< ChecksumTest >();
+                add< Compress >();
+                add< TLS >();
+                add< Malloc >();
+                add< Timer >();
+                add< rlock >();
+                add< wlock >();
+                //add< ulock >();
+                add< mutexspeed >();
+                add< simplemutexspeed >();
+                add< spinlockspeed >();
+                add< CTM >();
+                add< KeyTest >();
+                add< Bldr >();
+                add< StkBldr >();
+                add< BSONIter >();
+                add< BSONGetFields1 >();
+                add< BSONGetFields2 >();
+                add< TaskQueueTest >();
+                add< InsertDup >();
+                add< Insert1 >();
+                add< InsertRandom >();
+                add< MoreIndexes<InsertRandom> >();
+                add< Update1 >();
+                add< MoreIndexes<Update1> >();
+                add< InsertBig >();
+            }
         }
     } myall;
 }

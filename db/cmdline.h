@@ -21,25 +21,24 @@
 
 namespace mongo {
 
+#ifdef MONGO_SSL
+    class SSLManager;
+#endif
+
+
+
     /* command line options
     */
     /* concurrency: OK/READ */
     struct CmdLine {
 
-        CmdLine() :
-            port(DefaultDBPort), rest(false), jsonp(false), quiet(false), noTableScan(false), prealloc(true), smallfiles(sizeof(int*) == 4),
-            quota(false), quotaFiles(8), cpu(false), durOptions(0), oplogSize(0), defaultProfile(0), slowMS(100), pretouch(0), moveParanoia( true ),
-            syncdelay(60), socket("/tmp") {
-            // default may change for this later.
-#if defined(_DURABLEDEFAULTON)
-            dur = true;
-#else
-            dur = false;
-#endif
-        }
+        CmdLine();
 
         string binaryName;     // mongod or mongos
         string cwd;            // cwd of when process started
+
+        // this is suboptimal as someone could rename a binary.  todo...
+        bool isMongos() const { return binaryName == "mongos"; }
 
         int port;              // --port
         enum {
@@ -70,13 +69,17 @@ namespace mongo {
         bool quiet;            // --quiet
         bool noTableScan;      // --notablescan no table scans allowed
         bool prealloc;         // --noprealloc no preallocation of data files
+        bool preallocj;        // --nopreallocj no preallocation of journal files
         bool smallfiles;       // --smallfiles allocate smaller data files
+
+        bool configsvr;        // --configsvr
 
         bool quota;            // --quota
         int quotaFiles;        // --quotaFiles
         bool cpu;              // --cpu show cpu time periodically
 
-        bool dur;              // --dur durability
+        bool dur;                       // --dur durability (now --journal)
+        unsigned journalCommitInterval; // group/batch commit interval ms
 
         /** --durOptions 7      dump journal and terminate without doing anything further
             --durOptions 4      recover and terminate without listening
@@ -86,9 +89,12 @@ namespace mongo {
             DurScanOnly = 2,      // don't do any real work, just scan and dump if dump specified
             DurRecoverOnly = 4,   // terminate after recovery step
             DurParanoid = 8,      // paranoid mode enables extra checks
-            DurAlwaysCommit = 16  // do a group commit every time the writelock is released
+            DurAlwaysCommit = 16, // do a group commit every time the writelock is released
+            DurAlwaysRemap = 32   // remap the private view after every group commit (may lag to the next write lock acquisition, but will do all files then)
         };
         int durOptions;          // --durOptions <n> for debugging
+
+        bool objcheck;         // --objcheck
 
         long long oplogSize;   // --oplogSize
         int defaultProfile;    // --profile
@@ -98,7 +104,18 @@ namespace mongo {
         bool moveParanoia;     // for move chunk paranoia
         double syncdelay;      // seconds between fsyncs
 
+        bool noUnixSocket;     // --nounixsocket
         string socket;         // UNIX domain socket directory
+
+        bool keyFile;
+
+#ifdef MONGO_SSL
+        bool sslOnNormalPorts;      // --sslOnNormalPorts
+        string sslPEMKeyFile;       // --sslPEMKeyFile
+        string sslPEMKeyPassword;   // --sslPEMKeyPassword
+
+        SSLManager* sslServerManager; // currently leaks on close
+#endif
 
         static void addGlobalOptions( boost::program_options::options_description& general ,
                                       boost::program_options::options_description& hidden );
@@ -107,6 +124,7 @@ namespace mongo {
                                        boost::program_options::options_description& hidden );
 
 
+        static void parseConfigFile( istream &f, stringstream &ss);
         /**
          * @return true if should run program, false if should exit
          */
@@ -117,12 +135,37 @@ namespace mongo {
                            boost::program_options::variables_map &output );
     };
 
+    // todo move to cmdline.cpp?
+    inline CmdLine::CmdLine() :
+        port(DefaultDBPort), rest(false), jsonp(false), quiet(false), noTableScan(false), prealloc(true), preallocj(true), smallfiles(sizeof(int*) == 4),
+        configsvr(false),
+        quota(false), quotaFiles(8), cpu(false), durOptions(0), objcheck(false), oplogSize(0), defaultProfile(0), slowMS(100), pretouch(0), moveParanoia( true ),
+        syncdelay(60), noUnixSocket(false), socket("/tmp") 
+    {
+        journalCommitInterval = 0; // 0 means use default
+        dur = false;
+#if defined(_DURABLEDEFAULTON)
+        dur = true;
+#endif
+        if( sizeof(void*) == 8 )
+            dur = true;
+#if defined(_DURABLEDEFAULTOFF)
+        dur = false;
+#endif
+
+#ifdef MONGO_SSL
+        sslOnNormalPorts = false;
+        sslServerManager = 0;
+#endif
+    }
+            
     extern CmdLine cmdLine;
 
     void setupCoreSignals();
 
     string prettyHostName();
 
+    void printCommandLineOpts();
 
     /**
      * used for setParameter

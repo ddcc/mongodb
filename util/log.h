@@ -46,6 +46,39 @@ namespace mongo {
         }
     }
 
+    class LabeledLevel {
+    public:
+
+	LabeledLevel( int level ) : _level( level ) {}
+	LabeledLevel( const char* label, int level ) : _label( label ), _level( level ) {}
+	LabeledLevel( const string& label, int level ) : _label( label ), _level( level ) {}
+
+	LabeledLevel operator+( int i ) const {
+	    return LabeledLevel( _label, _level + i );
+	}
+
+	LabeledLevel operator+( const char* label ) const {
+	    if( _label == "" )
+		return LabeledLevel( label, _level );
+	    return LabeledLevel( _label + string("::") + label, _level );
+	}
+
+	LabeledLevel operator+( string& label ) const {
+	    return LabeledLevel( _label + string("::") + label, _level );
+	}
+
+	LabeledLevel operator-( int i ) const {
+	    return LabeledLevel( _label, _level - i );
+	}
+
+	const string& getLabel() const { return _label; }
+	int getLevel() const { return _level; }
+
+    private:
+	string _label;
+	int _level;
+    };
+
     class LazyString {
     public:
         virtual ~LazyString() {}
@@ -102,6 +135,9 @@ namespace mongo {
             return *this;
         }
         virtual Nullstream& operator<<(unsigned) {
+            return *this;
+        }
+        virtual Nullstream& operator<<(unsigned short) {
             return *this;
         }
         virtual Nullstream& operator<<(double) {
@@ -209,6 +245,7 @@ namespace mongo {
         Logstream& operator<<(long x)          { ss << x; return *this; }
         Logstream& operator<<(unsigned long x) { ss << x; return *this; }
         Logstream& operator<<(unsigned x)      { ss << x; return *this; }
+        Logstream& operator<<(unsigned short x){ ss << x; return *this; }
         Logstream& operator<<(double x)        { ss << x; return *this; }
         Logstream& operator<<(void *x)         { ss << x; return *this; }
         Logstream& operator<<(const void *x)   { ss << x; return *this; }
@@ -261,6 +298,9 @@ namespace mongo {
         }
     public:
         static Logstream& get() {
+            if ( StaticObserver::_destroyingStatics ) {
+                cout << "Logstream::get called in uninitialized state" << endl;
+            }
             Logstream *p = tsp.get();
             if( p == 0 )
                 tsp.reset( p = new Logstream() );
@@ -291,7 +331,7 @@ namespace mongo {
         return Logstream::get();
     }
 
-    /** logging which we may not want during unit tests runs.
+    /** logging which we may not want during unit tests (dbtests) runs.
         set tlogLevel to -1 to suppress tlog() output in a test program. */
     inline Nullstream& tlog( int level = 0 ) {
         if ( level > tlogLevel || level > logLevel )
@@ -305,13 +345,19 @@ namespace mongo {
         return Logstream::get().prolog();
     }
 
-#define MONGO_LOG(level) if ( logLevel >= (level) ) log( level )
+#define MONGO_LOG(level) if ( MONGO_unlikely(logLevel >= (level)) ) log( level )
 #define LOG MONGO_LOG
 
     inline Nullstream& log( LogLevel l ) {
         return Logstream::get().prolog().setLogLevel( l );
     }
 
+    inline Nullstream& log( const LabeledLevel& ll ) {
+        Nullstream& stream = log( ll.getLevel() );
+        if( ll.getLabel() != "" )
+            stream << "[" << ll.getLabel() << "] ";
+        return stream;
+    }
 
     inline Nullstream& log() {
         return Logstream::get().prolog();
@@ -392,7 +438,6 @@ namespace mongo {
     string errnoWithPrefix( const char * prefix );
 
     void Logstream::logLockless( const StringData& s ) {
-
         if ( s.size() == 0 )
             return;
 
@@ -474,5 +519,7 @@ namespace mongo {
             Logstream::get().indentDec();
         }
     };
+
+    extern Tee* const warnings; // Things put here go in serverStatus
 
 } // namespace mongo

@@ -18,9 +18,26 @@
 #include <iostream>
 
 #include "client/dbclient.h"
-#include "util/httpclient.h"
+#include "util/net/httpclient.h"
 
 using namespace mongo;
+
+void play( string url ) {
+    cout << "[" << url << "]" << endl;
+
+    HttpClient c;
+    HttpClient::Result r;
+    MONGO_assert( c.get( url , &r ) == 200 );
+
+    HttpClient::Headers h = r.getHeaders();
+    MONGO_assert( h["Content-Type"].find( "text/html" ) == 0 );
+
+    cout << "\tHeaders" << endl;
+    for ( HttpClient::Headers::iterator i = h.begin() ; i != h.end(); ++i ) {
+        cout << "\t\t" << i->first << "\t" << i->second << endl;
+    }
+    
+}
 
 int main( int argc, const char **argv ) {
 
@@ -32,12 +49,10 @@ int main( int argc, const char **argv ) {
     }
     port += 1000;
 
-    stringstream ss;
-    ss << "http://localhost:" << port << "/";
-    string url = ss.str();
-
-    cout << "[" << url << "]" << endl;
-
-    HttpClient c;
-    MONGO_assert( c.get( url ) == 200 );
+    play( str::stream() << "http://localhost:" << port << "/" );
+    
+#ifdef MONGO_SSL
+    play( "https://www.10gen.com/" );
+#endif
+    
 }
