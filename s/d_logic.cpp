@@ -29,7 +29,7 @@
 #include "../db/commands.h"
 #include "../db/jsobj.h"
 #include "../db/dbmessage.h"
-#include "../db/query.h"
+#include "../db/ops/query.h"
 
 #include "../client/connpool.h"
 
@@ -56,11 +56,11 @@ namespace mongo {
         DbMessage d(m);
         const char *ns = d.getns();
         string errmsg;
-        if ( shardVersionOk( ns , opIsWrite( op ) , errmsg ) ) {
+        if ( shardVersionOk( ns , errmsg ) ) {
             return false;
         }
 
-        log(1) << "connection meta data too old - will retry ns:(" << ns << ") op:(" << opToString(op) << ") " << errmsg << endl;
+        LOG(1) << "connection meta data too old - will retry ns:(" << ns << ") op:(" << opToString(op) << ") " << errmsg << endl;
 
         if ( doesOpGetAResponse( op ) ) {
             assert( dbresponse );
@@ -87,6 +87,8 @@ namespace mongo {
             dbresponse->responseTo = m.header()->id;
             return true;
         }
+        
+        uassert( 9517 , "writeback" , ( d.reservedField() & DbMessage::Reserved_FromWriteback ) == 0 );
 
         OID writebackID;
         writebackID.init();
@@ -95,8 +97,8 @@ namespace mongo {
         const OID& clientID = ShardedConnectionInfo::get(false)->getID();
         massert( 10422 ,  "write with bad shard config and no server id!" , clientID.isSet() );
 
-        log(1) << "got write with an old config - writing back ns: " << ns << endl;
-        if ( logLevel ) log(1) << debugString( m ) << endl;
+        LOG(1) << "got write with an old config - writing back ns: " << ns << endl;
+        if ( logLevel ) LOG(1) << m.toString() << endl;
 
         BSONObjBuilder b;
         b.appendBool( "writeBack" , true );
@@ -107,7 +109,7 @@ namespace mongo {
         b.appendTimestamp( "version" , shardingState.getVersion( ns ) );
         b.appendTimestamp( "yourVersion" , ShardedConnectionInfo::get( true )->getVersion( ns ) );
         b.appendBinData( "msg" , m.header()->len , bdtCustom , (char*)(m.singleData()) );
-        log(2) << "writing back msg with len: " << m.header()->len << " op: " << m.operation() << endl;
+        LOG(2) << "writing back msg with len: " << m.header()->len << " op: " << m.operation() << endl;
         writeBackManager.queueWriteBack( clientID.str() , b.obj() );
 
         return true;

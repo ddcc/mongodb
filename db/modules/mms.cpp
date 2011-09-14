@@ -20,7 +20,7 @@
 #include "../db.h"
 #include "../instance.h"
 #include "../module.h"
-#include "../../util/httpclient.h"
+#include "../../util/net/httpclient.h"
 #include "../../util/background.h"
 #include "../commands.h"
 
@@ -142,7 +142,7 @@ namespace mongo {
 
             string errmsg;
             BSONObjBuilder sub;
-            if ( ! c->run( "admin.$cmd" , co , errmsg , sub , false ) )
+            if ( ! c->run( "admin.$cmd" , co , 0 , errmsg , sub , false ) )
                 postData.append( cmd , errmsg );
             else
                 postData.append( cmd , sub.obj() );

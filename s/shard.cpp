@@ -20,6 +20,7 @@
 #include "shard.h"
 #include "config.h"
 #include "request.h"
+#include "client.h"
 #include "../db/commands.h"
 #include <set>
 
@@ -109,6 +110,14 @@ namespace mongo {
             ShardMap::iterator i = _lookup.find( mykey );
             massert( 13129 , (string)"can't find shard for: " + mykey , i != _lookup.end() );
             return i->second;
+        }
+
+        // Useful for ensuring our shard data will not be modified while we use it
+        Shard findCopy( const string& ident ){
+            ShardPtr found = find( ident );
+            scoped_lock lk( _mutex );
+            massert( 13128 , (string)"can't find shard for: " + ident , found.get() );
+            return *found.get();
         }
 
         void set( const string& name , const Shard& s , bool setName = true , bool setAddr = true ) {
@@ -226,7 +235,7 @@ namespace mongo {
         virtual bool slaveOk() const { return true; }
         virtual bool adminOnly() const { return true; }
 
-        virtual bool run(const string&, mongo::BSONObj&, std::string& errmsg , mongo::BSONObjBuilder& result, bool) {
+        virtual bool run(const string&, mongo::BSONObj&, int, std::string& errmsg , mongo::BSONObjBuilder& result, bool) {
             return staticShardInfo.getShardMap( result , errmsg );
         }
     } cmdGetShardMap;
@@ -243,10 +252,7 @@ namespace mongo {
     void Shard::_rsInit() {
         if ( _cs.type() == ConnectionString::SET ) {
             string x = _cs.getSetName();
-            if ( x.size() == 0 ) {
-                warning() << "no set name for shard: " << _name << " " << _cs.toString() << endl;
-            }
-            assert( x.size() );
+            massert( 14807 , str::stream() << "no set name for shard: " << _name << " " << _cs.toString() , x.size() );
             _rs = ReplicaSetMonitor::get( x , _cs.getServers() );
         }
     }
@@ -260,14 +266,9 @@ namespace mongo {
     }
 
     void Shard::reset( const string& ident ) {
-        ShardPtr s = staticShardInfo.find( ident );
-        massert( 13128 , (string)"can't find shard for: " + ident , s->ok() );
-        _name = s->_name;
-        _addr = s->_addr;
-        _cs = s->_cs;
+        *this = staticShardInfo.findCopy( ident );
+        _rs.reset();
         _rsInit();
-        _maxSize = s->_maxSize;
-        _isDraining = s->_isDraining;
     }
 
     bool Shard::containsNode( const string& node ) const {
@@ -289,10 +290,10 @@ namespace mongo {
     }
 
     void Shard::printShardInfo( ostream& out ) {
-        vector<ShardPtr> all;
+        vector<Shard> all;
         staticShardInfo.getAllShards( all );
         for ( unsigned i=0; i<all.size(); i++ )
-            out << all[i]->toString() << "\n";
+            out << all[i].toString() << "\n";
         out.flush();
     }
 
@@ -324,7 +325,7 @@ namespace mongo {
     }
 
     Shard Shard::pick( const Shard& current ) {
-        vector<ShardPtr> all;
+        vector<Shard> all;
         staticShardInfo.getAllShards( all );
         if ( all.size() == 0 ) {
             staticShardInfo.reload();
@@ -334,18 +335,18 @@ namespace mongo {
         }
 
         // if current shard was provided, pick a different shard only if it is a better choice
-        ShardStatus best = all[0]->getStatus();
+        ShardStatus best = all[0].getStatus();
         if ( current != EMPTY ) {
             best = current.getStatus();
         }
 
         for ( size_t i=0; i<all.size(); i++ ) {
-            ShardStatus t = all[i]->getStatus();
+            ShardStatus t = all[i].getStatus();
             if ( t < best )
                 best = t;
         }
 
-        log(1) << "best shard for new allocation is " << best << endl;
+        LOG(1) << "best shard for new allocation is " << best << endl;
         return best.shard();
     }
 
@@ -356,4 +357,20 @@ namespace mongo {
         _writeLock = 0; // TODO
     }
 
+    void ShardingConnectionHook::onCreate( DBClientBase * conn ) {
+        if( !noauth ) {
+            string err;
+            LOG(2) << "calling onCreate auth for " << conn->toString() << endl;
+            uassert( 15847, "can't authenticate to shard server",
+                    conn->auth("local", internalSecurity.user, internalSecurity.pwd, err, false));
+        }
+
+        if ( _shardedConnections ) {
+            conn->simpleCommand( "admin" , 0 , "setShardVersion" );
+        }
+    }
+
+    void ShardingConnectionHook::onDestory( DBClientBase * conn ) {
+        resetShardVersionCB( conn );
+    }
 }

@@ -47,11 +47,13 @@ namespace mongo {
             @see https://docs.google.com/drawings/edit?id=1TklsmZzm7ohIZkwgeK6rMvsdaR13KjtJYMsfLr175Zc&hl=en
         */
 
-        void WRITETODATAFILES_Impl1() {
-            RecoveryJob::get().processSection(commitJob._ab.buf(), commitJob._ab.len());
+        void WRITETODATAFILES_Impl1(const JSectHeader& h, AlignedBuilder& uncompressed) {
+            RWLockRecursive::Shared lk(MongoFile::mmmutex);
+            RecoveryJob::get().processSection(&h, uncompressed.buf(), uncompressed.len(), 0);
         }
 
-        // the old implementation
+#if 0
+        // the old implementation.  doesn't work with groupCommitWithLimitedLocks()
         void WRITETODATAFILES_Impl2() {
             /* we go backwards as what is at the end is most likely in the cpu cache.  it won't be much, but we'll take it. */
             for( set<WriteIntent>::const_iterator it(commitJob.writes().begin()), end(commitJob.writes().end()); it != end; ++it ) {
@@ -61,8 +63,10 @@ namespace mongo {
                 memcpy(intent.w_ptr, intent.start(), intent.length());
             }
         }
+#endif
 
 #if defined(_EXPERIMENTAL)
+        // doesn't work with groupCommitWithLimitedLocks()
         void WRITETODATAFILES_Impl3() {
             /* we go backwards as what is at the end is most likely in the cpu cache.  it won't be much, but we'll take it. */
             for( set<WriteIntent>::const_iterator it(commitJob.writes().begin()), end(commitJob.writes().end()); it != end; ++it ) {
@@ -76,23 +80,15 @@ namespace mongo {
         }
 #endif
 
-        void WRITETODATAFILES() {
-            dbMutex.assertAtLeastReadLocked();
-
-            MongoFile::markAllWritable(); // for _DEBUG. normally we don't write in a read lock
-
+        // concurrency: in mmmutex, not necessarily in dbMutex
+        void WRITETODATAFILES(const JSectHeader& h, AlignedBuilder& uncompressed) {
             Timer t;
 #if defined(_EXPERIMENTAL)
             WRITETODATAFILES_Impl3();
 #else
-            WRITETODATAFILES_Impl1();
+            WRITETODATAFILES_Impl1(h, uncompressed);
 #endif
             stats.curr->_writeToDataFilesMicros += t.micros();
-
-            if (!dbMutex.isWriteLocked())
-                MongoFile::unmarkAllWritable();
-
-            debugValidateAllMapsMatch();
         }
 
     }

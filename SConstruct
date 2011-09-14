@@ -22,6 +22,7 @@ import urllib
 import urllib2
 import buildscripts
 import buildscripts.bb
+import stat
 from buildscripts import utils
 
 buildscripts.bb.checkOk()
@@ -31,11 +32,11 @@ def findSettingsSetup():
     sys.path.append( ".." )
     sys.path.append( "../../" )
 
-
-
 # --- options ----
 
 options = {}
+
+options_topass = {}
 
 def add_option( name, help , nargs , contibutesToVariantDir , dest=None ):
 
@@ -57,7 +58,7 @@ def add_option( name, help , nargs , contibutesToVariantDir , dest=None ):
 def get_option( name ):
     return GetOption( name )
 
-def has_option( name ):
+def _has_option( name ):
     x = get_option( name )
     if x is None:
         return False
@@ -69,6 +70,12 @@ def has_option( name ):
         return False
 
     return True
+
+def has_option( name ):
+    x = _has_option(name)
+    options_topass[name] = x
+    return x
+
 
 def get_variant_dir():
     
@@ -114,6 +121,7 @@ add_option( "64" , "whether to force 64 bit" , 0 , True , "force64" )
 add_option( "32" , "whether to force 32 bit" , 0 , True , "force32" )
 
 add_option( "cxx", "compiler to use" , 1 , True )
+add_option( "cc", "compiler to use for c" , 1 , True )
 
 add_option( "cpppath", "Include path if you have headers in a nonstandard directory" , 1 , True )
 add_option( "libpath", "Library path if you have libraries in a nonstandard directory" , 1 , True )
@@ -127,10 +135,10 @@ add_option( "staticlibpath", "comma separated list of dirs to search for staticl
 add_option( "boost-compiler", "compiler used for boost (gcc41)" , 1 , True , "boostCompiler" )
 add_option( "boost-version", "boost version for linking(1_38)" , 1 , True , "boostVersion" )
 
-
 # experimental features
 add_option( "mm", "use main memory instead of memory mapped files" , 0 , True )
 add_option( "asio" , "Use Asynchronous IO (NOT READY YET)" , 0 , True )
+add_option( "ssl" , "Enable SSL" , 0 , True )
 
 # library choices
 add_option( "usesm" , "use spider monkey for javascript" , 0 , True )
@@ -139,20 +147,24 @@ add_option( "usev8" , "use v8 for javascript" , 0 , True )
 # mongo feature options
 add_option( "noshell", "don't build shell" , 0 , True )
 add_option( "safeshell", "don't let shell scripts run programs (still, don't run untrusted scripts)" , 0 , True )
+add_option( "win2008plus", "use newer operating system API features" , 0 , False )
 
 # dev tools
 add_option( "d", "debug build no optimization, etc..." , 0 , True , "debugBuild" )
 add_option( "dd", "debug build no optimization, additional debug logging, etc..." , 0 , False , "debugBuildAndLogging" )
 add_option( "durableDefaultOn" , "have durable default to on" , 0 , True )
+add_option( "durableDefaultOff" , "have durable default to off" , 0 , True )
 
 add_option( "pch" , "use precompiled headers to speed up the build (experimental)" , 0 , True , "usePCH" )
 add_option( "distcc" , "use distcc for distributing builds" , 0 , False )
+add_option( "clang" , "use clang++ rather than g++ (experimental)" , 0 , True )
 
 # debugging/profiling help
 
 # to use CPUPROFILE=/tmp/profile
 # to view pprof -gv mongod /tmp/profile
 add_option( "pg", "link against profiler" , 0 , False , "profile" )
+add_option( "tcmalloc" , "link against tcmalloc" , 0 , False )
 add_option( "gdbserver" , "build in gdb server support" , 0 , True )
 add_option( "heapcheck", "link to heap-checking malloc-lib and look for memory leaks during tests" , 0 , False )
 
@@ -211,6 +223,13 @@ env = Environment( MSVS_ARCH=msarch , tools = ["default", "gch"], toolpath = '.'
 if has_option( "cxx" ):
     env["CC"] = get_option( "cxx" )
     env["CXX"] = get_option( "cxx" )
+elif has_option("clang"):
+    env["CC"] = 'clang'
+    env["CXX"] = 'clang++'
+
+if has_option( "cc" ):
+    env["CC"] = get_option( "cc" )
+
 env["LIBPATH"] = []
 
 if has_option( "libpath" ):
@@ -222,12 +241,14 @@ if has_option( "cpppath" ):
 env.Append( CPPDEFINES=[ "_SCONS" , "MONGO_EXPOSE_MACROS" ] )
 env.Append( CPPPATH=[ "." ] )
 
-
 if has_option( "safeshell" ):
     env.Append( CPPDEFINES=[ "MONGO_SAFE_SHELL" ] )
 
 if has_option( "durableDefaultOn" ):
     env.Append( CPPDEFINES=[ "_DURABLEDEFAULTON" ] )
+
+if has_option( "durableDefaultOff" ):
+    env.Append( CPPDEFINES=[ "_DURABLEDEFAULTOFF" ] )
 
 boostCompiler = GetOption( "boostCompiler" )
 if boostCompiler is None:
@@ -243,6 +264,7 @@ else:
 
 if ( not ( usesm or usev8 or justClientLib) ):
     usesm = True
+    options_topass["usesm"] = True
 
 distBuild = len( COMMAND_LINE_TARGETS ) == 1 and ( str( COMMAND_LINE_TARGETS[0] ) == "s3dist" or str( COMMAND_LINE_TARGETS[0] ) == "dist" )
 
@@ -305,47 +327,53 @@ if has_option( "full" ):
 
 # ------    SOURCE FILE SETUP -----------
 
-commonFiles = Split( "pch.cpp buildinfo.cpp db/common.cpp  db/indexkey.cpp db/jsobj.cpp bson/oid.cpp db/json.cpp db/lasterror.cpp db/nonce.cpp db/queryutil.cpp db/projection.cpp shell/mongo.cpp db/security_key.cpp" )
-commonFiles += [ "util/background.cpp" , "util/mmap.cpp" , "util/sock.cpp" ,  "util/util.cpp" , "util/file_allocator.cpp" , "util/message.cpp" , 
-                 "util/assert_util.cpp" , "util/log.cpp" , "util/httpclient.cpp" , "util/md5main.cpp" , "util/base64.cpp", "util/concurrency/vars.cpp", "util/concurrency/task.cpp", "util/debug_util.cpp",
+commonFiles = Split( "pch.cpp buildinfo.cpp db/indexkey.cpp db/jsobj.cpp bson/oid.cpp db/json.cpp db/lasterror.cpp db/nonce.cpp db/queryutil.cpp db/querypattern.cpp db/projection.cpp shell/mongo.cpp db/security_common.cpp db/security_commands.cpp" )
+commonFiles += [ "util/background.cpp" , "util/util.cpp" , "util/file_allocator.cpp" ,
+                 "util/assert_util.cpp" , "util/log.cpp" , "util/ramlog.cpp" , "util/md5main.cpp" , "util/base64.cpp", "util/concurrency/vars.cpp", "util/concurrency/task.cpp", "util/debug_util.cpp",
                  "util/concurrency/thread_pool.cpp", "util/password.cpp", "util/version.cpp", "util/signal_handlers.cpp",  
                  "util/histogram.cpp", "util/concurrency/spin_lock.cpp", "util/text.cpp" , "util/stringutils.cpp" ,
                  "util/concurrency/synchronization.cpp" ]
-commonFiles += Glob( "util/*.c" )
+commonFiles += [ "util/net/sock.cpp" , "util/net/httpclient.cpp" , "util/net/message.cpp" , "util/net/message_port.cpp" , "util/net/listen.cpp" ]
+commonFiles += Glob( "util/*.c" ) 
 commonFiles += Split( "client/connpool.cpp client/dbclient.cpp client/dbclient_rs.cpp client/dbclientcursor.cpp client/model.cpp client/syncclusterconnection.cpp client/distlock.cpp s/shardconnection.cpp" )
 
 #mmap stuff
 
-if has_option( "mm" ):
-    commonFiles += [ "util/mmap_mm.cpp" ]
-elif os.sys.platform == "win32":
-    commonFiles += [ "util/mmap_win.cpp" ]
-else:
-    commonFiles += [ "util/mmap_posix.cpp" ]
-
 coreDbFiles = [ "db/commands.cpp" ]
-coreServerFiles = [ "util/message_server_port.cpp" , 
-                    "client/parallel.cpp" ,  
-                    "util/miniwebserver.cpp" , "db/dbwebserver.cpp" , 
-                    "db/matcher.cpp" , "db/dbcommands_generic.cpp" ]
+coreServerFiles = [ "util/net/message_server_port.cpp" , 
+                    "client/parallel.cpp" , "db/common.cpp", 
+                    "util/net/miniwebserver.cpp" , "db/dbwebserver.cpp" , 
+                    "db/matcher.cpp" , "db/dbcommands_generic.cpp" , "db/dbmessage.cpp" ]
+
+mmapFiles = [ "util/mmap.cpp" ]
+
+if has_option( "mm" ):
+    mmapFiles += [ "util/mmap_mm.cpp" ]
+elif os.sys.platform == "win32":
+    mmapFiles += [ "util/mmap_win.cpp" ]
+else:
+    mmapFiles += [ "util/mmap_posix.cpp" ]
+
+coreServerFiles += mmapFiles
 
 processInfoFiles = [ "util/processinfo.cpp" ]
 
 if os.path.exists( "util/processinfo_" + os.sys.platform + ".cpp" ):
     processInfoFiles += [ "util/processinfo_" + os.sys.platform + ".cpp" ]
+elif os.sys.platform == "linux3":
+    processInfoFiles += [ "util/processinfo_linux2.cpp" ]
 else:
     processInfoFiles += [ "util/processinfo_none.cpp" ]
 
 coreServerFiles += processInfoFiles
 
-
-
 if has_option( "asio" ):
-    coreServerFiles += [ "util/message_server_asio.cpp" ]
+    coreServerFiles += [ "util/net/message_server_asio.cpp" ]
 
-serverOnlyFiles = Split( "util/logfile.cpp util/alignedbuilder.cpp db/mongommf.cpp db/dur.cpp db/durop.cpp db/dur_writetodatafiles.cpp db/dur_preplogbuffer.cpp db/dur_commitjob.cpp db/dur_recover.cpp db/dur_journal.cpp db/query.cpp db/update.cpp db/introspect.cpp db/btree.cpp db/clientcursor.cpp db/tests.cpp db/repl.cpp db/repl/rs.cpp db/repl/consensus.cpp db/repl/rs_initiate.cpp db/repl/replset_commands.cpp db/repl/manager.cpp db/repl/health.cpp db/repl/heartbeat.cpp db/repl/rs_config.cpp db/repl/rs_rollback.cpp db/repl/rs_sync.cpp db/repl/rs_initialsync.cpp db/oplog.cpp db/repl_block.cpp db/btreecursor.cpp db/cloner.cpp db/namespace.cpp db/cap.cpp db/matcher_covered.cpp db/dbeval.cpp db/restapi.cpp db/dbhelpers.cpp db/instance.cpp db/client.cpp db/database.cpp db/pdfile.cpp db/cursor.cpp db/security_commands.cpp db/security.cpp db/queryoptimizer.cpp db/extsort.cpp db/cmdline.cpp" )
+# mongod files - also files used in tools. present in dbtests, but not in mongos and not in client libs.
+serverOnlyFiles = Split( "util/compress.cpp db/key.cpp db/btreebuilder.cpp util/logfile.cpp util/alignedbuilder.cpp db/mongommf.cpp db/dur.cpp db/durop.cpp db/dur_writetodatafiles.cpp db/dur_preplogbuffer.cpp db/dur_commitjob.cpp db/dur_recover.cpp db/dur_journal.cpp db/introspect.cpp db/btree.cpp db/clientcursor.cpp db/tests.cpp db/repl.cpp db/repl/rs.cpp db/repl/consensus.cpp db/repl/rs_initiate.cpp db/repl/replset_commands.cpp db/repl/manager.cpp db/repl/health.cpp db/repl/heartbeat.cpp db/repl/rs_config.cpp db/repl/rs_rollback.cpp db/repl/rs_sync.cpp db/repl/rs_initialsync.cpp db/oplog.cpp db/repl_block.cpp db/btreecursor.cpp db/cloner.cpp db/namespace.cpp db/cap.cpp db/matcher_covered.cpp db/dbeval.cpp db/restapi.cpp db/dbhelpers.cpp db/instance.cpp db/client.cpp db/database.cpp db/pdfile.cpp db/record.cpp db/cursor.cpp db/security.cpp db/queryoptimizer.cpp db/queryoptimizercursor.cpp db/extsort.cpp db/cmdline.cpp" )
 
-serverOnlyFiles += [ "db/index.cpp" ] + Glob( "db/geo/*.cpp" )
+serverOnlyFiles += [ "db/index.cpp" , "db/scanandorder.cpp" ] + Glob( "db/geo/*.cpp" ) + Glob( "db/ops/*.cpp" )
 
 serverOnlyFiles += [ "db/dbcommands.cpp" , "db/dbcommands_admin.cpp" ]
 serverOnlyFiles += Glob( "db/commands/*.cpp" )
@@ -361,10 +389,8 @@ elif usev8:
 else:
     scriptingFiles += [ "scripting/engine_none.cpp" ]
 
-coreServerFiles += scriptingFiles
-
 coreShardFiles = [ "s/config.cpp" , "s/grid.cpp" , "s/chunk.cpp" , "s/shard.cpp" , "s/shardkey.cpp" ]
-shardServerFiles = coreShardFiles + Glob( "s/strategy*.cpp" ) + [ "s/commands_admin.cpp" , "s/commands_public.cpp" , "s/request.cpp" , "s/client.cpp" , "s/cursors.cpp" ,  "s/server.cpp" , "s/config_migrate.cpp" , "s/s_only.cpp" , "s/stats.cpp" , "s/balance.cpp" , "s/balancer_policy.cpp" , "db/cmdline.cpp" , "s/writeback_listener.cpp" , "s/shard_version.cpp" ]
+shardServerFiles = coreShardFiles + Glob( "s/strategy*.cpp" ) + [ "s/commands_admin.cpp" , "s/commands_public.cpp" , "s/request.cpp" , "s/client.cpp" , "s/cursors.cpp" ,  "s/server.cpp" , "s/config_migrate.cpp" , "s/s_only.cpp" , "s/stats.cpp" , "s/balance.cpp" , "s/balancer_policy.cpp" , "db/cmdline.cpp" , "s/writeback_listener.cpp" , "s/shard_version.cpp", "s/mr_shard.cpp", "s/security.cpp" ]
 serverOnlyFiles += coreShardFiles + [ "s/d_logic.cpp" , "s/d_writeback.cpp" , "s/d_migrate.cpp" , "s/d_state.cpp" , "s/d_split.cpp" , "client/distlock_test.cpp" , "s/d_chunk_manager.cpp" ]
 
 serverOnlyFiles += [ "db/module.cpp" ] + Glob( "db/modules/*.cpp" )
@@ -463,7 +489,7 @@ if "darwin" == os.sys.platform:
         env.Append( CPPPATH=filterExists(["/sw/include" , "/opt/local/include"]) )
         env.Append( LIBPATH=filterExists(["/sw/lib/", "/opt/local/lib"]) )
 
-elif "linux2" == os.sys.platform:
+elif "linux2" == os.sys.platform or "linux3" == os.sys.platform:
     linux = True
     platform = "linux"
 
@@ -508,6 +534,9 @@ elif "win32" == os.sys.platform:
     #if force64:
     #    release = True
 
+    if has_option( "win2008plus" ):
+        env.Append( CPPDEFINES=[ "MONGO_USE_SRW_ON_WINDOWS" ] )
+
     for pathdir in env['ENV']['PATH'].split(os.pathsep):
 	if os.path.exists(os.path.join(pathdir, 'cl.exe')):
             print( "found visual studio at " + pathdir )
@@ -541,20 +570,14 @@ elif "win32" == os.sys.platform:
 
     boostLibs = []
 
-    env.Append(CPPPATH=[ "js/src/" ])
-    env.Append(CPPPATH=["../js/src/"])
-    env.Append(LIBPATH=["../js/src"])
-    env.Append(LIBPATH=["../js/"])
-
-    env.Append( CPPDEFINES=[ "OLDJS" ] )
     env.Append( CPPDEFINES=[ "_UNICODE" ] )
     env.Append( CPPDEFINES=[ "UNICODE" ] )
 
     winSDKHome = findVersion( [ "C:/Program Files/Microsoft SDKs/Windows/", "C:/Program Files (x86)/Microsoft SDKs/Windows/" ] ,
-                              [ "v7.0A", "v7.0", "v6.1", "v6.0a", "v6.0" ] )
+                              [ "v7.1", "v7.0A", "v7.0", "v6.1", "v6.0a", "v6.0" ] )
     print( "Windows SDK Root '" + winSDKHome + "'" )
 
-    env.Append( CPPPATH=[ boostDir , "pcre-7.4" , winSDKHome + "/Include" ] )
+    env.Append( CPPPATH=[ boostDir , winSDKHome + "/Include" ] )
 
     # consider adding /MP build with multiple processes option.
 
@@ -565,23 +588,25 @@ elif "win32" == os.sys.platform:
     # some warnings we don't like:
     env.Append( CPPFLAGS=" /wd4355 /wd4800 /wd4267 /wd4244 " )
     
-    env.Append( CPPDEFINES=["WIN32","_CONSOLE","_CRT_SECURE_NO_WARNINGS","HAVE_CONFIG_H","PCRE_STATIC","SUPPORT_UCP","SUPPORT_UTF8","PSAPI_VERSION=1" ] )
+    # PSAPI_VERSION relates to process api dll Psapi.dll.
+    env.Append( CPPDEFINES=["_CONSOLE","_CRT_SECURE_NO_WARNINGS","PSAPI_VERSION=1" ] )
 
-    #env.Append( CPPFLAGS='  /Yu"pch.h" ' ) # this would be for pre-compiled headers, could play with it later
+    # this would be for pre-compiled headers, could play with it later  
+    #env.Append( CPPFLAGS=' /Yu"pch.h" ' ) 
 
-    # docs say don't use /FD from command line
-    # /Gy funtion level linking
+    # docs say don't use /FD from command line (minimal rebuild)
+    # /Gy function level linking
     # /Gm is minimal rebuild, but may not work in parallel mode.
     if release:
         env.Append( CPPDEFINES=[ "NDEBUG" ] )
-        env.Append( CPPFLAGS= " /O2 /MT /Gy /Zi /TP /errorReport:none " )
+        env.Append( CPPFLAGS= " /O2 /Gy " )
+        env.Append( CPPFLAGS= " /MT /Zi /TP /errorReport:none " )
         # TODO: this has caused some linking problems :
         # /GL whole program optimization
         # /LTCG link time code generation
         env.Append( CPPFLAGS= " /GL " ) 
         env.Append( LINKFLAGS=" /LTCG " )
     else:
-
         # /Od disable optimization
         # /ZI debug info w/edit & continue 
         # /TP it's a c++ file
@@ -595,10 +620,6 @@ elif "win32" == os.sys.platform:
             
         if debugLogging:
             env.Append( CPPDEFINES=[ "_DEBUG" ] )
-
-    if os.path.exists("../readline/lib") :
-        env.Append( LIBPATH=["../readline/lib"] )
-        env.Append( CPPPATH=["../readline/include"] )
 
     if force64 and os.path.exists( boostDir + "/lib/vs2010_64" ):
         env.Append( LIBPATH=[ boostDir + "/lib/vs2010_64" ] )
@@ -617,26 +638,6 @@ elif "win32" == os.sys.platform:
         env.Append( LINKFLAGS=" /NODEFAULTLIB:MSVCPRT  " )
     else:
         env.Append( LINKFLAGS=" /NODEFAULTLIB:MSVCPRT  /NODEFAULTLIB:MSVCRT  " )
-
-    def pcreFilter(x):
-        name = x.name
-        if x.name.endswith( "dftables.c" ):
-            return False
-        if x.name.endswith( "pcredemo.c" ):
-            return False
-        if x.name.endswith( "pcretest.c" ):
-            return False
-        if x.name.endswith( "unittest.cc" ):
-            return False
-        if x.name.endswith( "pcregrep.c" ):
-            return False
-        return True
-
-    pcreFiles = []
-    pcreFiles += filter( pcreFilter , Glob( "pcre-7.4/*.c"  ) )
-    pcreFiles += filter( pcreFilter , Glob( "pcre-7.4/*.cc" ) )
-    commonFiles += pcreFiles
-    allClientFiles += pcreFiles
 
     winLibString = "ws2_32.lib kernel32.lib advapi32.lib Psapi.lib"
 
@@ -668,11 +669,15 @@ if nix:
     if has_option( "distcc" ):
         env["CXX"] = "distcc " + env["CXX"]
         
+    # -Winvalid-pch Warn if a precompiled header (see Precompiled Headers) is found in the search path but can't be used. 
     env.Append( CPPFLAGS="-fPIC -fno-strict-aliasing -ggdb -pthread -Wall -Wsign-compare -Wno-unknown-pragmas -Winvalid-pch" )
     # env.Append( " -Wconversion" ) TODO: this doesn't really work yet
     if linux:
         env.Append( CPPFLAGS=" -Werror " )
-        env.Append( CPPFLAGS=" -fno-builtin-memcmp " ) # glibc's memcmp is faster than gcc's
+        if not has_option('clang'): 
+            env.Append( CPPFLAGS=" -fno-builtin-memcmp " ) # glibc's memcmp is faster than gcc's
+
+    env.Append( CPPDEFINES="_FILE_OFFSET_BITS=64" )
     env.Append( CXXFLAGS=" -Wnon-virtual-dtor " )
     env.Append( LINKFLAGS=" -fPIC -pthread -rdynamic" )
     env.Append( LIBS=[] )
@@ -688,7 +693,7 @@ if nix:
         env.Append( CPPFLAGS=" -O0 -fstack-protector " );
         env['ENV']['GLIBCXX_FORCE_NEW'] = 1; # play nice with valgrind
     else:
-        env.Append( CPPFLAGS=" -O3" )
+        env.Append( CPPFLAGS=" -O3 " )
         #env.Append( CPPFLAGS=" -fprofile-generate" )
         #env.Append( LINKFLAGS=" -fprofile-generate" )
         # then:
@@ -717,25 +722,58 @@ if nix:
     # pre-compiled headers
     if usePCH and 'Gch' in dir( env ):
         print( "using precompiled headers" )
+        if has_option('clang'):
+            #env['GCHSUFFIX']  = '.pch' # clang++ uses pch.h.pch rather than pch.h.gch
+            #env.Prepend( CXXFLAGS=' -include pch.h ' ) # clang++ only uses pch from command line
+            print( "ERROR: clang pch is broken for now" )
+            Exit(1)
         env['Gch'] = env.Gch( [ "pch.h" ] )[0]
     elif os.path.exists('pch.h.gch'):
         print( "removing precompiled headers" )
         os.unlink('pch.h.gch') # gcc uses the file if it exists
 
 if usev8:
-    env.Append( CPPPATH=["../v8/include/"] )
-    env.Append( LIBPATH=["../v8/"] )
-
+    env.Prepend( CPPPATH=["../v8/include/"] )
+    env.Prepend( LIBPATH=["../v8/"] )
 
 if "uname" in dir(os):
     hacks = buildscripts.findHacks( os.uname() )
     if hacks is not None:
         hacks.insert( env , { "linux64" : linux64 } )
 
+if has_option( "ssl" ):
+    env.Append( CPPDEFINES=["MONGO_SSL"] )
+    env.Append( LIBS=["ssl"] )
+    if darwin:
+        env.Append( LIBS=["crypto"] )
+
 try:
     umask = os.umask(022)
 except OSError:
     pass
+
+if not windows:
+    for keysuffix in [ "1" , "2" ]:
+        keyfile = "jstests/libs/key%s" % keysuffix
+        os.chmod( keyfile , stat.S_IWUSR|stat.S_IRUSR )
+
+for x in os.listdir( "third_party" ):
+    if not x.endswith( ".py" ) or x.find( "#" ) >= 0:
+        continue
+         
+    shortName = x.rpartition( "." )[0]
+    path = "third_party/%s" % x
+
+
+    myModule = imp.load_module( "third_party_%s" % shortName , open( path , "r" ) , path , ( ".py" , "r" , imp.PY_SOURCE ) )
+    fileLists = { "commonFiles" : commonFiles , "serverOnlyFiles" : serverOnlyFiles , "scriptingFiles" : scriptingFiles }
+    
+    options_topass["windows"] = windows
+    options_topass["nix"] = nix
+    
+    myModule.configure( env , fileLists , options_topass )
+
+coreServerFiles += scriptingFiles
 
 # --- check system ---
 
@@ -783,7 +821,7 @@ def bigLibString( myenv ):
     return s
 
 
-def doConfigure( myenv , needPcre=True , shell=False ):
+def doConfigure( myenv , shell=False ):
     conf = Configure(myenv)
     myenv["LINKFLAGS_CLEAN"] = list( myenv["LINKFLAGS"] )
     myenv["LIBS_CLEAN"] = list( myenv["LIBS"] )
@@ -836,10 +874,6 @@ def doConfigure( myenv , needPcre=True , shell=False ):
 
         return False
 
-    if needPcre and not conf.CheckCXXHeader( 'pcrecpp.h' ):
-        print( "can't find pcre" )
-        Exit(1)
-
     if not conf.CheckCXXHeader( "boost/filesystem/operations.hpp" ):
         print( "can't find boost headers" )
         if shell:
@@ -866,10 +900,6 @@ def doConfigure( myenv , needPcre=True , shell=False ):
     if not conf.CheckCXXHeader( "execinfo.h" ):
         myenv.Append( CPPDEFINES=[ "NOEXECINFO" ] )
 
-    if nix and needPcre:
-        myCheckLib( "pcrecpp" , True )
-        myCheckLib( "pcre" , True )
-
     myenv["_HAVEPCAP"] = myCheckLib( ["pcap", "wpcap"] )
     removeIfInList( myenv["LIBS"] , "pcap" )
     removeIfInList( myenv["LIBS"] , "wpcap" )
@@ -880,75 +910,14 @@ def doConfigure( myenv , needPcre=True , shell=False ):
         else:
             m.configure( conf , myenv )
 
-    # XP_* is for spidermonkey.
-    # this is outside of usesm block so don't have to rebuild for java
-    if windows:
-        myenv.Append( CPPDEFINES=[ "XP_WIN" ] )
-    else:
-        myenv.Append( CPPDEFINES=[ "XP_UNIX" ] )
-
     if solaris:
         conf.CheckLib( "nsl" )
-
-    if usesm:
-
-        # see http://www.mongodb.org/pages/viewpageattachments.action?pageId=12157032
-        J = [ "mozjs" , "js", "js_static" ]
-        if windows:
-            if msarch == "amd64":
-                if release:
-                    J = [ "js64r", "js", "mozjs" , "js_static" ]
-                else:
-                    J = "js64d"
-                    print( "looking for js64d.lib for spidermonkey. (available at mongodb.org prebuilt)" );
-            else:
-                if not force32:
-                    print( "Assuming a 32 bit build is desired" )
-                if release:
-                    J = [ "js32r", "js", "mozjs" , "js_static" ]
-                else:
-                    J = [ "js32d", "js", "mozjs" , "js_static" ]
-                
-        myCheckLib( J , True )
-        mozHeader = "js"
-        if bigLibString(myenv).find( "mozjs" ) >= 0:
-            mozHeader = "mozjs"
-
-        if not conf.CheckHeader( mozHeader + "/jsapi.h" ):
-            if conf.CheckHeader( "jsapi.h" ):
-                myenv.Append( CPPDEFINES=[ "OLDJS" ] )
-            else:
-                print( "no spider monkey headers!" )
-                Exit(1)
 
     if usev8:
         if debugBuild:
             myCheckLib( [ "v8_g" , "v8" ] , True )
         else:
             myCheckLib( "v8" , True )
-
-    if shell:
-        haveReadLine = False
-        if darwin:
-            myenv.Append( CPPDEFINES=[ "USE_READLINE" ] )
-            if force64:
-                myCheckLib( "readline" , True )
-                myCheckLib( "ncurses" , True )
-            else:
-                myenv.Append( LINKFLAGS=" /usr/lib/libreadline.dylib " )
-        elif openbsd:
-            myenv.Append( CPPDEFINES=[ "USE_READLINE" ] )
-            myCheckLib( "termcap" , True )
-            myCheckLib( "readline" , True )
-        elif myCheckLib( "readline" , release and nix , staticOnly=release ):
-            myenv.Append( CPPDEFINES=[ "USE_READLINE" ] )
-            myCheckLib( "ncurses" , staticOnly=release )
-            myCheckLib( "tinfo" , staticOnly=release )
-        else:
-            print( "\n*** notice: no readline library, mongo shell will not have nice interactive line editing ***\n" )
-
-        if linux:
-            myCheckLib( "rt" , True )
 
     # requires ports devel/libexecinfo to be installed
     if freebsd or openbsd:
@@ -1005,6 +974,10 @@ def doConfigure( myenv , needPcre=True , shell=False ):
 
     myenv.Append(LINKCOM=" $STATICFILES")
     myenv.Append(STATICFILES=staticlibfiles)
+
+    if has_option( "tcmalloc" ):
+        myCheckLib( "tcmalloc" , True );  # if successful, appedded 'tcmalloc' to myenv[ LIBS ]
+
 
     return conf.Finish()
 
@@ -1076,8 +1049,13 @@ clientEnv.Prepend( LIBS=[ "mongoclient"] )
 clientEnv.Prepend( LIBPATH=["."] )
 clientEnv["CPPDEFINES"].remove( "MONGO_EXPOSE_MACROS" )
 l = clientEnv[ "LIBS" ]
-removeIfInList( l , "pcre" )
-removeIfInList( l , "pcrecpp" )
+
+# profile guided
+#if windows:
+#    if release:
+#        env.Append( LINKFLAGS="/PGD:test.pgd" )
+#        env.Append( LINKFLAGS="/LTCG:PGINSTRUMENT" )
+#        env.Append( LINKFLAGS="/LTCG:PGOPTIMIZE" )
 
 testEnv = env.Clone()
 testEnv.Append( CPPPATH=["../"] )
@@ -1095,7 +1073,7 @@ def checkErrorCodes():
 checkErrorCodes()
 
 # main db target
-mongodOnlyFiles = [ "db/db.cpp" ]
+mongodOnlyFiles = [ "db/db.cpp", "db/compact.cpp" ]
 if windows:
     mongodOnlyFiles.append( "util/ntservice.cpp" ) 
 mongod = env.Program( "mongod" , commonFiles + coreDbFiles + coreServerFiles + serverOnlyFiles + mongodOnlyFiles )
@@ -1103,7 +1081,7 @@ Default( mongod )
 
 # tools
 allToolFiles = commonFiles + coreDbFiles + coreServerFiles + serverOnlyFiles + [ "client/gridfs.cpp", "tools/tool.cpp" ]
-normalTools = [ "dump" , "restore" , "export" , "import" , "files" , "stat" ]
+normalTools = [ "dump" , "restore" , "export" , "import" , "files" , "stat" , "top" ]
 env.Alias( "tools" , [ add_exe( "mongo" + x ) for x in normalTools ] )
 for x in normalTools:
     env.Program( "mongo" + x , allToolFiles + [ "tools/" + x + ".cpp" ] )
@@ -1133,7 +1111,7 @@ clientTests += [ clientEnv.Program( "authTest" , [ "client/examples/authTest.cpp
 clientTests += [ clientEnv.Program( "httpClientTest" , [ "client/examples/httpClientTest.cpp" ] ) ]
 clientTests += [ clientEnv.Program( "bsondemo" , [ "bson/bsondemo/bsondemo.cpp" ] ) ]
 
-# testing
+# dbtests test binary
 test = testEnv.Program( "test" , Glob( "dbtests/*.cpp" ) )
 if windows:
     testEnv.Alias( "test" , "test.exe" )
@@ -1144,17 +1122,23 @@ clientTests += [ clientEnv.Program( "clientTest" , [ "client/examples/clientTest
 mongosniff_built = False
 if darwin or clientEnv["_HAVEPCAP"]:
     mongosniff_built = True
-    sniffEnv = clientEnv.Clone()
+    sniffEnv = env.Clone()
     sniffEnv.Append( CPPDEFINES="MONGO_EXPOSE_MACROS" )
+
     if not windows:
         sniffEnv.Append( LIBS=[ "pcap" ] )
     else:
         sniffEnv.Append( LIBS=[ "wpcap" ] )
+
+    sniffEnv.Prepend( LIBPATH=["."] )
+    sniffEnv.Append( LIBS=[ "mongotestfiles" ] )
+
     sniffEnv.Program( "mongosniff" , "tools/sniffer.cpp" )
 
 # --- shell ---
 
-env.JSHeader( "shell/mongo.cpp"  , ["shell/utils.js","shell/db.js","shell/mongo.js","shell/mr.js","shell/query.js","shell/collection.js"] )
+# note, if you add a file here, need to add in engine.cpp currently
+env.JSHeader( "shell/mongo.cpp"  , Glob( "shell/utils*.js" ) + [ "shell/db.js","shell/mongo.js","shell/mr.js","shell/query.js","shell/collection.js"] )
 
 env.JSHeader( "shell/mongo-server.cpp"  , [ "shell/servers.js"] )
 
@@ -1168,50 +1152,21 @@ if release and ( ( darwin and force64 ) or linux64 ):
 if noshell:
     print( "not building shell" )
 elif not onlyServer:
-    weird = force64 and not windows and not solaris
-
-    if weird:
-        shellEnv["CFLAGS"].remove("-m64")
-        shellEnv["CXXFLAGS"].remove("-m64")
-        shellEnv["LINKFLAGS"].remove("-m64")
-        shellEnv["CPPPATH"].remove( "/usr/64/include" )
-        shellEnv["LIBPATH"].remove( "/usr/64/lib" )
-        shellEnv.Append( CPPPATH=filterExists(["/sw/include" , "/opt/local/include"]) )
-        shellEnv.Append( LIBPATH=filterExists(["/sw/lib/", "/opt/local/lib" , "/usr/lib", "/usr/local/lib" ]) )
-
     l = shellEnv["LIBS"]
-
-    removeIfInList( l , "pcre" )
-    removeIfInList( l , "pcrecpp" )
 
     if windows:
         shellEnv.Append( LIBS=["winmm.lib"] )
 
     coreShellFiles = [ "shell/dbshell.cpp" , "shell/shell_utils.cpp" , "shell/mongo-server.cpp" ]
 
-    if weird:
-        shell32BitFiles = coreShellFiles
-        for f in allClientFiles:
-            shell32BitFiles.append( "32bit/" + str( f ) )
-        for f in scriptingFiles:
-            shell32BitFiles.append( "32bit/" + str( f ) )
-        for f in processInfoFiles:
-            shell32BitFiles.append( "32bit/" + str( f ) )
-        shellEnv.VariantDir( "32bit" , "." , duplicate=1 )
-    else:
-        shellEnv.Prepend( LIBPATH=[ "." ] )
+    coreShellFiles.append( "third_party/linenoise/linenoise.cpp" )
 
-    shellEnv = doConfigure( shellEnv , needPcre=False , shell=True )
+    shellEnv.Prepend( LIBPATH=[ "." ] )
+        
+    shellEnv = doConfigure( shellEnv , shell=True )
 
-    if weird:
-        mongo = shellEnv.Program( "mongo" , shell32BitFiles )
-    else:
-        shellEnv.Prepend( LIBS=[ "mongoshellfiles"] )
-        mongo = shellEnv.Program( "mongo" , coreShellFiles )
-
-    if weird:
-        Depends( "32bit/shell/mongo.cpp" , "shell/mongo.cpp" )
-        Depends( "32bit/shell/mongo-server.cpp" , "shell/mongo-server.cpp" )
+    shellEnv.Prepend( LIBS=[ "mongoshellfiles"] )
+    mongo = shellEnv.Program( "mongo" , coreShellFiles )
 
 
 #  ---- RUNNING TESTS ----
@@ -1258,7 +1213,7 @@ if not onlyServer and not noshell:
     addSmoketest( "smokeClone", [ "mongo", "mongod" ] )
     addSmoketest( "smokeRepl", [ "mongo", "mongod", "mongobridge" ] )
     addSmoketest( "smokeReplSets", [ "mongo", "mongod", "mongobridge" ] )
-    addSmoketest( "smokeDur", [ add_exe( "mongo" ) , add_exe( "mongod" ) ] )
+    addSmoketest( "smokeDur", [ add_exe( "mongo" ) , add_exe( "mongod" ) , add_exe('mongorestore') ] )
     addSmoketest( "smokeDisk", [ add_exe( "mongo" ), add_exe( "mongod" ), add_exe( "mongodump" ), add_exe( "mongorestore" ) ] )
     addSmoketest( "smokeAuth", [ add_exe( "mongo" ), add_exe( "mongod" ) ] )
     addSmoketest( "smokeParallel", [ add_exe( "mongo" ), add_exe( "mongod" ) ] )
@@ -1500,7 +1455,7 @@ env.Alias( "core" , [ add_exe( "mongo" ) , add_exe( "mongod" ) , add_exe( "mongo
 
 #headers
 if installSetup.headers:
-    for id in [ "", "util/", "util/mongoutils/", "util/concurrency/", "db/" , "db/stats/" , "db/repl/" , "client/" , "bson/", "bson/util/" , "s/" , "scripting/" ]:
+    for id in [ "", "util/", "util/net/", "util/mongoutils/", "util/concurrency/", "db/" , "db/stats/" , "db/repl/" , "db/ops/" , "client/" , "bson/", "bson/util/" , "s/" , "scripting/" ]:
         env.Install( installDir + "/" + installSetup.headerRoot + "/mongo/" + id , Glob( id + "*.h" ) )
         env.Install( installDir + "/" + installSetup.headerRoot + "/mongo/" + id , Glob( id + "*.hpp" ) )
 

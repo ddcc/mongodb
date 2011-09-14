@@ -18,6 +18,7 @@
 
 #include "../pch.h"
 #include "../client/dbclient.h"
+#include "../db/db.h"
 #include "tool.h"
 
 #include <fcntl.h>
@@ -27,6 +28,14 @@ using namespace mongo;
 namespace po = boost::program_options;
 
 class Dump : public Tool {
+    class FilePtr : boost::noncopyable {
+    public:
+        /*implicit*/ FilePtr(FILE* f) : _f(f) {}
+        ~FilePtr() { fclose(_f); }
+        operator FILE*() { return _f; }
+    private:
+        FILE* _f;
+    };
 public:
     Dump() : Tool( "dump" , ALL , "*" , "*" , false ) {
         add_options()
@@ -34,15 +43,24 @@ public:
         ("query,q", po::value<string>() , "json query" )
         ("oplog", "Use oplog for point-in-time snapshotting" )
         ("repair", "try to recover a crashed database" )
+        ("forceTableScan", "force a table scan (do not use $snapshot)" )
         ;
     }
 
     // This is a functor that writes a BSONObj to a file
     struct Writer {
-        Writer(ostream& out, ProgressMeter* m) :_out(out), _m(m) {}
+        Writer(FILE* out, ProgressMeter* m) :_out(out), _m(m) {}
 
         void operator () (const BSONObj& obj) {
-            _out.write( obj.objdata() , obj.objsize() );
+            size_t toWrite = obj.objsize();
+            size_t written = 0;
+
+            while (toWrite) {
+                size_t ret = fwrite( obj.objdata()+written, 1, toWrite, _out );
+                uassert(14035, errnoWithPrefix("couldn't write to file"), ret);
+                toWrite -= ret;
+                written += ret;
+            }
 
             // if there's a progress bar, hit it
             if (_m) {
@@ -50,21 +68,19 @@ public:
             }
         }
 
-        ostream& _out;
+        FILE* _out;
         ProgressMeter* _m;
     };
 
-    void doCollection( const string coll , ostream &out , ProgressMeter *m ) {
-        Query q;
-        if ( _query.isEmpty() && !hasParam("dbpath"))
-            q.snapshot();
-        else
-            q = _query;
+    void doCollection( const string coll , FILE* out , ProgressMeter *m ) {
+        Query q = _query;
 
         int queryOptions = QueryOption_SlaveOk | QueryOption_NoCursorTimeout;
         if (startsWith(coll.c_str(), "local.oplog."))
             queryOptions |= QueryOption_OplogReplay;
-
+        else if ( _query.isEmpty() && !hasParam("dbpath") && !hasParam("forceTableScan") )
+            q.snapshot();
+        
         DBClientBase& connBase = conn(true);
         Writer writer(out, m);
 
@@ -86,21 +102,18 @@ public:
     void writeCollectionFile( const string coll , path outputFile ) {
         cout << "\t" << coll << " to " << outputFile.string() << endl;
 
-        ofstream out;
-        out.open( outputFile.string().c_str() , ios_base::out | ios_base::binary  );
-        assertStreamGood( 10262 ,  "couldn't open file" , out );
+        FilePtr f (fopen(outputFile.string().c_str(), "wb"));
+        uassert(10262, errnoWithPrefix("couldn't open file"), f);
 
         ProgressMeter m( conn( true ).count( coll.c_str() , BSONObj() , QueryOption_SlaveOk ) );
 
-        doCollection(coll, out, &m);
+        doCollection(coll, f, &m);
 
         cout << "\t\t " << m.done() << " objects" << endl;
-
-        out.close();
     }
 
     void writeCollectionStdout( const string coll ) {
-        doCollection(coll, cout, NULL);
+        doCollection(coll, stdout, NULL);
     }
 
     void go( const string db , const path outdir ) {
@@ -113,10 +126,14 @@ public:
         auto_ptr<DBClientCursor> cursor = conn( true ).query( sns.c_str() , Query() , 0 , 0 , 0 , QueryOption_SlaveOk | QueryOption_NoCursorTimeout );
         while ( cursor->more() ) {
             BSONObj obj = cursor->nextSafe();
-            if ( obj.toString().find( ".$" ) != string::npos )
-                continue;
-
             const string name = obj.getField( "name" ).valuestr();
+
+            // skip namespaces with $ in them only if we don't specify a collection to dump
+            if ( _coll == "*" && name.find( ".$" ) != string::npos ) {
+                log(1) << "\tskipping collection: " << name << endl;
+                continue;
+            }
+
             const string filename = name.substr( db.size() + 1 );
 
             if ( _coll != "*" && db + "." + _coll != name && _coll != name )
@@ -139,18 +156,13 @@ public:
             return -1;
         }
 
-        if ( hasParam( "collection" ) ){
-            cout << "repair mode can't work with collection, only on full db" << endl;
-            return -1;
-        }
-
         string dbname = getParam( "db" );
         log() << "going to try and recover data from: " << dbname << endl;
 
         return _repair( dbname  );
     }
     
-    DiskLoc _repairExtent( Database* db , string ns, bool forward , DiskLoc eLoc ){
+    DiskLoc _repairExtent( Database* db , string ns, bool forward , DiskLoc eLoc , Writer& w ){
         LogIndentLevel lil;
         
         if ( eLoc.getOfs() <= 0 ){
@@ -170,22 +182,49 @@ public:
         
         LogIndentLevel lil2;
         
+        set<DiskLoc> seen;
+
         DiskLoc loc = forward ? e->firstRecord : e->lastRecord;
         while ( ! loc.isNull() ){
+            
+            if ( ! seen.insert( loc ).second ) {
+                error() << "infinite loop in extend, seen: " << loc << " before" << endl;
+                break;
+            }
+
             if ( loc.getOfs() <= 0 ){
                 error() << "offset is 0 for record which should be impossible" << endl;
                 break;
             }
-            log() << loc << endl;
+            log(1) << loc << endl;
             Record* rec = loc.rec();
-            log() << loc.obj() << endl;
+            BSONObj obj;
+            try {
+                obj = loc.obj();
+                assert( obj.valid() );
+                LOG(1) << obj << endl;
+                w( obj );
+            }
+            catch ( std::exception& e ) {
+                log() << "found invalid document @ " << loc << " " << e.what() << endl;
+                if ( ! obj.isEmpty() ) {
+                    try {
+                        BSONElement e = obj.firstElement();
+                        stringstream ss;
+                        ss << "first element: " << e;
+                        log() << ss.str();
+                    }
+                    catch ( std::exception& ) {
+                    }
+                }
+            }
             loc = forward ? rec->getNext( loc ) : rec->getPrev( loc );
         }
         return forward ? e->xnext : e->xprev;
         
     }
 
-    void _repair( Database* db , string ns ){
+    void _repair( Database* db , string ns , path outfile ){
         NamespaceDetails * nsd = nsdetails( ns.c_str() );
         log() << "nrecords: " << nsd->stats.nrecords 
               << " datasize: " << nsd->stats.datasize 
@@ -201,36 +240,46 @@ public:
             log() << " ERROR fisrtExtent is not valid" << endl;
             return;
         }
+
+        outfile /= ( ns.substr( ns.find( "." ) + 1 ) + ".bson" );
+        log() << "writing to: " << outfile.string() << endl;
         
+        FilePtr f (fopen(outfile.string().c_str(), "wb"));
+
+        ProgressMeter m( nsd->stats.nrecords * 2 );
+        
+        Writer w( f , &m );
+
         try {
             log() << "forward extent pass" << endl;
             LogIndentLevel lil;
             DiskLoc eLoc = nsd->firstExtent;
             while ( ! eLoc.isNull() ){
                 log() << "extent loc: " << eLoc << endl;
-                eLoc = _repairExtent( db , ns , true , eLoc );
+                eLoc = _repairExtent( db , ns , true , eLoc , w );
             }
         }
         catch ( DBException& e ){
             error() << "forward extent pass failed:" << e.toString() << endl;
         }
-
+        
         try {
             log() << "backwards extent pass" << endl;
             LogIndentLevel lil;
             DiskLoc eLoc = nsd->lastExtent;
             while ( ! eLoc.isNull() ){
                 log() << "extent loc: " << eLoc << endl;
-                eLoc = _repairExtent( db , ns , false , eLoc );
+                eLoc = _repairExtent( db , ns , false , eLoc , w );
             }
         }
         catch ( DBException& e ){
             error() << "ERROR: backwards extent pass failed:" << e.toString() << endl;
         }
 
+        log() << "\t\t " << m.done() << " objects" << endl;
     }
     
-    int _repair( string dbname ){
+    int _repair( string dbname ) {
         dblock lk;
         Client::Context cx( dbname );
         Database * db = cx.db();
@@ -238,16 +287,28 @@ public:
         list<string> namespaces;
         db->namespaceIndex.getNamespaces( namespaces );
         
+        path root = getParam( "out" );
+        root /= dbname;
+        create_directories( root );
+
         for ( list<string>::iterator i=namespaces.begin(); i!=namespaces.end(); ++i ){
             LogIndentLevel lil;
             string ns = *i;
+
             if ( str::endsWith( ns , ".system.namespaces" ) )
                 continue;
+            
+            if ( str::contains( ns , ".tmp.mr." ) )
+                continue;
+            
+            if ( _coll != "*" && ! str::endsWith( ns , _coll ) )
+                continue;
+
             log() << "trying to recover: " << ns << endl;
             
             LogIndentLevel lil2;
             try {
-                _repair( db , ns );
+                _repair( db , ns , root );
             }
             catch ( DBException& e ){
                 log() << "ERROR recovering: " << ns << " " << e.toString() << endl;
@@ -318,12 +379,7 @@ public:
             }
         }
 
-        {
-            // TODO: when mongos supports QueryOption_Exaust add a version check (SERVER-2628)
-            BSONObj isdbgrid;
-            conn("true").simpleCommand("admin", &isdbgrid, "isdbgrid");
-            _usingMongos = isdbgrid["isdbgrid"].trueValue();
-        }
+        _usingMongos = isMongos();
 
         path root( out );
         string db = _db;

@@ -56,18 +56,30 @@ namespace mongo {
     public:
         NotifyAll();
 
+        typedef unsigned long long When;
+
+        When now();
+
         /** awaits the next notifyAll() call by another thread. notifications that precede this
             call are ignored -- we are looking for a fresh event.
         */
-        void wait();
+        void waitFor(When);
+
+        /** a bit faster than waitFor( now() ) */
+        void awaitBeyondNow();
 
         /** may be called multiple times. notifies all waiters */
-        void notifyAll();
+        void notifyAll(When);
+
+        /** indicates how many threads are waiting for a notify. */
+        unsigned nWaiting() const { return _nWaiting; }
 
     private:
         mongo::mutex _mutex;
-        unsigned long long _counter;
         boost::condition _condition;
+        When _lastDone;
+        When _lastReturned;
+        unsigned _nWaiting;
     };
 
 } // namespace mongo

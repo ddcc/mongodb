@@ -97,8 +97,8 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <Optimization>Disabled</Optimization>
-      <AdditionalIncludeDirectories>..\..\js\src;..\pcre-7.4;c:\boost;\boost</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>_UNICODE;UNICODE;SUPPORT_UCP;SUPPORT_UTF8;MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;WIN32;_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\..\js\src;..\third_party\pcre-7.4;c:\boost;\boost</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>_UNICODE;UNICODE;;;MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <MinimalRebuild>No</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
@@ -122,8 +122,8 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <Optimization>Disabled</Optimization>
-      <AdditionalIncludeDirectories>..\..\js\src;..\pcre-7.4;c:\boost;\boost</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>SUPPORT_UCP;SUPPORT_UTF8;MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;WIN32;_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\..\js\src;..\third_party\pcre-7.4;c:\boost;\boost</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>;;MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <PrecompiledHeader>Use</PrecompiledHeader>
@@ -147,8 +147,8 @@
     <ClCompile>
       <Optimization>MaxSpeed</Optimization>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <AdditionalIncludeDirectories>..\..\js\src;..\pcre-7.4;c:\boost;\boost</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>_UNICODE;UNICODE;SUPPORT_UCP;SUPPORT_UTF8;MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;WIN32;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\..\js\src;..\third_party\pcre-7.4;c:\boost;\boost</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>_UNICODE;UNICODE;;;MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <PrecompiledHeader>Use</PrecompiledHeader>
@@ -174,8 +174,8 @@
     <ClCompile>
       <Optimization>MaxSpeed</Optimization>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <AdditionalIncludeDirectories>..\..\js\src;..\pcre-7.4;c:\boost;\boost</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>SUPPORT_UCP;SUPPORT_UTF8;MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;WIN32;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\..\js\src;..\third_party\pcre-7.4;c:\boost;\boost</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>;;MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <PrecompiledHeader>Use</PrecompiledHeader>
@@ -201,7 +201,7 @@
     <ClCompile Include="..\client\dbclient_rs.cpp" />
     <ClCompile Include="..\client\distlock.cpp" />
     <ClCompile Include="..\client\model.cpp" />
-    <ClCompile Include="..\pcre-7.4\pcrecpp.cc">
+    <ClCompile Include="..\third_party\pcre-7.4\pcrecpp.cc">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -211,7 +211,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_chartables.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_chartables.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -221,7 +221,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_compile.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_compile.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -231,7 +231,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_config.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_config.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -241,7 +241,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_dfa_exec.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_dfa_exec.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -251,7 +251,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_exec.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_exec.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -261,7 +261,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_fullinfo.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_fullinfo.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -271,7 +271,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_get.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_get.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -281,7 +281,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_globals.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_globals.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -291,7 +291,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_info.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_info.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -301,7 +301,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_maketables.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_maketables.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -311,7 +311,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_newline.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_newline.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -321,7 +321,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_ord2utf8.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_ord2utf8.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -331,7 +331,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_refcount.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_refcount.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -341,7 +341,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_scanner.cc">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_scanner.cc">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -351,7 +351,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_stringpiece.cc">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_stringpiece.cc">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -361,7 +361,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_study.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_study.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -371,7 +371,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_tables.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_tables.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -381,7 +381,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_try_flipped.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_try_flipped.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -391,7 +391,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_ucp_searchfuncs.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_ucp_searchfuncs.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -401,7 +401,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_valid_utf8.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_valid_utf8.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -411,7 +411,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_version.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_version.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -421,7 +421,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcre_xclass.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcre_xclass.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -431,7 +431,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\pcre-7.4\pcreposix.c">
+    <ClCompile Include="..\third_party\pcre-7.4\pcreposix.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -459,8 +459,26 @@
     <ClCompile Include="..\s\shard.cpp" />
     <ClCompile Include="..\s\shardconnection.cpp" />
     <ClCompile Include="..\s\shardkey.cpp" />
+    <ClCompile Include="..\third_party\snappy\snappy-sinksource.cc">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\third_party\snappy\snappy.cc">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\util\alignedbuilder.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\util\compress.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\util\concurrency\spin_lock.cpp" />
     <ClCompile Include="..\util\concurrency\synchronization.cpp" />
@@ -470,17 +488,23 @@
     <ClCompile Include="..\util\file_allocator.cpp" />
     <ClCompile Include="..\util\log.cpp" />
     <ClCompile Include="..\util\logfile.cpp" />
+    <ClCompile Include="..\util\net\listen.cpp" />
+    <ClCompile Include="..\util\net\miniwebserver.cpp" />
     <ClCompile Include="..\util\processinfo.cpp" />
+    <ClCompile Include="..\util\ramlog.cpp" />
     <ClCompile Include="..\util\stringutils.cpp" />
     <ClCompile Include="..\util\text.cpp" />
     <ClCompile Include="..\util\version.cpp" />
+    <ClCompile Include="btreebuilder.cpp" />
     <ClCompile Include="cap.cpp" />
     <ClCompile Include="commands\distinct.cpp" />
+    <ClCompile Include="commands\find_and_modify.cpp" />
     <ClCompile Include="commands\group.cpp" />
     <ClCompile Include="commands\isself.cpp" />
     <ClCompile Include="commands\mr.cpp" />
     <ClCompile Include="compact.cpp" />
     <ClCompile Include="dbcommands_generic.cpp" />
+    <ClCompile Include="dbmessage.cpp" />
     <ClCompile Include="dur.cpp" />
     <ClCompile Include="durop.cpp" />
     <ClCompile Include="dur_commitjob.cpp" />
@@ -490,9 +514,21 @@
     <ClCompile Include="dur_writetodatafiles.cpp" />
     <ClCompile Include="geo\2d.cpp" />
     <ClCompile Include="geo\haystack.cpp" />
+    <ClCompile Include="key.cpp" />
     <ClCompile Include="mongommf.cpp" />
     <ClCompile Include="oplog.cpp" />
+    <ClCompile Include="ops\delete.cpp" />
+    <ClCompile Include="ops\query.cpp" />
+    <ClCompile Include="ops\update.cpp" />
     <ClCompile Include="projection.cpp" />
+    <ClCompile Include="queryoptimizercursor.cpp" />
+    <ClCompile Include="querypattern.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="record.cpp" />
     <ClCompile Include="repl.cpp" />
     <ClCompile Include="repl\consensus.cpp" />
     <ClCompile Include="repl\heartbeat.cpp" />
@@ -542,13 +578,12 @@
     <ClCompile Include="nonce.cpp" />
     <ClCompile Include="..\client\parallel.cpp" />
     <ClCompile Include="pdfile.cpp" />
-    <ClCompile Include="query.cpp" />
     <ClCompile Include="queryoptimizer.cpp" />
+    <ClCompile Include="scanandorder.cpp" />
     <ClCompile Include="security.cpp" />
     <ClCompile Include="security_commands.cpp" />
-    <ClCompile Include="security_key.cpp" />
+    <ClCompile Include="security_common.cpp" />
     <ClCompile Include="tests.cpp" />
-    <ClCompile Include="update.cpp" />
     <ClCompile Include="cmdline.cpp" />
     <ClCompile Include="queryutil.cpp" />
     <ClCompile Include="..\util\assert_util.cpp" />
@@ -558,8 +593,7 @@
     <ClCompile Include="..\util\ntservice.cpp" />
     <ClCompile Include="..\util\processinfo_win32.cpp" />
     <ClCompile Include="..\util\util.cpp" />
-    <ClCompile Include="..\util\httpclient.cpp" />
-    <ClCompile Include="..\util\miniwebserver.cpp" />
+    <ClCompile Include="..\util\net\httpclient.cpp" />
     <ClCompile Include="..\util\md5.c">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
@@ -578,9 +612,10 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Use</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Use</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\util\message.cpp" />
-    <ClCompile Include="..\util\message_server_port.cpp" />
-    <ClCompile Include="..\util\sock.cpp" />
+    <ClCompile Include="..\util\net\message.cpp" />
+    <ClCompile Include="..\util\net\message_port.cpp" />
+    <ClCompile Include="..\util\net\message_server_port.cpp" />
+    <ClCompile Include="..\util\net\sock.cpp" />
     <ClCompile Include="..\s\d_logic.cpp" />
     <ClCompile Include="..\scripting\engine.cpp" />
     <ClCompile Include="..\scripting\engine_spidermonkey.cpp" />
@@ -620,14 +655,25 @@
     <None Include="repl\notes.txt" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\bson\bson-inl.h" />
+    <ClInclude Include="..\bson\bson.h" />
+    <ClInclude Include="..\bson\bson_db.h" />
+    <ClInclude Include="..\bson\inline_decls.h" />
+    <ClInclude Include="..\bson\stringdata.h" />
+    <ClInclude Include="..\bson\util\atomic_int.h" />
+    <ClInclude Include="..\bson\util\builder.h" />
+    <ClInclude Include="..\bson\util\misc.h" />
     <ClInclude Include="..\client\dbclientcursor.h" />
     <ClInclude Include="..\client\distlock.h" />
     <ClInclude Include="..\client\gridfs.h" />
     <ClInclude Include="..\client\parallel.h" />
     <ClInclude Include="..\s\d_logic.h" />
     <ClInclude Include="..\targetver.h" />
-    <ClInclude Include="..\pcre-7.4\config.h" />
-    <ClInclude Include="..\pcre-7.4\pcre.h" />
+    <ClInclude Include="..\third_party\pcre-7.4\config.h" />
+    <ClInclude Include="..\third_party\pcre-7.4\pcre.h" />
+    <ClInclude Include="..\third_party\snappy\config.h" />
+    <ClInclude Include="..\third_party\snappy\snappy.h" />
+    <ClInclude Include="..\util\alignedbuilder.h" />
     <ClInclude Include="..\util\concurrency\race.h" />
     <ClInclude Include="..\util\concurrency\rwlock.h" />
     <ClInclude Include="..\util\concurrency\msg.h" />
@@ -656,7 +702,10 @@
     <ClInclude Include="mongomutex.h" />
     <ClInclude Include="namespace-inl.h" />
     <ClInclude Include="oplogreader.h" />
+    <ClInclude Include="ops\delete.h" />
+    <ClInclude Include="ops\update.h" />
     <ClInclude Include="projection.h" />
+    <ClInclude Include="queryutil.h" />
     <ClInclude Include="repl.h" />
     <ClInclude Include="replpair.h" />
     <ClInclude Include="repl\connections.h" />
@@ -700,7 +749,6 @@
     <ClInclude Include="resource.h" />
     <ClInclude Include="scanandorder.h" />
     <ClInclude Include="security.h" />
-    <ClInclude Include="update.h" />
     <ClInclude Include="..\util\allocator.h" />
     <ClInclude Include="..\util\array.h" />
     <ClInclude Include="..\util\assert_util.h" />
@@ -727,13 +775,12 @@
     <ClInclude Include="..\util\concurrency\list.h" />
     <ClInclude Include="..\util\concurrency\value.h" />
     <ClInclude Include="..\util\web\html.h" />
-    <ClInclude Include="..\util\httpclient.h" />
-    <ClInclude Include="..\util\miniwebserver.h" />
+    <ClInclude Include="..\util\net\httpclient.h" />
     <ClInclude Include="..\util\md5.h" />
     <ClInclude Include="..\util\md5.hpp" />
-    <ClInclude Include="..\util\message.h" />
-    <ClInclude Include="..\util\message_server.h" />
-    <ClInclude Include="..\util\sock.h" />
+    <ClInclude Include="..\util\net\message.h" />
+    <ClInclude Include="..\util\net\message_server.h" />
+    <ClInclude Include="..\util\net\sock.h" />
     <ClInclude Include="..\scripting\engine.h" />
     <ClInclude Include="..\scripting\engine_spidermonkey.h" />
     <ClInclude Include="..\scripting\engine_v8.h" />

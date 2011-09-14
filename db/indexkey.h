@@ -25,6 +25,8 @@
 
 namespace mongo {
 
+    extern const int DefaultIndexVersionNumber;
+    
     class Cursor;
     class IndexSpec;
     class IndexType; // TODO: this name sucks
@@ -44,7 +46,7 @@ namespace mongo {
         IndexType( const IndexPlugin * plugin , const IndexSpec * spec );
         virtual ~IndexType();
 
-        virtual void getKeys( const BSONObj &obj, BSONObjSetDefaultOrder &keys ) const = 0;
+        virtual void getKeys( const BSONObj &obj, BSONObjSet &keys ) const = 0;
         virtual shared_ptr<Cursor> newCursor( const BSONObj& query , const BSONObj& order , int numWanted ) const = 0;
 
         /** optional op : changes query to match what's in the index */
@@ -122,7 +124,7 @@ namespace mongo {
             : _details(0) , _finishedInit(false) {
         }
 
-        IndexSpec( const BSONObj& k , const BSONObj& m = BSONObj() )
+        explicit IndexSpec( const BSONObj& k , const BSONObj& m = BSONObj() )
             : keyPattern(k) , info(m) , _details(0) , _finishedInit(false) {
             _init();
         }
@@ -131,14 +133,15 @@ namespace mongo {
            this is a DiscLoc of an IndexDetails info
            should have a key field
          */
-        IndexSpec( const DiskLoc& loc ) {
+        explicit IndexSpec( const DiskLoc& loc ) {
             reset( loc );
         }
 
-        void reset( const DiskLoc& loc );
+        void reset( const BSONObj& info );
+        void reset( const DiskLoc& infoLoc ) { reset(infoLoc.obj()); }
         void reset( const IndexDetails * details );
 
-        void getKeys( const BSONObj &obj, BSONObjSetDefaultOrder &keys ) const;
+        void getKeys( const BSONObj &obj, BSONObjSet &keys ) const;
 
         BSONElement missingField() const { return _nullElt; }
 
@@ -160,33 +163,33 @@ namespace mongo {
 
     protected:
 
+        int indexVersion() const;
+        
         IndexSuitability _suitability( const BSONObj& query , const BSONObj& order ) const ;
 
-        void _getKeys( vector<const char*> fieldNames , vector<BSONElement> fixed , const BSONObj &obj, BSONObjSetDefaultOrder &keys ) const;
-
         BSONSizeTracker _sizeTracker;
-
         vector<const char*> _fieldNames;
         vector<BSONElement> _fixed;
 
         BSONObj _nullKey; // a full key with all fields null
-
         BSONObj _nullObj; // only used for _nullElt
         BSONElement _nullElt; // jstNull
 
+        BSONObj _undefinedObj; // only used for _undefinedElt
+        BSONElement _undefinedElt; // undefined
+
         int _nFields; // number of fields in the index
         bool _sparse; // if the index is sparse
-
         shared_ptr<IndexType> _indexType;
-
         const IndexDetails * _details;
 
         void _init();
 
+        friend class IndexType;
+        friend class KeyGeneratorV0;
+        friend class KeyGeneratorV1;
     public:
         bool _finishedInit;
-
-        friend class IndexType;
     };
 
 

@@ -31,7 +31,7 @@ namespace mongo {
 
     boost::thread_specific_ptr<Client> currentClient;
 
-    Client::Client(const char *desc , MessagingPort *p) :
+    Client::Client(const char *desc , AbstractMessagingPort *p) :
         _context(0),
         _shutdown(false),
         _desc(desc),
@@ -42,7 +42,7 @@ namespace mongo {
     Client::~Client() {}
     bool Client::shutdown() { return true; }
 
-    Client& Client::initThread(const char *desc, MessagingPort *mp) {
+    Client& Client::initThread(const char *desc, AbstractMessagingPort *mp) {
         setThreadName(desc);
         assert( currentClient.get() == 0 );
         Client *c = new Client(desc, mp);
@@ -85,8 +85,13 @@ namespace mongo {
             log( 2 ) << "command: " << cmdObj << endl;
         }
 
+        if (!client.getAuthenticationInfo()->isAuthorized(dbname)) {
+            result.append("errmsg" , "unauthorized");
+            return false;
+        }
+
         string errmsg;
-        int ok = c->run( dbname , cmdObj , errmsg , result , fromRepl );
+        int ok = c->run( dbname , cmdObj , queryOptions, errmsg , result , fromRepl );
         if ( ! ok )
             result.append( "errmsg" , errmsg );
         return ok;

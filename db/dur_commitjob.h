@@ -38,8 +38,8 @@ namespace mongo {
          * since that is heavily used in set lookup.
          */
         struct WriteIntent { /* copyable */
-            WriteIntent() : w_ptr(0), p(0) { }
-            WriteIntent(void *a, unsigned b) : w_ptr(0), p((char*)a+b), len(b) { }
+            WriteIntent() : /*w_ptr(0), */ p(0) { }
+            WriteIntent(void *a, unsigned b) : /*w_ptr(0), */ p((char*)a+b), len(b) { }
 
             void* start() const { return (char*)p - len; }
             void* end() const { return p; }
@@ -64,7 +64,7 @@ namespace mongo {
                 return (out << "p: " << wi.p << " end: " << wi.end() << " len: " << wi.len);
             }
 
-            mutable void *w_ptr;  // writable mapping of p.
+            //mutable void *w_ptr;  // writable mapping of p.
             // mutable because set::iterator is const but this isn't used in op<
 #if defined(_EXPERIMENTAL)
             mutable unsigned ofsInJournalBuffer;
@@ -189,14 +189,10 @@ namespace mongo {
             /** we use the commitjob object over and over, calling reset() rather than reconstructing */
             void reset();
 
-            /** the commit code calls this when data reaches the journal (on disk) */
-            void notifyCommitted() { _notify.notifyAll(); }
+            void beginCommit();
 
-            /** Wait until the next group commit occurs. That is, wait until someone calls notifyCommitted. */
-            void awaitNextCommit() {
-                if( hasWritten() )
-                    _notify.wait();
-            }
+            /** the commit code calls this when data reaches the journal (on disk) */
+            void notifyCommitted() { _notify.notifyAll(_commitNumber); }
 
             /** we check how much written and if it is getting to be a lot, we commit sooner. */
             size_t bytes() const { return _bytes; }
@@ -207,11 +203,12 @@ namespace mongo {
 
             Writes& wi() { return _wi; }
         private:
+            NotifyAll::When _commitNumber;
             bool _hasWritten;
             Writes _wi; // todo: fix name
             size_t _bytes;
-            NotifyAll _notify; // for getlasterror fsync:true acknowledgements
         public:
+            NotifyAll _notify; // for getlasterror fsync:true acknowledgements
             unsigned _nSinceCommitIfNeededCall;
         };
 

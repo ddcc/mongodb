@@ -53,6 +53,7 @@ namespace mongo {
             const bool draining = isDraining( shardLimits );
             const bool opsQueued = hasOpsQueued( shardLimits );
 
+            
             // Is this shard a better chunk receiver then the current one?
             // Shards that would be bad receiver candidates:
             // + maxed out shards
@@ -64,6 +65,13 @@ namespace mongo {
                     min = make_pair( shard , size );
                 }
             }
+            else if ( opsQueued ) {
+                LOG(1) << "won't send a chunk to: " << shard << " because it has ops queued" << endl;
+            }
+            else if ( maxedOut ) {
+                LOG(1) << "won't send a chunk to: " << shard << " because it is maxedOut" << endl;
+            }
+
 
             // Check whether this shard is a better chunk donor then the current one.
             // Draining shards take a lower priority than overloaded shards.
@@ -79,7 +87,7 @@ namespace mongo {
         // If there is no candidate chunk receiver -- they may have all been maxed out,
         // draining, ... -- there's not much that the policy can do.
         if ( min.second == numeric_limits<unsigned>::max() ) {
-            log() << "no availalable shards to take chunks" << endl;
+            log() << "no available shards to take chunks" << endl;
             return NULL;
         }
 
@@ -88,13 +96,13 @@ namespace mongo {
             return NULL;
         }
 
-        log(1) << "collection : " << ns << endl;
-        log(1) << "donor      : " << max.second << " chunks on " << max.first << endl;
-        log(1) << "receiver   : " << min.second << " chunks on " << min.first << endl;
+        LOG(1) << "collection : " << ns << endl;
+        LOG(1) << "donor      : " << max.second << " chunks on " << max.first << endl;
+        LOG(1) << "receiver   : " << min.second << " chunks on " << min.first << endl;
         if ( ! drainingShards.empty() ) {
             string drainingStr;
             joinStringDelim( drainingShards, &drainingStr, ',' );
-            log(1) << "draining           : " << ! drainingShards.empty() << "(" << drainingShards.size() << ")" << endl;
+            LOG(1) << "draining           : " << ! drainingShards.empty() << "(" << drainingShards.size() << ")" << endl;
         }
 
         // Solving imbalances takes a higher priority than draining shards. Many shards can
@@ -126,7 +134,7 @@ namespace mongo {
     }
 
     BSONObj BalancerPolicy::pickChunk( const vector<BSONObj>& from, const vector<BSONObj>& to ) {
-        // It is possible for a donor ('from') shard to have less chunks than a recevier one ('to')
+        // It is possible for a donor ('from') shard to have less chunks than a receiver one ('to')
         // if the donor is in draining mode.
 
         if ( to.size() == 0 )

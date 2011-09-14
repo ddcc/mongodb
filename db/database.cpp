@@ -52,26 +52,9 @@ namespace mongo {
         }
 
         newDb = namespaceIndex.exists();
-        profile = 0;
+        profile = cmdLine.defaultProfile;
 
-        {
-            vector<string> others;
-            getDatabaseNames( others , path );
-
-            for ( unsigned i=0; i<others.size(); i++ ) {
-
-                if ( strcasecmp( others[i].c_str() , nm ) )
-                    continue;
-
-                if ( strcmp( others[i].c_str() , nm ) == 0 )
-                    continue;
-
-                stringstream ss;
-                ss << "db already exists with different case other: [" << others[i] << "] me [" << nm << "]";
-                uasserted( DatabaseDifferCaseCode , ss.str() );
-            }
-        }
-
+        checkDuplicateUncasedNames();
 
         // If already exists, open.  Otherwise behave as if empty until
         // there's a write, then open.
@@ -91,7 +74,49 @@ namespace mongo {
             throw;
         }
     }
+    
+    void Database::checkDuplicateUncasedNames() const {
+        string duplicate = duplicateUncasedName( name, path );
+        if ( !duplicate.empty() ) {
+            stringstream ss;
+            ss << "db already exists with different case other: [" << duplicate << "] me [" << name << "]";
+            uasserted( DatabaseDifferCaseCode , ss.str() );
+        }
+    }
 
+    string Database::duplicateUncasedName( const string &name, const string &path, set< string > *duplicates ) {
+        if ( duplicates ) {
+            duplicates->clear();   
+        }
+        
+        vector<string> others;
+        getDatabaseNames( others , path );
+        
+        set<string> allShortNames;
+        dbHolder.getAllShortNames( allShortNames );
+        
+        others.insert( others.end(), allShortNames.begin(), allShortNames.end() );
+        
+        for ( unsigned i=0; i<others.size(); i++ ) {
+
+            if ( strcasecmp( others[i].c_str() , name.c_str() ) )
+                continue;
+            
+            if ( strcmp( others[i].c_str() , name.c_str() ) == 0 )
+                continue;
+
+            if ( duplicates ) {
+                duplicates->insert( others[i] );
+            } else {
+                return others[i];
+            }
+        }
+        if ( duplicates ) {
+            return duplicates->empty() ? "" : *duplicates->begin();
+        }
+        return "";
+    }
+    
     boost::filesystem::path Database::fileName( int n ) const {
         stringstream ss;
         ss << name << '.' << n;
@@ -167,14 +192,32 @@ namespace mongo {
         return ret;
     }
 
-    MongoDataFile* Database::suitableFile( int sizeNeeded, bool preallocate ) {
+    bool fileIndexExceedsQuota( const char *ns, int fileIndex, bool enforceQuota ) {
+        return
+            cmdLine.quota &&
+            enforceQuota &&
+            fileIndex >= cmdLine.quotaFiles &&
+            // we don't enforce the quota on "special" namespaces as that could lead to problems -- e.g.
+            // rejecting an index insert after inserting the main record.
+            !NamespaceString::special( ns ) &&
+            NamespaceString( ns ).db != "local";
+    }
+    
+    MongoDataFile* Database::suitableFile( const char *ns, int sizeNeeded, bool preallocate, bool enforceQuota ) {
 
         // check existing files
         for ( int i=numFiles()-1; i>=0; i-- ) {
             MongoDataFile* f = getFile( i );
-            if ( f->getHeader()->unusedLength >= sizeNeeded )
-                return f;
+            if ( f->getHeader()->unusedLength >= sizeNeeded ) {
+                if ( fileIndexExceedsQuota( ns, i-1, enforceQuota ) ) // NOTE i-1 is the value used historically for this check.
+                    ;
+                else
+                    return f;
+            }
         }
+
+        if ( fileIndexExceedsQuota( ns, numFiles(), enforceQuota ) )
+            uasserted(12501, "quota exceeded");
 
         // allocate files until we either get one big enough or hit maxSize
         for ( int i = 0; i < 8; i++ ) {
@@ -187,6 +230,7 @@ namespace mongo {
                 return f;
         }
 
+        uasserted(14810, "couldn't allocate space (suitableFile)"); // callers don't check for null return code
         return 0;
     }
 
@@ -198,11 +242,11 @@ namespace mongo {
     }
 
 
-    Extent* Database::allocExtent( const char *ns, int size, bool capped ) {
+    Extent* Database::allocExtent( const char *ns, int size, bool capped, bool enforceQuota ) {
         Extent *e = DataFileMgr::allocFromFreeList( ns, size, capped );
         if( e )
             return e;
-        return suitableFile( size, !capped )->createExtent( ns, size, capped );
+        return suitableFile( ns, size, !capped, enforceQuota )->createExtent( ns, size, capped );
     }
 
 
@@ -223,24 +267,16 @@ namespace mongo {
         assert( cc().database() == this );
 
         if ( ! namespaceIndex.details( profileName.c_str() ) ) {
-            log(1) << "creating profile ns: " << profileName << endl;
+            log() << "creating profile collection: " << profileName << endl;
             BSONObjBuilder spec;
             spec.appendBool( "capped", true );
-            spec.append( "size", 131072.0 );
-            if ( ! userCreateNS( profileName.c_str(), spec.done(), errmsg , true ) ) {
+            spec.append( "size", 1024*1024 );
+            if ( ! userCreateNS( profileName.c_str(), spec.done(), errmsg , false /* we don't replica profile messages */ ) ) {
                 return false;
             }
         }
         profile = newLevel;
         return true;
-    }
-
-    void Database::finishInit() {
-        if ( cmdLine.defaultProfile == profile )
-            return;
-
-        string errmsg;
-        massert( 12506 , errmsg , setProfilingLevel( cmdLine.defaultProfile , errmsg ) );
     }
 
     bool Database::validDBName( const string& ns ) {

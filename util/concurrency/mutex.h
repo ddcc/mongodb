@@ -19,10 +19,11 @@
 
 #include <map>
 #include <set>
-
 #include "../heapcheck.h"
 
 namespace mongo {
+
+    void printStackTrace( ostream &o );
 
     class mutex;
 
@@ -50,7 +51,6 @@ namespace mongo {
         map< mid, set<mid> > followers;
         boost::mutex &x;
         unsigned magic;
-
         void aBreakPoint() { } // for debugging
     public:
         // set these to create an assert that
@@ -147,20 +147,16 @@ namespace mongo {
         ~StaticObserver() { _destroyingStatics = true; }
     };
 
-    /** On pthread systems, it is an error to destroy a mutex while held.  Static global
-     * mutexes may be held upon shutdown in our implementation, and this way we avoid
-     * destroying them.
-     * NOT recursive.
+    /** On pthread systems, it is an error to destroy a mutex while held (boost mutex 
+     *    may use pthread).  Static global mutexes may be held upon shutdown in our 
+     *    implementation, and this way we avoid destroying them.
+     *  NOT recursive.
      */
     class mutex : boost::noncopyable {
     public:
 #if defined(_DEBUG)
         const char * const _name;
-#endif
-
-#if defined(_DEBUG)
-        mutex(const char *name)
-            : _name(name)
+        mutex(const char *name) : _name(name)
 #else
         mutex(const char *)
 #endif
@@ -184,49 +180,100 @@ namespace mongo {
 #else
                   ok( _l.locked() )
 #endif
-            {
-            }
-
-            ~try_lock() {
-            }
-
+            { }
         private:
             boost::timed_mutex::scoped_timed_lock _l;
-
         public:
             const bool ok;
         };
 
-
         class scoped_lock : boost::noncopyable {
-#if defined(_DEBUG)
-            mongo::mutex *mut;
-#endif
         public:
-            scoped_lock( mongo::mutex &m ) : _l( m.boost() ) {
 #if defined(_DEBUG)
-                mut = &m;
-                mutexDebugger.entering(mut->_name);
+            struct PostStaticCheck {
+                PostStaticCheck() {
+                    if ( StaticObserver::_destroyingStatics ) {
+                        cout << "trying to lock a mongo::mutex during static shutdown" << endl;
+                        printStackTrace( cout );
+                    }
+                }
+            };
+
+            PostStaticCheck _check;
+            mongo::mutex * const _mut;
+#endif
+            scoped_lock( mongo::mutex &m ) : 
+#if defined(_DEBUG)
+            _mut(&m),
+#endif
+            _l( m.boost() ) {
+#if defined(_DEBUG)
+                mutexDebugger.entering(_mut->_name);
 #endif
             }
             ~scoped_lock() {
 #if defined(_DEBUG)
-                mutexDebugger.leaving(mut->_name);
+                mutexDebugger.leaving(_mut->_name);
 #endif
             }
             boost::timed_mutex::scoped_lock &boost() { return _l; }
         private:
             boost::timed_mutex::scoped_lock _l;
         };
-
-
     private:
-
         boost::timed_mutex &boost() { return *_m; }
         boost::timed_mutex *_m;
     };
 
     typedef mutex::scoped_lock scoped_lock;
     typedef boost::recursive_mutex::scoped_lock recursive_scoped_lock;
+
+    /** The concept with SimpleMutex is that it is a basic lock/unlock with no 
+          special functionality (such as try and try timeout).  Thus it can be 
+          implemented using OS-specific facilities in all environments (if desired).
+        On Windows, the implementation below is faster than boost mutex.
+    */
+#if defined(_WIN32)
+    class SimpleMutex : boost::noncopyable {
+        CRITICAL_SECTION _cs;
+    public:
+        SimpleMutex(const char *name) { InitializeCriticalSection(&_cs); }
+        ~SimpleMutex() { DeleteCriticalSection(&_cs); }
+
+        void lock() { EnterCriticalSection(&_cs); }
+        void unlock() { LeaveCriticalSection(&_cs); }
+
+        class scoped_lock : boost::noncopyable {
+            SimpleMutex& _m;
+        public:
+            scoped_lock( SimpleMutex &m ) : _m(m) { _m.lock(); }
+            ~scoped_lock() { _m.unlock(); }
+        };
+    };
+#else
+    class SimpleMutex : boost::noncopyable {
+    public:
+        SimpleMutex(const char* name) { assert( pthread_mutex_init(&_lock,0) == 0 ); }
+        ~SimpleMutex(){ 
+            if ( ! StaticObserver::_destroyingStatics ) { 
+                assert( pthread_mutex_destroy(&_lock) == 0 ); 
+            }
+        }
+
+        void lock() { assert( pthread_mutex_lock(&_lock) == 0 ); }
+        void unlock() { assert( pthread_mutex_unlock(&_lock) == 0 ); }
+        
+        class scoped_lock : boost::noncopyable {
+            SimpleMutex& _m;
+        public:
+            scoped_lock( SimpleMutex &m ) : _m(m) { _m.lock(); }
+            ~scoped_lock() { _m.unlock(); }
+        };
+
+    private:
+        pthread_mutex_t _lock;
+    };
+    
+#endif
 
 }

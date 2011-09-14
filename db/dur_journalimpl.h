@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include "dur_journalformat.h"
 #include "../util/logfile.h"
 
 namespace mongo {
@@ -40,20 +41,14 @@ namespace mongo {
              */
             void rotate();
 
-            /** write to journal
+            /** append to the journal file
             */
-            void journal(const AlignedBuilder& b);
+            void journal(const JSectHeader& h, const AlignedBuilder& b);
 
             boost::filesystem::path getFilePathFor(int filenumber) const;
 
             unsigned long long lastFlushTime() const { return _lastFlushTime; }
-            void cleanup();
-
-            // Rotate after reaching this data size in a journal (j._<n>) file
-            // We use a smaller size for 32 bit as the journal is mmapped during recovery (only)
-            // Note if you take a set of datafiles, including journal files, from 32->64 or vice-versa, it must 
-            // work.  (and should as-is)
-            static const unsigned long long DataLimit = (sizeof(void*)==4) ? 256 * 1024 * 1024 : 1 * 1024 * 1024 * 1024;
+            void cleanup(bool log); // closes and removes journal files
 
             unsigned long long curFileId() const { return _curFileId; }
 
@@ -67,14 +62,21 @@ namespace mongo {
             void open();
 
         private:
+            /** check if time to rotate files.  assure a file is open.
+             *  internally called with every commit
+             */
+            void _rotate();
+
             void _open();
             void closeCurrentJournalFile();
             void removeUnneededJournalFiles();
 
             unsigned long long _written; // bytes written so far to the current journal (log) file
             unsigned _nextFileNumber;
-
+        public:
             mutex _curLogFileMutex;
+            bool _ageOut;
+        private:
 
             LogFile *_curLogFile; // use _curLogFileMutex
             unsigned long long _curFileId; // current file id see JHeader::fileId

@@ -27,6 +27,9 @@ namespace mongo {
         not this.
     */
     class MongoMMF : private MemoryMappedFile {
+    protected:
+        virtual void* viewForFlushing() { return _view_write; }
+
     public:
         MongoMMF();
         virtual ~MongoMMF();
@@ -72,7 +75,7 @@ namespace mongo {
             fileSuffixNo() is 3
             if the suffix is "ns", fileSuffixNo -1
         */
-        RelativePath relativePath() const {
+        const RelativePath& relativePath() const {
             DEV assert( !_p._p.empty() );
             return _p;
         }

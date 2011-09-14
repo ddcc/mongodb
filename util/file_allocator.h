@@ -47,12 +47,14 @@ namespace mongo {
         void allocateAsap( const string &name, unsigned long long &size );
 
         void waitUntilFinished() const;
+        
+        bool hasFailed() const;
 
         static void ensureLength(int fd , long size);
 
         /** @return the singletone */
         static FileAllocator * get();
-
+        
     private:
 
         FileAllocator();
@@ -84,6 +86,6 @@ namespace mongo {
     };
 
     /** like "mkdir -p" but on parent dir of p rather than p itself */
-    void ensureParentDirCreated(const boost::filesystem::path& p);
+    boost::filesystem::path ensureParentDirCreated(const boost::filesystem::path& p);
 
 } // namespace mongo

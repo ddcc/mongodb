@@ -29,6 +29,35 @@ namespace mongo {
 
     BOOST_STATIC_ASSERT(sizeof(void*) == sizeof(size_t));
 
+    /** reset for a re-use. shrinks if > 128MB */
+    void AlignedBuilder::reset() {
+        _len = 0;
+        RARELY {
+            const unsigned sizeCap = 128*1024*1024;
+            if (_p._size > sizeCap)
+                _realloc(sizeCap, _len);
+        }
+    }
+
+    /** reset with a hint as to the upcoming needed size specified */
+    void AlignedBuilder::reset(unsigned sz) { 
+        _len = 0;
+        unsigned Q = 32 * 1024 * 1024 - 1;
+        unsigned want = (sz+Q) & (~Q);
+        if( _p._size == want ) {
+            return;
+        }        
+        if( _p._size > want ) {
+            if( _p._size <= 64 * 1024 * 1024 )
+                return;
+            bool downsize = false;
+            RARELY { downsize = true; }
+            if( !downsize )
+                return;
+        }
+        _realloc(want, _len);
+    }
+
     void AlignedBuilder::mallocSelfAligned(unsigned sz) {
         assert( sz == _p._size );
         void *p = malloc(sz + Alignment - 1);
@@ -44,10 +73,20 @@ namespace mongo {
 
     /* "slow"/infrequent portion of 'grow()'  */
     void NOINLINE_DECL AlignedBuilder::growReallocate(unsigned oldLen) {
+        dassert( _len > _p._size );
         unsigned a = _p._size;
         assert( a );
         while( 1 ) {
-            a *= 2;
+            if( a < 128 * 1024 * 1024 )
+                a *= 2;
+            else if( sizeof(int*) == 4 )
+                a += 32 * 1024 * 1024;
+            else 
+                a += 64 * 1024 * 1024;
+            DEV if( a > 256*1024*1024 ) { 
+                log() << "dur AlignedBuilder too big, aborting in _DEBUG build" << endl;
+                abort();
+            }
             wassert( a <= 256*1024*1024 );
             assert( a <= 512*1024*1024 );
             if( _len < a )

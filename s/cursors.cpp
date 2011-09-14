@@ -22,6 +22,7 @@
 #include "../db/queryutil.h"
 #include "../db/commands.h"
 #include "../util/concurrency/task.h"
+#include "../util/net/listen.h"
 
 namespace mongo {
 
@@ -111,7 +112,7 @@ namespace mongo {
         }
 
         bool hasMore = sendMore && _cursor->more();
-        log(6) << "\t hasMore:" << hasMore << " wouldSendMoreIfHad: " << sendMore << " id:" << getId() << " totalSent: " << _totalSent << endl;
+        LOG(6) << "\t hasMore:" << hasMore << " wouldSendMoreIfHad: " << sendMore << " id:" << getId() << " totalSent: " << _totalSent << endl;
 
         replyToQuery( 0 , r.p() , r.m() , b.buf() , b.len() , num , _totalSent , hasMore ? getId() : 0 );
         _totalSent += num;
@@ -130,13 +131,15 @@ namespace mongo {
 
     CursorCache::~CursorCache() {
         // TODO: delete old cursors?
-        int logLevel = 1;
+        bool print = logLevel > 0;
         if ( _cursors.size() || _refs.size() )
-            logLevel = 0;
-        log( logLevel ) << " CursorCache at shutdown - "
-                        << " sharded: " << _cursors.size()
-                        << " passthrough: " << _refs.size()
-                        << endl;
+            print = true;
+        
+        if ( print ) 
+            cout << " CursorCache at shutdown - "
+                 << " sharded: " << _cursors.size()
+                 << " passthrough: " << _refs.size()
+                 << endl;
     }
 
     ShardedClientCursorPtr CursorCache::get( long long id ) const {
@@ -184,7 +187,7 @@ namespace mongo {
 
     long long CursorCache::genId() {
         while ( true ) {
-            long long x = security.getNonce();
+            long long x = Security::getNonce();
             if ( x == 0 )
                 continue;
             if ( x < 0 )
@@ -272,6 +275,9 @@ namespace mongo {
             }
             log() << "killing old cursor " << i->second->getId() << " idle for: " << idleFor << "ms" << endl; // TODO: make log(1)
             _cursors.erase( i );
+            i = _cursors.begin(); // possible 2nd entry will get skipped, will get on next pass
+            if ( i == _cursors.end() )
+                break;
         }
     }
 
@@ -299,7 +305,7 @@ namespace mongo {
             help << " example: { cursorInfo : 1 }";
         }
         virtual LockType locktype() const { return NONE; }
-        bool run(const string&, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
+        bool run(const string&, BSONObj& jsobj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
             cursorCache.appendInfo( result );
             if ( jsobj["setTimeout"].isNumber() )
                 CursorCache::TIMEOUT = jsobj["setTimeout"].numberLong();

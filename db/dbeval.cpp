@@ -18,7 +18,7 @@
 */
 
 #include "pch.h"
-#include "query.h"
+#include "ops/query.h"
 #include "pdfile.h"
 #include "jsobj.h"
 #include "../bson/util/builder.h"
@@ -86,7 +86,7 @@ namespace mongo {
         int res;
         {
             Timer t;
-            res = s->invoke(f,args, cmdLine.quota ? 10 * 60 * 1000 : 0 );
+            res = s->invoke(f, &args, 0, cmdLine.quota ? 10 * 60 * 1000 : 0 );
             int m = t.millis();
             if ( m > cmdLine.slowMS ) {
                 out() << "dbeval slow, time: " << dec << m << "ms " << dbName << endl;
@@ -121,7 +121,7 @@ namespace mongo {
         }
         virtual LockType locktype() const { return NONE; }
         CmdEval() : Command("eval", false, "$eval") { }
-        bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        bool run(const string& dbname , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
 
             AuthenticationInfo *ai = cc().getAuthenticationInfo();
             uassert( 12598 , "$eval reads unauthorized", ai->isAuthorizedReads(dbname.c_str()) );

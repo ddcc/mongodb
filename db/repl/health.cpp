@@ -32,7 +32,6 @@
 #include "../dbhelpers.h"
 
 namespace mongo {
-
     /* decls for connections.h */
     ScopedConn::M& ScopedConn::_map = *(new ScopedConn::M());
     mutex ScopedConn::mapMutex("ScopedConn::mapMutex");
@@ -43,9 +42,9 @@ namespace mongo {
     using namespace mongoutils::html;
     using namespace bson;
 
-    static RamLog _rsLog;
-    Tee *rsLog = &_rsLog;
-    extern bool replSetBlind;
+    static RamLog * _rsLog = new RamLog( "rs" );
+    Tee *rsLog = _rsLog;
+    extern bool replSetBlind; // for testing
 
     string ago(time_t t) {
         if( t == 0 ) return "";
@@ -126,19 +125,6 @@ namespace mongo {
         return "";
     }
 
-    string MemberState::toString() const {
-        if( s == MemberState::RS_STARTUP ) return "STARTUP";
-        if( s == MemberState::RS_PRIMARY ) return "PRIMARY";
-        if( s == MemberState::RS_SECONDARY ) return "SECONDARY";
-        if( s == MemberState::RS_RECOVERING ) return "RECOVERING";
-        if( s == MemberState::RS_FATAL ) return "FATAL";
-        if( s == MemberState::RS_STARTUP2 ) return "STARTUP2";
-        if( s == MemberState::RS_ARBITER ) return "ARBITER";
-        if( s == MemberState::RS_DOWN ) return "DOWN";
-        if( s == MemberState::RS_ROLLBACK ) return "ROLLBACK";
-        return "";
-    }
-
     extern time_t started;
 
     // oplogdiags in web ui
@@ -208,8 +194,8 @@ namespace mongo {
 
         ss << "<style type=\"text/css\" media=\"screen\">"
            "table { font-size:75% }\n"
-//            "th { background-color:#bbb; color:#000 }\n"
-//            "td,th { padding:.25em }\n"
+           // "th { background-color:#bbb; color:#000 }\n"
+           // "td,th { padding:.25em }\n"
            "</style>\n";
 
         ss << table(h, true);
@@ -306,6 +292,8 @@ namespace mongo {
             myMinValid = "exception fetching minvalid";
         }
 
+        const Member *_self = this->_self;
+        assert(_self);
         {
             stringstream s;
             /* self row */
@@ -340,19 +328,39 @@ namespace mongo {
 
 
     void fillRsLog(stringstream& s) {
-        _rsLog.toHTML( s );
+        _rsLog->toHTML( s );
     }
 
     const Member* ReplSetImpl::findById(unsigned id) const {
-        if( id == _self->id() ) return _self;
+        if( _self && id == _self->id() ) return _self;
+        
         for( Member *m = head(); m; m = m->next() )
             if( m->id() == id )
                 return m;
         return 0;
     }
+    
+    const OpTime ReplSetImpl::lastOtherOpTime() const {
+        OpTime closest(0,0);
+        
+        for( Member *m = _members.head(); m; m=m->next() ) {                
+            if (!m->hbinfo().up()) {
+                continue;
+            }
+
+            if (m->hbinfo().opTime > closest) {
+                closest = m->hbinfo().opTime;
+            }
+        }
+
+        return closest;
+    }
 
     void ReplSetImpl::_summarizeStatus(BSONObjBuilder& b) const {
         vector<BSONObj> v;
+
+        const Member *_self = this->_self;
+        assert( _self );
 
         // add self
         {
@@ -390,6 +398,7 @@ namespace mongo {
             bb.appendTimestamp("optime", m->hbinfo().opTime.asDate());
             bb.appendDate("optimeDate", m->hbinfo().opTime.getSecs() * 1000LL);
             bb.appendTimeT("lastHeartbeat", m->hbinfo().lastHeartbeat);
+            bb.append("pingMs", m->hbinfo().ping);
             string s = m->lhb();
             if( !s.empty() )
                 bb.append("errmsg", s);
@@ -400,6 +409,10 @@ namespace mongo {
         b.append("set", name());
         b.appendTimeT("date", time(0));
         b.append("myState", box.getState().s);
+        const Member *syncTarget = _currentSyncTarget;
+        if (syncTarget) {
+            b.append("syncingTo", syncTarget->fullName());
+        }
         b.append("members", v);
         if( replSetBlind )
             b.append("blind",true); // to avoid confusion if set...normally never set except for testing.

@@ -1,6 +1,6 @@
 // tests sharding with replica sets
 
-s = new ShardingTest( "rs1" , 3 , 1 , 2 , { rs : true , chunksize : 1 } )
+s = new ShardingTest( "rs1" , 3 /* numShards */, 1 /* verboseLevel */, 2 /* numMongos */, { rs : true , chunksize : 1 } )
 
 s.adminCommand( { enablesharding : "test" } );
 
@@ -58,6 +58,12 @@ assert.soon( function(){
 } , "balance didn't happen" , 1000 * 60 * 6 , 5000 );
 
 s.config.settings.update( { _id: "balancer" }, { $set : { stopped: true } } , true );
+
+sleep( 1000 );
+
+while ( sh.isBalancerRunning() ){
+    sleep( 1000 );
+}
 
 for ( i=0; i<s._rs.length; i++ ){
     r = s._rs[i];

@@ -19,6 +19,8 @@
 #include "../commands.h"
 #include "../instance.h"
 #include "../queryoptimizer.h"
+#include "../../scripting/engine.h"
+#include "../clientcursor.h"
 
 namespace mongo {
 
@@ -36,13 +38,14 @@ namespace mongo {
             if ( func ) {
                 BSONObjBuilder b( obj.objsize() + 32 );
                 b.append( "0" , obj );
-                int res = s->invoke( func , b.obj() );
+                const BSONObj& key = b.obj();
+                int res = s->invoke( func , &key, 0 );
                 uassert( 10041 ,  (string)"invoke failed in $keyf: " + s->getError() , res == 0 );
                 int type = s->type("return");
                 uassert( 10042 ,  "return of $key has to be an object" , type == Object );
                 return s->getObject( "return" );
             }
-            return obj.extractFields( keyPattern , true );
+            return obj.extractFields( keyPattern , true ).getOwned();
         }
 
         bool group( string realdbname , const string& ns , const BSONObj& query ,
@@ -85,14 +88,28 @@ namespace mongo {
             map<BSONObj,int,BSONObjCmp> map;
             list<BSONObj> blah;
 
-            shared_ptr<Cursor> cursor = bestGuessCursor(ns.c_str() , query , BSONObj() );
+            shared_ptr<Cursor> cursor = NamespaceDetailsTransient::getCursor(ns.c_str() , query);
+            ClientCursor::CleanupPointer ccPointer;
+            ccPointer.reset( new ClientCursor( QueryOption_NoCursorTimeout, cursor, ns ) );
 
             while ( cursor->ok() ) {
-                if ( cursor->matcher() && ! cursor->matcher()->matchesCurrent( cursor.get() ) ) {
+                
+                if ( !ccPointer->yieldSometimes( ClientCursor::MaybeCovered ) ||
+                    !cursor->ok() ) {
+                    break;
+                }
+                
+                if ( ( cursor->matcher() && !cursor->matcher()->matchesCurrent( cursor.get() ) ) ||
+                    cursor->getsetdup( cursor->currLoc() ) ) {
                     cursor->advance();
                     continue;
                 }
 
+                if ( !ccPointer->yieldSometimes( ClientCursor::WillNeed ) ||
+                    !cursor->ok() ) {
+                    break;
+                }
+                
                 BSONObj obj = cursor->current();
                 cursor->advance();
 
@@ -110,10 +127,11 @@ namespace mongo {
 
                 s->setObject( "obj" , obj , true );
                 s->setNumber( "n" , n - 1 );
-                if ( s->invoke( f , BSONObj() , 0 , true ) ) {
+                if ( s->invoke( f , 0, 0 , 0 , true ) ) {
                     throw UserException( 9010 , (string)"reduce invoke failed: " + s->getError() );
                 }
             }
+            ccPointer.reset();
 
             if (!finalize.empty()) {
                 s->exec( "$finalize = " + finalize , "finalize define" , false , true , true , 100 );
@@ -125,7 +143,7 @@ namespace mongo {
                                           "    $arr[i] = ret; "
                                           "  } "
                                           "}" );
-                s->invoke( g , BSONObj() , 0 , true );
+                s->invoke( g , 0, 0 , 0 , true );
             }
 
             result.appendArray( "retval" , s->getObject( "$arr" ) );
@@ -137,8 +155,13 @@ namespace mongo {
             return true;
         }
 
-        bool run(const string& dbname, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
+        bool run(const string& dbname, BSONObj& jsobj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
 
+            if ( !globalScriptEngine ) {
+                errmsg = "server-side JavaScript execution is disabled";
+                return false;
+            }
+            
             /* db.$cmd.findOne( { group : <p> } ) */
             const BSONObj& p = jsobj.firstElement().embeddedObjectUserCheck();
 

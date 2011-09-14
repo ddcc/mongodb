@@ -19,14 +19,11 @@
 #include "pch.h"
 #include "client/dbclient.h"
 #include "db/json.h"
-#include "../util/httpclient.h"
+#include "../util/net/httpclient.h"
 #include "../util/text.h"
-
 #include "tool.h"
-
 #include <fstream>
 #include <iostream>
-
 #include <boost/program_options.hpp>
 
 namespace po = boost::program_options;
@@ -65,24 +62,31 @@ namespace mongo {
         virtual void printExtraHelpAfter( ostream & out ) {
             out << "\n";
             out << " Fields\n";
-            out << "   inserts \t- # of inserts per second\n";
-            out << "   query   \t- # of queries per second\n";
-            out << "   update  \t- # of updates per second\n";
-            out << "   delete  \t- # of deletes per second\n";
-            out << "   getmore \t- # of get mores (cursor batch) per second\n";
-            out << "   command \t- # of commands per second\n";
-            out << "   flushes \t- # of fsync flushes per second\n";
-            out << "   mapped    \t- amount of data mmaped (total data size) megabytes\n";
-            out << "   visze     \t- virtual size of process in megabytes\n";
-            out << "   res       \t- resident size of process in megabytes\n";
-            out << "   faults  \t- # of pages faults per sec (linux only)\n";
-            out << "   locked    \t- percent of time in global write lock\n";
-            out << "   idx miss  \t- percent of btree page misses (sampled)\n";
-            out << "   qr|qw     \t- queue lengths for clients waiting (read|write)\n";
-            out << "   ar|aw     \t- active clients (read|write)\n";
-            out << "   netIn     \t- network traffic in - bits\n";
-            out << "   netOut     \t- network traffic out - bits\n";
-            out << "   conn      \t- number of open connections\n";
+            out << "   inserts  \t- # of inserts per second (* means replicated op)\n";
+            out << "   query    \t- # of queries per second\n";
+            out << "   update   \t- # of updates per second\n";
+            out << "   delete   \t- # of deletes per second\n";
+            out << "   getmore  \t- # of get mores (cursor batch) per second\n";
+            out << "   command  \t- # of commands per second, on a slave its local|replicated\n";
+            out << "   flushes  \t- # of fsync flushes per second\n";
+            out << "   mapped   \t- amount of data mmaped (total data size) megabytes\n";
+            out << "   vsize    \t- virtual size of process in megabytes\n";
+            out << "   res      \t- resident size of process in megabytes\n";
+            out << "   faults   \t- # of pages faults per sec (linux only)\n";
+            out << "   locked   \t- percent of time in global write lock\n";
+            out << "   idx miss \t- percent of btree page misses (sampled)\n";
+            out << "   qr|qw    \t- queue lengths for clients waiting (read|write)\n";
+            out << "   ar|aw    \t- active clients (read|write)\n";
+            out << "   netIn    \t- network traffic in - bits\n";
+            out << "   netOut   \t- network traffic out - bits\n";
+            out << "   conn     \t- number of open connections\n";
+            out << "   set      \t- replica set name\n";
+            out << "   repl     \t- replication type \n";
+            out << "            \t    M   - master\n";
+            out << "            \t    SEC - secondary\n";
+            out << "            \t    REC - recovering\n";
+            out << "            \t    UNK - unknown\n";
+            out << "            \t    SLV - slave\n";
         }
 
 
@@ -196,6 +200,8 @@ namespace mongo {
         BSONObj doRow( const BSONObj& a , const BSONObj& b ) {
             BSONObjBuilder result;
 
+            bool isMongos =  b["shardCursorType"].type() == Object; // TODO: should have a better check
+
             if ( a["opcounters"].isABSONObj() && b["opcounters"].isABSONObj() ) {
                 BSONObj ax = a["opcounters"].embeddedObject();
                 BSONObj bx = b["opcounters"].embeddedObject();
@@ -251,11 +257,12 @@ namespace mongo {
             if ( b.getFieldDotted("mem.supported").trueValue() ) {
                 BSONObj bx = b["mem"].embeddedObject();
                 BSONObjIterator i( bx );
-                _appendMem( result , "mapped" , 6 , bx["mapped"].numberInt() );
+                if (!isMongos)
+                    _appendMem( result , "mapped" , 6 , bx["mapped"].numberInt() );
                 _appendMem( result , "vsize" , 6 , bx["virtual"].numberInt() );
                 _appendMem( result , "res" , 6 , bx["resident"].numberInt() );
 
-                if ( _all )
+                if ( !isMongos && _all )
                     _appendMem( result , "non-mapped" , 6 , bx["virtual"].numberInt() - bx["mapped"].numberInt() );
             }
 
@@ -266,8 +273,10 @@ namespace mongo {
                     _append( result , "faults" , 6 , (int)diff( "page_faults" , ax , bx ) );
             }
 
-            _append( result , "locked %" , 8 , percent( "globalLock.totalTime" , "globalLock.lockTime" , a , b ) );
-            _append( result , "idx miss %" , 8 , percent( "indexCounters.btree.accesses" , "indexCounters.btree.misses" , a , b ) );
+            if (!isMongos) {
+                _append( result , "locked %" , 8 , percent( "globalLock.totalTime" , "globalLock.lockTime" , a , b ) );
+                _append( result , "idx miss %" , 8 , percent( "indexCounters.btree.accesses" , "indexCounters.btree.misses" , a , b ) );
+            }
 
             if ( b.getFieldDotted( "globalLock.currentQueue" ).type() == Object ) {
                 int r = b.getFieldDotted( "globalLock.currentQueue.readers" ).numberInt();
@@ -320,9 +329,7 @@ namespace mongo {
                 _append( result , "repl" , 4 , ss.str() );
 
             }
-            else if ( b["shardCursorType"].type() == Object ) {
-                // is a mongos
-                // TODO: should have a better check
+            else if ( isMongos ) {
                 _append( result , "repl" , 4 , "RTR" );
             }
 
@@ -353,12 +360,16 @@ namespace mongo {
             }
 
             if ( hasParam( "discover" ) ) {
-                _noconnection = true;
                 _many = true;
             }
         }
 
         int run() {
+            if ( !(_username.empty() || _password.empty()) && isMongos()) {
+                cout << "You cannot use mongostat on a mongos running with authentication enabled" << endl;
+                return -1;
+            }
+
             _sleep = getParam( "sleep" , _sleep );
             _all = hasParam( "all" );
             if ( _many )
@@ -592,7 +603,6 @@ namespace mongo {
 
         int runMany() {
             StateMap threads;
-
 
             {
                 string orig = getParam( "host" );

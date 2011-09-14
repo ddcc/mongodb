@@ -28,8 +28,7 @@
 
 #include "../db/commands.h"
 #include "../db/jsobj.h"
-#include "../db/dbmessage.h"
-#include "../db/query.h"
+#include "../db/db.h"
 
 #include "../client/connpool.h"
 
@@ -289,7 +288,7 @@ namespace mongo {
     ShardedConnectionInfo* ShardedConnectionInfo::get( bool create ) {
         ShardedConnectionInfo* info = _tl.get();
         if ( ! info && create ) {
-            log(1) << "entering shard mode for connection" << endl;
+            LOG(1) << "entering shard mode for connection" << endl;
             info = new ShardedConnectionInfo();
             _tl.reset( info );
         }
@@ -312,6 +311,15 @@ namespace mongo {
 
     void ShardedConnectionInfo::setVersion( const string& ns , const ConfigVersion& version ) {
         _versions[ns] = version;
+    }
+
+    void ShardedConnectionInfo::addHook() {
+        static bool done = false;
+        if (!done) {
+            LOG(1) << "adding sharding hook" << endl;
+            pool.addHook(new ShardingConnectionHook(false));
+            done = true;
+        }
     }
 
     void ShardedConnectionInfo::setID( const OID& id ) {
@@ -372,7 +380,7 @@ namespace mongo {
 
         virtual bool slaveOk() const { return true; }
 
-        bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool) {
+        bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             ShardedConnectionInfo::reset();
             return true;
         }
@@ -412,6 +420,7 @@ namespace mongo {
             }
             
             if ( locked ) {
+                ShardedConnectionInfo::addHook();
                 shardingState.enable( configdb );
                 configServer.init( configdb );
                 return true;
@@ -443,7 +452,7 @@ namespace mongo {
             return true;
         }
 
-        bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool) {
+        bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
 
             // Steps
             // 1. check basic config
@@ -476,7 +485,7 @@ namespace mongo {
             
             string ns = cmdObj["setShardVersion"].valuestrsafe();
             if ( ns.size() == 0 ) {
-                errmsg = "need to speciy namespace";
+                errmsg = "need to specify namespace";
                 return false;
             }
 
@@ -493,7 +502,7 @@ namespace mongo {
             
             if ( globalVersion > 0 && version > 0 ) {
                 // this means there is no reset going on an either side
-                // so its safe to make some assuptions
+                // so its safe to make some assumptions
 
                 if ( version == globalVersion ) {
                     // mongos and mongod agree!
@@ -507,6 +516,10 @@ namespace mongo {
             }
 
             // step 4
+            
+            // this is because of a weird segfault I saw and I can't see why this should ever be set
+            massert( 13647 , str::stream() << "context should be empty here, is: " << cc().getContext()->ns() , cc().getContext() == 0 ); 
+        
             dblock setShardVersionLock; // TODO: can we get rid of this??
             
             if ( oldVersion > 0 && globalVersion == 0 ) {
@@ -538,7 +551,7 @@ namespace mongo {
             }
 
             if ( version < oldVersion ) {
-                errmsg = "you already have a newer version of collection '" + ns + "'";
+                errmsg = "this connection already had a newer version of collection '" + ns + "'";
                 result.append( "ns" , ns );
                 result.appendTimestamp( "newVersion" , version );
                 result.appendTimestamp( "globalVersion" , globalVersion );
@@ -551,10 +564,11 @@ namespace mongo {
                     sleepmillis(2);
                     OCCASIONALLY log() << "waiting till out of critical section" << endl;
                 }
-                errmsg = "going to older version for global for collection '" + ns + "'";
+                errmsg = "shard global version for collection is higher than trying to set to '" + ns + "'";
                 result.append( "ns" , ns );
                 result.appendTimestamp( "version" , version );
                 result.appendTimestamp( "globalVersion" , globalVersion );
+                result.appendBool( "reloadConfig" , true );
                 return false;
             }
 
@@ -572,7 +586,7 @@ namespace mongo {
 
                 ShardChunkVersion currVersion = version;
                 if ( ! shardingState.trySetVersion( ns , currVersion ) ) {
-                    errmsg = str::stream() << "client version differs from config's for colleciton '" << ns << "'";
+                    errmsg = str::stream() << "client version differs from config's for collection '" << ns << "'";
                     result.append( "ns" , ns );
                     result.appendTimestamp( "version" , version );
                     result.appendTimestamp( "globalVersion" , currVersion );
@@ -599,10 +613,10 @@ namespace mongo {
 
         virtual LockType locktype() const { return NONE; }
 
-        bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool) {
+        bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             string ns = cmdObj["getShardVersion"].valuestrsafe();
             if ( ns.size() == 0 ) {
-                errmsg = "need to speciy fully namespace";
+                errmsg = "need to specify full namespace";
                 return false;
             }
 
@@ -611,6 +625,7 @@ namespace mongo {
             result.appendTimestamp( "global" , shardingState.getVersion(ns) );
 
             ShardedConnectionInfo* info = ShardedConnectionInfo::get( false );
+            result.appendBool( "inShardedMode" , info != 0 );
             if ( info )
                 result.appendTimestamp( "mine" , info->getVersion(ns) );
             else
@@ -627,7 +642,7 @@ namespace mongo {
 
         virtual LockType locktype() const { return WRITE; } // TODO: figure out how to make this not need to lock
 
-        bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool) {
+        bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             shardingState.appendInfo( result );
             return true;
         }
@@ -638,7 +653,7 @@ namespace mongo {
      * @ return true if not in sharded mode
                      or if version for this client is ok
      */
-    bool shardVersionOk( const string& ns , bool isWriteOp , string& errmsg ) {
+    bool shardVersionOk( const string& ns , string& errmsg ) {
         if ( ! shardingState.enabled() )
             return true;
 
@@ -668,7 +683,7 @@ namespace mongo {
 
         if ( version == 0 && clientVersion > 0 ) {
             stringstream ss;
-            ss << "collection was dropped or this shard no longer valied version: " << version << " clientVersion: " << clientVersion;
+            ss << "collection was dropped or this shard no longer valid version: " << version << " clientVersion: " << clientVersion;
             errmsg = ss.str();
             return false;
         }
@@ -697,4 +712,7 @@ namespace mongo {
         return false;
     }
 
+    void ShardingConnectionHook::onHandedOut( DBClientBase * conn ) {
+        // no-op for mongod
+    }
 }

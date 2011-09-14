@@ -3,6 +3,7 @@
 .sconsign.dblite
 .sconf_temp
 perf.data
+massif.out.*
 
 *~
 *.swp
@@ -77,6 +78,7 @@ mongoimport
 mongosniff
 mongobridge
 mongostat
+mongotop
 bsondump
 
 *.tgz
@@ -114,6 +116,12 @@ debian/mongodb
 
 #osx
 .DS_Store
+
+#third party
+third_party/js-1.7/jsautocfg.h
+third_party/js-1.7/jsautokw.h
+third_party/js-1.7/jskwgen
+third_party/js-1.7/jscpucfg
 
 # QtCreator
 *.config

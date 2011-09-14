@@ -28,6 +28,7 @@
 
 #include "client/dbclient.h"
 #include "db/instance.h"
+#include "db/matcher.h"
 
 using std::string;
 
@@ -82,6 +83,7 @@ namespace mongo {
         }
 
         bool isMaster();
+        bool isMongos();
 
         virtual void preSetup() {}
 
@@ -91,6 +93,8 @@ namespace mongo {
 
         virtual void printExtraHelp( ostream & out ) {}
         virtual void printExtraHelpAfter( ostream & out ) {}
+
+        virtual void printVersion(ostream &out);
 
     protected:
 

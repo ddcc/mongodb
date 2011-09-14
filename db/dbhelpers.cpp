@@ -19,12 +19,13 @@
 #include "pch.h"
 #include "db.h"
 #include "dbhelpers.h"
-#include "query.h"
 #include "json.h"
 #include "queryoptimizer.h"
 #include "btree.h"
 #include "pdfile.h"
 #include "oplog.h"
+#include "ops/update.h"
+#include "ops/delete.h"
 
 namespace mongo {
 
@@ -63,7 +64,7 @@ namespace mongo {
     public:
         FindOne( bool requireIndex ) : requireIndex_( requireIndex ) {}
         virtual void _init() {
-            if ( requireIndex_ && strcmp( qp().indexKey().firstElement().fieldName(), "$natural" ) == 0 )
+            if ( requireIndex_ && strcmp( qp().indexKey().firstElementFieldName(), "$natural" ) == 0 )
                 throw MsgAssertionException( 9011 , "Not an index cursor" );
             c_ = qp().newCursor();
             if ( !c_->ok() ) {
@@ -75,7 +76,7 @@ namespace mongo {
                 setComplete();
                 return;
             }
-            if ( matcher()->matches( c_->currKey(), c_->currLoc() ) ) {
+            if ( matcher( c_ )->matchesCurrent( c_.get() ) ) {
                 one_ = c_->current();
                 loc_ = c_->currLoc();
                 setStop();
@@ -148,7 +149,7 @@ namespace mongo {
 
         BSONObj key = i.getKeyFromQuery( query );
 
-        DiskLoc loc = i.head.btree()->findSingle( i , i.head , key );
+        DiskLoc loc = i.idxInterface().findSingle(i , i.head , key);
         if ( loc.isNull() )
             return false;
         result = loc.obj();
@@ -160,7 +161,7 @@ namespace mongo {
         uassert(13430, "no _id index", idxNo>=0);
         IndexDetails& i = d->idx( idxNo );
         BSONObj key = i.getKeyFromQuery( idquery );
-        return i.head.btree()->findSingle( i , i.head , key );
+        return i.idxInterface().findSingle(i , i.head , key);
     }
 
     bool Helpers::isEmpty(const char *ns, bool doAuth) {
@@ -178,10 +179,13 @@ namespace mongo {
         Client::Context context(ns);
 
         shared_ptr<Cursor> c = DataFileMgr::findAll(ns);
-        if ( !c->ok() )
+        if ( !c->ok() ) {
+            context.getClient()->curop()->done();
             return false;
+        }
 
         result = c->current();
+        context.getClient()->curop()->done();
         return true;
     }
 
@@ -208,12 +212,14 @@ namespace mongo {
         OpDebug debug;
         Client::Context context(ns);
         updateObjects(ns, obj, /*pattern=*/BSONObj(), /*upsert=*/true, /*multi=*/false , /*logtheop=*/true , debug );
+        context.getClient()->curop()->done();
     }
 
     void Helpers::putSingletonGod(const char *ns, BSONObj obj, bool logTheOp) {
         OpDebug debug;
         Client::Context context(ns);
         _updateObjects(/*god=*/true, ns, obj, /*pattern=*/BSONObj(), /*upsert=*/true, /*multi=*/false , logTheOp , debug );
+        context.getClient()->curop()->done();
     }
 
     BSONObj Helpers::toKeyFormat( const BSONObj& o , BSONObj& key ) {
@@ -248,11 +254,21 @@ namespace mongo {
 
         IndexDetails& i = nsd->idx( ii );
 
-        shared_ptr<Cursor> c( new BtreeCursor( nsd , ii , i , minClean , maxClean , maxInclusive, 1 ) );
+        shared_ptr<Cursor> c( BtreeCursor::make( nsd , ii , i , minClean , maxClean , maxInclusive, 1 ) );
         auto_ptr<ClientCursor> cc( new ClientCursor( QueryOption_NoCursorTimeout , c , ns ) );
         cc->setDoingDeletes( true );
 
         while ( c->ok() ) {
+
+            if ( yield && ! cc->yieldSometimes( ClientCursor::WillNeed) ) {
+                // cursor got finished by someone else, so we're done
+                cc.release(); // if the collection/db is dropped, cc may be deleted
+                break;
+            }
+
+            if ( ! c->ok() )
+                break;
+
             DiskLoc rloc = c->currLoc();
 
             if ( callback )
@@ -269,11 +285,7 @@ namespace mongo {
 
             getDur().commitIfNeeded();
 
-            if ( yield && ! cc->yield() ) {
-                // cursor got finished by someone else, so we're done
-                cc.release(); // if the collection/db is dropped, cc may be deleted
-                break;
-            }
+
         }
 
         return num;

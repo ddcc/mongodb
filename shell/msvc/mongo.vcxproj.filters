@@ -39,6 +39,9 @@
     <Filter Include="shell\generated_from_js">
       <UniqueIdentifier>{96e4c411-7ab4-4bcd-b7c6-a33059f5d492}</UniqueIdentifier>
     </Filter>
+    <Filter Include="thirdparty">
+      <UniqueIdentifier>{5eca87ab-5987-4fb0-97be-e80cc721e328}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\dbshell.cpp">
@@ -65,9 +68,6 @@
     <ClCompile Include="..\..\pch.cpp" />
     <ClCompile Include="..\..\db\json.cpp">
       <Filter>shared source files</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\util\sock.cpp">
-      <Filter>shell</Filter>
     </ClCompile>
     <ClCompile Include="..\..\util\debug_util.cpp">
       <Filter>shell</Filter>
@@ -162,9 +162,6 @@
     <ClCompile Include="..\..\util\md5main.cpp">
       <Filter>util</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\util\message.cpp">
-      <Filter>util</Filter>
-    </ClCompile>
     <ClCompile Include="..\..\util\util.cpp">
       <Filter>util</Filter>
     </ClCompile>
@@ -224,6 +221,24 @@
     </ClCompile>
     <ClCompile Include="..\..\client\dbclient_rs.cpp">
       <Filter>client</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\third_party\linenoise\linenoise.cpp">
+      <Filter>thirdparty</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\util\concurrency\spin_lock.cpp">
+      <Filter>util\concurrency</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\util\net\listen.cpp">
+      <Filter>util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\util\net\message.cpp">
+      <Filter>util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\util\net\sock.cpp">
+      <Filter>util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\util\net\message_port.cpp">
+      <Filter>util</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
