@@ -2,7 +2,7 @@ mongodb (1:2.0.0-1) unstable; urgency=low
 
   * New upstream release 2.0.0
     http://blog.mongodb.org/post/10126837729/mongodb-2-0-released
-  * necessary xulrunner is embedded (Closes: #637370, #572870, #631054)
+  * proper Spider Monkey is embedded (Closes: #637370, #572870, #631054)
 
  -- Antonin Kral <A.Kral@sh.cvut.cz>  Wed, 14 Sep 2011 17:09:16 +0200
 
