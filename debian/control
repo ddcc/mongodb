@@ -3,7 +3,7 @@ Section: database
 Priority: optional
 Maintainer: Antonin Kral <A.Kral@sh.cvut.cz>
 Uploaders: Roberto C. Sanchez <roberto@connexer.com>, Jérémy Lal <kapouer@melix.org>
-Build-Depends: debhelper (>= 7), cdbs (>= 0.4.73~), libpcre3, libpcre3-dev, scons, libv8-dev, libreadline-dev, libboost-dev, libboost-thread-dev, libboost-filesystem-dev, libboost-program-options-dev, libboost-date-time-dev, python-pymongo
+Build-Depends: debhelper (>= 7), cdbs (>= 0.4.73~), libpcre3, libpcre3-dev, scons, xulrunner-dev (>= 1.9) | xulrunner-1.9-dev | xulrunner-1.9.1-dev, libreadline-dev, libboost-dev, libboost-thread-dev, libboost-filesystem-dev, libboost-program-options-dev, libboost-date-time-dev, python-pymongo
 Standards-Version: 3.9.2
 Vcs-Git: git://github.com/bobek/mongo-debian.git
 Vcs-Browser: https://github.com/bobek/mongo-debian
@@ -26,8 +26,6 @@ Description: object/document-oriented database (metapackage)
     * Efficient storage of binary data including large
       objects (e.g. videos)
     * Auto-sharding for cloud-level scalability (Q209)
- .
- This package is build with V8 JavaScript engine.
  .
  High performance, scalability, and reasonable depth of
  functionality are the goals for the project.
@@ -52,8 +50,6 @@ Description: object/document-oriented database (server package)
       objects (e.g. videos)
     * Auto-sharding for cloud-level scalability (Q209)
  .
- This package is build with V8 JavaScript engine.
- .
  High performance, scalability, and reasonable depth of
  functionality are the goals for the project.
  .
@@ -76,8 +72,6 @@ Description: object/document-oriented database (client apps)
     * Efficient storage of binary data including large
       objects (e.g. videos)
     * Auto-sharding for cloud-level scalability (Q209)
- .
- This package is build with V8 JavaScript engine.
  .
  High performance, scalability, and reasonable depth of
  functionality are the goals for the project.
