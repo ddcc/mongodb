@@ -1,0 +1,37 @@
+From: Antonin Kral <a.kral@bobek.cz>
+Date: Thu, 15 Sep 2011 09:41:07 +0200
+Subject: use system-wide pcre
+
+---
+ SConstruct |   10 +++++++++-
+ 1 files changed, 9 insertions(+), 1 deletions(-)
+
+diff --git a/SConstruct b/SConstruct
+index 05d0dfe..ababc34 100644
+--- a/SConstruct
++++ b/SConstruct
+@@ -493,6 +493,10 @@ elif "linux2" == os.sys.platform or "linux3" == os.sys.platform:
+     linux = True
+     platform = "linux"
+ 
++    # use system-wide pcre
++    env.Append( CPPPATH=["/usr/include"] )
++    env.Append( LIBS=["pcrecpp", "pcre"] )
++
+     if os.uname()[4] == "x86_64" and not force32:
+         linux64 = True
+         nixLibPrefix = "lib"
+@@ -761,7 +765,11 @@ if not windows:
+ for x in os.listdir( "third_party" ):
+     if not x.endswith( ".py" ) or x.find( "#" ) >= 0:
+         continue
+-         
++
++    # use system-wide pcre
++    if x.find('pcre') >= 0:
++        continue
++
+     shortName = x.rpartition( "." )[0]
+     path = "third_party/%s" % x
+ 
+-- 
