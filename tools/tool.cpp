@@ -21,10 +21,11 @@
 #include <iostream>
 
 #include <boost/filesystem/operations.hpp>
-#include <pcrecpp.h>
+#include "pcrecpp.h"
 
 #include "util/file_allocator.h"
 #include "util/password.h"
+#include "util/version.h"
 
 using namespace std;
 using namespace mongo;
@@ -44,6 +45,7 @@ namespace mongo {
         _options->add_options()
         ("help","produce help message")
         ("verbose,v", "be more verbose (include multiple times for more verbosity e.g. -vvvvv)")
+        ("version", "print the program's version and exit" )
         ;
 
         if ( access & REMOTE_SERVER )
@@ -51,6 +53,9 @@ namespace mongo {
             ("host,h",po::value<string>(), "mongo host to connect to ( <set name>/s1,s2 for sets)" )
             ("port",po::value<string>(), "server port. Can also use --host hostname:port" )
             ("ipv6", "enable IPv6 support (disabled by default)")
+#ifdef MONGO_SSL
+            ("ssl", "use all for connections")
+#endif
 
             ("username,u",po::value<string>(), "username" )
             ("password,p", new PasswordValue( &_password ), "password" )
@@ -63,6 +68,7 @@ namespace mongo {
              "server - needs to lock the data directory, so cannot be "
              "used if a mongod is currently accessing the same path" )
             ("directoryperdb", "if dbpath specified, each db is in a separate directory" )
+            ("journal", "enable journaling" )
             ;
 
         if ( access & SPECIFY_DBCOL )
@@ -92,6 +98,12 @@ namespace mongo {
         printExtraHelpAfter(out);
     }
 
+    void Tool::printVersion(ostream &out) {
+        out << _name << " version " << mongo::versionString;
+        if (mongo::versionString[strlen(mongo::versionString)-1] == '-')
+            out << " (commit " << mongo::gitVersion() << ")";
+        out << endl;
+    }
     int Tool::main( int argc , char ** argv ) {
         static StaticObserver staticObserver;
 
@@ -146,6 +158,11 @@ namespace mongo {
             return 0;
         }
 
+        if ( _params.count( "version" ) ) {
+            printVersion(cout);
+            return 0;
+        }
+
         if ( _params.count( "verbose" ) ) {
             logLevel = 1;
         }
@@ -155,6 +172,13 @@ namespace mongo {
                 logLevel = s.length();
             }
         }
+
+
+#ifdef MONGO_SSL
+        if (_params.count("ssl")) {
+            mongo::cmdLine.sslOnNormalPorts = true;
+        }
+#endif
 
         preSetup();
 
@@ -195,6 +219,11 @@ namespace mongo {
                 directoryperdb = true;
             }
             assert( lastError.get( true ) );
+
+            if (_params.count("journal")){
+                cmdLine.dur = true;
+            }
+
             Client::initThread("tools");
             _conn = new DBDirectClient();
             _host = "DIRECT";
@@ -212,6 +241,8 @@ namespace mongo {
             }
 
             FileAllocator::get()->start();
+
+            dur::startup();
         }
 
         if ( _params.count( "db" ) )
@@ -239,6 +270,33 @@ namespace mongo {
             cerr << "assertion: " << e.toString() << endl;
             ret = -1;
         }
+	catch(const boost::filesystem::filesystem_error &fse) {
+	    /*
+	      https://jira.mongodb.org/browse/SERVER-2904
+
+	      Simple tools that don't access the database, such as
+	      bsondump, aren't throwing DBExceptions, but are throwing
+	      boost exceptions.
+
+	      The currently available set of error codes don't seem to match
+	      boost documentation.  boost::filesystem::not_found_error
+	      (from http://www.boost.org/doc/libs/1_31_0/libs/filesystem/doc/exception.htm)
+	      doesn't seem to exist in our headers.  Also, fse.code() isn't
+	      boost::system::errc::no_such_file_or_directory when this
+	      happens, as you would expect.  And, determined from
+	      experimentation that the command-line argument gets turned into
+	      "\\?" instead of "/?" !!!
+	     */
+#if defined(_WIN32)
+	    if (/*(fse.code() == boost::system::errc::no_such_file_or_directory) &&*/
+		(fse.path1() == "\\?"))
+		printHelp(cerr);
+	    else
+#endif // _WIN32
+		cerr << "error: " << fse.what() << endl;
+
+	    ret = -1;
+	}
 
         if ( currentClient.get() )
             currentClient->shutdown();
@@ -273,6 +331,13 @@ namespace mongo {
         }
 
         return true;
+    }
+
+    bool Tool::isMongos() {
+        // TODO: when mongos supports QueryOption_Exaust add a version check (SERVER-2628)
+        BSONObj isdbgrid;
+        conn("true").simpleCommand("admin", &isdbgrid, "isdbgrid");
+        return isdbgrid["isdbgrid"].trueValue();
     }
 
     void Tool::addFieldOptions() {
@@ -332,8 +397,15 @@ namespace mongo {
         if ( ! dbname.size() )
             dbname = _db;
 
-        if ( ! ( _username.size() || _password.size() ) )
+        if ( ! ( _username.size() || _password.size() ) ) {
+            // Make sure that we don't need authentication to connect to this db
+            // findOne throws an AssertionException if it's not authenticated.
+            if (_coll.size() > 0) {
+                // BSONTools don't have a collection
+                conn().findOne(getNS(), Query("{}"));
+            }
             return;
+        }
 
         string errmsg;
         if ( _conn->auth( dbname , _username , _password , errmsg ) )
@@ -348,7 +420,7 @@ namespace mongo {
     }
 
     BSONTool::BSONTool( const char * name, DBAccess access , bool objcheck )
-        : Tool( name , access , "" , "" ) , _objcheck( objcheck ) {
+        : Tool( name , access , "" , "" , false ) , _objcheck( objcheck ) {
 
         add_options()
         ("objcheck" , "validate object before inserting" )
@@ -400,14 +472,14 @@ namespace mongo {
         ProgressMeter m( fileLength );
 
         while ( read < fileLength ) {
-            int readlen = fread(buf, 4, 1, file);
-            int size = ((int*)buf)[0];
-            if ( size >= BUF_SIZE ) {
-                cerr << "got an object of size: " << size << "  terminating..." << endl;
-            }
-            uassert( 10264 ,  "invalid object size" , size < BUF_SIZE );
+            size_t amt = fread(buf, 1, 4, file);
+            assert( amt == 4 );
 
-            readlen = fread(buf+4, size-4, 1, file);
+            int size = ((int*)buf)[0];
+            uassert( 10264 , str::stream() << "invalid object size: " << size , size < BUF_SIZE );
+
+            amt = fread(buf+4, 1, size-4, file);
+            assert( amt == (size_t)( size - 4 ) );
 
             BSONObj o( buf );
             if ( _objcheck && ! o.valid() ) {
@@ -441,9 +513,9 @@ namespace mongo {
         fclose( file );
 
         uassert( 10265 ,  "counts don't match" , m.done() == fileLength );
-        out() << "\t "  << m.hits() << " objects found" << endl;
+        (_usesstdout ? cout : cerr ) << m.hits() << " objects found" << endl;
         if ( _matcher.get() )
-            out() << "\t "  << processed << " objects processed" << endl;
+            (_usesstdout ? cout : cerr ) << processed << " objects processed" << endl;
         return processed;
     }
 

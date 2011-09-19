@@ -1,7 +1,7 @@
 // isself.cpp
 
 #include "pch.h"
-#include "../../util/message.h"
+#include "../../util/net/listen.h"
 #include "../commands.h"
 #include "../../client/dbclient.h"
 
@@ -11,6 +11,20 @@
 # endif
 # include <sys/resource.h>
 # include <sys/stat.h>
+
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netdb.h>
+#ifdef __openbsd__
+# include <sys/uio.h>
+#endif
+
 #endif
 
 
@@ -116,7 +130,7 @@ namespace mongo {
             help << "{ _isSelf : 1 } INTERNAL ONLY";
         }
 
-        bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
+        bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
             init();
             result.append( "id" , _id );
             return true;

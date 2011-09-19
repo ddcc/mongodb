@@ -18,15 +18,14 @@
 #pragma once
 
 #include "../pch.h"
-
 #include "jsobj.h"
 #include "../util/timer.h"
+#include "../client/dbclient.h"
 
 namespace mongo {
 
     class BSONObj;
     class BSONObjBuilder;
-    class BufBuilder;
     class Client;
 
     /** mongodb "commands" (sent via db.$cmd.findOne(...))
@@ -47,7 +46,7 @@ namespace mongo {
 
            return value is true if succeeded.  if false, set errmsg text.
         */
-        virtual bool run(const string& db, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) = 0;
+        virtual bool run(const string& db, BSONObj& cmdObj, int options, string& errmsg, BSONObjBuilder& result, bool fromRepl = false ) = 0;
 
         /*
            note: logTheTop() MUST be false if READ
@@ -70,7 +69,7 @@ namespace mongo {
         */
         virtual bool localHostOnlyIfNoAuth(const BSONObj& cmdObj) { return false; }
 
-        /* Return true if slaves of a replication pair are allowed to execute the command
+        /* Return true if slaves are allowed to execute the command
            (the command directly from a client -- if fromRepl, always allowed).
         */
         virtual bool slaveOk() const = 0;
@@ -95,6 +94,11 @@ namespace mongo {
            (e.g., getnonce, authenticate) can be done by anyone even unauthorized.
         */
         virtual bool requiresAuth() { return true; }
+
+        /* Return true if a replica set secondary should go into "recovering"
+           (unreadable) state while running this command.
+         */
+        virtual bool maintenanceMode() const { return false; }
 
         /** @param webUI expose the command in the web ui as localhost:28017/<name>
             @param oldName an optional old, deprecated name for the command
@@ -122,12 +126,30 @@ namespace mongo {
         static const map<string,Command*>* commandsByBestName() { return _commandsByBestName; }
         static const map<string,Command*>* webCommands() { return _webCommands; }
         /** @return if command was found and executed */
-        static bool runAgainstRegistered(const char *ns, BSONObj& jsobj, BSONObjBuilder& anObjBuilder);
+        static bool runAgainstRegistered(const char *ns, BSONObj& jsobj, BSONObjBuilder& anObjBuilder, int queryOptions = 0);
         static LockType locktype( const string& name );
         static Command * findCommand( const string& name );
     };
 
-    bool _runCommands(const char *ns, BSONObj& jsobj, BufBuilder &b, BSONObjBuilder& anObjBuilder, bool fromRepl, int queryOptions);
+    class CmdShutdown : public Command {
+    public:
+        virtual bool requiresAuth() { return true; }
+        virtual bool adminOnly() const { return true; }
+        virtual bool localHostOnlyIfNoAuth(const BSONObj& cmdObj) { return true; }
+        virtual bool logTheOp() {
+            return false;
+        }
+        virtual bool slaveOk() const {
+            return true;
+        }
+        virtual LockType locktype() const { return NONE; }
+        virtual void help( stringstream& help ) const;
+        CmdShutdown() : Command("shutdown") {}
+        bool run(const string& dbname, BSONObj& cmdObj, int options, string& errmsg, BSONObjBuilder& result, bool fromRepl);
+    private:
+        bool shutdownHelper();
+    };
 
+    bool _runCommands(const char *ns, BSONObj& jsobj, BufBuilder &b, BSONObjBuilder& anObjBuilder, bool fromRepl, int queryOptions);
 
 } // namespace mongo

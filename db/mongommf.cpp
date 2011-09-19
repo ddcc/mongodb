@@ -53,7 +53,7 @@ namespace mongo {
                 break;
 
             size_t viewStart = (size_t) x.first;
-            size_t viewEnd = viewStart + mmf->length();
+            size_t viewEnd = (size_t) (viewStart + mmf->length());
             if( viewEnd <= chunkStart )
                 break;
 
@@ -68,7 +68,7 @@ namespace mongo {
             bool ok = VirtualProtect((void*)protectStart, protectSize, PAGE_WRITECOPY, &old);
             if( !ok ) {
                 DWORD e = GetLastError();
-                log() << "VirtualProtect failed " << chunkno << hex << protectStart << ' ' << protectSize << ' ' << errnoWithDescription(e) << endl;
+                log() << "VirtualProtect failed (mcw) " << mmf->filename() << ' ' << chunkno << hex << protectStart << ' ' << protectSize << ' ' << errnoWithDescription(e) << endl;
                 assert(false);
             }
         }
@@ -76,95 +76,16 @@ namespace mongo {
         writable.set(chunkno);
     }
 
-    __declspec(noinline) void makeChunkWritableOld(size_t chunkno) { 
-        scoped_lock lk(mapViewMutex);
-
-        if( writable.get(chunkno) )
-            return;
-
-        size_t loc = chunkno * MemoryMappedFile::ChunkSize;
-        void *Loc = (void*) loc;
-        size_t ofs;
-        MongoMMF *mmf = privateViews.find( (void *) (loc), ofs );
-        MemoryMappedFile *f = (MemoryMappedFile*) mmf;
-        assert(f);
-
-        size_t len = MemoryMappedFile::ChunkSize;
-        assert( mmf->getView() <= Loc );
-        if( ofs + len > f->length() ) {
-            // at the very end of the map
-            len = f->length() - ofs;
-        }
-        else { 
-            ;
-        }
-
-        // todo: check this goes away on remap
-        DWORD old;
-        bool ok = VirtualProtect(Loc, len, PAGE_WRITECOPY, &old);
-        if( !ok ) {
-            DWORD e = GetLastError();
-            log() << "VirtualProtect failed " << Loc << ' ' << len << ' ' << errnoWithDescription(e) << endl;
-            assert(false);
-        }
-
-        writable.set(chunkno);
-    }
-
-    // align so that there is only one map per chunksize so our bitset works right
-    void* mapaligned(HANDLE h, unsigned long long _len) {
-        void *loc = 0;
-        int n = 0;
-        while( 1 ) { 
-            n++;
-            void *m = MapViewOfFileEx(h, FILE_MAP_READ, 0, 0, 0, loc);
-            if( m == 0 ) {
-                DWORD e = GetLastError();
-                if( n == 0 ) { 
-                    // if first fails, it isn't going to work
-                    log() << "mapaligned errno: " << e << endl;
-                    break;
-                }
-                if( debug && n == 1 ) { 
-                    log() << "mapaligned info e:" << e << " at n=1" << endl;
-                }
-                if( n > 98 ) {
-                    log() << "couldn't align mapped view of file len:" << _len/1024.0/1024.0 << "MB errno:" << e << endl;
-                    break;
-                }
-                loc = (void*) (((size_t)loc)+MemoryMappedFile::ChunkSize);
-                continue;
-            }
-
-            size_t x = (size_t) m;
-            if( x % MemoryMappedFile::ChunkSize == 0 ) {
-                void *end = (void*) (x+_len);
-                DEV log() << "mapaligned " << m << '-' << end << " len:" << _len << endl;
-                return m;
-            }
-
-            UnmapViewOfFile(m);
-            x = ((x+MemoryMappedFile::ChunkSize-1) / MemoryMappedFile::ChunkSize) * MemoryMappedFile::ChunkSize;
-            loc = (void*) x;
-            if( n % 20 == 0 ) { 
-                log() << "warning mapaligned n=20" << endl;
-            }
-            if( n > 100 ) {
-                log() << "couldn't align mapped view of file len:" << _len/1024.0/1024.0 << "MB" << endl;
-                break;
-            }
-        }
-        return 0;
-    }
-
     void* MemoryMappedFile::createPrivateMap() {
         assert( maphandle );
         scoped_lock lk(mapViewMutex);
-        //void *p = mapaligned(maphandle, len);
         void *p = MapViewOfFile(maphandle, FILE_MAP_READ, 0, 0, 0);
         if ( p == 0 ) {
             DWORD e = GetLastError();
-            log() << "createPrivateMap failed " << filename() << " " << errnoWithDescription(e) << endl;
+            log() << "createPrivateMap failed " << filename() << " " << 
+                errnoWithDescription(e) << " filelen:" << len <<
+                ((sizeof(void*) == 4 ) ? " (32 bit build)" : "") <<
+                endl;
         }
         else {
             clearWritableBits(p);
@@ -180,7 +101,17 @@ namespace mongo {
         scoped_lock lk(mapViewMutex);
 
         clearWritableBits(oldPrivateAddr);
-
+#if 1
+        // https://jira.mongodb.org/browse/SERVER-2942
+        DWORD old;
+        bool ok = VirtualProtect(oldPrivateAddr, (SIZE_T) len, PAGE_READONLY, &old);
+        if( !ok ) {
+            DWORD e = GetLastError();
+            log() << "VirtualProtect failed in remapPrivateView " << filename() << hex << oldPrivateAddr << ' ' << len << ' ' << errnoWithDescription(e) << endl;
+            assert(false);
+        }
+        return oldPrivateAddr;
+#else
         if( !UnmapViewOfFile(oldPrivateAddr) ) {
             DWORD e = GetLastError();
             log() << "UnMapViewOfFile failed " << filename() << ' ' << errnoWithDescription(e) << endl;
@@ -199,6 +130,7 @@ namespace mongo {
         }
         assert(p == oldPrivateAddr);
         return p;
+#endif
     }
 #endif
 
@@ -351,7 +283,7 @@ namespace mongo {
             if( cmdLine.dur ) {
                 _view_private = createPrivateMap();
                 if( _view_private == 0 ) {
-                    massert( 13636 , "createPrivateMap failed (look in log for error)" , false );
+                    msgasserted(13636, str::stream() << "file " << filename() << " open/create failed in createPrivateMap (look in log for more information)");
                 }
                 privateViews.add(_view_private, this); // note that testIntent builds use this, even though it points to view_write then...
             }
@@ -376,14 +308,12 @@ namespace mongo {
     }
 
     /*virtual*/ void MongoMMF::close() {
-        {
-            if( cmdLine.dur && _view_write/*actually was opened*/ ) {
-                if( debug )
-                    log() << "closingFileNotication:" << filename() << endl;
-                dur::closingFileNotification();
-            }
-            privateViews.remove(_view_private);
+        if( cmdLine.dur && _view_write/*actually was opened*/ ) {
+            dur::closingFileNotification();
         }
+
+        RWLockRecursive::Exclusive lk(mmmutex);
+        privateViews.remove(_view_private);
         _view_write = _view_private = 0;
         MemoryMappedFile::close();
     }

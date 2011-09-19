@@ -16,9 +16,8 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "../pch.h"
+#include "pch.h"
 #include <boost/thread/thread.hpp>
-
 #include "dbtests.h"
 #include "../util/concurrency/spin_lock.h"
 
@@ -70,8 +69,6 @@ namespace {
     public:
         void run() {
 
-#if defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4)
-
             SpinLock spin;
             int counter = 0;
 
@@ -92,12 +89,8 @@ namespace {
             }
 
             ASSERT_EQUALS( counter, threads*incs );
-#else
-
-            // WARNING "TODO Missing spin lock in this platform."
-            ASSERT( true );
-
-
+#if defined(__linux__)
+            ASSERT( SpinLock::isfast() );
 #endif
 
         }

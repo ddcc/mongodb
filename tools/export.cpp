@@ -40,8 +40,76 @@ public:
         ("csv","export to csv instead of json")
         ("out,o", po::value<string>(), "output file; if not specified, stdout is used")
         ("jsonArray", "output to a json array rather than one object per line")
+        ("slaveOk,k", po::value<bool>()->default_value(true) , "use secondaries for export if available, default true")
         ;
         _usesstdout = false;
+    }
+
+    // Turn every double quote character into two double quote characters
+    // If hasSurroundingQuotes is true, doesn't escape the first and last
+    // characters of the string, if it's false, add a double quote character
+    // around the whole string.
+    string csvEscape(string str, bool hasSurroundingQuotes = false) {
+        size_t index = hasSurroundingQuotes ? 1 : 0;
+        while (((index = str.find('"', index)) != string::npos)
+               && (index < (hasSurroundingQuotes ? str.size() - 1 : str.size()))) {
+            str.replace(index, 1, "\"\"");
+            index += 2;
+        }
+        return hasSurroundingQuotes ? str : "\"" + str + "\"";
+    }
+
+    // Gets the string representation of a BSON object that can be correctly written to a CSV file
+    string csvString (const BSONElement& object) {
+        const char* binData; // Only used with BinData type
+
+        switch (object.type()) {
+        case MinKey:
+            return "$MinKey";
+        case MaxKey:
+            return "$MaxKey";
+        case NumberInt:
+        case NumberDouble:
+        case NumberLong:
+        case Bool:
+            return object.toString(false);
+        case String:
+        case Symbol:
+            return csvEscape(object.toString(false), true);
+        case Object:
+            return csvEscape(object.jsonString(Strict, false));
+        case Array:
+            return csvEscape(object.jsonString(Strict, false));
+        case BinData:
+            int len;
+            binData = object.binDataClean(len);
+            return toHex(binData, len);
+        case jstOID:
+            return "ObjectID(" + object.OID().toString() + ")"; // OIDs are always 24 bytes
+        case Date:
+            return timeToISOString(object.Date() / 1000);
+        case Timestamp:
+            return csvEscape(object.jsonString(Strict, false));
+        case RegEx:
+            return csvEscape("/" + string(object.regex()) + "/" + string(object.regexFlags()));
+        case Code:
+            return csvEscape(object.toString(false));
+        case CodeWScope:
+            if (string(object.codeWScopeScopeData()) == "") {
+                return csvEscape(object.toString(false));
+            } else {
+                return csvEscape(object.jsonString(Strict, false));
+            }
+        case EOO:
+        case Undefined:
+        case DBRef:
+        case jstNULL:
+            cerr << "Invalid BSON object type for CSV output: " << object.type() << endl;
+            return "";
+        }
+        // Can never get here
+        assert(false);
+        return "";
     }
 
     int run() {
@@ -110,7 +178,9 @@ public:
         if ( q.getFilter().isEmpty() && !hasParam("dbpath"))
             q.snapshot();
 
-        auto_ptr<DBClientCursor> cursor = conn().query( ns.c_str() , q , 0 , 0 , fieldsToReturn , QueryOption_SlaveOk | QueryOption_NoCursorTimeout );
+        bool slaveOk = _params["slaveOk"].as<bool>();
+
+        auto_ptr<DBClientCursor> cursor = conn().query( ns.c_str() , q , 0 , 0 , fieldsToReturn , ( slaveOk ? QueryOption_SlaveOk : 0 ) | QueryOption_NoCursorTimeout );
 
         if ( csv ) {
             for ( vector<string>::iterator i=_fields.begin(); i != _fields.end(); i++ ) {
@@ -134,7 +204,7 @@ public:
                         out << ",";
                     const BSONElement & e = obj.getFieldDotted(i->c_str());
                     if ( ! e.eoo() ) {
-                        out << e.jsonString( Strict , false );
+                        out << csvString(e);
                     }
                 }
                 out << endl;

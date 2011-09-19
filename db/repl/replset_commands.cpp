@@ -17,6 +17,7 @@
 #include "pch.h"
 #include "../cmdline.h"
 #include "../commands.h"
+#include "../repl.h"
 #include "health.h"
 #include "rs.h"
 #include "rs_config.h"
@@ -28,7 +29,7 @@ using namespace bson;
 
 namespace mongo {
 
-    void checkMembersUpForConfigChange(const ReplSetConfig& cfg, bool initial);
+    void checkMembersUpForConfigChange(const ReplSetConfig& cfg, BSONObjBuilder& result, bool initial);
 
     /* commands in other files:
          replSetHeartbeat - health.cpp
@@ -44,14 +45,18 @@ namespace mongo {
             help << "Just for regression tests.\n";
         }
         CmdReplSetTest() : ReplSetCommand("replSetTest") { }
-        virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             log() << "replSet replSetTest command received: " << cmdObj.toString() << rsLog;
+
+            if (!checkAuth(errmsg, result)) {
+                return false;
+            }
+
             if( cmdObj.hasElement("forceInitialSyncFailure") ) {
                 replSetForceInitialSyncFailure = (unsigned) cmdObj["forceInitialSyncFailure"].Number();
                 return true;
             }
 
-            // may not need this, but if removed check all tests still work:
             if( !check(errmsg, result) )
                 return false;
 
@@ -63,7 +68,10 @@ namespace mongo {
         }
     } cmdReplSetTest;
 
-    /** get rollback id */
+    /** get rollback id.  used to check if a rollback happened during some interval of time.
+        as consumed, the rollback id is not in any particular order, it simply changes on each rollback.
+        @see incRBID()
+    */
     class CmdReplSetGetRBID : public ReplSetCommand {
     public:
         /* todo: ideally this should only change on rollbacks NOT on mongod restarts also. fix... */
@@ -72,9 +80,11 @@ namespace mongo {
             help << "internal";
         }
         CmdReplSetGetRBID() : ReplSetCommand("replSetGetRBID") {
-            rbid = (int) curTimeMillis();
+            // this is ok but micros or combo with some rand() and/or 64 bits might be better --
+            // imagine a restart and a clock correction simultaneously (very unlikely but possible...)
+            rbid = (int) curTimeMillis64();
         }
-        virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             if( !check(errmsg, result) )
                 return false;
             result.append("rbid",rbid);
@@ -102,7 +112,7 @@ namespace mongo {
             help << "\nhttp://www.mongodb.org/display/DOCS/Replica+Set+Commands";
         }
         CmdReplSetGetStatus() : ReplSetCommand("replSetGetStatus", true) { }
-        virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             if ( cmdObj["forShell"].trueValue() )
                 lastError.disableForCommand();
 
@@ -122,20 +132,38 @@ namespace mongo {
             help << "\nhttp://www.mongodb.org/display/DOCS/Replica+Set+Commands";
         }
         CmdReplSetReconfig() : ReplSetCommand("replSetReconfig"), mutex("rsreconfig") { }
-        virtual bool run(const string& a, BSONObj& b, string& errmsg, BSONObjBuilder& c, bool d) {
+        virtual bool run(const string& a, BSONObj& b, int e, string& errmsg, BSONObjBuilder& c, bool d) {
             try {
                 rwlock_try_write lk(mutex);
-                return _run(a,b,errmsg,c,d);
+                return _run(a,b,e,errmsg,c,d);
             }
             catch(rwlock_try_write::exception&) { }
             errmsg = "a replSetReconfig is already in progress";
             return false;
         }
     private:
-        bool _run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            if( !check(errmsg, result) )
+        bool _run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+            if ( !checkAuth(errmsg, result) ) {
                 return false;
-            if( !theReplSet->box.getState().primary() ) {
+            }
+
+            if( cmdObj["replSetReconfig"].type() != Object ) {
+                errmsg = "no configuration specified";
+                return false;
+            }
+
+            bool force = cmdObj.hasField("force") && cmdObj["force"].trueValue();
+            if( force && !theReplSet ) {
+                replSettings.reconfig = cmdObj["replSetReconfig"].Obj().getOwned();
+                result.append("msg", "will try this config momentarily, try running rs.conf() again in a few seconds");
+                return true;
+            }
+
+            if ( !check(errmsg, result) ) {
+                return false;
+            }
+
+            if( !force && !theReplSet->box.getState().primary() ) {
                 errmsg = "replSetReconfig command must be sent to the current replica set primary.";
                 return false;
             }
@@ -152,18 +180,8 @@ namespace mongo {
                 }
             }
 
-            if( cmdObj["replSetReconfig"].type() != Object ) {
-                errmsg = "no configuration specified";
-                return false;
-            }
-
-            /** TODO
-                Support changes when a majority, but not all, members of a set are up.
-                Determine what changes should not be allowed as they would cause erroneous states.
-                What should be possible when a majority is not up?
-                */
             try {
-                ReplSetConfig newConfig(cmdObj["replSetReconfig"].Obj());
+                ReplSetConfig newConfig(cmdObj["replSetReconfig"].Obj(), force);
 
                 log() << "replSet replSetReconfig config object parses ok, " << newConfig.members.size() << " members specified" << rsLog;
 
@@ -171,12 +189,12 @@ namespace mongo {
                     return false;
                 }
 
-                checkMembersUpForConfigChange(newConfig,false);
+                checkMembersUpForConfigChange(newConfig, result, false);
 
                 log() << "replSet replSetReconfig [2]" << rsLog;
 
                 theReplSet->haveNewConfig(newConfig, true);
-                ReplSet::startupStatusMsg = "replSetReconfig'd";
+                ReplSet::startupStatusMsg.set("replSetReconfig'd");
             }
             catch( DBException& e ) {
                 log() << "replSet replSetReconfig exception: " << e.what() << rsLog;
@@ -199,7 +217,7 @@ namespace mongo {
         }
 
         CmdReplSetFreeze() : ReplSetCommand("replSetFreeze") { }
-        virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             if( !check(errmsg, result) )
                 return false;
             int secs = (int) cmdObj.firstElement().numberInt();
@@ -223,13 +241,38 @@ namespace mongo {
         }
 
         CmdReplSetStepDown() : ReplSetCommand("replSetStepDown") { }
-        virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             if( !check(errmsg, result) )
                 return false;
             if( !theReplSet->box.getState().primary() ) {
                 errmsg = "not primary so can't step down";
                 return false;
             }
+
+            bool force = cmdObj.hasField("force") && cmdObj["force"].trueValue();
+
+            // only step down if there is another node synced to within 10
+            // seconds of this node
+            if (!force) {
+                long long int lastOp = (long long int)theReplSet->lastOpTimeWritten.getSecs();
+                long long int closest = (long long int)theReplSet->lastOtherOpTime().getSecs();
+
+                long long int diff = lastOp - closest;
+                result.append("closest", closest);
+                result.append("difference", diff);
+
+                if (diff < 0) {
+                    // not our problem, but we'll wait until thing settle down
+                    errmsg = "someone is ahead of the primary?";
+                    return false;
+                }
+
+                if (diff > 10) {
+                    errmsg = "no secondaries within 10 seconds of my optime";
+                    return false;
+                }
+            }
+
             int secs = (int) cmdObj.firstElement().numberInt();
             if( secs == 0 )
                 secs = 60;
@@ -274,7 +317,7 @@ namespace mongo {
                     s << p("Not using --replSet");
                 else  {
                     s << p("Still starting up, or else set is not yet " + a("http://www.mongodb.org/display/DOCS/Replica+Set+Configuration#InitialSetup", "", "initiated")
-                           + ".<br>" + ReplSet::startupStatusMsg);
+                           + ".<br>" + ReplSet::startupStatusMsg.get());
                 }
             }
             else {
@@ -305,7 +348,7 @@ namespace mongo {
                     s << p("Not using --replSet");
                 else  {
                     s << p("Still starting up, or else set is not yet " + a("http://www.mongodb.org/display/DOCS/Replica+Set+Configuration#InitialSetup", "", "initiated")
-                           + ".<br>" + ReplSet::startupStatusMsg);
+                           + ".<br>" + ReplSet::startupStatusMsg.get());
                 }
             }
             else {

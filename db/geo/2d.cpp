@@ -26,12 +26,31 @@
 #include "../btree.h"
 #include "../curop-inl.h"
 #include "../matcher.h"
-
 #include "core.h"
+
+// Note: we use indexinterface herein to talk to the btree code. In the future it would be nice to 
+//       be able to use the V1 key class (see key.h) instead of toBson() which has some cost.
+//       toBson() is new with v1 so this could be slower than it used to be?  a quick profiling
+//       might make sense.
 
 namespace mongo {
 
+    class GeoKeyNode { 
+        GeoKeyNode();
+    public:
+        GeoKeyNode(DiskLoc r, BSONObj k) : recordLoc(r), _key(k) { }
+        const DiskLoc recordLoc;
+        const BSONObj _key;
+    };
+
+    // just use old indexes for geo for now. todo.
+//    typedef BtreeBucket<V0> GeoBtreeBucket;
+//    typedef GeoBtreeBucket::KeyNode GeoKeyNode;
+
+//#define BTREE btree<V0>
+
 #if 0
+# define GEODEBUGGING
 # define GEODEBUG(x) cout << x << endl;
 # define GEODEBUGPRINT(x) PRINT(x)
     inline void PREFIXDEBUG(GeoHash prefix, const GeoConvert* g) {
@@ -77,6 +96,8 @@ namespace mongo {
 
     class Geo2dType : public IndexType , public GeoConvert {
     public:
+        virtual ~Geo2dType() { }
+
         Geo2dType( const IndexPlugin * plugin , const IndexSpec* spec )
             : IndexType( plugin , spec ) {
 
@@ -98,32 +119,40 @@ namespace mongo {
 
             uassert( 13024 , "no geo field specified" , _geo.size() );
 
-            _bits = _configval( spec , "bits" , 26 ); // for lat/long, ~ 1ft
+            double bits =  _configval( spec , "bits" , 26 ); // for lat/long, ~ 1ft
 
-            uassert( 13028 , "can't have more than 32 bits in geo index" , _bits <= 32 );
+            uassert( 13028 , "bits in geo index must be between 1 and 32" , bits > 0 && bits <= 32 );
 
-            _max = _configval( spec , "max" , 180 );
-            _min = _configval( spec , "min" , -180 );
+            _bits = (unsigned) bits;
 
-            _scaling = (1024*1024*1024*4.0)/(_max-_min);
+            _max = _configval( spec , "max" , 180.0 );
+            _min = _configval( spec , "min" , -180.0 );
+
+            double numBuckets = (1024 * 1024 * 1024 * 4.0);
+
+            _scaling = numBuckets / ( _max - _min );
 
             _order = orderBuilder.obj();
 
             GeoHash a(0, 0, _bits);
             GeoHash b = a;
             b.move(1, 1);
-            _error = distance(a, b);
+
+            // Epsilon is 1/100th of a bucket size
+            // TODO:  Can we actually find error bounds for the sqrt function?
+            double epsilon = 0.001 / _scaling;
+            _error = distance(a, b) + epsilon;
+
+            // Error in radians
+            _errorSphere = deg2rad( _error );
         }
 
-        int _configval( const IndexSpec* spec , const string& name , int def ) {
+        double _configval( const IndexSpec* spec , const string& name , double def ) {
             BSONElement e = spec->info[name];
-            if ( e.isNumber() )
-                return e.numberInt();
+            if ( e.isNumber() ) {
+                return e.numberDouble();
+            }
             return def;
-        }
-
-        ~Geo2dType() {
-
         }
 
         virtual BSONObj fixKey( const BSONObj& in ) {
@@ -148,54 +177,132 @@ namespace mongo {
             return b.obj();
         }
 
-        virtual void getKeys( const BSONObj &obj, BSONObjSetDefaultOrder &keys ) const {
-            BSONElement geo = obj.getFieldDotted(_geo.c_str());
-            if ( geo.eoo() )
+        /** Finds the key objects to put in an index */
+        virtual void getKeys( const BSONObj& obj, BSONObjSet& keys ) const {
+            getKeys( obj, &keys, NULL );
+        }
+
+        /** Finds all locations in a geo-indexed object */
+        // TODO:  Can we just return references to the locs, if they won't change?
+        void getKeys( const BSONObj& obj, vector< BSONObj >& locs ) const {
+            getKeys( obj, NULL, &locs );
+        }
+
+        /** Finds the key objects and/or locations for a geo-indexed object */
+        void getKeys( const BSONObj &obj, BSONObjSet* keys, vector< BSONObj >* locs ) const {
+
+            BSONElementMSet bSet;
+
+            // Get all the nested location fields, but don't return individual elements from
+            // the last array, if it exists.
+            obj.getFieldsDotted(_geo.c_str(), bSet, false);
+
+            if( bSet.empty() )
                 return;
 
-            BSONObjBuilder b(64);
+            for( BSONElementMSet::iterator setI = bSet.begin(); setI != bSet.end(); ++setI ) {
 
-            if ( ! geo.isABSONObj() )
-                return;
+                BSONElement geo = *setI;
 
-            BSONObj embed = geo.embeddedObject();
-            if ( embed.isEmpty() )
-                return;
+                GEODEBUG( "Element " << geo << " found for query " << _geo.c_str() );
 
-            _hash( embed ).append( b , "" );
+                if ( geo.eoo() || ! geo.isABSONObj() )
+                    continue;
 
-            // Go through all the other index keys
-            for ( vector<string>::const_iterator i = _other.begin(); i != _other.end(); ++i ){
+                //
+                // Grammar for location lookup:
+                // locs ::= [loc,loc,...,loc]|{<k>:loc,<k>:loc}|loc
+                // loc  ::= { <k1> : #, <k2> : # }|[#, #]|{}
+                //
+                // Empty locations are ignored, preserving single-location semantics
+                //
 
-            	// Get *all* fields for the index key
-				BSONElementSet eSet;
-				obj.getFieldsDotted( *i, eSet );
+                BSONObj embed = geo.embeddedObject();
+                if ( embed.isEmpty() )
+                    continue;
+
+                // Differentiate between location arrays and locations
+                // by seeing if the first element value is a number
+                bool singleElement = embed.firstElement().isNumber();
+
+                BSONObjIterator oi(embed);
+
+                while( oi.more() ) {
+
+                    BSONObj locObj;
+
+                    if( singleElement ) locObj = embed;
+                    else {
+                        BSONElement locElement = oi.next();
+
+                        uassert( 13654, str::stream() << "location object expected, location array not in correct format",
+                                 locElement.isABSONObj() );
+
+                        locObj = locElement.embeddedObject();
+
+                        if( locObj.isEmpty() )
+                            continue;
+                    }
+
+                    BSONObjBuilder b(64);
+
+                    // Remember the actual location object if needed
+                    if( locs )
+                        locs->push_back( locObj );
+
+                    // Stop if we don't need to get anything but location objects
+                    if( ! keys ) {
+                        if( singleElement ) break;
+                        else continue;
+                    }
+
+                    _hash( locObj ).append( b , "" );
+
+                    // Go through all the other index keys
+                    for ( vector<string>::const_iterator i = _other.begin(); i != _other.end(); ++i ) {
+
+                        // Get *all* fields for the index key
+                        BSONElementSet eSet;
+                        obj.getFieldsDotted( *i, eSet );
 
 
-				if ( eSet.size() == 0 )
-					b.appendAs( _spec->missingField(), "" );
-				else if ( eSet.size() == 1 )
-					b.appendAs( *(eSet.begin()), "" );
-				else{
+                        if ( eSet.size() == 0 )
+                            b.appendAs( _spec->missingField(), "" );
+                        else if ( eSet.size() == 1 )
+                            b.appendAs( *(eSet.begin()), "" );
+                        else {
 
-					// If we have more than one key, store as an array of the objects
-					// TODO:  Store multiple keys?
+                            // If we have more than one key, store as an array of the objects
 
-					BSONArrayBuilder aBuilder;
+                            BSONArrayBuilder aBuilder;
 
-					for( BSONElementSet::iterator ei = eSet.begin(); ei != eSet.end(); ++ei ){
-						aBuilder.append( *ei );
-					}
+                            for( BSONElementSet::iterator ei = eSet.begin(); ei != eSet.end(); ++ei ) {
+                                aBuilder.append( *ei );
+                            }
 
-					BSONArray arr = aBuilder.arr();
+                            BSONArray arr = aBuilder.arr();
 
-					b.append( "", arr );
+                            b.append( "", arr );
 
-				}
+                        }
 
-			}
+                    }
 
-            keys.insert( b.obj() );
+                    keys->insert( b.obj() );
+
+                    if( singleElement ) break;
+
+                }
+            }
+
+        }
+
+        BSONObj _fromBSONHash( const BSONElement& e ) const {
+            return _unhash( _tohash( e ) );
+        }
+
+        BSONObj _fromBSONHash( const BSONObj& o ) const {
+            return _unhash( _tohash( o.firstElement() ) );
         }
 
         GeoHash _tohash( const BSONElement& e ) const {
@@ -217,6 +324,10 @@ namespace mongo {
             return hash( x.number() , y.number() );
         }
 
+        GeoHash hash( const Point& p ) const {
+            return hash( p._x, p._y );
+        }
+
         GeoHash hash( double x , double y ) const {
             return GeoHash( _convert(x), _convert(y) , _bits );
         }
@@ -231,9 +342,9 @@ namespace mongo {
         }
 
         unsigned _convert( double in ) const {
-            uassert( 13027 , "point not in range" , in <= (_max + _error) && in >= (_min - _error) );
+            uassert( 13027 , str::stream() << "point not in interval of [ " << _min << ", " << _max << " )", in < _max && in >= _min );
             in -= _min;
-            assert( in > 0 );
+            assert( in >= 0 );
             return (unsigned)(in * _scaling);
         }
 
@@ -269,6 +380,10 @@ namespace mongo {
         }
 
         double sizeEdge( const GeoHash& a ) const {
+
+            if( ! a.constrains() )
+                return _max - _min;
+
             double ax,ay,bx,by;
             GeoHash b = a;
             b.move( 1 , 1 );
@@ -297,13 +412,15 @@ namespace mongo {
                 case BSONObj::opNEAR:
                 case BSONObj::opWITHIN:
                     return OPTIMAL;
-                default:;
+                default:
+                    // We can try to match if there's no other indexing defined,
+                    // this is assumed a point
+                    return HELPFUL;
                 }
             }
             case Array:
-            	// Non-geo index data is stored in a non-standard way, cannot use for exact lookups with
-            	// additional criteria
-            	if ( query.nFields() > 1 ) return USELESS;
+                // We can try to match if there's no other indexing defined,
+                // this is assumed a point
                 return HELPFUL;
             default:
                 return USELESS;
@@ -314,12 +431,13 @@ namespace mongo {
         vector<string> _other;
 
         unsigned _bits;
-        int _max;
-        int _min;
+        double _max;
+        double _min;
         double _scaling;
 
         BSONObj _order;
         double _error;
+        double _errorSphere;
     };
 
     class Box {
@@ -341,6 +459,10 @@ namespace mongo {
 
         Box() {}
 
+        BSONArray toBSON() const {
+            return BSON_ARRAY( BSON_ARRAY( _min._x << _min._y ) << BSON_ARRAY( _max._x << _max._y ) );
+        }
+
         string toString() const {
             StringBuilder buf(64);
             buf << _min.toString() << " -->> " << _max.toString();
@@ -349,6 +471,10 @@ namespace mongo {
 
         bool between( double min , double max , double val , double fudge=0) const {
             return val + fudge >= min && val <= max + fudge;
+        }
+
+        bool onBoundary( double bound, double val, double fudge = 0 ) const {
+            return ( val >= bound - fudge && val <= bound + fudge );
         }
 
         bool mid( double amin , double amax , double bmin , double bmax , bool min , double& res ) const {
@@ -380,16 +506,41 @@ namespace mongo {
 
             Box intersection( boundMin , boundMax );
 
-            return intersection.area() / ( ( area() + other.area() ) / 2 );
+            return intersection.area() / area();
         }
 
         double area() const {
             return ( _max._x - _min._x ) * ( _max._y - _min._y );
         }
 
+        double maxDim() const {
+            return max( _max._x - _min._x, _max._y - _min._y );
+        }
+
         Point center() const {
             return Point( ( _min._x + _max._x ) / 2 ,
                           ( _min._y + _max._y ) / 2 );
+        }
+
+        void truncate( const Geo2dType* g ) {
+            if( _min._x < g->_min ) _min._x = g->_min;
+            if( _min._y < g->_min ) _min._y = g->_min;
+            if( _max._x > g->_max ) _max._x = g->_max;
+            if( _max._y > g->_max ) _max._y = g->_max;
+        }
+
+        void fudge( const Geo2dType* g ) {
+            _min._x -= g->_error;
+            _min._y -= g->_error;
+            _max._x += g->_error;
+            _max._y += g->_error;
+        }
+
+        bool onBoundary( Point p, double fudge = 0 ) {
+            return onBoundary( _min._x, p._x, fudge ) ||
+                   onBoundary( _max._x, p._x, fudge ) ||
+                   onBoundary( _min._y, p._y, fudge ) ||
+                   onBoundary( _max._y, p._y, fudge );
         }
 
         bool inside( Point p , double fudge = 0 ) {
@@ -412,6 +563,227 @@ namespace mongo {
         Point _max;
     };
 
+
+    class Polygon {
+    public:
+
+        Polygon( void ) : _centroidCalculated( false ) {}
+
+        Polygon( vector<Point> points ) : _centroidCalculated( false ),
+            _points( points ) { }
+
+        void add( Point p ) {
+            _centroidCalculated = false;
+            _points.push_back( p );
+        }
+
+        int size( void ) const {
+            return _points.size();
+        }
+
+        /**
+         * Determine if the point supplied is contained by the current polygon.
+         *
+         * The algorithm uses a ray casting method.
+         */
+        bool contains( const Point& p ) const {
+            return contains( p, 0 ) > 0;
+        }
+
+        int contains( const Point &p, double fudge ) const {
+
+            Box fudgeBox( Point( p._x - fudge, p._y - fudge ), Point( p._x + fudge, p._y + fudge ) );
+
+            int counter = 0;
+            Point p1 = _points[0];
+            for ( int i = 1; i <= size(); i++ ) {
+                Point p2 = _points[i % size()];
+
+                GEODEBUG( "Doing intersection check of " << fudgeBox.toString() << " with seg " << p1.toString() << " to " << p2.toString() );
+
+                // We need to check whether or not this segment intersects our error box
+                if( fudge > 0 &&
+                        // Points not too far below box
+                        fudgeBox._min._y <= std::max( p1._y, p2._y ) &&
+                        // Points not too far above box
+                        fudgeBox._max._y >= std::min( p1._y, p2._y ) &&
+                        // Points not too far to left of box
+                        fudgeBox._min._x <= std::max( p1._x, p2._x ) &&
+                        // Points not too far to right of box
+                        fudgeBox._max._x >= std::min( p1._x, p2._x ) ) {
+
+                    GEODEBUG( "Doing detailed check" );
+
+                    // If our box contains one or more of these points, we need to do an exact check.
+                    if( fudgeBox.inside(p1) ) {
+                        GEODEBUG( "Point 1 inside" );
+                        return 0;
+                    }
+                    if( fudgeBox.inside(p2) ) {
+                        GEODEBUG( "Point 2 inside" );
+                        return 0;
+                    }
+
+                    // Do intersection check for vertical sides
+                    if ( p1._y != p2._y ) {
+
+                        double invSlope = ( p2._x - p1._x ) / ( p2._y - p1._y );
+
+                        double xintersT = ( fudgeBox._max._y - p1._y ) * invSlope + p1._x;
+                        if( fudgeBox._min._x <= xintersT && fudgeBox._max._x >= xintersT ) {
+                            GEODEBUG( "Top intersection @ " << xintersT );
+                            return 0;
+                        }
+
+                        double xintersB = ( fudgeBox._min._y - p1._y ) * invSlope + p1._x;
+                        if( fudgeBox._min._x <= xintersB && fudgeBox._max._x >= xintersB ) {
+                            GEODEBUG( "Bottom intersection @ " << xintersB );
+                            return 0;
+                        }
+
+                    }
+
+                    // Do intersection check for horizontal sides
+                    if( p1._x != p2._x ) {
+
+                        double slope = ( p2._y - p1._y ) / ( p2._x - p1._x );
+
+                        double yintersR = ( p1._x - fudgeBox._max._x ) * slope + p1._y;
+                        if( fudgeBox._min._y <= yintersR && fudgeBox._max._y >= yintersR ) {
+                            GEODEBUG( "Right intersection @ " << yintersR );
+                            return 0;
+                        }
+
+                        double yintersL = ( p1._x - fudgeBox._min._x ) * slope + p1._y;
+                        if( fudgeBox._min._y <= yintersL && fudgeBox._max._y >= yintersL ) {
+                            GEODEBUG( "Left intersection @ " << yintersL );
+                            return 0;
+                        }
+
+                    }
+
+                }
+                else if( fudge == 0 ){
+
+                    // If this is an exact vertex, we won't intersect, so check this
+                    if( p._y == p1._y && p._x == p1._x ) return 1;
+                    else if( p._y == p2._y && p._x == p2._x ) return 1;
+
+                    // If this is a horizontal line we won't intersect, so check this
+                    if( p1._y == p2._y && p._y == p1._y ){
+                        // Check that the x-coord lies in the line
+                        if( p._x >= std::min( p1._x, p2._x ) && p._x <= std::max( p1._x, p2._x ) ) return 1;
+                    }
+
+                }
+
+                // Normal intersection test.
+                // TODO: Invert these for clearer logic?
+                if ( p._y > std::min( p1._y, p2._y ) ) {
+                    if ( p._y <= std::max( p1._y, p2._y ) ) {
+                        if ( p._x <= std::max( p1._x, p2._x ) ) {
+                            if ( p1._y != p2._y ) {
+                                double xinters = (p._y-p1._y)*(p2._x-p1._x)/(p2._y-p1._y)+p1._x;
+                                // Special case of point on vertical line
+                                if ( p1._x == p2._x && p._x == p1._x ){
+
+                                    // Need special case for the vertical edges, for example:
+                                    // 1) \e   pe/----->
+                                    // vs.
+                                    // 2) \ep---e/----->
+                                    //
+                                    // if we count exact as intersection, then 1 is in but 2 is out
+                                    // if we count exact as no-int then 1 is out but 2 is in.
+
+                                    return 1;
+                                }
+                                else if( p1._x == p2._x || p._x <= xinters ) {
+                                    counter++;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                p1 = p2;
+            }
+
+            if ( counter % 2 == 0 ) {
+                return -1;
+            }
+            else {
+                return 1;
+            }
+        }
+
+        /**
+         * Calculate the centroid, or center of mass of the polygon object.
+         */
+        Point centroid( void ) {
+
+            /* Centroid is cached, it won't change betwen points */
+            if ( _centroidCalculated ) {
+                return _centroid;
+            }
+
+            Point cent;
+            double signedArea = 0.0;
+            double area = 0.0;  // Partial signed area
+
+            /// For all vertices except last
+            int i = 0;
+            for ( i = 0; i < size() - 1; ++i ) {
+                area = _points[i]._x * _points[i+1]._y - _points[i+1]._x * _points[i]._y ;
+                signedArea += area;
+                cent._x += ( _points[i]._x + _points[i+1]._x ) * area;
+                cent._y += ( _points[i]._y + _points[i+1]._y ) * area;
+            }
+
+            // Do last vertex
+            area = _points[i]._x * _points[0]._y - _points[0]._x * _points[i]._y;
+            cent._x += ( _points[i]._x + _points[0]._x ) * area;
+            cent._y += ( _points[i]._y + _points[0]._y ) * area;
+            signedArea += area;
+            signedArea *= 0.5;
+            cent._x /= ( 6 * signedArea );
+            cent._y /= ( 6 * signedArea );
+
+            _centroidCalculated = true;
+            _centroid = cent;
+
+            return cent;
+        }
+
+        Box bounds( void ) {
+
+            // TODO: Cache this
+
+            _bounds._max = _points[0];
+            _bounds._min = _points[0];
+
+            for ( int i = 1; i < size(); i++ ) {
+
+                _bounds._max._x = max( _bounds._max._x, _points[i]._x );
+                _bounds._max._y = max( _bounds._max._y, _points[i]._y );
+                _bounds._min._x = min( _bounds._min._x, _points[i]._x );
+                _bounds._min._y = min( _bounds._min._y, _points[i]._y );
+
+            }
+
+            return _bounds;
+
+        }
+
+    private:
+
+        bool _centroidCalculated;
+        Point _centroid;
+
+        Box _bounds;
+
+        vector<Point> _points;
+    };
+
     class Geo2dPlugin : public IndexPlugin {
     public:
         Geo2dPlugin() : IndexPlugin( GEO2DNAME ) {
@@ -421,6 +793,1940 @@ namespace mongo {
             return new Geo2dType( this , spec );
         }
     } geo2dplugin;
+
+    void __forceLinkGeoPlugin() {
+        geo2dplugin.getName();
+    }
+    
+
+
+    class GeoHopper;
+
+    class GeoPoint {
+    public:
+
+        GeoPoint() : _distance( -1 ), _exact( false )
+        {}
+
+        //// Distance not used ////
+
+        GeoPoint( const GeoKeyNode& node )
+            : _key( node._key ) , _loc( node.recordLoc ) , _o( node.recordLoc.obj() ), _distance( -1 ) , _exact( false ) {
+        }
+
+        //// Immediate initialization of distance ////
+
+        GeoPoint( const GeoKeyNode& node, double distance, bool exact )
+            : _key( node._key ) , _loc( node.recordLoc ) , _o( node.recordLoc.obj() ), _distance( distance ), _exact( exact ) {
+        }
+
+        GeoPoint( const GeoPoint& pt, double distance, bool exact )
+            : _key( pt.key() ) , _loc( pt.loc() ) , _o( pt.obj() ), _distance( distance ), _exact( exact ) {
+        }
+
+        bool operator<( const GeoPoint& other ) const {
+            if( _distance != other._distance ) return _distance < other._distance;
+            if( _exact != other._exact ) return _exact < other._exact;
+            return _loc < other._loc;
+        }
+
+        double distance() const {
+            return _distance;
+        }
+
+        bool isExact() const {
+            return _exact;
+        }
+
+        BSONObj key() const {
+            return _key;
+        }
+
+        DiskLoc loc() const {
+            return _loc;
+        }
+
+        BSONObj obj() const {
+            return _o;
+        }
+
+        BSONObj pt() const {
+            return _pt;
+        }
+
+        bool isEmpty() {
+            return _o.isEmpty();
+        }
+
+        string toString() const {
+            return str::stream() << "Point from " << _o << " dist : " << _distance << ( _exact ? " (ex)" : " (app)" );
+        }
+
+        BSONObj _key;
+        DiskLoc _loc;
+        BSONObj _o;
+        BSONObj _pt;
+
+        double _distance;
+        bool _exact;
+    };
+
+    // GeoBrowse subclasses this
+    class GeoAccumulator {
+    public:
+        GeoAccumulator( const Geo2dType * g , const BSONObj& filter, bool uniqueDocs, bool needDistance )
+            : _g(g) ,
+              _keysChecked(0) ,
+              _lookedAt(0) ,
+              _matchesPerfd(0) ,
+              _objectsLoaded(0) ,
+              _pointsLoaded(0) ,
+              _found(0) ,
+              _uniqueDocs( uniqueDocs ) ,
+              _needDistance( needDistance )
+        {
+            if ( ! filter.isEmpty() ) {
+                _matcher.reset( new CoveredIndexMatcher( filter , g->keyPattern() ) );
+                GEODEBUG( "Matcher is now " << _matcher->docMatcher().toString() );
+            }
+        }
+
+        virtual ~GeoAccumulator() { }
+
+        /** Check if we've already looked at a key.  ALSO marks as seen, anticipating a follow-up call 
+            to add().  This is broken out to avoid some work extracting the key bson if it's an
+            already seen point.
+        */
+    private:
+        set< pair<DiskLoc,int> > _seen;
+    public:
+        bool seen(DiskLoc bucket, int pos) {
+
+            _keysChecked++;
+
+            pair< set<pair<DiskLoc,int> >::iterator, bool > seenBefore = _seen.insert( make_pair(bucket,pos) );
+            if ( ! seenBefore.second ) {
+                GEODEBUG( "\t\t\t\t already seen : " << bucket.toString() << ' ' << pos ); // node.key.toString() << " @ " << Point( _g, GeoHash( node.key.firstElement() ) ).toString() << " with " << node.recordLoc.obj()["_id"] );
+                return true;
+            }
+            return false;
+        }
+
+        enum KeyResult { BAD, BORDER, GOOD };
+
+        virtual void add( const GeoKeyNode& node ) {
+
+            GEODEBUG( "\t\t\t\t checking key " << node._key.toString() )
+
+            _lookedAt++;
+
+            ////
+            // Approximate distance check using key data
+            ////
+            double keyD = 0;
+            Point keyP( _g, GeoHash( node._key.firstElement(), _g->_bits ) );
+            KeyResult keyOk = approxKeyCheck( keyP, keyD );
+            if ( keyOk == BAD ) {
+                GEODEBUG( "\t\t\t\t bad distance : " << node.recordLoc.obj()  << "\t" << keyD );
+                return;
+            }
+            GEODEBUG( "\t\t\t\t good distance : " << node.recordLoc.obj()  << "\t" << keyD );
+
+            ////
+            // Check for match using other key (and potentially doc) criteria
+            ////
+            // Remember match results for each object
+            map<DiskLoc, bool>::iterator match = _matched.find( node.recordLoc );
+            bool newDoc = match == _matched.end();
+            if( newDoc ) {
+
+                GEODEBUG( "\t\t\t\t matching new doc with " << (_matcher ? _matcher->docMatcher().toString() : "(empty)" ) );
+
+                // matcher
+                MatchDetails details;
+                if ( _matcher.get() ) {
+                    bool good = _matcher->matchesWithSingleKeyIndex( node._key , node.recordLoc , &details );
+
+                    _matchesPerfd++;
+
+                    if ( details._loadedObject )
+                        _objectsLoaded++;
+
+                    if ( ! good ) {
+                        GEODEBUG( "\t\t\t\t didn't match : " << node.recordLoc.obj()["_id"] );
+                        _matched[ node.recordLoc ] = false;
+                        return;
+                    }
+                }
+
+                _matched[ node.recordLoc ] = true;
+
+                if ( ! details._loadedObject ) // don't double count
+                    _objectsLoaded++;
+
+            }
+            else if( !((*match).second) ) {
+                GEODEBUG( "\t\t\t\t previously didn't match : " << node.recordLoc.obj()["_id"] );
+                return;
+            }
+
+            ////
+            // Exact check with particular data fields
+            ////
+            // Can add multiple points
+            int diff = addSpecific( node , keyP, keyOk == BORDER, keyD, newDoc );
+            if( diff > 0 ) _found += diff;
+            else _found -= -diff;
+
+        }
+
+        virtual void getPointsFor( const BSONObj& key, const BSONObj& obj, vector< BSONObj >& locsForNode, bool allPoints = false ){
+
+            // Find all the location objects from the keys
+            vector< BSONObj > locs;
+            _g->getKeys( obj, allPoints ? locsForNode : locs );
+            _pointsLoaded++;
+
+            if( allPoints ) return;
+            if( locs.size() == 1 ){
+                locsForNode.push_back( locs[0] );
+                return;
+            }
+
+            // Find the particular location we want
+            GeoHash keyHash( key.firstElement(), _g->_bits );
+
+            // log() << "Hash: " << node.key << " and " << keyHash.getHash() << " unique " << _uniqueDocs << endl;
+            for( vector< BSONObj >::iterator i = locs.begin(); i != locs.end(); ++i ) {
+
+                // Ignore all locations not hashed to the key's hash, since we may see
+                // those later
+                if( _g->_hash( *i ) != keyHash ) continue;
+
+                locsForNode.push_back( *i );
+
+            }
+
+        }
+
+        virtual int addSpecific( const GeoKeyNode& node, const Point& p , bool inBounds, double d, bool newDoc ) = 0;
+        virtual KeyResult approxKeyCheck( const Point& p , double& keyD ) = 0;
+        virtual bool exactDocCheck( const Point& p , double& d ) = 0;
+        virtual bool expensiveExactCheck(){ return false; }
+
+
+        long long found() const {
+            return _found;
+        }
+
+        const Geo2dType * _g;
+        map<DiskLoc, bool> _matched;
+        shared_ptr<CoveredIndexMatcher> _matcher;
+
+        long long _keysChecked;
+        long long _lookedAt;
+        long long _matchesPerfd;
+        long long _objectsLoaded;
+        long long _pointsLoaded;
+        long long _found;
+
+        bool _uniqueDocs;
+        bool _needDistance;
+
+    };
+
+    struct BtreeLocation {
+        BtreeLocation() : ii(0) { }
+        IndexInterface *ii;
+        int pos;
+        bool found;
+        DiskLoc bucket;
+
+        BSONObj key() {
+            if ( bucket.isNull() )
+                return BSONObj();
+            return ii->keyAt(bucket, pos);
+            //return bucket.btree<V>()->keyNode( pos ).key.toBson();
+        }
+
+        bool hasPrefix( const GeoHash& hash ) {
+            BSONObj k = key();
+            BSONElement e = k.firstElement();
+            if ( e.eoo() )
+                return false;
+            return GeoHash( e ).hasPrefix( hash );
+        }
+
+        bool advance( int direction , int& totalFound , GeoAccumulator* all ) {
+
+            if ( bucket.isNull() )
+                return false;
+            bucket = ii->advance( bucket , pos , direction , "btreelocation" );
+
+            if ( all )
+                return checkCur( totalFound , all );
+
+            return ! bucket.isNull();
+        }
+
+        bool checkCur( int& totalFound , GeoAccumulator* all ) {
+            if ( bucket.isNull() )
+                return false;
+
+            if ( ii->isUsed(bucket, pos) ) {
+                totalFound++;
+                if( !all->seen(bucket, pos) ) { 
+                    BSONObj o;
+                    DiskLoc recLoc;
+                    ii->keyAt(bucket, pos, o, recLoc);
+                    GeoKeyNode n(recLoc, o);
+                    all->add(n);
+                }
+            }
+            else {
+                GEODEBUG( "\t\t\t\t not used: " << key() );
+            }
+
+            return true;
+        }
+
+        string toString() {
+            stringstream ss;
+            ss << "bucket: " << bucket.toString() << " pos: " << pos << " found: " << found;
+            return ss.str();
+        }
+
+        // Returns the min and max keys which bound a particular location.
+        // The only time these may be equal is when we actually equal the location
+        // itself, otherwise our expanding algorithm will fail.
+        static bool initial( const IndexDetails& id , const Geo2dType * spec ,
+                             BtreeLocation& min , BtreeLocation&  max ,
+                             GeoHash start ,
+                             int & found , GeoAccumulator * hopper ) {
+
+            Ordering ordering = Ordering::make(spec->_order);
+
+            IndexInterface *ii = &id.idxInterface();
+            min.ii = ii;
+            max.ii = ii;
+
+            min.bucket = ii->locate( id , id.head , start.wrap() ,
+                                     ordering , min.pos , min.found , minDiskLoc, -1 );
+
+            if (hopper) min.checkCur( found , hopper );
+
+            // TODO: Might be able to avoid doing a full lookup in some cases here,
+            // but would add complexity and we're hitting pretty much the exact same data.
+            // Cannot set this = min in general, however.
+            max.bucket = ii->locate( id , id.head , start.wrap() ,
+                                     ordering , max.pos , max.found , minDiskLoc, 1 );
+
+            if (hopper) max.checkCur( found , hopper );
+
+            return ! min.bucket.isNull() || ! max.bucket.isNull();
+        }
+    };
+
+
+    class GeoCursorBase : public Cursor {
+    public:
+
+        static const shared_ptr< CoveredIndexMatcher > emptyMatcher;
+
+        GeoCursorBase( const Geo2dType * spec )
+            : _spec( spec ), _id( _spec->getDetails() ) {
+
+        }
+
+        virtual DiskLoc refLoc() { return DiskLoc(); }
+
+        virtual BSONObj indexKeyPattern() {
+            return _spec->keyPattern();
+        }
+
+        virtual void noteLocation() {
+            // no-op since these are meant to be safe
+        }
+
+        /* called before query getmore block is iterated */
+        virtual void checkLocation() {
+            // no-op since these are meant to be safe
+        }
+
+        virtual bool supportGetMore() { return false; }
+        virtual bool supportYields() { return false; }
+
+        virtual bool getsetdup(DiskLoc loc) { return false; }
+        virtual bool modifiedKeys() const { return true; }
+        virtual bool isMultiKey() const { return false; }
+
+
+
+        const Geo2dType * _spec;
+        const IndexDetails * _id;
+    };
+
+    const shared_ptr< CoveredIndexMatcher > GeoCursorBase::emptyMatcher( new CoveredIndexMatcher( BSONObj(), BSONObj(), false ) );
+
+    // TODO: Pull out the cursor bit from the browse, have GeoBrowse as field of cursor to clean up
+    // this hierarchy a bit.  Also probably useful to look at whether GeoAccumulator can be a member instead
+    // of a superclass.
+    class GeoBrowse : public GeoCursorBase , public GeoAccumulator {
+    public:
+
+        // The max points which should be added to an expanding box
+        static const int maxPointsHeuristic = 300;
+
+        // Expand states
+        enum State {
+            START ,
+            DOING_EXPAND ,
+            DONE_NEIGHBOR ,
+            DONE
+        } _state;
+
+        GeoBrowse( const Geo2dType * g , string type , BSONObj filter = BSONObj(), bool uniqueDocs = true, bool needDistance = false )
+            : GeoCursorBase( g ), GeoAccumulator( g , filter, uniqueDocs, needDistance ) ,
+              _type( type ) , _filter( filter ) , _firstCall(true), _nscanned(), _centerPrefix(0, 0, 0) {
+
+            // Set up the initial expand state
+            _state = START;
+            _neighbor = -1;
+            _foundInExp = 0;
+
+        }
+
+        virtual string toString() {
+            return (string)"GeoBrowse-" + _type;
+        }
+
+        virtual bool ok() {
+            bool first = _firstCall;
+            if ( _firstCall ) {
+                fillStack( maxPointsHeuristic );
+                _firstCall = false;
+            }
+            if ( ! _cur.isEmpty() || _stack.size() ) {
+                if ( first ) {
+                    ++_nscanned;
+                }
+                return true;
+            }
+
+            while ( moreToDo() ) {
+                fillStack( maxPointsHeuristic );
+                if ( ! _cur.isEmpty() ) {
+                    if ( first ) {
+                        ++_nscanned;
+                    }
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        virtual bool advance() {
+            _cur._o = BSONObj();
+
+            if ( _stack.size() ) {
+                _cur = _stack.front();
+                _stack.pop_front();
+                ++_nscanned;
+                return true;
+            }
+
+            if ( ! moreToDo() )
+                return false;
+
+            while ( _cur.isEmpty() && moreToDo() )
+                fillStack( maxPointsHeuristic );
+            return ! _cur.isEmpty() && ++_nscanned;
+        }
+
+        virtual Record* _current() { assert(ok()); return _cur._loc.rec(); }
+        virtual BSONObj current() { assert(ok()); return _cur._o; }
+        virtual DiskLoc currLoc() { assert(ok()); return _cur._loc; }
+        virtual BSONObj currKey() const { return _cur._key; }
+
+        virtual CoveredIndexMatcher* matcher() const {
+            if( _matcher.get() ) return _matcher.get();
+            else return GeoCursorBase::emptyMatcher.get();
+        }
+
+        virtual shared_ptr< CoveredIndexMatcher > matcherPtr() const {
+            if( _matcher.get() ) return _matcher;
+            else return GeoCursorBase::emptyMatcher;
+        }
+
+        // Are we finished getting points?
+        virtual bool moreToDo() {
+            return _state != DONE;
+        }
+
+        virtual bool supportGetMore() { return true; }
+
+        // Fills the stack, but only checks a maximum number of maxToCheck points at a time.
+        // Further calls to this function will continue the expand/check neighbors algorithm.
+        virtual void fillStack( int maxToCheck, int maxToAdd = -1, bool onlyExpand = false ) {
+
+#ifdef GEODEBUGGING
+            log() << "Filling stack with maximum of " << maxToCheck << ", state : " << (int) _state << endl;
+#endif
+
+            if( maxToAdd < 0 ) maxToAdd = maxToCheck;
+            int maxFound = _foundInExp + maxToCheck;
+            assert( maxToCheck > 0 );
+            assert( maxFound > 0 );
+            assert( _found <= 0x7fffffff ); // conversion to int
+            int maxAdded = static_cast<int>(_found) + maxToAdd;
+            assert( maxAdded >= 0 ); // overflow check
+
+            bool isNeighbor = _centerPrefix.constrains();
+
+            // Starting a box expansion
+            if ( _state == START ) {
+
+                // Get the very first hash point, if required
+                if( ! isNeighbor )
+                    _prefix = expandStartHash();
+
+                GEODEBUG( "initializing btree" );
+
+#ifdef GEODEBUGGING
+                log() << "Initializing from b-tree with hash of " << _prefix << " @ " << Box( _g, _prefix ) << endl;
+#endif
+
+                if ( ! BtreeLocation::initial( *_id , _spec , _min , _max , _prefix , _foundInExp , this ) )
+                    _state = isNeighbor ? DONE_NEIGHBOR : DONE;
+                else {
+                    _state = DOING_EXPAND;
+                    _lastPrefix.reset();
+                }
+
+                GEODEBUG( (_state == DONE_NEIGHBOR || _state == DONE ? "not initialized" : "initializedFig") );
+
+            }
+
+            // Doing the actual box expansion
+            if ( _state == DOING_EXPAND ) {
+
+                while ( true ) {
+
+                    GEODEBUG( "box prefix [" << _prefix << "]" );
+#ifdef GEODEBUGGING
+                    if( _prefix.constrains() ) {
+                        log() << "current expand box : " << Box( _g, _prefix ).toString() << endl;
+                    }
+                    else {
+                        log() << "max expand box." << endl;
+                    }
+#endif
+
+                    GEODEBUG( "expanding box points... ");
+
+                    // Record the prefix we're actively exploring...
+                    _expPrefix.reset( new GeoHash( _prefix ) );
+
+                    // Find points inside this prefix
+                    while ( _min.hasPrefix( _prefix ) && _min.advance( -1 , _foundInExp , this ) && _foundInExp < maxFound && _found < maxAdded );
+                    while ( _max.hasPrefix( _prefix ) && _max.advance( 1 , _foundInExp , this ) && _foundInExp < maxFound && _found < maxAdded );
+
+#ifdef GEODEBUGGING
+
+                    log() << "finished expand, checked : " << ( maxToCheck - ( maxFound - _foundInExp ) )
+                          << " found : " << ( maxToAdd - ( maxAdded - _found ) )
+                          << " max : " << maxToCheck << " / " << maxToAdd << endl;
+
+#endif
+
+                    GEODEBUG( "finished expand, found : " << ( maxToAdd - ( maxAdded - _found ) ) );
+                    if( _foundInExp >= maxFound || _found >= maxAdded ) return;
+
+                    // We've searched this prefix fully, remember
+                    _lastPrefix.reset( new GeoHash( _prefix ));
+
+                    // If we've searched the entire space, we're finished.
+                    if ( ! _prefix.constrains() ) {
+                        GEODEBUG( "box exhausted" );
+                        _state = DONE;
+                        notePrefix();
+                        return;
+                    }
+
+                    // If we won't fit in the box, and we're not doing a sub-scan, increase the size
+                    if ( ! fitsInBox( _g->sizeEdge( _prefix ) ) && _fringe.size() <= 1 ) {
+
+                        // If we're still not expanded bigger than the box size, expand again
+                        // TODO: Is there an advantage to scanning prior to expanding?
+                        _prefix = _prefix.up();
+                        continue;
+
+                    }
+
+                    // We're done and our size is large enough
+                    _state = DONE_NEIGHBOR;
+
+                    // Go to the next sub-box, if applicable
+                    if( _fringe.size() > 0 ) _fringe.pop_back();
+                    // Go to the next neighbor if this was the last sub-search
+                    if( _fringe.size() == 0 ) _neighbor++;
+
+                    break;
+
+                }
+
+                notePrefix();
+            }
+
+            // If we doeighbors
+            if( onlyExpand ) return;
+
+            // If we're done expanding the current box...
+            if( _state == DONE_NEIGHBOR ) {
+
+                // Iterate to the next neighbor
+                // Loop is useful for cases where we want to skip over boxes entirely,
+                // otherwise recursion increments the neighbors.
+                for ( ; _neighbor < 9; _neighbor++ ) {
+
+                    // If we have no fringe for the neighbor, make sure we have the default fringe
+                    if( _fringe.size() == 0 ) _fringe.push_back( "" );
+
+                    if( ! isNeighbor ) {
+                        _centerPrefix = _prefix;
+                        _centerBox = Box( _g, _centerPrefix );
+                        isNeighbor = true;
+                    }
+
+                    int i = (_neighbor / 3) - 1;
+                    int j = (_neighbor % 3) - 1;
+
+                    if ( ( i == 0 && j == 0 ) ||
+                            ( i < 0 && _centerBox._min._x <= _g->_min ) ||
+                            ( j < 0 && _centerBox._min._y <= _g->_min ) ||
+                            ( i > 0 && _centerBox._max._x >= _g->_max ) ||
+                            ( j > 0 && _centerBox._max._y >= _g->_max ) ) {
+                        continue; // main box or wrapped edge
+                        // TODO:  We may want to enable wrapping in future, probably best as layer on top of
+                        // this search.
+                    }
+
+                    // Make sure we've got a reasonable center
+                    assert( _centerPrefix.constrains() );
+
+                    GeoHash _neighborPrefix = _centerPrefix;
+                    _neighborPrefix.move( i, j );
+
+                    GEODEBUG( "moving to " << i << " , " << j << " fringe : " << _fringe.size() );
+                    PREFIXDEBUG( _centerPrefix, _g );
+                    PREFIXDEBUG( _neighborPrefix , _g );
+                    while( _fringe.size() > 0 ) {
+
+                        _prefix = _neighborPrefix + _fringe.back();
+                        Box cur( _g , _prefix );
+
+                        PREFIXDEBUG( _prefix, _g );
+
+                        double intAmt = intersectsBox( cur );
+
+                        // No intersection
+                        if( intAmt <= 0 ) {
+                            GEODEBUG( "skipping box" << cur.toString() );
+                            _fringe.pop_back();
+                            continue;
+                        }
+                        // Large intersection, refine search
+                        else if( intAmt > 0.5 && _prefix.canRefine() && _fringe.back().size() < 4 /* two bits */ ) {
+
+                            GEODEBUG( "Adding to fringe: " << _fringe.back() << " curr prefix : " << _prefix << " bits : " << _prefix.getBits() );
+
+                            // log() << "Diving to level : " << ( _fringe.back().size() / 2 + 1 ) << endl;
+
+                            string lastSuffix = _fringe.back();
+                            _fringe.pop_back();
+                            _fringe.push_back( lastSuffix + "00" );
+                            _fringe.push_back( lastSuffix + "01" );
+                            _fringe.push_back( lastSuffix + "11" );
+                            _fringe.push_back( lastSuffix + "10" );
+
+                            continue;
+                        }
+
+                        // Restart our search from a diff box.
+                        _state = START;
+
+                        assert( ! onlyExpand );
+
+                        assert( _found <= 0x7fffffff );
+                        fillStack( maxFound - _foundInExp, maxAdded - static_cast<int>(_found) );
+
+                        // When we return from the recursive fillStack call, we'll either have checked enough points or
+                        // be entirely done.  Max recurse depth is < 8 * 16.
+
+                        // If we're maxed out on points, return
+                        if( _foundInExp >= maxFound || _found >= maxAdded ) {
+                            // Make sure we'll come back to add more points
+                            assert( _state == DOING_EXPAND );
+                            return;
+                        }
+
+                        // Otherwise we must be finished to return
+                        assert( _state == DONE );
+                        return;
+
+                    }
+
+                }
+
+                // Finished with neighbors
+                _state = DONE;
+            }
+
+        }
+
+        // The initial geo hash box for our first expansion
+        virtual GeoHash expandStartHash() = 0;
+
+        // Whether the current box width is big enough for our search area
+        virtual bool fitsInBox( double width ) = 0;
+
+        // The amount the current box overlaps our search area
+        virtual double intersectsBox( Box& cur ) = 0;
+
+        virtual int addSpecific( const GeoKeyNode& node , const Point& keyP , bool onBounds , double keyD , bool newDoc ) {
+
+            int found = 0;
+
+            // We need to handle every possible point in this method, even those not in the key value, to
+            // avoid us tracking which hashes we've already seen.
+            if( ! newDoc ){
+                // log() << "Already handled doc!" << endl;
+                return 0;
+            }
+
+            if( _uniqueDocs && ! onBounds ) {
+                // log() << "Added ind to " << _type << endl;
+                _stack.push_front( GeoPoint( node ) );
+                found++;
+            }
+            else {
+                // We now handle every possible point in the document, even those not in the key value,
+                // since we're iterating through them anyway - prevents us from having to save the hashes
+                // we've seen per-doc
+
+                // If we're filtering by hash, get the original
+                bool expensiveExact = expensiveExactCheck();
+
+                vector< BSONObj > locs;
+                getPointsFor( node._key, node.recordLoc.obj(), locs, true );
+                for( vector< BSONObj >::iterator i = locs.begin(); i != locs.end(); ++i ){
+
+                    double d = -1;
+                    Point p( *i );
+
+                    // We can avoid exact document checks by redoing approx checks,
+                    // if the exact checks are more expensive.
+                    bool needExact = true;
+                    if( expensiveExact ){
+                        assert( false );
+                        KeyResult result = approxKeyCheck( p, d );
+                        if( result == BAD ) continue;
+                        else if( result == GOOD ) needExact = false;
+                    }
+
+                    if( ! needExact || exactDocCheck( p, d ) ){
+                        // log() << "Added mult to " << _type << endl;
+                        _stack.push_front( GeoPoint( node ) );
+                        found++;
+                        // If returning unique, just exit after first point is added
+                        if( _uniqueDocs ) break;
+                    }
+                }
+            }
+
+            if ( _cur.isEmpty() && _stack.size() > 0 ){
+                _cur = _stack.front();
+                _stack.pop_front();
+            }
+
+            return found;
+        }
+
+        virtual long long nscanned() {
+            if ( _firstCall ) {
+                ok();
+            }
+            return _nscanned;
+        }
+
+        virtual void explainDetails( BSONObjBuilder& b ){
+            b << "keysChecked" << _keysChecked;
+            b << "lookedAt" << _lookedAt;
+            b << "matchesPerfd" << _matchesPerfd;
+            b << "objectsLoaded" << _objectsLoaded;
+            b << "pointsLoaded" << _pointsLoaded;
+        }
+
+        virtual BSONObj prettyIndexBounds() const {
+
+            vector<GeoHash>::const_iterator i = _expPrefixes.end();
+            if( _expPrefixes.size() > 0 && *(--i) != *( _expPrefix.get() ) )
+                _expPrefixes.push_back( *( _expPrefix.get() ) );
+
+            BSONObjBuilder bob;
+            BSONArrayBuilder bab;
+            for( i = _expPrefixes.begin(); i != _expPrefixes.end(); ++i ){
+                bab << Box( _g, *i ).toBSON();
+            }
+            bob << _g->_geo << bab.arr();
+
+            return bob.obj();
+
+        }
+
+        void notePrefix() {
+            _expPrefixes.push_back( _prefix );
+        }
+
+        string _type;
+        BSONObj _filter;
+        list<GeoPoint> _stack;
+
+        GeoPoint _cur;
+        bool _firstCall;
+
+        long long _nscanned;
+
+        // The current box we're expanding (-1 is first/center box)
+        int _neighbor;
+
+        // The points we've found so far
+        // TODO:  Long long?
+        int _foundInExp;
+
+        // The current hash prefix we're expanding and the center-box hash prefix
+        GeoHash _prefix;
+        shared_ptr<GeoHash> _lastPrefix;
+        GeoHash _centerPrefix;
+        list<string> _fringe;
+        int recurseDepth;
+        Box _centerBox;
+
+        // Start and end of our search range in the current box
+        BtreeLocation _min;
+        BtreeLocation _max;
+
+        shared_ptr<GeoHash> _expPrefix;
+        mutable vector<GeoHash> _expPrefixes;
+
+    };
+
+
+    class GeoHopper : public GeoBrowse {
+    public:
+        typedef multiset<GeoPoint> Holder;
+
+        GeoHopper( const Geo2dType * g , unsigned max , const Point& n , const BSONObj& filter = BSONObj() , double maxDistance = numeric_limits<double>::max() , GeoDistType type=GEO_PLAIN, bool uniqueDocs = false, bool needDistance = true )
+            : GeoBrowse( g, "search", filter, uniqueDocs, needDistance ), _max( max ) , _near( n ), _maxDistance( maxDistance ), _type( type ), _distError( type == GEO_PLAIN ? g->_error : g->_errorSphere ), _farthest(0)
+        {}
+
+        virtual KeyResult approxKeyCheck( const Point& p, double& d ) {
+
+            // Always check approximate distance, since it lets us avoid doing
+            // checks of the rest of the object if it succeeds
+
+            switch (_type) {
+            case GEO_PLAIN:
+                d = _near.distance( p );
+                break;
+            case GEO_SPHERE:
+                checkEarthBounds( p );
+                d = spheredist_deg( _near, p );
+                break;
+            default: assert( false );
+            }
+            assert( d >= 0 );
+
+            GEODEBUG( "\t\t\t\t\t\t\t checkDistance " << _near.toString()
+                      << "\t" << p.toString() << "\t" << d
+                      << " farthest: " << farthest() );
+
+            // If we need more points
+            double borderDist = ( _points.size() < _max ? _maxDistance : farthest() );
+
+            if( d >= borderDist - 2 * _distError && d <= borderDist + 2 * _distError ) return BORDER;
+            else return d < borderDist ? GOOD : BAD;
+
+        }
+
+        virtual bool exactDocCheck( const Point& p, double& d ){
+
+            bool within = false;
+
+            // Get the appropriate distance for the type
+            switch ( _type ) {
+            case GEO_PLAIN:
+                d = _near.distance( p );
+                within = _near.distanceWithin( p, _maxDistance );
+                break;
+            case GEO_SPHERE:
+                checkEarthBounds( p );
+                d = spheredist_deg( _near, p );
+                within = ( d <= _maxDistance );
+                break;
+            default: assert( false );
+            }
+
+            return within;
+        }
+
+        // Always in distance units, whether radians or normal
+        double farthest() const {
+            return _farthest;
+        }
+
+        virtual int addSpecific( const GeoKeyNode& node, const Point& keyP, bool onBounds, double keyD, bool newDoc ) {
+
+            // Unique documents
+
+            GeoPoint newPoint( node, keyD, false );
+
+            int prevSize = _points.size();
+
+            // STEP 1 : Remove old duplicate points from the set if needed
+            if( _uniqueDocs ){
+
+                // Lookup old point with same doc
+                map< DiskLoc , Holder::iterator >::iterator oldPointIt = _seenPts.find( newPoint.loc() );
+
+                if( oldPointIt != _seenPts.end() ){
+                    const GeoPoint& oldPoint = *(oldPointIt->second);
+                    // We don't need to care if we've already seen this same approx pt or better,
+                    // or we've already gone to disk once for the point
+                    if( oldPoint < newPoint ){
+                        GEODEBUG( "\t\tOld point closer than new point" );
+                        return 0;
+                    }
+                    GEODEBUG( "\t\tErasing old point " << oldPointIt->first.obj() );
+                    _points.erase( oldPointIt->second );
+                }
+            }
+
+            Holder::iterator newIt = _points.insert( newPoint );
+            if( _uniqueDocs ) _seenPts[ newPoint.loc() ] = newIt;
+
+            GEODEBUG( "\t\tInserted new point " << newPoint.toString() << " approx : " << keyD );
+
+            assert( _max > 0 );
+
+            Holder::iterator lastPtIt = _points.end();
+            lastPtIt--;
+            _farthest = lastPtIt->distance() + 2 * _distError;
+
+            return _points.size() - prevSize;
+
+        }
+
+        // Removes extra points from end of _points set.
+        // Check can be a bit costly if we have lots of exact points near borders,
+        // so we'll do this every once and awhile.
+        void processExtraPoints(){
+
+            if( _points.size() == 0 ) return;
+
+            int prevSize = _points.size();
+
+            // Erase all points from the set with a position >= _max *and*
+            // whose distance isn't close to the _max - 1 position distance
+
+            int numToErase = _points.size() - _max;
+            if( numToErase < 0 ) numToErase = 0;
+
+            // Get the first point definitely in the _points array
+            Holder::iterator startErase = _points.end();
+            for( int i = 0; i < numToErase + 1; i++ ) startErase--;
+            _farthest = startErase->distance() + 2 * _distError;
+
+            GEODEBUG( "\t\tPotentially erasing " << numToErase << " points, " << " size : " << _points.size() << " max : " << _max << " dist : " << startErase->distance() << " farthest dist : " << _farthest << " from error : " << _distError );
+
+            startErase++;
+            while( numToErase > 0 && startErase->distance() <= _farthest ){
+                GEODEBUG( "\t\tNot erasing point " << startErase->toString() );
+                numToErase--;
+                startErase++;
+                assert( startErase != _points.end() || numToErase == 0 );
+            }
+
+            if( _uniqueDocs ){
+                for( Holder::iterator i = startErase; i != _points.end(); ++i )
+                    _seenPts.erase( i->loc() );
+            }
+
+            _points.erase( startErase, _points.end() );
+
+            int diff = _points.size() - prevSize;
+            if( diff > 0 ) _found += diff;
+            else _found -= -diff;
+
+        }
+
+        unsigned _max;
+        Point _near;
+        Holder _points;
+        double _maxDistance;
+        GeoDistType _type;
+        double _distError;
+        double _farthest;
+
+        map< DiskLoc , Holder::iterator > _seenPts;
+
+    };
+
+
+
+    class GeoSearch : public GeoHopper {
+    public:
+        GeoSearch( const Geo2dType * g , const Point& startPt , int numWanted=100 , BSONObj filter=BSONObj() , double maxDistance = numeric_limits<double>::max() , GeoDistType type=GEO_PLAIN, bool uniqueDocs = false, bool needDistance = false )
+           : GeoHopper( g , numWanted , startPt , filter , maxDistance, type, uniqueDocs, needDistance ),
+             _start( g->hash( startPt._x, startPt._y ) ),
+             // TODO:  Remove numWanted...
+             _numWanted( numWanted ),
+             _type(type)
+        {
+
+           assert( g->getDetails() );
+            _nscanned = 0;
+            _found = 0;
+
+            if( _maxDistance < 0 ){
+               _scanDistance = numeric_limits<double>::max();
+            }
+            else if (type == GEO_PLAIN) {
+                _scanDistance = maxDistance + _spec->_error;
+            }
+            else if (type == GEO_SPHERE) {
+                checkEarthBounds( startPt );
+                // TODO: consider splitting into x and y scan distances
+                _scanDistance = computeXScanDistance( startPt._y, rad2deg( _maxDistance ) + _spec->_error );
+            }
+
+            assert( _scanDistance > 0 );
+
+        }
+
+        void exec() {
+
+            if( _numWanted == 0 ) return;
+
+            /*
+             * Search algorithm
+             * 1) use geohash prefix to find X items
+             * 2) compute max distance from want to an item
+             * 3) find optimal set of boxes that complete circle
+             * 4) use regular btree cursors to scan those boxes
+             */
+
+#ifdef GEODEBUGGING
+
+           log() << "start near search for " << _numWanted << " points near " << _near << " (max dist " << _maxDistance << ")" << endl;
+
+#endif
+
+           // Part 1
+           {
+               do {
+                   long long f = found();
+                   assert( f <= 0x7fffffff );
+                   fillStack( maxPointsHeuristic, _numWanted - static_cast<int>(f) , true );
+                   processExtraPoints();
+               } while( _state != DONE && _state != DONE_NEIGHBOR &&
+                        found() < _numWanted &&
+                        (! _prefix.constrains() || _g->sizeEdge( _prefix ) <= _scanDistance ) );
+
+               // If we couldn't scan or scanned everything, we're done
+               if( _state == DONE ){
+                   expandEndPoints();
+                   return;
+               }
+           }
+
+#ifdef GEODEBUGGING
+
+           log() << "part 1 of near search completed, found " << found() << " points (out of " << _foundInExp << " scanned)"
+                 << " in expanded region " << _prefix << " @ " << Box( _g, _prefix )
+                 << " with furthest distance " << farthest() << endl;
+
+#endif
+
+           // Part 2
+            {
+
+               // Find farthest distance for completion scan
+                double farDist = farthest();
+                if( found() < _numWanted ) {
+                    // Not enough found in Phase 1
+                    farDist = _scanDistance;
+                }
+                else if ( _type == GEO_PLAIN ) {
+                   // Enough found, but need to search neighbor boxes
+                    farDist += _spec->_error;
+                }
+                else if ( _type == GEO_SPHERE ) {
+                   // Enough found, but need to search neighbor boxes
+                    farDist = std::min( _scanDistance, computeXScanDistance( _near._y, rad2deg( farDist ) ) + 2 * _spec->_error );
+                }
+                assert( farDist >= 0 );
+                GEODEBUGPRINT( farDist );
+
+                // Find the box that includes all the points we need to return
+                _want = Box( _near._x - farDist , _near._y - farDist , farDist * 2 );
+                GEODEBUGPRINT( _want.toString() );
+
+                // log() << "Found : " << found() << " wanted : " << _numWanted << " Far distance : " << farDist << " box : " << _want << endl;
+
+                // Remember the far distance for further scans
+                _scanDistance = farDist;
+
+                // Reset the search, our distances have probably changed
+                if( _state == DONE_NEIGHBOR ){
+                   _state = DOING_EXPAND;
+                   _neighbor = -1;
+                }
+
+#ifdef GEODEBUGGING
+
+                log() << "resetting search with start at " << _start << " (edge length " << _g->sizeEdge( _start ) << ")" << endl;
+
+#endif
+
+                // Do regular search in the full region
+                do {
+                   fillStack( maxPointsHeuristic );
+                   processExtraPoints();
+                }
+                while( _state != DONE );
+
+            }
+
+            GEODEBUG( "done near search with " << _points.size() << " points " );
+
+            expandEndPoints();
+
+        }
+
+        void addExactPoints( const GeoPoint& pt, Holder& points, bool force ){
+            int before, after;
+            addExactPoints( pt, points, before, after, force );
+        }
+
+        void addExactPoints( const GeoPoint& pt, Holder& points, int& before, int& after, bool force ){
+
+            before = 0;
+            after = 0;
+
+            GEODEBUG( "Adding exact points for " << pt.toString() );
+
+            if( pt.isExact() ){
+                if( force ) points.insert( pt );
+                return;
+            }
+
+            vector<BSONObj> locs;
+            getPointsFor( pt.key(), pt.obj(), locs, _uniqueDocs );
+
+            GeoPoint nearestPt( pt, -1, true );
+
+            for( vector<BSONObj>::iterator i = locs.begin(); i != locs.end(); i++ ){
+
+                Point loc( *i );
+
+                double d;
+                if( ! exactDocCheck( loc, d ) ) continue;
+
+                if( _uniqueDocs && ( nearestPt.distance() < 0 || d < nearestPt.distance() ) ){
+                    nearestPt._distance = d;
+                    nearestPt._pt = *i;
+                    continue;
+                }
+                else if( ! _uniqueDocs ){
+                    GeoPoint exactPt( pt, d, true );
+                    exactPt._pt = *i;
+                    GEODEBUG( "Inserting exact pt " << exactPt.toString() << " for " << pt.toString() << " exact : " << d << " is less? " << ( exactPt < pt ) << " bits : " << _g->_bits );
+                    points.insert( exactPt );
+                    exactPt < pt ? before++ : after++;
+                }
+
+            }
+
+            if( _uniqueDocs && nearestPt.distance() >= 0 ){
+                GEODEBUG( "Inserting unique exact pt " << nearestPt.toString() << " for " << pt.toString() << " exact : " << nearestPt.distance() << " is less? " << ( nearestPt < pt ) << " bits : " << _g->_bits );
+                points.insert( nearestPt );
+                if( nearestPt < pt ) before++;
+                else after++;
+            }
+
+        }
+
+        // TODO: Refactor this back into holder class, allow to run periodically when we are seeing a lot of pts
+        void expandEndPoints( bool finish = true ){
+
+            processExtraPoints();
+
+            // All points in array *could* be in maxDistance
+
+            // Step 1 : Trim points to max size
+            // TODO:  This check will do little for now, but is skeleton for future work in incremental $near
+            // searches
+            if( _max > 0 ){
+
+                int numToErase = _points.size() - _max;
+
+                if( numToErase > 0 ){
+
+                    Holder tested;
+
+                    // Work backward through all points we're not sure belong in the set
+                    Holder::iterator maybePointIt = _points.end();
+                    maybePointIt--;
+                    double approxMin = maybePointIt->distance() - 2 * _distError;
+
+                    GEODEBUG( "\t\tNeed to erase " << numToErase << " max : " << _max << " min dist " << approxMin << " error : " << _distError << " starting from : " << (*maybePointIt).toString() );
+
+                    // Insert all
+                    int erased = 0;
+                    while( _points.size() > 0 && ( maybePointIt->distance() >= approxMin || erased < numToErase ) ){
+
+                        Holder::iterator current = maybePointIt--;
+
+                        addExactPoints( *current, tested, true );
+                        _points.erase( current );
+                        erased++;
+
+                        if( tested.size() )
+                            approxMin = tested.begin()->distance() - 2 * _distError;
+
+                    }
+
+                    GEODEBUG( "\t\tEnding search at point " << ( _points.size() == 0 ? "(beginning)" : maybePointIt->toString() ) );
+
+                    int numToAddBack = erased - numToErase;
+                    assert( numToAddBack >= 0 );
+
+                    GEODEBUG( "\t\tNum tested valid : " << tested.size() << " erased : " << erased << " added back : " << numToAddBack );
+
+#ifdef GEODEBUGGING
+                    for( Holder::iterator it = tested.begin(); it != tested.end(); it++ ){
+                        log() << "Tested Point: " << *it << endl;
+                    }
+#endif
+                    Holder::iterator testedIt = tested.begin();
+                    for( int i = 0; i < numToAddBack && testedIt != tested.end(); i++ ){
+                        _points.insert( *testedIt );
+                        testedIt++;
+                    }
+                }
+            }
+
+#ifdef GEODEBUGGING
+            for( Holder::iterator it = _points.begin(); it != _points.end(); it++ ){
+                log() << "Point: " << *it << endl;
+            }
+#endif
+            // We've now trimmed first set of unneeded points
+
+            GEODEBUG( "\t\t Start expanding, num points : " << _points.size() << " max : " << _max );
+
+            // Step 2: iterate through all points and add as needed
+
+            unsigned expandedPoints = 0;
+            Holder::iterator it = _points.begin();
+            double expandWindowEnd = -1;
+            while( it != _points.end() ){
+                const GeoPoint& currPt = *it;
+
+                // TODO: If one point is exact, maybe not 2 * _distError
+
+                // See if we're in an expand window
+                bool inWindow = currPt.distance() <= expandWindowEnd;
+                // If we're not, and we're done with points, break
+                if( ! inWindow && expandedPoints >= _max ) break;
+
+                bool expandApprox = ! currPt.isExact() && ( ! _uniqueDocs || ( finish && _needDistance ) || inWindow );
+
+                if( expandApprox ){
+
+                    // Add new point(s)
+                    // These will only be added in a radius of 2 * _distError around the current point,
+                    // so should not affect previously valid points.
+                    int before, after;
+                    addExactPoints( currPt, _points, before, after, false );
+                    expandedPoints += before;
+
+                    if( _max > 0 && expandedPoints < _max )
+                        expandWindowEnd = currPt.distance() + 2 * _distError;
+
+                    // Iterate to the next point
+                    Holder::iterator current = it++;
+                    // Erase the current point
+                    _points.erase( current );
+
+                }
+                else{
+                    expandedPoints++;
+                    it++;
+                }
+            }
+
+            GEODEBUG( "\t\tFinished expanding, num points : " << _points.size() << " max : " << _max );
+
+            // Finish
+            // TODO:  Don't really need to trim?
+            for( ; expandedPoints > _max; expandedPoints-- ) it--;
+            _points.erase( it, _points.end() );
+
+#ifdef GEODEBUGGING
+            for( Holder::iterator it = _points.begin(); it != _points.end(); it++ ){
+                log() << "Point: " << *it << endl;
+            }
+#endif
+        }
+
+        virtual GeoHash expandStartHash(){
+           return _start;
+        }
+
+        // Whether the current box width is big enough for our search area
+        virtual bool fitsInBox( double width ){
+           return width >= _scanDistance;
+        }
+
+        // Whether the current box overlaps our search area
+        virtual double intersectsBox( Box& cur ){
+            return cur.intersects( _want );
+        }
+
+        GeoHash _start;
+        int _numWanted;
+        double _scanDistance;
+
+        long long _nscanned;
+        int _found;
+        GeoDistType _type;
+
+        Box _want;
+    };
+
+    class GeoSearchCursor : public GeoCursorBase {
+    public:
+
+        GeoSearchCursor( shared_ptr<GeoSearch> s )
+            : GeoCursorBase( s->_spec ) ,
+              _s( s ) , _cur( s->_points.begin() ) , _end( s->_points.end() ), _nscanned() {
+            if ( _cur != _end ) {
+                ++_nscanned;
+            }
+        }
+
+        virtual ~GeoSearchCursor() {}
+
+        virtual bool ok() {
+            return _cur != _end;
+        }
+
+        virtual Record* _current() { assert(ok()); return _cur->_loc.rec(); }
+        virtual BSONObj current() { assert(ok()); return _cur->_o; }
+        virtual DiskLoc currLoc() { assert(ok()); return _cur->_loc; }
+        virtual bool advance() {
+            if( ok() ){
+                _cur++;
+                incNscanned();
+                return ok();
+            }
+            return false;
+        }
+        virtual BSONObj currKey() const { return _cur->_key; }
+
+        virtual string toString() {
+            return "GeoSearchCursor";
+        }
+
+
+        virtual BSONObj prettyStartKey() const {
+            return BSON( _s->_g->_geo << _s->_prefix.toString() );
+        }
+        virtual BSONObj prettyEndKey() const {
+            GeoHash temp = _s->_prefix;
+            temp.move( 1 , 1 );
+            return BSON( _s->_g->_geo << temp.toString() );
+        }
+
+        virtual long long nscanned() { return _nscanned; }
+
+        virtual CoveredIndexMatcher* matcher() const {
+            if( _s->_matcher.get() ) return _s->_matcher.get();
+            else return emptyMatcher.get();
+        }
+
+        virtual shared_ptr< CoveredIndexMatcher > matcherPtr() const {
+            if( _s->_matcher.get() ) return _s->_matcher;
+            else return emptyMatcher;
+        }
+
+        shared_ptr<GeoSearch> _s;
+        GeoHopper::Holder::iterator _cur;
+        GeoHopper::Holder::iterator _end;
+
+        void incNscanned() { if ( ok() ) { ++_nscanned; } }
+        long long _nscanned;
+    };
+
+    class GeoCircleBrowse : public GeoBrowse {
+    public:
+
+        GeoCircleBrowse( const Geo2dType * g , const BSONObj& circle , BSONObj filter = BSONObj() , const string& type="$center", bool uniqueDocs = true )
+            : GeoBrowse( g , "circle" , filter, uniqueDocs ) {
+
+            uassert( 13060 , "$center needs 2 fields (middle,max distance)" , circle.nFields() == 2 );
+
+            BSONObjIterator i(circle);
+            BSONElement center = i.next();
+
+            uassert( 13656 , "the first field of $center object must be a location object" , center.isABSONObj() );
+
+            // Get geohash and exact center point
+            // TODO: For wrapping search, may be useful to allow center points outside-of-bounds here.
+            // Calculating the nearest point as a hash start inside the region would then be required.
+            _start = g->_tohash(center);
+            _startPt = Point(center);
+
+            _maxDistance = i.next().numberDouble();
+            uassert( 13061 , "need a max distance >= 0 " , _maxDistance >= 0 );
+
+            if (type == "$center") {
+                // Look in box with bounds of maxDistance in either direction
+                _type = GEO_PLAIN;
+                _xScanDistance = _maxDistance + _g->_error;
+                _yScanDistance = _maxDistance + _g->_error;
+            }
+            else if (type == "$centerSphere") {
+                // Same, but compute maxDistance using spherical transform
+
+                uassert(13461, "Spherical MaxDistance > PI. Are you sure you are using radians?", _maxDistance < M_PI);
+                checkEarthBounds( _startPt );
+
+                _type = GEO_SPHERE;
+                _yScanDistance = rad2deg( _maxDistance ) + _g->_error;
+                _xScanDistance = computeXScanDistance(_startPt._y, _yScanDistance);
+
+                uassert(13462, "Spherical distance would require wrapping, which isn't implemented yet",
+                        (_startPt._x + _xScanDistance < 180) && (_startPt._x - _xScanDistance > -180) &&
+                        (_startPt._y + _yScanDistance < 90) && (_startPt._y - _yScanDistance > -90));
+            }
+            else {
+                uassert(13460, "invalid $center query type: " + type, false);
+            }
+
+            // Bounding box includes fudge factor.
+            // TODO:  Is this correct, since fudge factor may be spherically transformed?
+            _bBox._min = Point( _startPt._x - _xScanDistance, _startPt._y - _yScanDistance );
+            _bBox._max = Point( _startPt._x + _xScanDistance, _startPt._y + _yScanDistance );
+
+            GEODEBUG( "Bounding box for circle query : " << _bBox.toString() << " (max distance : " << _maxDistance << ")" << " starting from " << _startPt.toString() );
+
+            ok();
+        }
+
+        virtual GeoHash expandStartHash() {
+            return _start;
+        }
+
+        virtual bool fitsInBox( double width ) {
+            return width >= std::max(_xScanDistance, _yScanDistance);
+        }
+
+        virtual double intersectsBox( Box& cur ) {
+            return cur.intersects( _bBox );
+        }
+
+        virtual KeyResult approxKeyCheck( const Point& p, double& d ) {
+
+            // Inexact hash distance checks.
+            double error = 0;
+            switch (_type) {
+            case GEO_PLAIN:
+                d = _startPt.distance( p );
+                error = _g->_error;
+                break;
+            case GEO_SPHERE: {
+                checkEarthBounds( p );
+                d = spheredist_deg( _startPt, p );
+                error = _g->_errorSphere;
+                break;
+            }
+            default: assert( false );
+            }
+
+            // If our distance is in the error bounds...
+            if( d >= _maxDistance - error && d <= _maxDistance + error ) return BORDER;
+            return d > _maxDistance ? BAD : GOOD;
+        }
+
+        virtual bool exactDocCheck( const Point& p, double& d ){
+
+            switch (_type) {
+            case GEO_PLAIN: {
+                if( _startPt.distanceWithin( p, _maxDistance ) ) return true;
+                break;
+            }
+            case GEO_SPHERE:
+                checkEarthBounds( p );
+                if( spheredist_deg( _startPt , p ) <= _maxDistance ) return true;
+                break;
+            default: assert( false );
+            }
+
+            return false;
+        }
+
+        GeoDistType _type;
+        GeoHash _start;
+        Point _startPt;
+        double _maxDistance; // user input
+        double _xScanDistance; // effected by GeoDistType
+        double _yScanDistance; // effected by GeoDistType
+        Box _bBox;
+
+    };
+
+    class GeoBoxBrowse : public GeoBrowse {
+    public:
+
+        GeoBoxBrowse( const Geo2dType * g , const BSONObj& box , BSONObj filter = BSONObj(), bool uniqueDocs = true )
+            : GeoBrowse( g , "box" , filter, uniqueDocs ) {
+
+            uassert( 13063 , "$box needs 2 fields (bottomLeft,topRight)" , box.nFields() == 2 );
+
+            // Initialize an *exact* box from the given obj.
+            BSONObjIterator i(box);
+            _want._min = Point( i.next() );
+            _want._max = Point( i.next() );
+
+            _wantRegion = _want;
+            _wantRegion.fudge( g ); // Need to make sure we're checking regions within error bounds of where we want
+            fixBox( g, _wantRegion );
+            fixBox( g, _want );
+
+            uassert( 13064 , "need an area > 0 " , _want.area() > 0 );
+
+            Point center = _want.center();
+            _start = _g->hash( center._x , center._y );
+
+            GEODEBUG( "center : " << center.toString() << "\t" << _prefix );
+
+            _fudge = _g->_error;
+            _wantLen = _fudge +
+                       std::max( ( _want._max._x - _want._min._x ) ,
+                                 ( _want._max._y - _want._min._y ) ) / 2;
+
+            ok();
+        }
+
+        void fixBox( const Geo2dType* g, Box& box ) {
+            if( box._min._x > box._max._x )
+                swap( box._min._x, box._max._x );
+            if( box._min._y > box._max._y )
+                swap( box._min._y, box._max._y );
+
+            double gMin = g->_min;
+            double gMax = g->_max;
+
+            if( box._min._x < gMin ) box._min._x = gMin;
+            if( box._min._y < gMin ) box._min._y = gMin;
+            if( box._max._x > gMax) box._max._x = gMax;
+            if( box._max._y > gMax ) box._max._y = gMax;
+        }
+
+        void swap( double& a, double& b ) {
+            double swap = a;
+            a = b;
+            b = swap;
+        }
+
+        virtual GeoHash expandStartHash() {
+            return _start;
+        }
+
+        virtual bool fitsInBox( double width ) {
+            return width >= _wantLen;
+        }
+
+        virtual double intersectsBox( Box& cur ) {
+            return cur.intersects( _wantRegion );
+        }
+
+        virtual KeyResult approxKeyCheck( const Point& p, double& d ) {
+            if( _want.onBoundary( p, _fudge ) ) return BORDER;
+            else return _want.inside( p, _fudge ) ? GOOD : BAD;
+
+        }
+
+        virtual bool exactDocCheck( const Point& p, double& d ){
+            return _want.inside( p );
+        }
+
+        Box _want;
+        Box _wantRegion;
+        double _wantLen;
+        double _fudge;
+
+        GeoHash _start;
+
+    };
+
+    class GeoPolygonBrowse : public GeoBrowse {
+    public:
+
+        GeoPolygonBrowse( const Geo2dType* g , const BSONObj& polyPoints ,
+                          BSONObj filter = BSONObj(), bool uniqueDocs = true ) : GeoBrowse( g , "polygon" , filter, uniqueDocs ) {
+
+            GEODEBUG( "In Polygon" )
+
+            BSONObjIterator i( polyPoints );
+            BSONElement first = i.next();
+            _poly.add( Point( first ) );
+
+            while ( i.more() ) {
+                _poly.add( Point( i.next() ) );
+            }
+
+            uassert( 14030, "polygon must be defined by three points or more", _poly.size() >= 3 );
+
+            _bounds = _poly.bounds();
+            _bounds.fudge( g ); // We need to check regions within the error bounds of these bounds
+            _bounds.truncate( g ); // We don't need to look anywhere outside the space
+
+            _maxDim = _g->_error + _bounds.maxDim() / 2;
+
+            ok();
+        }
+
+        // The initial geo hash box for our first expansion
+        virtual GeoHash expandStartHash() {
+            return _g->hash( _bounds.center() );
+        }
+
+        // Whether the current box width is big enough for our search area
+        virtual bool fitsInBox( double width ) {
+            return _maxDim <= width;
+        }
+
+        // Whether the current box overlaps our search area
+        virtual double intersectsBox( Box& cur ) {
+            return cur.intersects( _bounds );
+        }
+
+        virtual KeyResult approxKeyCheck( const Point& p, double& d ) {
+
+            int in = _poly.contains( p, _g->_error );
+
+            if( in == 0 ) return BORDER;
+            else return in > 0 ? GOOD : BAD;
+
+        }
+
+        virtual bool exactDocCheck( const Point& p, double& d ){
+            return _poly.contains( p );
+        }
+
+    private:
+
+        Polygon _poly;
+        Box _bounds;
+        double _maxDim;
+
+        GeoHash _start;
+    };
+
+    shared_ptr<Cursor> Geo2dType::newCursor( const BSONObj& query , const BSONObj& order , int numWanted ) const {
+        if ( numWanted < 0 )
+            numWanted = numWanted * -1;
+        else if ( numWanted == 0 )
+            numWanted = 100;
+
+        BSONObjIterator i(query);
+        while ( i.more() ) {
+            BSONElement e = i.next();
+
+            if ( _geo != e.fieldName() )
+                continue;
+
+            if ( e.type() == Array ) {
+                // If we get an array query, assume it is a location, and do a $within { $center : [[x, y], 0] } search
+                shared_ptr<Cursor> c( new GeoCircleBrowse( this , BSON( "0" << e.embeddedObjectUserCheck() << "1" << 0 ), query.filterFieldsUndotted( BSON( _geo << "" ), false ), "$center", true ) );
+                return c;
+            }
+            else if ( e.type() == Object ) {
+
+                // TODO:  Filter out _geo : { $special... } field so it doesn't get matched accidentally,
+                // if matcher changes
+
+                switch ( e.embeddedObject().firstElement().getGtLtOp() ) {
+                case BSONObj::opNEAR: {
+                    BSONObj n = e.embeddedObject();
+                    e = n.firstElement();
+
+                    const char* suffix = e.fieldName() + 5; // strlen("$near") == 5;
+                    GeoDistType type;
+                    if (suffix[0] == '\0') {
+                        type = GEO_PLAIN;
+                    }
+                    else if (strcmp(suffix, "Sphere") == 0) {
+                        type = GEO_SPHERE;
+                    }
+                    else {
+                        uassert(13464, string("invalid $near search type: ") + e.fieldName(), false);
+                        type = GEO_PLAIN; // prevents uninitialized warning
+                    }
+
+                    double maxDistance = numeric_limits<double>::max();
+                    if ( e.isABSONObj() && e.embeddedObject().nFields() > 2 ) {
+                        BSONObjIterator i(e.embeddedObject());
+                        i.next();
+                        i.next();
+                        BSONElement e = i.next();
+                        if ( e.isNumber() )
+                            maxDistance = e.numberDouble();
+                    }
+                    {
+                        BSONElement e = n["$maxDistance"];
+                        if ( e.isNumber() )
+                            maxDistance = e.numberDouble();
+                    }
+
+                    bool uniqueDocs = false;
+                    if( ! n["$uniqueDocs"].eoo() ) uniqueDocs = n["$uniqueDocs"].trueValue();
+
+                    shared_ptr<GeoSearch> s( new GeoSearch( this , Point( e ) , numWanted , query , maxDistance, type, uniqueDocs ) );
+                    s->exec();
+                    shared_ptr<Cursor> c;
+                    c.reset( new GeoSearchCursor( s ) );
+                    return c;
+                }
+                case BSONObj::opWITHIN: {
+
+                    e = e.embeddedObject().firstElement();
+                    uassert( 13057 , "$within has to take an object or array" , e.isABSONObj() );
+
+                    BSONObj context = e.embeddedObject();
+                    e = e.embeddedObject().firstElement();
+                    string type = e.fieldName();
+
+                    bool uniqueDocs = true;
+                    if( ! context["$uniqueDocs"].eoo() ) uniqueDocs = context["$uniqueDocs"].trueValue();
+
+                    if ( startsWith(type,  "$center") ) {
+                        uassert( 13059 , "$center has to take an object or array" , e.isABSONObj() );
+                        shared_ptr<Cursor> c( new GeoCircleBrowse( this , e.embeddedObjectUserCheck() , query , type, uniqueDocs ) );
+                        return c;
+                    }
+                    else if ( type == "$box" ) {
+                        uassert( 13065 , "$box has to take an object or array" , e.isABSONObj() );
+                        shared_ptr<Cursor> c( new GeoBoxBrowse( this , e.embeddedObjectUserCheck() , query, uniqueDocs ) );
+                        return c;
+                    }
+                    else if ( startsWith( type, "$poly" ) ) {
+                        uassert( 14029 , "$polygon has to take an object or array" , e.isABSONObj() );
+                        shared_ptr<Cursor> c( new GeoPolygonBrowse( this , e.embeddedObjectUserCheck() , query, uniqueDocs ) );
+                        return c;
+                    }
+                    throw UserException( 13058 , (string)"unknown $within type: " + type );
+                }
+                default:
+                    // Otherwise... assume the object defines a point, and we want to do a zero-radius $within $center
+                    shared_ptr<Cursor> c( new GeoCircleBrowse( this , BSON( "0" << e.embeddedObjectUserCheck() << "1" << 0 ), query.filterFieldsUndotted( BSON( _geo << "" ), false ) ) );
+                    return c;
+                }
+            }
+        }
+
+        throw UserException( 13042 , (string)"missing geo field (" + _geo + ") in : " + query.toString() );
+    }
+
+    // ------
+    // commands
+    // ------
+
+    class Geo2dFindNearCmd : public Command {
+    public:
+        Geo2dFindNearCmd() : Command( "geoNear" ) {}
+        virtual LockType locktype() const { return READ; }
+        bool slaveOk() const { return true; }
+        void help(stringstream& h) const { h << "http://www.mongodb.org/display/DOCS/Geospatial+Indexing#GeospatialIndexing-geoNearCommand"; }
+        bool slaveOverrideOk() { return true; }
+        bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+            string ns = dbname + "." + cmdObj.firstElement().valuestr();
+
+            NamespaceDetails * d = nsdetails( ns.c_str() );
+            if ( ! d ) {
+                errmsg = "can't find ns";
+                return false;
+            }
+
+            vector<int> idxs;
+            d->findIndexByType( GEO2DNAME , idxs );
+
+            if ( idxs.size() > 1 ) {
+                errmsg = "more than 1 geo indexes :(";
+                return false;
+            }
+
+            if ( idxs.size() == 0 ) {
+                errmsg = "no geo index :(";
+                return false;
+            }
+
+            int geoIdx = idxs[0];
+
+            result.append( "ns" , ns );
+
+            IndexDetails& id = d->idx( geoIdx );
+            Geo2dType * g = (Geo2dType*)id.getSpec().getType();
+            assert( &id == g->getDetails() );
+
+            int numWanted = 100;
+            if ( cmdObj["num"].isNumber() ) {
+                numWanted = cmdObj["num"].numberInt();
+                assert( numWanted >= 0 );
+            }
+
+            bool uniqueDocs = false;
+            if( ! cmdObj["uniqueDocs"].eoo() ) uniqueDocs = cmdObj["uniqueDocs"].trueValue();
+
+            bool includeLocs = false;
+            if( ! cmdObj["includeLocs"].eoo() ) includeLocs = cmdObj["includeLocs"].trueValue();
+
+            uassert(13046, "'near' param missing/invalid", !cmdObj["near"].eoo());
+            const Point n( cmdObj["near"] );
+            result.append( "near" , g->_tohash( cmdObj["near"] ).toString() );
+
+            BSONObj filter;
+            if ( cmdObj["query"].type() == Object )
+                filter = cmdObj["query"].embeddedObject();
+
+            double maxDistance = numeric_limits<double>::max();
+            if ( cmdObj["maxDistance"].isNumber() )
+                maxDistance = cmdObj["maxDistance"].number();
+
+            GeoDistType type = GEO_PLAIN;
+            if ( cmdObj["spherical"].trueValue() )
+                type = GEO_SPHERE;
+
+            GeoSearch gs( g , n , numWanted , filter , maxDistance , type, uniqueDocs, true );
+
+            if ( cmdObj["start"].type() == String) {
+                GeoHash start ((string) cmdObj["start"].valuestr());
+                gs._start = start;
+            }
+
+            gs.exec();
+
+            double distanceMultiplier = 1;
+            if ( cmdObj["distanceMultiplier"].isNumber() )
+                distanceMultiplier = cmdObj["distanceMultiplier"].number();
+
+            double totalDistance = 0;
+
+            BSONObjBuilder arr( result.subarrayStart( "results" ) );
+            int x = 0;
+            for ( GeoHopper::Holder::iterator i=gs._points.begin(); i!=gs._points.end(); i++ ) {
+
+                const GeoPoint& p = *i;
+                double dis = distanceMultiplier * p.distance();
+                totalDistance += dis;
+
+                BSONObjBuilder bb( arr.subobjStart( BSONObjBuilder::numStr( x++ ) ) );
+                bb.append( "dis" , dis );
+                if( includeLocs ) bb.append( "loc" , p._pt );
+                bb.append( "obj" , p._o );
+                bb.done();
+            }
+            arr.done();
+
+            BSONObjBuilder stats( result.subobjStart( "stats" ) );
+            stats.append( "time" , cc().curop()->elapsedMillis() );
+            stats.appendNumber( "btreelocs" , gs._nscanned );
+            stats.appendNumber( "nscanned" , gs._lookedAt );
+            stats.appendNumber( "objectsLoaded" , gs._objectsLoaded );
+            stats.append( "avgDistance" , totalDistance / x );
+            stats.append( "maxDistance" , gs.farthest() );
+            stats.done();
+
+            return true;
+        }
+
+    } geo2dFindNearCmd;
+
+    class GeoWalkCmd : public Command {
+    public:
+        GeoWalkCmd() : Command( "geoWalk" ) {}
+        virtual LockType locktype() const { return READ; }
+        bool slaveOk() const { return true; }
+        bool slaveOverrideOk() { return true; }
+        bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+            string ns = dbname + "." + cmdObj.firstElement().valuestr();
+
+            NamespaceDetails * d = nsdetails( ns.c_str() );
+            if ( ! d ) {
+                errmsg = "can't find ns";
+                return false;
+            }
+
+            int geoIdx = -1;
+            {
+                NamespaceDetails::IndexIterator ii = d->ii();
+                while ( ii.more() ) {
+                    IndexDetails& id = ii.next();
+                    if ( id.getSpec().getTypeName() == GEO2DNAME ) {
+                        if ( geoIdx >= 0 ) {
+                            errmsg = "2 geo indexes :(";
+                            return false;
+                        }
+                        geoIdx = ii.pos() - 1;
+                    }
+                }
+            }
+
+            if ( geoIdx < 0 ) {
+                errmsg = "no geo index :(";
+                return false;
+            }
+
+
+            IndexDetails& id = d->idx( geoIdx );
+            Geo2dType * g = (Geo2dType*)id.getSpec().getType();
+            assert( &id == g->getDetails() );
+
+            int max = 100000;
+
+            auto_ptr<BtreeCursor> bc( BtreeCursor::make( d , geoIdx , id , BSONObj() , BSONObj() , true , 1 ) );
+            BtreeCursor &c = *bc;
+            while ( c.ok() && max-- ) {
+                GeoHash h( c.currKey().firstElement() );
+                int len;
+                cout << "\t" << h.toString()
+                     << "\t" << c.current()[g->_geo]
+                     << "\t" << hex << h.getHash()
+                     << "\t" << hex << ((long long*)c.currKey().firstElement().binData(len))[0]
+                     << "\t" << c.current()["_id"]
+                     << endl;
+                c.advance();
+            }
+
+            return true;
+        }
+
+    } geoWalkCmd;
 
     struct GeoUnitTest : public UnitTest {
 
@@ -664,1163 +2970,6 @@ namespace mongo {
         }
     } geoUnitTest;
 
-    class GeoPoint {
-    public:
-        GeoPoint() {
-        }
-
-        GeoPoint( const KeyNode& node , double distance )
-            : _key( node.key ) , _loc( node.recordLoc ) , _o( node.recordLoc.obj() ) , _distance( distance ) {
-        }
-
-        GeoPoint( const BSONObj& key , DiskLoc loc , double distance )
-            : _key(key) , _loc(loc) , _o( loc.obj() ) , _distance( distance ) {
-        }
-
-        bool operator<( const GeoPoint& other ) const {
-            return _distance < other._distance;
-        }
-
-        bool isEmpty() const {
-            return _o.isEmpty();
-        }
-
-        BSONObj _key;
-        DiskLoc _loc;
-        BSONObj _o;
-        double _distance;
-    };
-
-    class GeoAccumulator {
-    public:
-        GeoAccumulator( const Geo2dType * g , const BSONObj& filter )
-            : _g(g) , _lookedAt(0) , _objectsLoaded(0) , _found(0) {
-            if ( ! filter.isEmpty() ) {
-                _matcher.reset( new CoveredIndexMatcher( filter , g->keyPattern() ) );
-            }
-        }
-
-        virtual ~GeoAccumulator() {
-        }
-
-        virtual void add( const KeyNode& node ) {
-            // when looking at other boxes, don't want to look at some object twice
-            pair<set<DiskLoc>::iterator,bool> seenBefore = _seen.insert( node.recordLoc );
-            if ( ! seenBefore.second ) {
-                GEODEBUG( "\t\t\t\t already seen : " << node.recordLoc.obj()["_id"] );
-                return;
-            }
-            _lookedAt++;
-
-            // distance check
-            double d = 0;
-            if ( ! checkDistance( GeoHash( node.key.firstElement() ) , d ) ) {
-                GEODEBUG( "\t\t\t\t bad distance : " << node.recordLoc.obj()  << "\t" << d );
-                return;
-            }
-            GEODEBUG( "\t\t\t\t good distance : " << node.recordLoc.obj()  << "\t" << d );
-
-            // matcher
-            MatchDetails details;
-            if ( _matcher.get() ) {
-                bool good = _matcher->matches( node.key , node.recordLoc , &details );
-                if ( details.loadedObject )
-                    _objectsLoaded++;
-
-                if ( ! good ) {
-                    GEODEBUG( "\t\t\t\t didn't match : " << node.recordLoc.obj()["_id"] );
-                    return;
-                }
-            }
-
-            if ( ! details.loadedObject ) // dont double count
-                _objectsLoaded++;
-
-            addSpecific( node , d );
-            _found++;
-        }
-
-        virtual void addSpecific( const KeyNode& node , double d ) = 0;
-        virtual bool checkDistance( const GeoHash& node , double& d ) = 0;
-
-        long long found() const {
-            return _found;
-        }
-
-        const Geo2dType * _g;
-        set<DiskLoc> _seen;
-        auto_ptr<CoveredIndexMatcher> _matcher;
-
-        long long _lookedAt;
-        long long _objectsLoaded;
-        long long _found;
-    };
-
-    class GeoHopper : public GeoAccumulator {
-    public:
-        typedef multiset<GeoPoint> Holder;
-
-        GeoHopper( const Geo2dType * g , unsigned max , const Point& n , const BSONObj& filter = BSONObj() , double maxDistance = numeric_limits<double>::max() , GeoDistType type=GEO_PLAIN)
-            : GeoAccumulator( g , filter ) , _max( max ) , _near( n ), _maxDistance( maxDistance ), _type( type ), _farthest(-1)
-        {}
-
-        virtual bool checkDistance( const GeoHash& h , double& d ) {
-            switch (_type) {
-            case GEO_PLAIN:
-                d = _near.distance( Point(_g, h) );
-                break;
-            case GEO_SPHERE:
-                d = spheredist_deg(_near, Point(_g, h));
-                break;
-            default:
-                assert(0);
-            }
-            bool good = d < _maxDistance && ( _points.size() < _max || d < farthest() );
-            GEODEBUG( "\t\t\t\t\t\t\t checkDistance " << _near.toString() << "\t" << h << "\t" << d
-                      << " ok: " << good << " farthest: " << farthest() );
-            return good;
-        }
-
-        virtual void addSpecific( const KeyNode& node , double d ) {
-            GEODEBUG( "\t\t" << GeoHash( node.key.firstElement() ) << "\t" << node.recordLoc.obj() << "\t" << d );
-            _points.insert( GeoPoint( node.key , node.recordLoc , d ) );
-            if ( _points.size() > _max ) {
-                _points.erase( --_points.end() );
-
-                Holder::iterator i = _points.end();
-                i--;
-                _farthest = i->_distance;
-            }
-            else {
-                if (d > _farthest)
-                    _farthest = d;
-            }
-        }
-
-        double farthest() const {
-            return _farthest;
-        }
-
-
-        unsigned _max;
-        Point _near;
-        Holder _points;
-        double _maxDistance;
-        GeoDistType _type;
-        double _farthest;
-    };
-
-    struct BtreeLocation {
-        int pos;
-        bool found;
-        DiskLoc bucket;
-
-        BSONObj key() {
-            if ( bucket.isNull() )
-                return BSONObj();
-            return bucket.btree()->keyNode( pos ).key;
-        }
-
-        bool hasPrefix( const GeoHash& hash ) {
-            BSONElement e = key().firstElement();
-            if ( e.eoo() )
-                return false;
-            return GeoHash( e ).hasPrefix( hash );
-        }
-
-        bool advance( int direction , int& totalFound , GeoAccumulator* all ) {
-
-            if ( bucket.isNull() )
-                return false;
-            bucket = bucket.btree()->advance( bucket , pos , direction , "btreelocation" );
-
-            if ( all )
-                return checkCur( totalFound , all );
-
-            return ! bucket.isNull();
-        }
-
-        bool checkCur( int& totalFound , GeoAccumulator* all ) {
-            if ( bucket.isNull() )
-                return false;
-
-            if ( bucket.btree()->isUsed(pos) ) {
-                totalFound++;
-                all->add( bucket.btree()->keyNode( pos ) );
-            }
-            else {
-                GEODEBUG( "\t\t\t\t not used: " << key() );
-            }
-
-            return true;
-        }
-
-        string toString() {
-            stringstream ss;
-            ss << "bucket: " << bucket.toString() << " pos: " << pos << " found: " << found;
-            return ss.str();
-        }
-
-        static bool initial( const IndexDetails& id , const Geo2dType * spec ,
-                             BtreeLocation& min , BtreeLocation&  max ,
-                             GeoHash start ,
-                             int & found , GeoAccumulator * hopper ) {
-
-            Ordering ordering = Ordering::make(spec->_order);
-
-            min.bucket = id.head.btree()->locate( id , id.head , start.wrap() ,
-                                                  ordering , min.pos , min.found , minDiskLoc );
-            if (hopper) min.checkCur( found , hopper );
-            max = min;
-
-            if ( min.bucket.isNull() || ( hopper && !(hopper->found()) ) ) {
-                min.bucket = id.head.btree()->locate( id , id.head , start.wrap() ,
-                                                      ordering , min.pos , min.found , minDiskLoc , -1 );
-                if (hopper) min.checkCur( found , hopper );
-            }
-
-            return ! min.bucket.isNull() || ! max.bucket.isNull();
-        }
-    };
-
-    class GeoSearch {
-    public:
-        GeoSearch( const Geo2dType * g , const GeoHash& n , int numWanted=100 , BSONObj filter=BSONObj() , double maxDistance = numeric_limits<double>::max() , GeoDistType type=GEO_PLAIN)
-            : _spec( g ) ,_startPt(g,n), _start( n ) ,
-              _numWanted( numWanted ) , _filter( filter ) , _maxDistance( maxDistance ) ,
-              _hopper( new GeoHopper( g , numWanted , _startPt , filter , maxDistance, type ) ), _type(type) {
-            assert( g->getDetails() );
-            _nscanned = 0;
-            _found = 0;
-
-            if (type == GEO_PLAIN) {
-                _scanDistance = maxDistance;
-            }
-            else if (type == GEO_SPHERE) {
-                if (maxDistance == numeric_limits<double>::max()) {
-                    _scanDistance = maxDistance;
-                }
-                else {
-                    //TODO: consider splitting into x and y scan distances
-                    _scanDistance = computeXScanDistance(_startPt._y, rad2deg(maxDistance));
-                }
-            }
-            else {
-                assert(0);
-            }
-        }
-
-        void exec() {
-            const IndexDetails& id = *_spec->getDetails();
-
-            const BtreeBucket * head = id.head.btree();
-            assert( head );
-            /*
-             * Search algorithm
-             * 1) use geohash prefix to find X items
-             * 2) compute max distance from want to an item
-             * 3) find optimal set of boxes that complete circle
-             * 4) use regular btree cursors to scan those boxes
-             */
-
-            GeoHopper * hopper = _hopper.get();
-
-            _prefix = _start;
-            BtreeLocation min,max;
-            {
-                // 1 regular geo hash algorithm
-
-
-                if ( ! BtreeLocation::initial( id , _spec , min , max , _start , _found , NULL ) )
-                    return;
-
-                while ( !_prefix.constrains() || // if next pass would cover universe, just keep going
-                        ( _hopper->found() < _numWanted && _spec->sizeEdge( _prefix ) <= _scanDistance)) {
-                    GEODEBUG( _prefix << "\t" << _found << "\t DESC" );
-                    while ( min.hasPrefix(_prefix) && min.checkCur(_found, hopper) && min.advance(-1, _found, NULL) )
-                        _nscanned++;
-                    GEODEBUG( _prefix << "\t" << _found << "\t ASC" );
-                    while ( max.hasPrefix(_prefix) && max.checkCur(_found, hopper) && max.advance(+1, _found, NULL) )
-                        _nscanned++;
-
-                    if ( ! _prefix.constrains() ) {
-                        GEODEBUG( "done search w/o part 2" )
-                        return;
-                    }
-
-                    _alreadyScanned = Box(_spec, _prefix);
-                    _prefix = _prefix.up();
-                }
-            }
-            GEODEBUG( "done part 1" );
-            {
-                // 2
-                double farthest = hopper->farthest();
-                GEODEBUGPRINT(hopper->farthest());
-                if (hopper->found() < _numWanted) {
-                    // Not enough found in Phase 1
-                    farthest = _scanDistance;
-                }
-                else if (_type == GEO_SPHERE) {
-                    farthest = std::min(_scanDistance, computeXScanDistance(_startPt._y, rad2deg(farthest)));
-                }
-                GEODEBUGPRINT(farthest);
-
-                Box want( _startPt._x - farthest , _startPt._y - farthest , farthest * 2 );
-                GEODEBUGPRINT(want.toString());
-
-                _prefix = _start;
-                while (_prefix.constrains() && _spec->sizeEdge( _prefix ) < farthest ) {
-                    _prefix = _prefix.up();
-                }
-
-                PREFIXDEBUG(_prefix, _spec);
-
-                if (_prefix.getBits() <= 1) {
-                    // TODO consider walking in $natural order
-
-                    while ( min.checkCur(_found, hopper) && min.advance(-1, _found, NULL) )
-                        _nscanned++;
-                    while ( max.checkCur(_found, hopper) && max.advance(+1, _found, NULL) )
-                        _nscanned++;
-
-                    GEODEBUG( "done search after scanning whole collection" )
-                    return;
-                }
-
-                if ( logLevel > 0 ) {
-                    log(1) << "want: " << want << " found:" << _found << " nscanned: " << _nscanned << " hash size:" << _spec->sizeEdge( _prefix )
-                           << " farthest: " << farthest << " using box: " << Box( _spec , _prefix ).toString() << endl;
-                }
-
-                for ( int x=-1; x<=1; x++ ) {
-                    for ( int y=-1; y<=1; y++ ) {
-                        GeoHash toscan = _prefix;
-                        toscan.move( x , y );
-
-                        // 3 & 4
-                        doBox( id , want , toscan );
-                    }
-                }
-            }
-            GEODEBUG( "done search" )
-
-        }
-
-        void doBox( const IndexDetails& id , const Box& want , const GeoHash& toscan , int depth = 0 ) {
-            Box testBox( _spec , toscan );
-            if ( logLevel > 2 ) {
-                cout << "\t";
-                for ( int i=0; i<depth; i++ )
-                    cout << "\t";
-                cout << " doBox: " << testBox.toString() << "\t" << toscan.toString() << " scanned so far: " << _nscanned << endl;
-            }
-            else {
-                GEODEBUGPRINT(testBox.toString());
-            }
-
-            if (_alreadyScanned.contains(testBox, _spec->_error)) {
-                GEODEBUG("skipping box: already scanned");
-                return; // been here, done this
-            }
-
-            double intPer = testBox.intersects( want );
-
-            if ( intPer <= 0 ) {
-                GEODEBUG("skipping box: not in want");
-                return;
-            }
-
-            bool goDeeper = intPer < .5 && depth < 2;
-
-            long long myscanned = 0;
-
-            BtreeLocation loc;
-            loc.bucket = id.head.btree()->locate( id , id.head , toscan.wrap() , Ordering::make(_spec->_order) ,
-                                                  loc.pos , loc.found , minDiskLoc );
-            loc.checkCur( _found , _hopper.get() );
-            while ( loc.hasPrefix( toscan ) && loc.advance( 1 , _found , _hopper.get() ) ) {
-                _nscanned++;
-                if ( ++myscanned > 100 && goDeeper ) {
-                    doBox( id , want , toscan + "00" , depth + 1);
-                    doBox( id , want , toscan + "01" , depth + 1);
-                    doBox( id , want , toscan + "10" , depth + 1);
-                    doBox( id , want , toscan + "11" , depth + 1);
-                    return;
-                }
-            }
-
-        }
-
-
-        const Geo2dType * _spec;
-
-        Point _startPt;
-        GeoHash _start;
-        GeoHash _prefix;
-        int _numWanted;
-        BSONObj _filter;
-        double _maxDistance;
-        double _scanDistance;
-        shared_ptr<GeoHopper> _hopper;
-
-        long long _nscanned;
-        int _found;
-        GeoDistType _type;
-
-        Box _alreadyScanned;
-    };
-
-    class GeoCursorBase : public Cursor {
-    public:
-        GeoCursorBase( const Geo2dType * spec )
-            : _spec( spec ), _id( _spec->getDetails() ) {
-
-        }
-
-        virtual DiskLoc refLoc() { return DiskLoc(); }
-
-        virtual BSONObj indexKeyPattern() {
-            return _spec->keyPattern();
-        }
-
-        virtual void noteLocation() {
-            // no-op since these are meant to be safe
-        }
-
-        /* called before query getmore block is iterated */
-        virtual void checkLocation() {
-            // no-op since these are meant to be safe
-        }
-
-        virtual bool supportGetMore() { return false; }
-        virtual bool supportYields() { return false; }
-
-        virtual bool getsetdup(DiskLoc loc) { return false; }
-        virtual bool modifiedKeys() const { return true; }
-        virtual bool isMultiKey() const { return false; }
-
-
-
-        const Geo2dType * _spec;
-        const IndexDetails * _id;
-    };
-
-    class GeoSearchCursor : public GeoCursorBase {
-    public:
-        GeoSearchCursor( shared_ptr<GeoSearch> s )
-            : GeoCursorBase( s->_spec ) ,
-              _s( s ) , _cur( s->_hopper->_points.begin() ) , _end( s->_hopper->_points.end() ), _nscanned() {
-            if ( _cur != _end ) {
-                ++_nscanned;
-            }
-        }
-
-        virtual ~GeoSearchCursor() {}
-
-        virtual bool ok() {
-            return _cur != _end;
-        }
-
-        virtual Record* _current() { assert(ok()); return _cur->_loc.rec(); }
-        virtual BSONObj current() { assert(ok()); return _cur->_o; }
-        virtual DiskLoc currLoc() { assert(ok()); return _cur->_loc; }
-        virtual bool advance() { _cur++; incNscanned(); return ok(); }
-        virtual BSONObj currKey() const { return _cur->_key; }
-
-        virtual string toString() {
-            return "GeoSearchCursor";
-        }
-
-
-        virtual BSONObj prettyStartKey() const {
-            return BSON( _s->_spec->_geo << _s->_prefix.toString() );
-        }
-        virtual BSONObj prettyEndKey() const {
-            GeoHash temp = _s->_prefix;
-            temp.move( 1 , 1 );
-            return BSON( _s->_spec->_geo << temp.toString() );
-        }
-
-        virtual long long nscanned() { return _nscanned; }
-
-        shared_ptr<GeoSearch> _s;
-        GeoHopper::Holder::iterator _cur;
-        GeoHopper::Holder::iterator _end;
-
-        void incNscanned() { if ( ok() ) { ++_nscanned; } }
-        long long _nscanned;
-    };
-
-    class GeoBrowse : public GeoCursorBase , public GeoAccumulator {
-    public:
-        GeoBrowse( const Geo2dType * g , string type , BSONObj filter = BSONObj() )
-            : GeoCursorBase( g ) ,GeoAccumulator( g , filter ) ,
-              _type( type ) , _filter( filter ) , _firstCall(true), _nscanned() {
-        }
-
-        virtual string toString() {
-            return (string)"GeoBrowse-" + _type;
-        }
-
-        virtual bool ok() {
-            bool first = _firstCall;
-            if ( _firstCall ) {
-                fillStack();
-                _firstCall = false;
-            }
-            if ( ! _cur.isEmpty() || _stack.size() ) {
-                if ( first ) {
-                    ++_nscanned;
-                }
-                return true;
-            }
-
-            while ( moreToDo() ) {
-                fillStack();
-                if ( ! _cur.isEmpty() ) {
-                    if ( first ) {
-                        ++_nscanned;
-                    }
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-        virtual bool advance() {
-            _cur._o = BSONObj();
-
-            if ( _stack.size() ) {
-                _cur = _stack.front();
-                _stack.pop_front();
-                ++_nscanned;
-                return true;
-            }
-
-            if ( ! moreToDo() )
-                return false;
-
-            while ( _cur.isEmpty() && moreToDo() )
-                fillStack();
-            return ! _cur.isEmpty() && ++_nscanned;
-        }
-
-        virtual Record* _current() { assert(ok()); return _cur._loc.rec(); }
-        virtual BSONObj current() { assert(ok()); return _cur._o; }
-        virtual DiskLoc currLoc() { assert(ok()); return _cur._loc; }
-        virtual BSONObj currKey() const { return _cur._key; }
-
-
-        virtual bool moreToDo() = 0;
-        virtual void fillStack() = 0;
-
-        virtual void addSpecific( const KeyNode& node , double d ) {
-            if ( _cur.isEmpty() )
-                _cur = GeoPoint( node , d );
-            else
-                _stack.push_back( GeoPoint( node , d ) );
-        }
-
-        virtual long long nscanned() {
-            if ( _firstCall ) {
-                ok();
-            }
-            return _nscanned;
-        }
-
-        string _type;
-        BSONObj _filter;
-        list<GeoPoint> _stack;
-
-        GeoPoint _cur;
-        bool _firstCall;
-
-        long long _nscanned;
-
-    };
-
-    class GeoCircleBrowse : public GeoBrowse {
-    public:
-
-        enum State {
-            START ,
-            DOING_EXPAND ,
-            DOING_AROUND ,
-            DONE
-        } _state;
-
-        GeoCircleBrowse( const Geo2dType * g , const BSONObj& circle , BSONObj filter = BSONObj() , const string& type="$center")
-            : GeoBrowse( g , "circle" , filter ) {
-
-            uassert( 13060 , "$center needs 2 fields (middle,max distance)" , circle.nFields() == 2 );
-            BSONObjIterator i(circle);
-            BSONElement center = i.next();
-            _start = g->_tohash(center);
-            _startPt = Point(center);
-            _prefix = _start;
-            _maxDistance = i.next().numberDouble();
-            uassert( 13061 , "need a max distance > 0 " , _maxDistance > 0 );
-            _maxDistance += g->_error;
-
-            _state = START;
-            _found = 0;
-
-            if (type == "$center") {
-                _type = GEO_PLAIN;
-                _xScanDistance = _maxDistance;
-                _yScanDistance = _maxDistance;
-            }
-            else if (type == "$centerSphere") {
-                uassert(13461, "Spherical MaxDistance > PI. Are you sure you are using radians?", _maxDistance < M_PI);
-
-                _type = GEO_SPHERE;
-                _yScanDistance = rad2deg(_maxDistance);
-                _xScanDistance = computeXScanDistance(_startPt._y, _yScanDistance);
-
-                uassert(13462, "Spherical distance would require wrapping, which isn't implemented yet",
-                        (_startPt._x + _xScanDistance < 180) && (_startPt._x - _xScanDistance > -180) &&
-                        (_startPt._y + _yScanDistance < 90) && (_startPt._y - _yScanDistance > -90));
-
-                GEODEBUGPRINT(_maxDistance);
-                GEODEBUGPRINT(_xScanDistance);
-                GEODEBUGPRINT(_yScanDistance);
-            }
-            else {
-                uassert(13460, "invalid $center query type: " + type, false);
-            }
-
-            ok();
-        }
-
-        virtual bool moreToDo() {
-            return _state != DONE;
-        }
-
-        virtual void fillStack() {
-
-            if ( _state == START ) {
-                if ( ! BtreeLocation::initial( *_id , _spec , _min , _max ,
-                                               _prefix , _found , this ) ) {
-                    _state = DONE;
-                    return;
-                }
-                _state = DOING_EXPAND;
-            }
-
-
-            if ( _state == DOING_AROUND ) {
-                // TODO could rework and return rather than looping
-                for (int i=-1; i<=1; i++) {
-                    for (int j=-1; j<=1; j++) {
-                        if (i == 0 && j == 0)
-                            continue; // main box
-
-                        GeoHash newBox = _prefix;
-                        newBox.move(i, j);
-
-                        PREFIXDEBUG(newBox, _g);
-                        if (needToCheckBox(newBox)) {
-                            // TODO consider splitting into quadrants
-                            getPointsForPrefix(newBox);
-                        }
-                        else  {
-                            GEODEBUG("skipping box");
-                        }
-                    }
-                }
-
-                _state = DONE;
-                return;
-            }
-
-            if (_state == DOING_EXPAND) {
-                GEODEBUG( "circle prefix [" << _prefix << "]" );
-                PREFIXDEBUG(_prefix, _g);
-
-                while ( _min.hasPrefix( _prefix ) && _min.advance( -1 , _found , this ) );
-                while ( _max.hasPrefix( _prefix ) && _max.advance( 1 , _found , this ) );
-
-                if ( ! _prefix.constrains() ) {
-                    GEODEBUG( "\t exhausted the btree" );
-                    _state = DONE;
-                    return;
-                }
-
-                Point ll (_g, _prefix);
-                GeoHash trHash = _prefix;
-                trHash.move( 1 , 1 );
-                Point tr (_g, trHash);
-                double sideLen = fabs(tr._x - ll._x);
-
-                if (sideLen > std::max(_xScanDistance, _yScanDistance)) { // circle must be contained by surrounding squares
-                    if ( (ll._x + _xScanDistance < _startPt._x && ll._y + _yScanDistance < _startPt._y) &&
-                            (tr._x - _xScanDistance > _startPt._x && tr._y - _yScanDistance > _startPt._y) ) {
-                        GEODEBUG("square fully contains circle");
-                        _state = DONE;
-                    }
-                    else if (_prefix.getBits() > 1) {
-                        GEODEBUG("checking surrounding squares");
-                        _state = DOING_AROUND;
-                    }
-                    else {
-                        GEODEBUG("using simple search");
-                        _prefix = _prefix.up();
-                    }
-                }
-                else {
-                    _prefix = _prefix.up();
-                }
-
-                return;
-            }
-
-            /* Clients are expected to use moreToDo before calling
-             * fillStack, so DONE is checked for there. If any more
-             * State values are defined, you should handle them
-             * here. */
-            assert(0);
-        }
-
-        bool needToCheckBox(const GeoHash& prefix) {
-            Point ll (_g, prefix);
-            if (fabs(ll._x - _startPt._x) <= _xScanDistance) return true;
-            if (fabs(ll._y - _startPt._y) <= _yScanDistance) return true;
-
-            GeoHash trHash = prefix;
-            trHash.move( 1 , 1 );
-            Point tr (_g, trHash);
-
-            if (fabs(tr._x - _startPt._x) <= _xScanDistance) return true;
-            if (fabs(tr._y - _startPt._y) <= _yScanDistance) return true;
-
-            return false;
-        }
-
-        void getPointsForPrefix(const GeoHash& prefix) {
-            if ( ! BtreeLocation::initial( *_id , _spec , _min , _max , prefix , _found , this ) ) {
-                return;
-            }
-
-            while ( _min.hasPrefix( prefix ) && _min.advance( -1 , _found , this ) );
-            while ( _max.hasPrefix( prefix ) && _max.advance( 1 , _found , this ) );
-        }
-
-
-        virtual bool checkDistance( const GeoHash& h , double& d ) {
-            switch (_type) {
-            case GEO_PLAIN:
-                d = _g->distance( _start , h );
-                break;
-            case GEO_SPHERE:
-                d = spheredist_deg(_startPt, Point(_g, h));
-                break;
-            default:
-                assert(0);
-            }
-
-            GEODEBUG( "\t " << h << "\t" << d );
-            return d <= _maxDistance;
-        }
-
-        GeoDistType _type;
-        GeoHash _start;
-        Point _startPt;
-        double _maxDistance; // user input
-        double _xScanDistance; // effected by GeoDistType
-        double _yScanDistance; // effected by GeoDistType
-
-        int _found;
-
-        GeoHash _prefix;
-        BtreeLocation _min;
-        BtreeLocation _max;
-
-    };
-
-    class GeoBoxBrowse : public GeoBrowse {
-    public:
-
-        enum State {
-            START ,
-            DOING_EXPAND ,
-            DONE
-        } _state;
-
-        GeoBoxBrowse( const Geo2dType * g , const BSONObj& box , BSONObj filter = BSONObj() )
-            : GeoBrowse( g , "box" , filter ) {
-
-            uassert( 13063 , "$box needs 2 fields (bottomLeft,topRight)" , box.nFields() == 2 );
-            BSONObjIterator i(box);
-            _bl = g->_tohash( i.next() );
-            _tr = g->_tohash( i.next() );
-
-            _want._min = Point( _g , _bl );
-            _want._max = Point( _g , _tr );
-
-            uassert( 13064 , "need an area > 0 " , _want.area() > 0 );
-
-            _state = START;
-            _found = 0;
-
-            Point center = _want.center();
-            _prefix = _g->hash( center._x , center._y );
-
-            GEODEBUG( "center : " << center.toString() << "\t" << _prefix );
-
-            {
-                GeoHash a(0LL,32);
-                GeoHash b(0LL,32);
-                b.move(1,1);
-                _fudge = _g->distance(a,b);
-            }
-
-            _wantLen = _fudge + std::max((_want._max._x - _want._min._x), (_want._max._y - _want._min._y));
-
-            ok();
-        }
-
-        virtual bool moreToDo() {
-            return _state != DONE;
-        }
-
-        virtual void fillStack() {
-            if ( _state == START ) {
-
-                if ( ! BtreeLocation::initial( *_id , _spec , _min , _max ,
-                                               _prefix , _found , this ) ) {
-                    _state = DONE;
-                    return;
-                }
-                _state = DOING_EXPAND;
-            }
-
-            if ( _state == DOING_EXPAND ) {
-                int started = _found;
-                while ( started == _found || _state == DONE ) {
-                    GEODEBUG( "box prefix [" << _prefix << "]" );
-                    while ( _min.hasPrefix( _prefix ) && _min.advance( -1 , _found , this ) );
-                    while ( _max.hasPrefix( _prefix ) && _max.advance( 1 , _found , this ) );
-
-                    if ( _state == DONE )
-                        return;
-
-                    if ( ! _prefix.constrains() ) {
-                        GEODEBUG( "box exhausted" );
-                        _state = DONE;
-                        return;
-                    }
-
-                    if (_g->sizeEdge(_prefix) < _wantLen) {
-                        _prefix = _prefix.up();
-                    }
-                    else {
-                        for (int i=-1; i<=1; i++) {
-                            for (int j=-1; j<=1; j++) {
-
-                                if (i == 0 && j == 0)
-                                    continue; // main box
-
-                                GeoHash newBox = _prefix;
-                                newBox.move(i, j);
-
-                                PREFIXDEBUG(newBox, _g);
-
-                                Box cur( _g , newBox );
-                                if (_want.intersects(cur)) {
-                                    // TODO consider splitting into quadrants
-                                    getPointsForPrefix(newBox);
-                                }
-                                else  {
-                                    GEODEBUG("skipping box");
-                                }
-                            }
-                        }
-                        _state = DONE;
-                    }
-
-                }
-                return;
-            }
-
-        }
-
-        void getPointsForPrefix(const GeoHash& prefix) {
-            if ( ! BtreeLocation::initial( *_id , _spec , _min , _max , prefix , _found , this ) ) {
-                return;
-            }
-
-            while ( _min.hasPrefix( prefix ) && _min.advance( -1 , _found , this ) );
-            while ( _max.hasPrefix( prefix ) && _max.advance( 1 , _found , this ) );
-        }
-
-        virtual bool checkDistance( const GeoHash& h , double& d ) {
-            bool res = _want.inside( Point( _g , h ) , _fudge );
-            GEODEBUG( "\t want : " << _want.toString()
-                      << " point: " << Point( _g , h ).toString()
-                      << " in : " << res );
-            return res;
-        }
-
-        GeoHash _bl;
-        GeoHash _tr;
-        Box _want;
-        double _wantLen;
-
-        int _found;
-
-        GeoHash _prefix;
-        BtreeLocation _min;
-        BtreeLocation _max;
-
-        double _fudge;
-    };
-
-
-    shared_ptr<Cursor> Geo2dType::newCursor( const BSONObj& query , const BSONObj& order , int numWanted ) const {
-        if ( numWanted < 0 )
-            numWanted = numWanted * -1;
-        else if ( numWanted == 0 )
-            numWanted = 100;
-
-        BSONObjIterator i(query);
-        while ( i.more() ) {
-            BSONElement e = i.next();
-
-            if ( _geo != e.fieldName() )
-                continue;
-
-            if ( e.type() != Object )
-                continue;
-
-            switch ( e.embeddedObject().firstElement().getGtLtOp() ) {
-            case BSONObj::opNEAR: {
-                BSONObj n = e.embeddedObject();
-                e = n.firstElement();
-
-                const char* suffix = e.fieldName() + 5; // strlen("$near") == 5;
-                GeoDistType type;
-                if (suffix[0] == '\0') {
-                    type = GEO_PLAIN;
-                }
-                else if (strcmp(suffix, "Sphere") == 0) {
-                    type = GEO_SPHERE;
-                }
-                else {
-                    uassert(13464, string("invalid $near search type: ") + e.fieldName(), false);
-                    type = GEO_PLAIN; // prevents uninitialized warning
-                }
-
-                double maxDistance = numeric_limits<double>::max();
-                if ( e.isABSONObj() && e.embeddedObject().nFields() > 2 ) {
-                    BSONObjIterator i(e.embeddedObject());
-                    i.next();
-                    i.next();
-                    BSONElement e = i.next();
-                    if ( e.isNumber() )
-                        maxDistance = e.numberDouble();
-                }
-                {
-                    BSONElement e = n["$maxDistance"];
-                    if ( e.isNumber() )
-                        maxDistance = e.numberDouble();
-                }
-                shared_ptr<GeoSearch> s( new GeoSearch( this , _tohash(e) , numWanted , query , maxDistance, type ) );
-                s->exec();
-                shared_ptr<Cursor> c;
-                c.reset( new GeoSearchCursor( s ) );
-                return c;
-            }
-            case BSONObj::opWITHIN: {
-                e = e.embeddedObject().firstElement();
-                uassert( 13057 , "$within has to take an object or array" , e.isABSONObj() );
-                e = e.embeddedObject().firstElement();
-                string type = e.fieldName();
-                if ( startsWith(type,  "$center") ) {
-                    uassert( 13059 , "$center has to take an object or array" , e.isABSONObj() );
-                    shared_ptr<Cursor> c( new GeoCircleBrowse( this , e.embeddedObjectUserCheck() , query , type) );
-                    return c;
-                }
-                else if ( type == "$box" ) {
-                    uassert( 13065 , "$box has to take an object or array" , e.isABSONObj() );
-                    shared_ptr<Cursor> c( new GeoBoxBrowse( this , e.embeddedObjectUserCheck() , query ) );
-                    return c;
-                }
-                throw UserException( 13058 , (string)"unknown $with type: " + type );
-            }
-            default:
-                break;
-            }
-        }
-
-        throw UserException( 13042 , (string)"missing geo field (" + _geo + ") in : " + query.toString() );
-    }
-
-    // ------
-    // commands
-    // ------
-
-    class Geo2dFindNearCmd : public Command {
-    public:
-        Geo2dFindNearCmd() : Command( "geoNear" ) {}
-        virtual LockType locktype() const { return READ; }
-        bool slaveOk() const { return true; }
-        void help(stringstream& h) const { h << "http://www.mongodb.org/display/DOCS/Geospatial+Indexing#GeospatialIndexing-geoNearCommand"; }
-        bool slaveOverrideOk() { return true; }
-        bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            string ns = dbname + "." + cmdObj.firstElement().valuestr();
-
-            NamespaceDetails * d = nsdetails( ns.c_str() );
-            if ( ! d ) {
-                errmsg = "can't find ns";
-                return false;
-            }
-
-            vector<int> idxs;
-            d->findIndexByType( GEO2DNAME , idxs );
-
-            if ( idxs.size() > 1 ) {
-                errmsg = "more than 1 geo indexes :(";
-                return false;
-            }
-
-            if ( idxs.size() == 0 ) {
-                errmsg = "no geo index :(";
-                return false;
-            }
-
-            int geoIdx = idxs[0];
-
-            result.append( "ns" , ns );
-
-            IndexDetails& id = d->idx( geoIdx );
-            Geo2dType * g = (Geo2dType*)id.getSpec().getType();
-            assert( &id == g->getDetails() );
-
-            int numWanted = 100;
-            if ( cmdObj["num"].isNumber() )
-                numWanted = cmdObj["num"].numberInt();
-
-            uassert(13046, "'near' param missing/invalid", !cmdObj["near"].eoo());
-            const GeoHash n = g->_tohash( cmdObj["near"] );
-            result.append( "near" , n.toString() );
-
-            BSONObj filter;
-            if ( cmdObj["query"].type() == Object )
-                filter = cmdObj["query"].embeddedObject();
-
-            double maxDistance = numeric_limits<double>::max();
-            if ( cmdObj["maxDistance"].isNumber() )
-                maxDistance = cmdObj["maxDistance"].number();
-
-            GeoDistType type = GEO_PLAIN;
-            if ( cmdObj["spherical"].trueValue() )
-                type = GEO_SPHERE;
-
-            GeoSearch gs( g , n , numWanted , filter , maxDistance , type);
-
-            if ( cmdObj["start"].type() == String) {
-                GeoHash start ((string) cmdObj["start"].valuestr());
-                gs._start = start;
-            }
-
-            gs.exec();
-
-            double distanceMultiplier = 1;
-            if ( cmdObj["distanceMultiplier"].isNumber() )
-                distanceMultiplier = cmdObj["distanceMultiplier"].number();
-
-            double totalDistance = 0;
-
-
-            BSONObjBuilder arr( result.subarrayStart( "results" ) );
-            int x = 0;
-            for ( GeoHopper::Holder::iterator i=gs._hopper->_points.begin(); i!=gs._hopper->_points.end(); i++ ) {
-                const GeoPoint& p = *i;
-
-                double dis = distanceMultiplier * p._distance;
-                totalDistance += dis;
-
-                BSONObjBuilder bb( arr.subobjStart( BSONObjBuilder::numStr( x++ ) ) );
-                bb.append( "dis" , dis );
-                bb.append( "obj" , p._o );
-                bb.done();
-            }
-            arr.done();
-
-            BSONObjBuilder stats( result.subobjStart( "stats" ) );
-            stats.append( "time" , cc().curop()->elapsedMillis() );
-            stats.appendNumber( "btreelocs" , gs._nscanned );
-            stats.appendNumber( "nscanned" , gs._hopper->_lookedAt );
-            stats.appendNumber( "objectsLoaded" , gs._hopper->_objectsLoaded );
-            stats.append( "avgDistance" , totalDistance / x );
-            stats.append( "maxDistance" , gs._hopper->farthest() );
-            stats.done();
-
-            return true;
-        }
-
-    } geo2dFindNearCmd;
-
-    class GeoWalkCmd : public Command {
-    public:
-        GeoWalkCmd() : Command( "geoWalk" ) {}
-        virtual LockType locktype() const { return READ; }
-        bool slaveOk() const { return true; }
-        bool slaveOverrideOk() { return true; }
-        bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            string ns = dbname + "." + cmdObj.firstElement().valuestr();
-
-            NamespaceDetails * d = nsdetails( ns.c_str() );
-            if ( ! d ) {
-                errmsg = "can't find ns";
-                return false;
-            }
-
-            int geoIdx = -1;
-            {
-                NamespaceDetails::IndexIterator ii = d->ii();
-                while ( ii.more() ) {
-                    IndexDetails& id = ii.next();
-                    if ( id.getSpec().getTypeName() == GEO2DNAME ) {
-                        if ( geoIdx >= 0 ) {
-                            errmsg = "2 geo indexes :(";
-                            return false;
-                        }
-                        geoIdx = ii.pos() - 1;
-                    }
-                }
-            }
-
-            if ( geoIdx < 0 ) {
-                errmsg = "no geo index :(";
-                return false;
-            }
-
-
-            IndexDetails& id = d->idx( geoIdx );
-            Geo2dType * g = (Geo2dType*)id.getSpec().getType();
-            assert( &id == g->getDetails() );
-
-            int max = 100000;
-
-            BtreeCursor c( d , geoIdx , id , BSONObj() , BSONObj() , true , 1 );
-            while ( c.ok() && max-- ) {
-                GeoHash h( c.currKey().firstElement() );
-                int len;
-                cout << "\t" << h.toString()
-                     << "\t" << c.current()[g->_geo]
-                     << "\t" << hex << h.getHash()
-                     << "\t" << hex << ((long long*)c.currKey().firstElement().binData(len))[0]
-                     << "\t" << c.current()["_id"]
-                     << endl;
-                c.advance();
-            }
-
-            return true;
-        }
-
-    } geoWalkCmd;
 
 }
+

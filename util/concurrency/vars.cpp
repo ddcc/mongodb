@@ -17,12 +17,12 @@
 */
 
 #include "pch.h"
-#include "value.h"
 #include "mutex.h"
+#include "value.h"
 
 namespace mongo {
 
-    mongo::mutex _atomicMutex("_atomicMutex");
+    mutex DiagStr::m("diags");
 
     // intentional leak. otherwise destructor orders can be problematic at termination.
     MutexDebugger &mutexDebugger = *(new MutexDebugger());

@@ -7,10 +7,10 @@ Subject: return empty TERM if not set (Closes: #620910)
  1 files changed, 1 insertions(+), 1 deletions(-)
 
 diff --git a/SConstruct b/SConstruct
-index cb6019f..0293366 100644
+index f98eb27..7417daa 100644
 --- a/SConstruct
 +++ b/SConstruct
-@@ -679,7 +679,7 @@ if nix:
+@@ -684,7 +684,7 @@ if nix:
  
      #make scons colorgcc friendly
      env['ENV']['HOME'] = os.environ['HOME']

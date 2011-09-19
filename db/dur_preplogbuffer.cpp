@@ -35,6 +35,7 @@
 #include "../util/alignedbuilder.h"
 #include "../util/timer.h"
 #include "dur_stats.h"
+#include "../server.h"
 
 using namespace mongoutils;
 
@@ -58,9 +59,8 @@ namespace mongo {
         void prepBasicWrite_inlock(AlignedBuilder&bb, const WriteIntent *i, RelativePath& lastDbPath) {
             size_t ofs = 1;
             MongoMMF *mmf = findMMF_inlock(i->start(), /*out*/ofs);
-            dassert( i->w_ptr == 0 );
 
-            if( !mmf->willNeedRemap() ) {
+            if( unlikely(!mmf->willNeedRemap()) ) {
                 // tag this mmf as needed a remap of its private view later.
                 // usually it will already be dirty/already set, so we do the if above first
                 // to avoid possibility of cpu cache line contention
@@ -69,8 +69,13 @@ namespace mongo {
 
             // since we have already looked up the mmf, we go ahead and remember the write view location
             // so we don't have to find the MongoMMF again later in WRITETODATAFILES()
+            // 
+            // this was for WRITETODATAFILES_Impl2 so commented out now
+            //
+            /*
             dassert( i->w_ptr == 0 );
             i->w_ptr = ((char*)mmf->view_write()) + ofs;
+            */
 
             JEntry e;
             e.len = min(i->length(), (unsigned)(mmf->length() - ofs)); //dont write past end of file
@@ -92,8 +97,8 @@ namespace mongo {
 #endif
             bb.appendBuf(i->start(), e.len);
 
-            if (e.len != (unsigned)i->length()) {
-                log() << "dur info splitting prepBasicWrite at boundary" << endl;
+            if (unlikely(e.len != (unsigned)i->length())) {
+                log() << "journal info splitting prepBasicWrite at boundary" << endl;
 
                 // This only happens if we write to the last byte in a file and
                 // the fist byte in another file that is mapped adjacently. I
@@ -120,23 +125,20 @@ namespace mongo {
             }
         }
 
-        void resetLogBuffer(AlignedBuilder& bb) {
+        void resetLogBuffer(/*out*/JSectHeader& h, AlignedBuilder& bb) {
             bb.reset();
 
-            // JSectHeader
-            JSectHeader h;
-            h.len = (unsigned) 0xffffffff;  // total length, will fill in later
+            h.setSectionLen(0xffffffff);  // total length, will fill in later
             h.seqNumber = getLastDataFileFlushTime();
             h.fileId = j.curFileId();
-
-            bb.appendStruct(h);
         }
 
         /** we will build an output buffer ourself and then use O_DIRECT
             we could be in read lock for this
             caller handles locking
+            @return partially populated sectheader and _ab set
         */
-        void _PREPLOGBUFFER() {
+        void _PREPLOGBUFFER(JSectHeader& h) {
             assert( cmdLine.dur );
 
             {
@@ -148,7 +150,7 @@ namespace mongo {
             }
 
             AlignedBuilder& bb = commitJob._ab;
-            resetLogBuffer(bb);
+            resetLogBuffer(h, bb); // adds JSectHeader
 
             // ops other than basic writes (DurOp's)
             {
@@ -157,34 +159,14 @@ namespace mongo {
                 }
             }
 
-            {
-                prepBasicWrites(bb);
-            }
-
-            {
-                JSectFooter f(bb.buf(), bb.len());
-                bb.appendStruct(f);
-            }
-
-            {
-                // pad to alignment, and set the total section length in the JSectHeader
-                assert( 0xffffe000 == (~(Alignment-1)) );
-                unsigned L = (bb.len() + Alignment-1) & (~(Alignment-1));
-                dassert( L >= (unsigned) bb.len() );
-
-                *((unsigned*)bb.atOfs(0)) = L;
-
-                unsigned padding = L - bb.len();
-                bb.skip(padding);
-                dassert( bb.len() % Alignment == 0 );
-            }
+            prepBasicWrites(bb);
 
             return;
         }
-        void PREPLOGBUFFER() {
+        void PREPLOGBUFFER(/*out*/ JSectHeader& h) {
             Timer t;
             j.assureLogFileOpen(); // so fileId is set
-            _PREPLOGBUFFER();
+            _PREPLOGBUFFER(h);
             stats.curr->_prepLogBufferMicros += t.micros();
         }
 

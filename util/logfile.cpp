@@ -77,18 +77,35 @@ namespace mongo {
             CloseHandle(_fd);
     }
 
-    void LogFile::synchronousAppend(const void *buf, size_t len) {
-        assert(_fd);
-        DWORD written;
-        if( !WriteFile(_fd, buf, len, &written, NULL) ) {
-            DWORD e = GetLastError();
-            if( e == 87 )
-                massert(13519, "error appending to file - misaligned direct write?", false);
-            else
-                uasserted(13517, str::stream() << "error appending to file " << errnoWithDescription(e));
+    void LogFile::truncate() {
+        verify(15870, _fd != INVALID_HANDLE_VALUE);
+
+        if (!SetEndOfFile(_fd)){
+            msgasserted(15871, "Couldn't truncate file: " + errnoWithDescription());
         }
-        else {
-            dassert( written == len );
+    }
+
+    void LogFile::synchronousAppend(const void *_buf, size_t _len) {
+        const size_t BlockSize = 8 * 1024 * 1024;
+        assert(_fd);
+        assert(_len % 4096 == 0);
+        const char *buf = (const char *) _buf;
+        size_t left = _len;
+        while( left ) {
+            size_t toWrite = min(left, BlockSize);
+            DWORD written;
+            if( !WriteFile(_fd, buf, toWrite, &written, NULL) ) {
+                DWORD e = GetLastError();
+                if( e == 87 )
+                    msgasserted(13519, "error 87 appending to file - invalid parameter");
+                else
+                    uasserted(13517, str::stream() << "error appending to file " << _name << ' ' << _len << ' ' << toWrite << ' ' << errnoWithDescription(e));
+            }
+            else {
+                dassert( written == toWrite );
+            }
+            left -= written;
+            buf += written;
         }
     }
 
@@ -96,28 +113,44 @@ namespace mongo {
 
 #else
 
+// posix
+
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include "paths.h"
 
 namespace mongo {
 
     LogFile::LogFile(string name) : _name(name) {
-        _fd = open(name.c_str(),
-                   O_CREAT
-                   | O_WRONLY
+        int options = O_CREAT
+                    | O_WRONLY
 #if defined(O_DIRECT)
-                   | O_DIRECT
+                    | O_DIRECT
 #endif
 #if defined(O_NOATIME)
-                   | O_NOATIME
+                    | O_NOATIME
 #endif
-                   ,
-                   S_IRUSR | S_IWUSR);
+                    ;
+
+        _fd = open(name.c_str(), options, S_IRUSR | S_IWUSR);
+
+#if defined(O_DIRECT)
+        _direct = true;
+        if( _fd < 0 ) {
+            _direct = false;
+            options &= ~O_DIRECT;
+            _fd = open(name.c_str(), options, S_IRUSR | S_IWUSR);
+        }
+#else
+        _direct = false;
+#endif
+
         if( _fd < 0 ) {
             uasserted(13516, str::stream() << "couldn't open file " << name << " for writing " << errnoWithDescription());
         }
 
+        flushMyDirectory(name);
     }
 
     LogFile::~LogFile() {
@@ -126,7 +159,21 @@ namespace mongo {
         _fd = -1;
     }
 
+    void LogFile::truncate() {
+        verify(15872, _fd >= 0);
+
+        BOOST_STATIC_ASSERT(sizeof(off_t) == 8); // we don't want overflow here
+        const off_t pos = lseek(_fd, 0, SEEK_CUR); // doesn't actually seek
+        if (ftruncate(_fd, pos) != 0){
+            msgasserted(15873, "Couldn't truncate file: " + errnoWithDescription());
+        }
+    }
+
     void LogFile::synchronousAppend(const void *b, size_t len) {
+#ifdef POSIX_FADV_DONTNEED
+        const off_t pos = lseek(_fd, 0, SEEK_CUR); // doesn't actually seek
+#endif
+
         const char *buf = (char *) b;
         assert(_fd);
         assert(((size_t)buf)%4096==0); // aligned
@@ -150,6 +197,10 @@ namespace mongo {
             uasserted(13514, str::stream() << "error appending to file on fsync " << ' ' << errnoWithDescription());
         }
 
+#ifdef POSIX_FADV_DONTNEED
+        if (!_direct)
+            posix_fadvise(_fd, pos, len, POSIX_FADV_DONTNEED);
+#endif
     }
 
 }

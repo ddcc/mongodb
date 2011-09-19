@@ -53,8 +53,8 @@ namespace mongo {
 
         bool supported();
 
-        bool blockCheckSupported();
-        bool blockInMemory( char * start );
+        static bool blockCheckSupported();
+        static bool blockInMemory( char * start );
 
     private:
         pid_t _pid;
@@ -62,6 +62,6 @@ namespace mongo {
 
     void writePidFile( const std::string& path );
 
-    void printMemInfo( const char * where );
+    void printMemInfo( const char * whereContextStr = 0 );
 
 }

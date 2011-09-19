@@ -38,6 +38,8 @@ namespace mongo {
 
         const string _name;
 
+        void truncate(); // Removes extra data after current position
+
     private:
 #if defined(_WIN32)
         typedef HANDLE fd_type;
@@ -45,6 +47,7 @@ namespace mongo {
         typedef int fd_type;
 #endif
         fd_type _fd;
+        bool _direct; // are we using direct I/O
     };
 
 }

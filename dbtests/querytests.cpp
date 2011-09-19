@@ -18,9 +18,10 @@
  */
 
 #include "pch.h"
-#include "../db/query.h"
+#include "../db/ops/query.h"
+#include "../db/dbhelpers.h"
+#include "../db/clientcursor.h"
 
-#include "../db/db.h"
 #include "../db/instance.h"
 #include "../db/json.h"
 #include "../db/lasterror.h"
@@ -61,7 +62,7 @@ namespace QueryTests {
         }
         static void addIndex( const BSONObj &key ) {
             BSONObjBuilder b;
-            b.append( "name", key.firstElement().fieldName() );
+            b.append( "name", key.firstElementFieldName() );
             b.append( "ns", ns() );
             b.append( "key", key );
             BSONObj o = b.done();
@@ -239,7 +240,7 @@ namespace QueryTests {
         }
         void run() {
             const char *ns = "unittests.querytests.ReturnOneOfManyAndTail";
-            client().createCollection( ns, 0, true );
+            client().createCollection( ns, 1024, true );
             insert( ns, BSON( "a" << 0 ) );
             insert( ns, BSON( "a" << 1 ) );
             insert( ns, BSON( "a" << 2 ) );
@@ -258,7 +259,7 @@ namespace QueryTests {
         }
         void run() {
             const char *ns = "unittests.querytests.TailNotAtEnd";
-            client().createCollection( ns, 0, true );
+            client().createCollection( ns, 2047, true );
             insert( ns, BSON( "a" << 0 ) );
             insert( ns, BSON( "a" << 1 ) );
             insert( ns, BSON( "a" << 2 ) );
@@ -283,7 +284,7 @@ namespace QueryTests {
         }
         void run() {
             const char *ns = "unittests.querytests.EmptyTail";
-            client().createCollection( ns, 0, true );
+            client().createCollection( ns, 1900, true );
             auto_ptr< DBClientCursor > c = client().query( ns, Query().hint( BSON( "$natural" << 1 ) ), 2, 0, 0, QueryOption_CursorTailable );
             ASSERT_EQUALS( 0, c->getCursorId() );
             ASSERT( c->isDead() );
@@ -301,7 +302,7 @@ namespace QueryTests {
         }
         void run() {
             const char *ns = "unittests.querytests.TailableDelete";
-            client().createCollection( ns, 0, true, 2 );
+            client().createCollection( ns, 8192, true, 2 );
             insert( ns, BSON( "a" << 0 ) );
             insert( ns, BSON( "a" << 1 ) );
             auto_ptr< DBClientCursor > c = client().query( ns, Query().hint( BSON( "$natural" << 1 ) ), 2, 0, 0, QueryOption_CursorTailable );
@@ -322,7 +323,7 @@ namespace QueryTests {
         }
         void run() {
             const char *ns = "unittests.querytests.TailableInsertDelete";
-            client().createCollection( ns, 0, true );
+            client().createCollection( ns, 1330, true );
             insert( ns, BSON( "a" << 0 ) );
             insert( ns, BSON( "a" << 1 ) );
             auto_ptr< DBClientCursor > c = client().query( ns, Query().hint( BSON( "$natural" << 1 ) ), 2, 0, 0, QueryOption_CursorTailable );
@@ -356,23 +357,32 @@ namespace QueryTests {
         ~TailableQueryOnId() {
             client().dropCollection( "unittests.querytests.TailableQueryOnId" );
         }
+
+		void insertA(const char* ns, int a) {
+			BSONObjBuilder b;
+			b.appendOID("_id", 0, true);
+			b.appendOID("value", 0, true);
+			b.append("a", a);
+			insert(ns, b.obj());
+		}
+
         void run() {
             const char *ns = "unittests.querytests.TailableQueryOnId";
             BSONObj info;
-            client().runCommand( "unittests", BSON( "create" << "querytests.TailableQueryOnId" << "capped" << true << "autoIndexId" << true ), info );
-            insert( ns, BSON( "a" << 0 ) );
-            insert( ns, BSON( "a" << 1 ) );
+            client().runCommand( "unittests", BSON( "create" << "querytests.TailableQueryOnId" << "capped" << true << "size" << 8192 << "autoIndexId" << true ), info );
+            insertA( ns, 0 );
+            insertA( ns, 1 );
             auto_ptr< DBClientCursor > c1 = client().query( ns, QUERY( "a" << GT << -1 ), 0, 0, 0, QueryOption_CursorTailable );
             OID id;
             id.init("000000000000000000000000");
-            auto_ptr< DBClientCursor > c2 = client().query( ns, QUERY( "_id" << GT << id ), 0, 0, 0, QueryOption_CursorTailable );
+            auto_ptr< DBClientCursor > c2 = client().query( ns, QUERY( "value" << GT << id ), 0, 0, 0, QueryOption_CursorTailable );
             c1->next();
             c1->next();
             ASSERT( !c1->more() );
             c2->next();
             c2->next();
             ASSERT( !c2->more() );
-            insert( ns, BSON( "a" << 2 ) );
+            insertA( ns, 2 );
             ASSERT( c1->more() );
             ASSERT_EQUALS( 2, c1->next().getIntField( "a" ) );
             ASSERT( !c1->more() );
@@ -390,7 +400,6 @@ namespace QueryTests {
         }
         void run() {
             const char *ns = "unittests.querytests.OplogReplayMode";
-            insert( ns, BSON( "ts" << 3 ) );
             insert( ns, BSON( "ts" << 0 ) );
             insert( ns, BSON( "ts" << 1 ) );
             insert( ns, BSON( "ts" << 2 ) );
@@ -398,6 +407,12 @@ namespace QueryTests {
             ASSERT( c->more() );
             ASSERT_EQUALS( 2, c->next().getIntField( "ts" ) );
             ASSERT( !c->more() );
+
+            insert( ns, BSON( "ts" << 3 ) );
+            c = client().query( ns, QUERY( "ts" << GT << 1 ).hint( BSON( "$natural" << 1 ) ), 0, 0, 0, QueryOption_OplogReplay );
+            ASSERT( c->more() );
+            ASSERT_EQUALS( 2, c->next().getIntField( "ts" ) );
+            ASSERT( c->more() );
         }
     };
 
@@ -725,6 +740,90 @@ namespace QueryTests {
     };
     BSONObj MinMax::empty_;
 
+    class MatchCodeCodeWScope : public ClientBase {
+    public:
+        MatchCodeCodeWScope() : _ns( "unittests.querytests.MatchCodeCodeWScope" ) {}
+        ~MatchCodeCodeWScope() {
+            client().dropCollection( "unittests.querytests.MatchCodeCodeWScope" );
+        }
+        void run() {
+            checkMatch();
+            client().ensureIndex( _ns, BSON( "a" << 1 ) );
+            checkMatch();
+            // Use explain queries to check index bounds.
+            {
+                BSONObj explain = client().findOne( _ns, QUERY( "a" << BSON( "$type" << (int)Code ) ).explain() );
+                BSONObjBuilder lower;
+                lower.appendCode( "", "" );
+                BSONObjBuilder upper;
+                upper.appendCodeWScope( "", "", BSONObj() );
+                ASSERT( lower.done().firstElement().valuesEqual( explain[ "indexBounds" ].Obj()[ "a" ].Array()[ 0 ].Array()[ 0 ] ) );
+                ASSERT( upper.done().firstElement().valuesEqual( explain[ "indexBounds" ].Obj()[ "a" ].Array()[ 0 ].Array()[ 1 ] ) );
+            }
+            {
+                BSONObj explain = client().findOne( _ns, QUERY( "a" << BSON( "$type" << (int)CodeWScope ) ).explain() );
+                BSONObjBuilder lower;
+                lower.appendCodeWScope( "", "", BSONObj() );
+                // This upper bound may change if a new bson type is added.
+                BSONObjBuilder upper;
+                upper << "" << BSON( "$maxElement" << 1 );
+                ASSERT( lower.done().firstElement().valuesEqual( explain[ "indexBounds" ].Obj()[ "a" ].Array()[ 0 ].Array()[ 0 ] ) );
+                ASSERT( upper.done().firstElement().valuesEqual( explain[ "indexBounds" ].Obj()[ "a" ].Array()[ 0 ].Array()[ 1 ] ) );
+            }
+        }
+    private:
+        void checkMatch() {
+            client().remove( _ns, BSONObj() );
+            
+            client().insert( _ns, code() );
+            client().insert( _ns, codeWScope() );
+            
+            ASSERT_EQUALS( 1U, client().count( _ns, code() ) );
+            ASSERT_EQUALS( 1U, client().count( _ns, codeWScope() ) );
+            
+            ASSERT_EQUALS( 1U, client().count( _ns, BSON( "a" << BSON( "$type" << (int)Code ) ) ) );
+            ASSERT_EQUALS( 1U, client().count( _ns, BSON( "a" << BSON( "$type" << (int)CodeWScope ) ) ) );
+        }
+        BSONObj code() const {
+            BSONObjBuilder codeBuilder;
+            codeBuilder.appendCode( "a", "return 1;" );
+            return codeBuilder.obj();            
+        }
+        BSONObj codeWScope() const {
+            BSONObjBuilder codeWScopeBuilder;
+            codeWScopeBuilder.appendCodeWScope( "a", "return 1;", BSONObj() );
+            return codeWScopeBuilder.obj();            
+        }
+        const char *_ns;
+    };
+    
+    class MatchDBRefType : public ClientBase {
+    public:
+        MatchDBRefType() : _ns( "unittests.querytests.MatchDBRefType" ) {}
+        ~MatchDBRefType() {
+            client().dropCollection( "unittests.querytests.MatchDBRefType" );
+        }
+        void run() {
+            checkMatch();
+            client().ensureIndex( _ns, BSON( "a" << 1 ) );
+            checkMatch();
+        }
+    private:
+        void checkMatch() {
+            client().remove( _ns, BSONObj() );            
+            client().insert( _ns, dbref() );
+            ASSERT_EQUALS( 1U, client().count( _ns, dbref() ) );
+            ASSERT_EQUALS( 1U, client().count( _ns, BSON( "a" << BSON( "$type" << (int)DBRef ) ) ) );
+        }
+        BSONObj dbref() const {
+            BSONObjBuilder b;
+            OID oid;
+            b.appendDBRef( "a", "ns", oid );
+            return b.obj();            
+        }
+        const char *_ns;
+    };
+    
     class DirectLocking : public ClientBase {
     public:
         void run() {
@@ -850,10 +949,12 @@ namespace QueryTests {
             writelock lk("");
             Client::Context ctx( "unittests" );
 
+            // note that extents are always at least 4KB now - so this will get rounded up a bit.
             ASSERT( userCreateNS( ns() , fromjson( "{ capped : true , size : 2000 }" ) , err , false ) );
-            for ( int i=0; i<100; i++ ) {
+            for ( int i=0; i<200; i++ ) {
                 insertNext();
-                ASSERT( count() < 45 );
+//                cout << count() << endl;
+                ASSERT( count() < 90 );
             }
 
             int a = count();
@@ -870,7 +971,7 @@ namespace QueryTests {
             insertNext();
             ASSERT( c->more() );
 
-            for ( int i=0; i<50; i++ ) {
+            for ( int i=0; i<90; i++ ) {
                 insertNext();
             }
 
@@ -879,7 +980,10 @@ namespace QueryTests {
         }
 
         void insertNext() {
-            insert( ns() , BSON( "i" << _n++ ) );
+			BSONObjBuilder b;
+			b.appendOID("_id", 0, true);
+			b.append("i", _n++);
+            insert( ns() , b.obj() );
         }
 
         int _n;
@@ -913,6 +1017,7 @@ namespace QueryTests {
             unsigned long long slow , fast;
 
             int n = 10000;
+            DEV n = 1000;
             {
                 Timer t;
                 for ( int i=0; i<n; i++ ) {
@@ -986,7 +1091,7 @@ namespace QueryTests {
 
         void run() {
             BSONObj info;
-            ASSERT( client().runCommand( "unittests", BSON( "create" << "querytests.findingstart" << "capped" << true << "size" << 1000 << "$nExtents" << 5 << "autoIndexId" << false ), info ) );
+            ASSERT( client().runCommand( "unittests", BSON( "create" << "querytests.findingstart" << "capped" << true << "$nExtents" << 5 << "autoIndexId" << false ), info ) );
 
             int i = 0;
             for( int oldCount = -1;
@@ -1003,6 +1108,7 @@ namespace QueryTests {
                     ASSERT( !next[ "ts" ].eoo() );
                     ASSERT_EQUALS( ( j > min ? j : min ), next[ "ts" ].numberInt() );
                 }
+                //cout << k << endl;
             }
         }
 
@@ -1023,7 +1129,7 @@ namespace QueryTests {
             unsigned startNumCursors = ClientCursor::numCursors();
 
             BSONObj info;
-            ASSERT( client().runCommand( "unittests", BSON( "create" << "querytests.findingstart" << "capped" << true << "size" << 10000 << "$nExtents" << 5 << "autoIndexId" << false ), info ) );
+            ASSERT( client().runCommand( "unittests", BSON( "create" << "querytests.findingstart" << "capped" << true << "$nExtents" << 5 << "autoIndexId" << false ), info ) );
 
             int i = 0;
             for( ; i < 150; client().insert( ns(), BSON( "ts" << i++ ) ) );
@@ -1046,7 +1152,35 @@ namespace QueryTests {
     private:
         int _old;
     };
+    
+    /**
+     * Check OplogReplay mode where query timestamp is earlier than the earliest
+     * entry in the collection.
+     */
+    class FindingStartStale : public CollectionBase {
+    public:
+        FindingStartStale() : CollectionBase( "findingstart" ) {}
 
+        void run() {
+            unsigned startNumCursors = ClientCursor::numCursors();
+            
+            BSONObj info;
+            ASSERT( client().runCommand( "unittests", BSON( "create" << "querytests.findingstart" << "capped" << true << "$nExtents" << 5 << "autoIndexId" << false ), info ) );
+            
+            // Check OplogReplay mode with empty collection.
+            auto_ptr< DBClientCursor > c = client().query( ns(), QUERY( "ts" << GTE << 50 ), 0, 0, 0, QueryOption_OplogReplay );
+            ASSERT( !c->more() );
+
+            // Check with some docs in the collection.
+            for( int i = 100; i < 150; client().insert( ns(), BSON( "ts" << i++ ) ) );
+            c = client().query( ns(), QUERY( "ts" << GTE << 50 ), 0, 0, 0, QueryOption_OplogReplay );
+            ASSERT( c->more() );
+            ASSERT_EQUALS( 100, c->next()[ "ts" ].numberInt() );
+
+            // Check that no persistent cursors outlast our queries above.
+            ASSERT_EQUALS( startNumCursors, ClientCursor::numCursors() );
+        }
+    };
 
     class WhatsMyUri : public CollectionBase {
     public:
@@ -1217,6 +1351,7 @@ namespace QueryTests {
         }
 
         void setupTests() {
+            add< FindingStart >();
             add< CountBasic >();
             add< CountQuery >();
             add< CountFields >();
@@ -1250,6 +1385,8 @@ namespace QueryTests {
             add< IndexInsideArrayCorrect >();
             add< SubobjArr >();
             add< MinMax >();
+            add< MatchCodeCodeWScope >();
+            add< MatchDBRefType >();
             add< DirectLocking >();
             add< FastCountIn >();
             add< EmbeddedArray >();
@@ -1258,8 +1395,8 @@ namespace QueryTests {
             add< TailableCappedRaceCondition >();
             add< HelperTest >();
             add< HelperByIdTest >();
-            add< FindingStart >();
             add< FindingStartPartiallyFull >();
+            add< FindingStartStale >();
             add< WhatsMyUri >();
 
             add< parsedtests::basic1 >();

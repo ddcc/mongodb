@@ -17,7 +17,8 @@
  */
 
 #include "pch.h"
-#include "../util/message.h"
+#include "../util/net/message.h"
+#include "../util/net/listen.h"
 #include "../client/dbclient.h"
 #include "../db/dbmessage.h"
 
@@ -41,7 +42,7 @@ public:
             try {
                 m.reset();
                 if ( !mp_.recv( m ) ) {
-                    cout << "end connection " << mp_.farEnd.toString() << endl;
+                    cout << "end connection " << mp_.remoteString() << endl;
                     mp_.shutdown();
                     break;
                 }
@@ -87,7 +88,7 @@ set<MessagingPort*> ports;
 
 class MyListener : public Listener {
 public:
-    MyListener( int port ) : Listener( "", port ) {}
+    MyListener( int port ) : Listener( "bridge" , "", port ) {}
     virtual void accepted(MessagingPort *mp) {
         ports.insert( mp );
         Forwarder f( *mp );
@@ -108,7 +109,7 @@ void cleanup( int sig ) {
 void myterminate() {
     rawOut( "bridge terminate() called, printing stack:" );
     printStackTrace();
-    abort();
+    ::abort();
 }
 
 void setupSignals() {

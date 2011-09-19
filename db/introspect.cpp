@@ -23,17 +23,66 @@
 #include "pdfile.h"
 #include "jsobj.h"
 #include "pdfile.h"
+#include "curop.h"
 
 namespace mongo {
 
-    void profile( const char *str, int millis) {
-        BSONObjBuilder b;
+    BufBuilder profileBufBuilder; // reused, instead of allocated every time - avoids a malloc/free cycle
+
+    void profile( const Client& c , CurOp& currentOp ) {
+        assertInWriteLock();
+
+        Database *db = c.database();
+        DEV assert( db );
+        const char *ns = db->profileName.c_str();
+        
+        // build object
+        profileBufBuilder.reset();
+        BSONObjBuilder b(profileBufBuilder);
         b.appendDate("ts", jsTime());
-        b.append("info", str);
-        b.append("millis", (double) millis);
+        currentOp.debug().append( currentOp , b );
+
+        b.append("client", c.clientAddress() );
+
+        if ( c.getAuthenticationInfo() )
+            b.append( "user" , c.getAuthenticationInfo()->getUser( nsToDatabase( ns ) ) );
+
         BSONObj p = b.done();
-        theDataFileMgr.insert(cc().database()->profileName.c_str(),
-                              p.objdata(), p.objsize(), true);
+
+        if (p.objsize() > 100*1024){
+            string small = p.toString(/*isArray*/false, /*full*/false);
+
+            warning() << "can't add full line to system.profile: " << small;
+
+            // rebuild with limited info
+            BSONObjBuilder b(profileBufBuilder);
+            b.appendDate("ts", jsTime());
+            b.append("client", c.clientAddress() );
+            if ( c.getAuthenticationInfo() )
+                b.append( "user" , c.getAuthenticationInfo()->getUser( nsToDatabase( ns ) ) );
+
+            b.append("err", "profile line too large (max is 100KB)");
+            if (small.size() < 100*1024){ // should be much smaller but if not don't break anything
+                b.append("abbreviated", small);
+            }
+
+            p = b.done();
+        }
+
+        // write: not replicated
+        NamespaceDetails *d = db->namespaceIndex.details(ns);
+        if( d ) {
+            int len = p.objsize();
+            Record *r = theDataFileMgr.fast_oplog_insert(d, ns, len);
+            memcpy(getDur().writingPtr(r->data, len), p.objdata(), len);
+        }
+        else { 
+            static time_t last;
+            if( time(0) > last+10 ) {
+                log() << "profile: warning ns " << ns << " does not exist" << endl;
+                last = time(0);
+            }
+        }
     }
 
 } // namespace mongo

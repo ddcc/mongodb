@@ -1,3 +1,43 @@
+mongodb (1:2.0.0-1) unstable; urgency=low
+
+  * New upstream release 2.0.0 (Closes: #641646)
+    http://blog.mongodb.org/post/10126837729/mongodb-2-0-released
+  * proper Spider Monkey is embedded (Closes: #637370, #572870, #631054)
+  * currently linking against system libpcre3
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Wed, 14 Sep 2011 17:09:16 +0200
+
+mongodb (1:1.8.3-1) unstable; urgency=low
+
+  * New upstream release 1.8.3
+    https://jira.mongodb.org/browse/SERVER/fixforversion/10390
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Tue, 23 Aug 2011 08:48:57 +0200
+
+mongodb (1:1.8.2-2) unstable; urgency=low
+
+  * [2e1c3ff] (Closes: #625401) ignore unused-but-set-{variable,parameter}
+  * [0e9611d] (Closes: #572870, #631054) switch to v8 as javascript engine
+  * [bbf5935] (Closes: #634484) use dbpath and logpath from config file
+    not forcing in init.d
+  * [bf8d466] update description
+  * [cbe2d99] Imported Upstream version 1.8.3
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Tue, 23 Aug 2011 08:48:17 +0200
+
+mongodb (1:1.8.2-1) unstable; urgency=low
+
+  * New upstream release 1.8.2
+    https://jira.mongodb.org/browse/SERVER/fixforversion/10263
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Sat, 18 Jun 2011 21:25:25 +0200
+
+mongodb (1:1.8.1-2) unstable; urgency=low
+
+  * Depend on libboost 1.46
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Tue, 31 May 2011 13:19:30 +0200
+
 mongodb (1:1.8.1-1) unstable; urgency=low
 
   * Upstream 1.8.1
@@ -92,7 +132,7 @@ mongodb (1:1.4.4-2) unstable; urgency=low
 mongodb (1:1.4.4-1) unstable; urgency=low
 
   * [5c6a221] Imported Upstream version 1.4.4
-  * upstream change log is at 
+  * upstream change log is at
     http://jira.mongodb.org/browse/SERVER/fixforversion/10166
   * [68c73c3] removed not needed files from upstream
   * [c1546df] debian policy to 3.9.0
@@ -164,14 +204,14 @@ mongodb (1:1.4.0-1) unstable; urgency=low
   * upstream release notes
     http://www.mongodb.org/display/DOCS/1.4+Release+Notes
 
- -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 25 Mar 2010 19:44:59 +0100 
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 25 Mar 2010 19:44:59 +0100
 
 mongodb (1:1.2.4-1) unstable; urgency=low
 
   * [c3803a1] Imported Upstream version 1.2.4
   * [ab4e0c8] removal of unnecessary files for Debian from upstream
     source
-  * changelog for upstream at 
+  * changelog for upstream at
     http://jira.mongodb.org/browse/SERVER/fixforversion/10130
 
  -- Antonin Kral <A.Kral@sh.cvut.cz>  Wed, 17 Mar 2010 10:18:01 +0100
@@ -185,7 +225,7 @@ mongodb (1:1.2.2-4) unstable; urgency=low
 mongodb (1:1.2.2-3) unstable; urgency=low
 
   * [aced2f4] removed unnecessary dependency (Closes: #572873)
-  * [ce78acd] Added call for tests to ensure correct build 
+  * [ce78acd] Added call for tests to ensure correct build
     (Closes: #570106)
 
  -- Antonin Kral <A.Kral@sh.cvut.cz>  Sun, 07 Mar 2010 21:07:37 +0100

@@ -2,7 +2,7 @@ t = db.jstests_drop2;
 t.drop();
 
 function debug( x ) {
-//    printjson( x );
+    //printjson( x );
 }
 
 t.save( {} );
@@ -14,11 +14,11 @@ function op( drop ) {
     for ( var i in p ) {
         var o = p[ i ];
         if ( drop ) {
-            if ( o.active && o.query && o.query.drop && o.query.drop == "jstests_drop2" ) {
+            if (  o.query && o.query.drop && o.query.drop == "jstests_drop2" ) {
                 return o.opid;
             }
         } else {
-            if ( o.active && o.query && o.query.query && o.query.query.$where && o.ns == "test.jstests_drop2" ) {
+            if (  o.query && o.query.query && o.query.query.$where && o.ns == "test.jstests_drop2" ) {
                 return o.opid;
             }
         }
@@ -26,7 +26,7 @@ function op( drop ) {
     return null;
 }
 
-s1 = startParallelShell( "db.jstests_drop2.count( { $where: function() { while( 1 ) { ; } } } )" );
+s1 = startParallelShell( "db.jstests_drop2.count( { $where: function() { while( 1 ) { sleep( 1 ); } } } )" );
 countOp = null;
 assert.soon( function() { countOp = op( false ); return countOp; } );
 

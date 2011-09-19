@@ -18,7 +18,7 @@
 #include "pch.h"
 
 #include "../util/unittest.h"
-#include "../util/message.h"
+#include "../util/net/message.h"
 
 
 #include "lasterror.h"
@@ -70,8 +70,10 @@ namespace mongo {
             b.appendBool( "updatedExisting", updatedExisting == True );
         if ( upsertedId.isSet() )
             b.append( "upserted" , upsertedId );
-        if ( writebackId.isSet() )
+        if ( writebackId.isSet() ) {
             b.append( "writeback" , writebackId );
+            b.append( "instanceIdent" , prettyHostName() ); // this can be any unique string
+        }
         b.appendNumber( "n", nObjects );
 
         return ! msg.empty();
@@ -83,7 +85,7 @@ namespace mongo {
 
     LastError * LastErrorHolder::disableForCommand() {
         LastError *le = _get();
-        assert( le );
+        uassert(13649, "no operation yet", le);
         le->disabled = true;
         le->nPrev--; // caller is a command that shouldn't count as an operation
         return le;

@@ -55,7 +55,7 @@ namespace mongo {
 
         if ( p ) {
             HostAndPort r = p->remote();
-            if ( _remote.port() == -1 )
+            if ( ! _remote.hasPort() )
                 _remote = r;
             else if ( _remote != r ) {
                 stringstream ss;
@@ -96,11 +96,15 @@ namespace mongo {
         BSONElement cid = gle["connectionId"];
 
         if ( cid.eoo() ) {
-            error() << "getLastError writeback can't work because of version mis-match" << endl;
+            error() << "getLastError writeback can't work because of version mismatch" << endl;
             return;
         }
 
-        all.push_back( WBInfo( cid.numberLong() , w.OID() ) );
+        string ident = "";
+        if ( gle["instanceIdent"].type() == String )
+            ident = gle["instanceIdent"].String();
+
+        all.push_back( WBInfo( WriteBackListener::ConnectionIdent( ident , cid.numberLong() ) , w.OID() ) );
     }
 
     vector<BSONObj> ClientInfo::_handleWriteBacks( vector<WBInfo>& all , bool fromWriteBackListener ) {
@@ -110,12 +114,12 @@ namespace mongo {
             return res;
         
         if ( fromWriteBackListener ) {
-            LOG(1) << "not doing recusrive writeback" << endl;
+            LOG(1) << "not doing recursive writeback" << endl;
             return res;
         }
         
         for ( unsigned i=0; i<all.size(); i++ ) {
-            res.push_back( WriteBackListener::waitFor( all[i].connectionId , all[i].id ) );
+            res.push_back( WriteBackListener::waitFor( all[i].ident , all[i].id ) );
         }
 
         return res;
@@ -137,7 +141,7 @@ namespace mongo {
         if ( shards->size() == 1 ) {
             string theShard = *(shards->begin() );
 
-            ShardConnection conn( theShard , "" );
+            ShardConnection conn( theShard , "", true );
             
             BSONObj res;
             bool ok = false;
@@ -146,7 +150,7 @@ namespace mongo {
             }
             catch( std::exception &e ){
                 
-                warning() << "Could not get last error." << e.what() << endl;
+                warning() << "could not get last error." << causedBy( e ) << endl;
                 
                 // Catch everything that happens here, since we need to ensure we return our connection when we're
             	// finished.
@@ -207,7 +211,7 @@ namespace mongo {
         for ( set<string>::iterator i = shards->begin(); i != shards->end(); i++ ) {
             string theShard = *i;
             bbb.append( theShard );
-            ShardConnection conn( theShard , "" );
+            ShardConnection conn( theShard , "", true );
             BSONObj res;
             bool ok = false;
             try {
@@ -219,7 +223,7 @@ namespace mongo {
         	    // Safe to return here, since we haven't started any extra processing yet, just collecting
         	    // responses.
                 
-        	    warning() << "Could not get last error." << e.what() << endl;
+        	    warning() << "could not get last error." << causedBy( e ) << endl;
                 conn.done();
                 
                 return false;

@@ -34,10 +34,9 @@ namespace mongo {
 
     Balancer balancer;
 
-    Balancer::Balancer() : _balancedLastTime(0), _policy( new BalancerPolicy ) {}
+    Balancer::Balancer() : _balancedLastTime(0), _policy( new BalancerPolicy() ) {}
 
     Balancer::~Balancer() {
-        delete _policy;
     }
 
     int Balancer::_moveChunks( const vector<CandidateChunkPtr>* candidateChunks ) {
@@ -74,7 +73,7 @@ namespace mongo {
             }
 
             // the move requires acquiring the collection metadata's lock, which can fail
-            log() << "balacer move failed: " << res << " from: " << chunkInfo.from << " to: " << chunkInfo.to
+            log() << "balancer move failed: " << res << " from: " << chunkInfo.from << " to: " << chunkInfo.to
                   << " chunk: " << chunkToMove << endl;
 
             if ( res["chunkTooBig"].trueValue() ) {
@@ -156,7 +155,7 @@ namespace mongo {
         cursor.reset();
 
         if ( collections.empty() ) {
-            log(1) << "no collections to balance" << endl;
+            LOG(1) << "no collections to balance" << endl;
             return;
         }
 
@@ -171,7 +170,7 @@ namespace mongo {
         vector<Shard> allShards;
         Shard::getAllShards( allShards );
         if ( allShards.size() < 2) {
-            log(1) << "can't balance without more active shards" << endl;
+            LOG(1) << "can't balance without more active shards" << endl;
             return;
         }
 
@@ -206,7 +205,7 @@ namespace mongo {
             cursor.reset();
 
             if (shardToChunksMap.empty()) {
-                log(1) << "skipping empty collection (" << ns << ")";
+                LOG(1) << "skipping empty collection (" << ns << ")";
                 continue;
             }
 
@@ -245,9 +244,8 @@ namespace mongo {
             return true;
 
         }
-        catch ( std::exception& ) {
-
-            log( LL_WARNING ) << "could not initialize balancer, please check that all shards and config servers are up" << endl;
+        catch ( std::exception& e ) {
+            warning() << "could not initialize balancer, please check that all shards and config servers are up: " << e.what() << endl;
             return false;
 
         }
@@ -267,7 +265,7 @@ namespace mongo {
             break;
         }
 
-        // getConnectioString and the constructor of a DistributedLock do not throw, which is what we expect on while
+        // getConnectioString and dist lock constructor does not throw, which is what we expect on while
         // on the balancer thread
         ConnectionString config = configServer.getConnectionString();
         DistributedLock balanceLock( config , "balancer" );
@@ -276,59 +274,64 @@ namespace mongo {
 
             try {
                 
-                // first make sure we should even be running
+                ScopedDbConnection conn( config );
+                
+                // ping has to be first so we keep things in the config server in sync
+                _ping( conn.conn() );
+
+                // now make sure we should even be running
                 if ( ! grid.shouldBalance() ) {
-                    log(1) << "skipping balancing round because balancing is disabled" << endl;
+                    LOG(1) << "skipping balancing round because balancing is disabled" << endl;
+                    conn.done();
+                    
                     sleepsecs( 30 );
                     continue;
                 }
                 
-
-                ScopedDbConnection conn( config );
-
-                _ping( conn.conn() );
-                if ( ! _checkOIDs() ) {
-                    uassert( 13258 , "oids broken after resetting!" , _checkOIDs() );
-                }
+                uassert( 13258 , "oids broken after resetting!" , _checkOIDs() );
 
                 // use fresh shard state
                 Shard::reloadShardInfo();
 
-                dist_lock_try lk( &balanceLock , "doing balance round" );
-                if ( ! lk.got() ) {
-                    log(1) << "skipping balancing round because another balancer is active" << endl;
-                    conn.done();
-
-                    sleepsecs( 30 ); // no need to wake up soon
-                    continue;
+                {
+                    dist_lock_try lk( &balanceLock , "doing balance round" );
+                    if ( ! lk.got() ) {
+                        LOG(1) << "skipping balancing round because another balancer is active" << endl;
+                        conn.done();
+                        
+                        sleepsecs( 30 ); // no need to wake up soon
+                        continue;
+                    }
+                    
+                    LOG(1) << "*** start balancing round" << endl;
+                    
+                    vector<CandidateChunkPtr> candidateChunks;
+                    _doBalanceRound( conn.conn() , &candidateChunks );
+                    if ( candidateChunks.size() == 0 ) {
+                        LOG(1) << "no need to move any chunk" << endl;
+                    }
+                    else {
+                        _balancedLastTime = _moveChunks( &candidateChunks );
+                    }
+                    
+                    LOG(1) << "*** end of balancing round" << endl;
                 }
-
-                log(1) << "*** start balancing round" << endl;
-
-                vector<CandidateChunkPtr> candidateChunks;
-                _doBalanceRound( conn.conn() , &candidateChunks );
-                if ( candidateChunks.size() == 0 ) {
-                    log(1) << "no need to move any chunk" << endl;
-                }
-                else {
-                    _balancedLastTime = _moveChunks( &candidateChunks );
-                }
-
-                log(1) << "*** end of balancing round" << endl;
+                
                 conn.done();
-
+                    
                 sleepsecs( _balancedLastTime ? 5 : 10 );
             }
             catch ( std::exception& e ) {
                 log() << "caught exception while doing balance: " << e.what() << endl;
 
                 // Just to match the opening statement if in log level 1
-                log(1) << "*** End of balancing round" << endl;
+                LOG(1) << "*** End of balancing round" << endl;
 
                 sleepsecs( 30 ); // sleep a fair amount b/c of error
                 continue;
             }
         }
+
     }
 
 }  // namespace mongo

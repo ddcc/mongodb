@@ -13,11 +13,14 @@ namespace mongo {
             unsigned _intervalMicros;
             struct S {
                 BSONObj _asObj();
+                string _asCSV();
+                string _CSVHeader();
                 void reset();
 
                 unsigned _commits;
                 unsigned _earlyCommits; // count of early commits from commitIfNeeded() or from getDur().commitNow()
                 unsigned long long _journaledBytes;
+                unsigned long long _uncompressedBytes;
                 unsigned long long _writeToDataFilesBytes;
 
                 unsigned long long _prepLogBufferMicros;

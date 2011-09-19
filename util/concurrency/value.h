@@ -1,5 +1,5 @@
 /* @file value.h
-   concurrency helpers Atomic<T> and DiagStr
+   concurrency helpers DiagStr, Guarded
 */
 
 /**
@@ -20,68 +20,56 @@
 
 #pragma once
 
+#include "mutex.h"
+
 namespace mongo {
 
-    extern mutex _atomicMutex;
+    /** declare that a variable that is "guarded" by a mutex.
 
-    /** atomic wrapper for a value.  enters a mutex on each access.  must
-        be copyable.
+        The decl documents the rule.  For example "counta and countb are guarded by xyzMutex":
+
+          Guarded<int, xyzMutex> counta;
+          Guarded<int, xyzMutex> countb;
+
+        Upon use, specify the scoped_lock object.  This makes it hard for someone 
+        later to forget to be in the lock.  Check is made that it is the right lock in _DEBUG
+        builds at runtime.
     */
-    template<typename T>
-    class Atomic : boost::noncopyable {
-        T val;
+    template <typename T, mutex& BY>
+    class Guarded {
+        T _val;
     public:
-        Atomic<T>() { }
-
-        void operator=(const T& a) {
-            scoped_lock lk(_atomicMutex);
-            val = a;
+        T& ref(const scoped_lock& lk) {
+            dassert( lk._mut == &BY );
+            return _val;
         }
-
-        operator T() const {
-            scoped_lock lk(_atomicMutex);
-            return val;
-        }
-
-        /** example:
-              Atomic<int> q;
-              ...
-              {
-                Atomic<int>::tran t(q);
-                if( q.ref() > 0 )
-                    q.ref()--;
-              }
-        */
-        class tran : private scoped_lock {
-            Atomic<T>& _a;
-        public:
-            tran(Atomic<T>& a) : scoped_lock(_atomicMutex), _a(a) { }
-            T& ref() { return _a.val; }
-        };
     };
 
-    /** this string COULD be mangled but with the double buffering, assuming writes
-    are infrequent, it's unlikely.  thus, this is reasonable for lockless setting of
-    diagnostic strings, where their content isn't critical.
-    */
     class DiagStr {
-        char buf1[256];
-        char buf2[256];
-        char *p;
+        string _s;
+        static mutex m;
     public:
-        DiagStr() {
-            memset(buf1, 0, 256);
-            memset(buf2, 0, 256);
-            p = buf1;
+        DiagStr(const DiagStr& r) : _s(r.get()) { }
+        DiagStr() { }
+        bool empty() const { 
+            mutex::scoped_lock lk(m);
+            return _s.empty();
         }
-
-        const char * get() const { return p; }
+        string get() const { 
+            mutex::scoped_lock lk(m);
+            return _s;
+        }
 
         void set(const char *s) {
-            char *q = (p==buf1) ? buf2 : buf1;
-            strncpy(q, s, 255);
-            p = q;
+            mutex::scoped_lock lk(m);
+            _s = s;
         }
+        void set(const string& s) { 
+            mutex::scoped_lock lk(m);
+            _s = s;
+        }
+        operator string() const { return get(); }
+        void operator=(const string& s) { set(s); }
     };
 
 }

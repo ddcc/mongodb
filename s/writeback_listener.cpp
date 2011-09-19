@@ -36,11 +36,12 @@ namespace mongo {
     set<string> WriteBackListener::_seenSets;
     mongo::mutex WriteBackListener::_cacheLock("WriteBackListener");
 
-    map<ConnectionId,WriteBackListener::WBStatus> WriteBackListener::_seenWritebacks;
+    map<WriteBackListener::ConnectionIdent,WriteBackListener::WBStatus> WriteBackListener::_seenWritebacks;
     mongo::mutex WriteBackListener::_seenWritebacksLock("WriteBackListener::seen");
 
     WriteBackListener::WriteBackListener( const string& addr ) : _addr( addr ) {
-        log() << "creating WriteBackListener for: " << addr << endl;
+        _name = str::stream() << "WriteBackListener-" << addr;
+        log() << "creating WriteBackListener for: " << addr << " serverID: " << serverID << endl;
     }
 
     /* static */
@@ -86,18 +87,19 @@ namespace mongo {
     }
 
     /* static */
-    BSONObj WriteBackListener::waitFor( ConnectionId connectionId, const OID& oid ) {
+    BSONObj WriteBackListener::waitFor( const ConnectionIdent& ident, const OID& oid ) {
         Timer t;
-        for ( int i=0; i<5000; i++ ) {
+        for ( int i=0; i<10000; i++ ) {
             {
                 scoped_lock lk( _seenWritebacksLock );
-                WBStatus s = _seenWritebacks[connectionId];
+                WBStatus s = _seenWritebacks[ident];
                 if ( oid < s.id ) {
                     // this means we're waiting for a GLE that already passed.
-                    // it should be impossible becauseonce we call GLE, no other
+                    // it should be impossible because once we call GLE, no other
                     // writebacks should happen with that connection id
-                    msgasserted( 13633 , str::stream() << "got writeback waitfor for older id " <<
-                                 " oid: " << oid << " s.id: " << s.id << " connectionId: " << connectionId );
+
+                    msgasserted( 14041 , str::stream() << "got writeback waitfor for older id " <<
+                                 " oid: " << oid << " s.id: " << s.id << " ident: " << ident.toString() );
                 }
                 else if ( oid == s.id ) {
                     return s.gle;
@@ -115,7 +117,7 @@ namespace mongo {
         while ( ! inShutdown() ) {
             
             if ( ! Shard::isAShardNode( _addr ) ) {
-                log(1) << _addr << " is not a shard node" << endl;
+                LOG(1) << _addr << " is not a shard node" << endl;
                 sleepsecs( 60 );
                 continue;
             }
@@ -129,6 +131,7 @@ namespace mongo {
                     BSONObjBuilder cmd;
                     cmd.appendOID( "writebacklisten" , &serverID ); // Command will block for data
                     if ( ! conn->runCommand( "admin" , cmd.obj() , result ) ) {
+                        result = result.getOwned();
                         log() <<  "writebacklisten command failed!  "  << result << endl;
                         conn.done();
                         continue;
@@ -136,16 +139,19 @@ namespace mongo {
 
                 }
 
-                log(1) << "writebacklisten result: " << result << endl;
+                LOG(1) << "writebacklisten result: " << result << endl;
 
                 BSONObj data = result.getObjectField( "data" );
                 if ( data.getBoolField( "writeBack" ) ) {
                     string ns = data["ns"].valuestrsafe();
 
-                    ConnectionId cid = 0;
+                    ConnectionIdent cid( "" , 0 );
                     OID wid;
                     if ( data["connectionId"].isNumber() && data["id"].type() == jstOID ) {
-                        cid = data["connectionId"].numberLong();
+                        string s = "";
+                        if ( data["instanceIdent"].type() == String )
+                            s = data["instanceIdent"].String();
+                        cid = ConnectionIdent( s , data["connectionId"].numberLong() );
                         wid = data["id"].OID();
                     }
                     else {
@@ -160,9 +166,10 @@ namespace mongo {
                     ShardChunkVersion needVersion( data["version"] );
 
                     LOG(1) << "connectionId: " << cid << " writebackId: " << wid << " needVersion : " << needVersion.toString()
-                           << " mine : " << db->getChunkManager( ns )->getVersion().toString() << endl;// TODO change to log(3)
+                           << " mine : " << db->getChunkManager( ns )->getVersion().toString() 
+                           << endl;
 
-                    if ( logLevel ) log(1) << debugString( m ) << endl;
+                    LOG(1) << m.toString() << endl;
 
                     if ( needVersion.isSet() && needVersion <= db->getChunkManager( ns )->getVersion() ) {
                         // this means when the write went originally, the version was old
@@ -180,32 +187,53 @@ namespace mongo {
                     // we have to call getLastError so we can return the right fields to the user if they decide to call getLastError
 
                     BSONObj gle;
-                    try {
-                        
-                        Request r( m , 0 );
-                        r.init();
+                    int attempts = 0;
+                    while ( true ) {
+                        attempts++;
 
-                        ClientInfo * ci = r.getClientInfo();
-                        ci->noAutoSplit();
+                        try {
+                            
+                            Request r( m , 0 );
+                            r.init();
+                            
+                            r.d().reservedField() |= DbMessage::Reserved_FromWriteback;
+                            
+                            ClientInfo * ci = r.getClientInfo();
+                            if (!noauth) {
+                                ci->getAuthenticationInfo()->authorize("admin", internalSecurity.user);
+                            }
+                            ci->noAutoSplit();
+                            
+                            r.process();
+                            
+                            ci->newRequest(); // this so we flip prev and cur shards
+                            
+                            BSONObjBuilder b;
+                            if ( ! ci->getLastError( BSON( "getLastError" << 1 ) , b , true ) ) {
+                                b.appendBool( "commandFailed" , true );
+                            }
+                            gle = b.obj();
+                            
+                            if ( gle["code"].numberInt() == 9517 ) {
+                                log() << "writeback failed because of stale config, retrying attempts: " << attempts << endl;
+                                if( ! db->getChunkManagerIfExists( ns , true ) ){
+                                    uassert( 15884, str::stream() << "Could not reload chunk manager after " << attempts << " attempts.", attempts <= 4 );
+                                    sleepsecs( attempts - 1 );
+                                }
+                                continue;
+                            }
 
-                        r.process();
-                        
-                        ci->newRequest(); // this so we flip prev and cur shards
-
-                        BSONObjBuilder b;
-                        if ( ! ci->getLastError( BSON( "getLastError" << 1 ) , b , true ) ) {
-                            b.appendBool( "commandFailed" , true );
+                            ci->clearSinceLastGetError();
                         }
-                        gle = b.obj();
-
-                        ci->clearSinceLastGetError();
-                    }
-                    catch ( DBException& e ) {
-                        error() << "error processing writeback: " << e << endl;
-                        BSONObjBuilder b;
-                        b.append( "err" , e.toString() );
-                        e.getInfo().append( b );
-                        gle = b.obj();
+                        catch ( DBException& e ) {
+                            error() << "error processing writeback: " << e << endl;
+                            BSONObjBuilder b;
+                            b.append( "err" , e.toString() );
+                            e.getInfo().append( b );
+                            gle = b.obj();
+                        }
+                        
+                        break;
                     }
 
                     {
@@ -226,7 +254,7 @@ namespace mongo {
                 secsToSleep = 0;
                 continue;
             }
-            catch ( std::exception e ) {
+            catch ( std::exception& e ) {
 
                 if ( inShutdown() ) {
                     // we're shutting down, so just clean up

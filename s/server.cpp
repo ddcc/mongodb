@@ -17,15 +17,18 @@
 */
 
 #include "pch.h"
-#include "../util/message.h"
+#include "../util/net/message.h"
 #include "../util/unittest.h"
 #include "../client/connpool.h"
-#include "../util/message_server.h"
+#include "../util/net/message_server.h"
 #include "../util/stringutils.h"
 #include "../util/version.h"
+#include "../util/ramlog.h"
 #include "../util/signal_handlers.h"
 #include "../util/admin_access.h"
+#include "../util/concurrency/task.h"
 #include "../db/dbwebserver.h"
+#include "../scripting/engine.h"
 
 #include "server.h"
 #include "request.h"
@@ -43,6 +46,7 @@ namespace mongo {
     Database *database = 0;
     string mongosCommand;
     bool dbexitCalled = false;
+    static bool scriptingEnabled = true;
 
     bool inShutdown() {
         return dbexitCalled;
@@ -65,20 +69,18 @@ namespace mongo {
         out() << endl;
     }
 
-    class ShardingConnectionHook : public DBConnectionHook {
-    public:
-
-        virtual void onHandedOut( DBClientBase * conn ) {
-            ClientInfo::get()->addShard( conn->getServerAddress() );
-        }
-    } shardingConnectionHook;
+    void ShardingConnectionHook::onHandedOut( DBClientBase * conn ) {
+        ClientInfo::get()->addShard( conn->getServerAddress() );
+    }
 
     class ShardedMessageHandler : public MessageHandler {
     public:
         virtual ~ShardedMessageHandler() {}
 
         virtual void connected( AbstractMessagingPort* p ) {
-            assert( ClientInfo::get() );
+            ClientInfo *c = ClientInfo::get();
+            massert(15849, "client info not defined", c);
+            c->getAuthenticationInfo()->isLocalHost = p->remote().isLocalHost();
         }
 
         virtual void process( Message& m , AbstractMessagingPort* p , LastError * le) {
@@ -93,7 +95,7 @@ namespace mongo {
                 r.process();
             }
             catch ( AssertionException & e ) {
-                log( e.isUserAssertion() ? 1 : 0 ) << "AssertionException in process: " << e.what() << endl;
+                log( e.isUserAssertion() ? 1 : 0 ) << "AssertionException while processing op type : " << m.operation() << " to : " << r.getns() << causedBy(e) << endl;
 
                 le->raiseError( e.getCode() , e.what() );
 
@@ -147,6 +149,7 @@ namespace mongo {
         setupSIGTRAPforGDB();
         setupCoreSignals();
         setupSignals( false );
+        Logstream::get().addGlobalTee( new RamLog("global") );
     }
 
     void start( const MessageServer::Options& opts ) {
@@ -154,10 +157,8 @@ namespace mongo {
         installChunkShardVersioning();
         balancer.go();
         cursorCache.startTimeoutThread();
+        PeriodicTask::theRunner->go();
 
-        log() << "waiting for connections on port " << cmdLine.port << endl;
-        //DbGridListener l(port);
-        //l.listen();
         ShardedMessageHandler handler;
         MessageServer * server = createServer( opts , &handler );
         server->setAsTimeTracker();
@@ -201,6 +202,7 @@ int _main(int argc, char* argv[]) {
     ( "chunkSize" , po::value<int>(), "maximum amount of data per chunk" )
     ( "ipv6", "enable IPv6 support (disabled by default)" )
     ( "jsonp","allow JSONP access via http (has security implications)" )
+    ("noscripting", "disable scripting engine")
     ;
 
     options.add(sharding_options);
@@ -242,6 +244,10 @@ int _main(int argc, char* argv[]) {
         return 0;
     }
 
+    if (params.count("noscripting")) {
+        scriptingEnabled = false;
+    }
+
     if ( ! params.count( "configdb" ) ) {
         out() << "error: no args for --configdb" << endl;
         return 4;
@@ -254,7 +260,7 @@ int _main(int argc, char* argv[]) {
         return 5;
     }
 
-    // we either have a seeting were all process are in localhost or none is
+    // we either have a setting where all processes are in localhost or none are
     for ( vector<string>::const_iterator it = configdbs.begin() ; it != configdbs.end() ; ++it ) {
         try {
 
@@ -278,8 +284,12 @@ int _main(int argc, char* argv[]) {
     
     // set some global state
 
-    pool.addHook( &shardingConnectionHook );
+    pool.addHook( new ShardingConnectionHook( false ) );
     pool.setName( "mongos connectionpool" );
+
+    shardConnectionPool.addHook( new ShardingConnectionHook( true ) );
+    shardConnectionPool.setName( "mongos shardconnection connectionpool" );
+
     
     DBClientConnection::setLazyKillCursor( false );
 
@@ -309,6 +319,16 @@ int _main(int argc, char* argv[]) {
         return 8;
     }
 
+    {
+        class CheckConfigServers : public task::Task {
+            virtual string name() const { return "CheckConfigServers"; }
+            virtual void doWork() { configServer.ok(true); }
+        };
+        static CheckConfigServers checkConfigServers;
+
+        task::repeat(&checkConfigServers, 60*1000);
+    }
+
     int configError = configServer.checkConfigVersion( params.count( "upgrade" ) );
     if ( configError ) {
         if ( configError > 0 ) {
@@ -325,6 +345,12 @@ int _main(int argc, char* argv[]) {
 
     boost::thread web( boost::bind(&webServerThread, new NoAdminAccess() /* takes ownership */) );
 
+    if ( scriptingEnabled ) {
+        ScriptEngine::setup();
+//        globalScriptEngine->setCheckInterruptCallback( jsInterruptCallback );
+//        globalScriptEngine->setGetInterruptSpecCallback( jsGetInterruptSpecCallback );
+    }
+
     MessageServer::Options opts;
     opts.port = cmdLine.port;
     opts.ipList = cmdLine.bind_ip;
@@ -335,6 +361,7 @@ int _main(int argc, char* argv[]) {
 }
 int main(int argc, char* argv[]) {
     try {
+        doPreServerStatupInits();
         return _main(argc, argv);
     }
     catch(DBException& e) { 
@@ -352,6 +379,12 @@ int main(int argc, char* argv[]) {
 }
 
 #undef exit
+
+void mongo::exitCleanly( ExitCode code ) {
+    // TODO: do we need to add anything?
+    mongo::dbexit( code );
+}
+
 void mongo::dbexit( ExitCode rc, const char *why, bool tryToGetLock ) {
     dbexitCalled = true;
     log() << "dbexit: " << why

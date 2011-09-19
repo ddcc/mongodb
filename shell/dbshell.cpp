@@ -17,19 +17,11 @@
 
 #include "pch.h"
 #include <stdio.h>
+#include <string.h>
 
-#if defined(_WIN32)
-# if defined(USE_READLINE)
-# define USE_READLINE_STATIC
-# endif
-#endif
 
-#ifdef USE_READLINE
-#include <readline/readline.h>
-#include <readline/history.h>
-#include <setjmp.h>
-jmp_buf jbuf;
-#endif
+#define USE_LINENOISE
+#include "../third_party/linenoise/linenoise.h"
 
 #include "../scripting/engine.h"
 #include "../client/dbclient.h"
@@ -52,9 +44,16 @@ static volatile bool atPrompt = false; // can eval before getting to prompt
 bool autoKillOp = false;
 
 
-#if defined(USE_READLINE) && !defined(__freebsd__) && !defined(__openbsd__) && !defined(_WIN32)
-#define CTRLC_HANDLE
+#if defined(USE_LINENOISE) && !defined(__freebsd__) && !defined(__openbsd__) && !defined(_WIN32)
+// this is for ctrl-c handling
+#include <setjmp.h>
+jmp_buf jbuf;
 #endif
+
+#if defined(USE_LINENOISE)
+#define USE_TABCOMPLETION
+#endif
+
 
 namespace mongo {
 
@@ -67,7 +66,8 @@ void generateCompletions( const string& prefix , vector<string>& all ) {
     if ( prefix.find( '"' ) != string::npos )
         return;
 
-    shellMainScope->invokeSafe("function(x) {shellAutocomplete(x)}", BSON("0" << prefix), 1000);
+    BSONObj args = BSON("0" << prefix);
+    shellMainScope->invokeSafe("function(x) {shellAutocomplete(x)}", &args, 0, 1000);
     BSONObjBuilder b;
     shellMainScope->append( b , "" , "__autocomplete__" );
     BSONObj res = b.obj();
@@ -81,45 +81,19 @@ void generateCompletions( const string& prefix , vector<string>& all ) {
 
 }
 
-#ifdef USE_READLINE
-static char** completionHook(const char* text , int start ,int end ) {
-    static map<string,string> m;
-
+#ifdef USE_TABCOMPLETION
+void completionHook(const char* text , linenoiseCompletions* lc ) {
     vector<string> all;
+    generateCompletions( text , all );
 
-    generateCompletions( string(text,end) , all );
+    for ( unsigned i=0; i<all.size(); i++ )
+        linenoiseAddCompletion( lc , (char*)all[i].c_str() );
 
-    if ( all.size() == 0 ) {
-        return 0;
-    }
-
-    string longest = all[0];
-    for ( vector<string>::iterator i=all.begin(); i!=all.end(); ++i ) {
-        string s = *i;
-        for ( unsigned j=0; j<s.size(); j++ ) {
-            if ( longest[j] == s[j] )
-                continue;
-            longest = longest.substr(0,j);
-            break;
-        }
-    }
-
-    char ** matches = (char**)malloc( sizeof(char*) * (all.size()+2) );
-    unsigned x=0;
-    matches[x++] = strdup( longest.c_str() );
-    for ( unsigned i=0; i<all.size(); i++ ) {
-        matches[x++] = strdup( all[i].c_str() );
-    }
-    matches[x++] = 0;
-
-    rl_completion_append_character = '\0'; // don't add a space after completions
-
-    return matches;
 }
 #endif
 
 void shellHistoryInit() {
-#ifdef USE_READLINE
+#ifdef USE_LINENOISE
     stringstream ss;
     char * h = getenv( "HOME" );
     if ( h )
@@ -127,22 +101,22 @@ void shellHistoryInit() {
     ss << ".dbshell";
     historyFile = ss.str();
 
-    using_history();
-    read_history( historyFile.c_str() );
-
-    rl_attempted_completion_function = completionHook;
+    linenoiseHistoryLoad( (char*)historyFile.c_str() );
+#ifdef USE_TABCOMPLETION
+    linenoiseSetCompletionCallback( completionHook );
+#endif
 
 #else
     //cout << "type \"exit\" to exit" << endl;
 #endif
 }
 void shellHistoryDone() {
-#ifdef USE_READLINE
-    write_history( historyFile.c_str() );
+#ifdef USE_LINENOISE
+    linenoiseHistorySave( (char*)historyFile.c_str() );
 #endif
 }
 void shellHistoryAdd( const char * line ) {
-#ifdef USE_READLINE
+#ifdef USE_LINENOISE
     if ( line[0] == '\0' )
         return;
 
@@ -153,7 +127,7 @@ void shellHistoryAdd( const char * line ) {
     lastLine = line;
 
     if ((strstr(line, ".auth")) == NULL)
-        add_history( line );
+        linenoiseHistoryAdd( line );
 #endif
 }
 
@@ -163,7 +137,6 @@ void intr( int sig ) {
 #endif
 }
 
-#if !defined(_WIN32)
 void killOps() {
     if ( mongo::shellUtils::_nokillop || mongo::shellUtils::_allMyUris.size() == 0 )
         return;
@@ -208,32 +181,26 @@ void quitNicely( int sig ) {
         gotInterrupted = 1;
         return;
     }
+
+#if !defined(_WIN32)
     if ( sig == SIGPIPE )
         mongo::rawOut( "mongo got signal SIGPIPE\n" );
+#endif
+
     killOps();
     shellHistoryDone();
     exit(0);
 }
-#else
-void quitNicely( int sig ) {
-    mongo::dbexitCalled = true;
-    //killOps();
-    shellHistoryDone();
-    exit(0);
-}
-#endif
 
 char * shellReadline( const char * prompt , int handlesigint = 0 ) {
 
     atPrompt = true;
-#ifdef USE_READLINE
-
-    rl_bind_key('\t',rl_complete);
+#ifdef USE_LINENOISE
 
 
 #ifdef CTRLC_HANDLE
     if ( ! handlesigint ) {
-        char* ret = readline( prompt );
+        char* ret = linenoise( prompt );
         atPrompt = false;
         return ret;
     }
@@ -246,7 +213,7 @@ char * shellReadline( const char * prompt , int handlesigint = 0 ) {
     signal( SIGINT , intr );
 #endif
 
-    char * ret = readline( prompt );
+    char * ret = linenoise( prompt );
     signal( SIGINT , quitNicely );
     atPrompt = false;
     return ret;
@@ -262,8 +229,18 @@ char * shellReadline( const char * prompt , int handlesigint = 0 ) {
 #endif
 }
 
-#if !defined(_WIN32)
-#include <string.h>
+#ifdef _WIN32
+char * strsignal(int sig){
+    switch (sig){
+        case SIGINT: return "SIGINT";
+        case SIGTERM: return "SIGTERM";
+        case SIGABRT: return "SIGABRT";
+        case SIGSEGV: return "SIGSEGV";
+        case SIGFPE: return "SIGFPE";
+        default: return "unknown";
+    }
+}
+#endif
 
 void quitAbruptly( int sig ) {
     ostringstream ossSig;
@@ -289,16 +266,17 @@ void myterminate() {
 void setupSignals() {
     signal( SIGINT , quitNicely );
     signal( SIGTERM , quitNicely );
-    signal( SIGPIPE , quitNicely ); // Maybe just log and continue?
     signal( SIGABRT , quitAbruptly );
     signal( SIGSEGV , quitAbruptly );
-    signal( SIGBUS , quitAbruptly );
     signal( SIGFPE , quitAbruptly );
+
+#if !defined(_WIN32) // surprisingly these are the only ones that don't work on windows
+    signal( SIGPIPE , quitNicely ); // Maybe just log and continue?
+    signal( SIGBUS , quitAbruptly );
+#endif
+
     set_terminate( myterminate );
 }
-#else
-inline void setupSignals() {}
-#endif
 
 string fixHost( string url , string host , string port ) {
     //cout << "fixHost url: " << url << " host: " << host << " port: " << port << endl;
@@ -337,7 +315,7 @@ string fixHost( string url , string host , string port ) {
     return newurl;
 }
 
-static string OpSymbols = "~!%^&*-+=|:,<>/?";
+static string OpSymbols = "~!%^&*-+=|:,<>/?.";
 
 bool isOpSymbol( char c ) {
     for ( size_t i = 0; i < OpSymbols.size(); i++ )
@@ -410,6 +388,9 @@ public:
         assert( ! isBalanced( "x = 5 +") );
         assert( isBalanced( " x ++") );
         assert( isBalanced( "-- x") );
+        assert( !isBalanced( "a.") );
+        assert( !isBalanced( "a. ") );
+        assert( isBalanced( "a.b") );
     }
 } balnaced_test;
 
@@ -422,6 +403,8 @@ string finishCode( string code ) {
             return "";
         if ( ! line )
             return "";
+        if ( code.find("\n\n") != string::npos ) // cancel multiline if two blank lines are entered
+            return ";";
 
         while (startsWith(line, "... "))
             line += 4;
@@ -461,18 +444,6 @@ namespace mongo {
     extern DBClientWithCommands *latestConn;
 }
 
-string stateToString(MemberState s) {
-    if( s.s == MemberState::RS_STARTUP ) return "STARTUP";
-    if( s.s == MemberState::RS_PRIMARY ) return "PRIMARY";
-    if( s.s == MemberState::RS_SECONDARY ) return "SECONDARY";
-    if( s.s == MemberState::RS_RECOVERING ) return "RECOVERING";
-    if( s.s == MemberState::RS_FATAL ) return "FATAL";
-    if( s.s == MemberState::RS_STARTUP2 ) return "STARTUP2";
-    if( s.s == MemberState::RS_ARBITER ) return "ARBITER";
-    if( s.s == MemberState::RS_DOWN ) return "DOWN";
-    if( s.s == MemberState::RS_ROLLBACK ) return "ROLLBACK";
-    return "";
-}
 string sayReplSetMemberState() {
     try {
         if( latestConn ) {
@@ -482,8 +453,10 @@ string sayReplSetMemberState() {
                 ss << info["set"].String() << ':';
                 int s = info["myState"].Int();
                 MemberState ms(s);
-                ss << stateToString(ms);
-                return ss.str();
+                return ms.toString();
+            }
+            else if( str::equals(info.getStringField("info"), "mongos") ) { 
+                return "mongos";
             }
         }
     }
@@ -509,6 +482,7 @@ int _main(int argc, char* argv[]) {
 
     bool runShell = false;
     bool nodb = false;
+    bool norc = false;
 
     string script;
 
@@ -520,6 +494,7 @@ int _main(int argc, char* argv[]) {
     shell_options.add_options()
     ("shell", "run the shell after executing files")
     ("nodb", "don't connect to mongod on startup - no 'db address' arg expected")
+    ("norc", "will not run the \".mongorc.js\" file on start up")
     ("quiet", "be less chatty" )
     ("port", po::value<string>(&port), "port to connect to")
     ("host", po::value<string>(&dbhost), "server to connect to")
@@ -531,6 +506,9 @@ int _main(int argc, char* argv[]) {
     ("version", "show version information")
     ("verbose", "increase verbosity")
     ("ipv6", "enable IPv6 support (disabled by default)")
+#ifdef MONGO_SSL
+    ("ssl", "use all for connections")
+#endif
     ;
 
     hidden_options.add_options()
@@ -582,6 +560,9 @@ int _main(int argc, char* argv[]) {
     if (params.count("nodb")) {
         nodb = true;
     }
+    if (params.count("norc")) {
+        norc = true;
+    }
     if (params.count("help")) {
         show_help_text(argv[0], shell_options);
         return mongo::EXIT_CLEAN;
@@ -596,12 +577,19 @@ int _main(int argc, char* argv[]) {
     if (params.count("quiet")) {
         mongo::cmdLine.quiet = true;
     }
+#ifdef MONGO_SSL
+    if (params.count("ssl")) {
+        mongo::cmdLine.sslOnNormalPorts = true;
+    }
+#endif
     if (params.count("nokillop")) {
         mongo::shellUtils::_nokillop = true;
     }
     if (params.count("autokillop")) {
         autoKillOp = true;
     }
+
+    
 
     /* This is a bit confusing, here are the rules:
      *
@@ -696,7 +684,27 @@ int _main(int argc, char* argv[]) {
 
         mongo::shellUtils::MongoProgramScope s;
 
+        if (!norc) {
+            string rcLocation;
+#ifndef _WIN32
+            if ( getenv("HOME") != NULL )
+                rcLocation = str::stream() << getenv("HOME") << "/.mongorc.js" ;
+#else
+            if ( getenv("HOMEDRIVE") != NULL && getenv("HOMEPATH") != NULL )
+                rcLocation = str::stream() << getenv("HOMEDRIVE") << getenv("HOMEPATH") << "\\.mongorc.js";
+#endif
+            if ( !rcLocation.empty() && fileExists(rcLocation) ) {
+                if ( ! scope->execFile( rcLocation , false , true , false , 0 ) ) {
+                    cout << "The \".mongorc.js\" file located in your home folder could not be executed" << endl;
+                    return -5;
+                }
+            }
+        }
+
         shellHistoryInit();
+
+        string prompt;
+        int promptType; 
 
         //v8::Handle<v8::Object> shellHelper = baseContext_->Global()->Get( v8::String::New( "shellHelper" ) )->ToObject();
 
@@ -706,7 +714,15 @@ int _main(int argc, char* argv[]) {
 //            shellMainScope->localConnect;
             //DBClientWithCommands *c = getConnection( JSContext *cx, JSObject *obj );
 
-            string prompt(sayReplSetMemberState()+"> ");
+            promptType = scope->type("prompt");
+            if (promptType == String){
+                prompt = scope->getString("prompt");
+            } else if (promptType  == Code) {
+                scope->exec("__prompt__ = prompt();", "", false, false, false, 0);
+                prompt = scope->getString("__prompt__");
+            } else {
+                prompt = sayReplSetMemberState()+"> ";
+            }
 
             char * line = shellReadline( prompt.c_str() );
 

@@ -1,4 +1,4 @@
-// restore.cpp
+// @file restore.cpp
 
 /**
 *    Copyright (C) 2008 10gen Inc.
@@ -25,6 +25,7 @@
 #include <boost/program_options.hpp>
 
 #include <fcntl.h>
+#include <set>
 
 using namespace mongo;
 
@@ -38,13 +39,16 @@ class Restore : public BSONTool {
 public:
 
     bool _drop;
+    bool _keepIndexVersion;
     string _curns;
     string _curdb;
+    set<string> _users; // For restoring users with --drop
 
     Restore() : BSONTool( "restore" ) , _drop(false) {
         add_options()
         ("drop" , "drop each collection before import" )
         ("oplogReplay" , "replay oplog for point-in-time restore")
+        ("keepIndexVersion" , "don't upgrade indexes to newest version")
         ;
         add_hidden_options()
         ("dir", po::value<string>()->default_value("dump"), "directory to restore from")
@@ -67,6 +71,7 @@ public:
         }
 
         _drop = hasParam( "drop" );
+        _keepIndexVersion = hasParam("keepIndexVersion");
 
         bool doOplog = hasParam( "oplogReplay" );
         if (doOplog) {
@@ -168,7 +173,7 @@ public:
 
         if ( ! ( endsWith( root.string().c_str() , ".bson" ) ||
                  endsWith( root.string().c_str() , ".bin" ) ) ) {
-            cerr << "don't know what to do with [" << root.string() << "]" << endl;
+            cerr << "don't know what to do with file [" << root.string() << "]" << endl;
             return;
         }
 
@@ -208,13 +213,31 @@ public:
         out() << "\t going into namespace [" << ns << "]" << endl;
 
         if ( _drop ) {
-            out() << "\t dropping" << endl;
-            conn().dropCollection( ns );
+            if (root.leaf() != "system.users.bson" ) {
+                out() << "\t dropping" << endl;
+                conn().dropCollection( ns );
+            } else {
+                // Create map of the users currently in the DB
+                BSONObj fields = BSON("user" << 1);
+                scoped_ptr<DBClientCursor> cursor(conn().query(ns, Query(), 0, 0, &fields));
+                while (cursor->more()) {
+                    BSONObj user = cursor->next();
+                    _users.insert(user["user"].String());
+                }
+            }
         }
 
         _curns = ns.c_str();
         _curdb = NamespaceString(_curns).db;
         processFile( root );
+        if (_drop && root.leaf() == "system.users.bson") {
+            // Delete any users that used to exist but weren't in the dump file
+            for (set<string>::iterator it = _users.begin(); it != _users.end(); ++it) {
+                BSONObj userMatch = BSON("user" << *it);
+                conn().remove(ns, Query(userMatch));
+            }
+            _users.clear();
+        }
     }
 
     virtual void gotObject( const BSONObj& obj ) {
@@ -245,7 +268,7 @@ public:
                     string s = _curdb + "." + n.coll;
                     bo.append("ns", s);
                 }
-                else {
+                else if (strcmp(e.fieldName(), "v") != 0 || _keepIndexVersion) { // Remove index version number
                     bo.append(e);
                 }
             }
@@ -257,10 +280,16 @@ public:
                 cerr << "Error creating index " << o["ns"].String();
                 cerr << ": " << err["code"].Int() << " " << err["err"].String() << endl;
                 cerr << "To resume index restoration, run " << _name << " on file" << _fileName << " manually." << endl;
-                abort();
+                ::abort();
             }
         }
-        else {
+        else if (_drop && endsWith(_curns.c_str(), ".system.users") && _users.count(obj["user"].String())) {
+            // Since system collections can't be dropped, we have to manually
+            // replace the contents of the system.users collection
+            BSONObj userMatch = BSON("user" << obj["user"].String());
+            conn().update(_curns, Query(userMatch), obj);
+            _users.erase(obj["user"].String());
+        } else {
             conn().insert( _curns , obj );
         }
     }

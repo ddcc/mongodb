@@ -1,2 +1,4 @@
 0001-install-libs-to-usr-lib-not-usr-lib64-Closes-588557.patch
 0002-return-empty-TERM-if-not-set-Closes-620910.patch
+0003-Ignore-unused-but-set-variables-and-params-Closes-62.patch
+0004-use-system-wide-pcre.patch

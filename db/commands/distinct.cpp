@@ -32,7 +32,7 @@ namespace mongo {
             help << "{ distinct : 'collection name' , key : 'a.b' , query : {} }";
         }
 
-        bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
+        bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
             Timer t;
             string ns = dbname + '.' + cmdObj.firstElement().valuestr();
 
@@ -63,7 +63,7 @@ namespace mongo {
 
             shared_ptr<Cursor> cursor;
             if ( ! query.isEmpty() ) {
-                cursor = bestGuessCursor(ns.c_str() , query , BSONObj() );
+                cursor = NamespaceDetailsTransient::getCursor(ns.c_str() , query , BSONObj() );
             }
             else {
 
@@ -78,29 +78,33 @@ namespace mongo {
 
                     if ( idx.inKeyPattern( key ) ) {
                         cursor = bestGuessCursor( ns.c_str() , BSONObj() , idx.keyPattern() );
-                        break;
+                        if( cursor.get() ) break;
                     }
 
                 }
 
                 if ( ! cursor.get() )
-                    cursor = bestGuessCursor(ns.c_str() , query , BSONObj() );
+                    cursor = NamespaceDetailsTransient::getCursor(ns.c_str() , query , BSONObj() );
 
             }
 
-
-
-            scoped_ptr<ClientCursor> cc (new ClientCursor(QueryOption_NoCursorTimeout, cursor, ns));
+            
+            assert( cursor );
+            string cursorName = cursor->toString();
+            
+            auto_ptr<ClientCursor> cc (new ClientCursor(QueryOption_NoCursorTimeout, cursor, ns));
 
             while ( cursor->ok() ) {
                 nscanned++;
                 bool loadedObject = false;
 
-                if ( !cursor->matcher() || cursor->matcher()->matchesCurrent( cursor.get() , &md ) ) {
+                if ( ( !cursor->matcher() || cursor->matcher()->matchesCurrent( cursor.get() , &md ) ) &&
+                    !cursor->getsetdup( cursor->currLoc() ) ) {
                     n++;
 
+                    BSONObj holder;
                     BSONElementSet temp;
-                    loadedObject = ! cc->getFieldsDotted( key , temp );
+                    loadedObject = ! cc->getFieldsDotted( key , temp, holder );
 
                     for ( BSONElementSet::iterator i=temp.begin(); i!=temp.end(); ++i ) {
                         BSONElement e = *i;
@@ -109,7 +113,7 @@ namespace mongo {
 
                         int now = bb.len();
 
-                        uassert(10044,  "distinct too big, 4mb cap", ( now + e.size() + 1024 ) < bufSize );
+                        uassert(10044,  "distinct too big, 16mb cap", ( now + e.size() + 1024 ) < bufSize );
 
                         arr.append( e );
                         BSONElement x( start + now );
@@ -118,13 +122,15 @@ namespace mongo {
                     }
                 }
 
-                if ( loadedObject || md.loadedObject )
+                if ( loadedObject || md._loadedObject )
                     nscannedObjects++;
 
                 cursor->advance();
 
-                if (!cc->yieldSometimes())
+                if (!cc->yieldSometimes( ClientCursor::MaybeCovered )) {
+                    cc.release();
                     break;
+                }
 
                 RARELY killCurrentOp.checkForInterrupt();
             }
@@ -139,6 +145,7 @@ namespace mongo {
                 b.appendNumber( "nscanned" , nscanned );
                 b.appendNumber( "nscannedObjects" , nscannedObjects );
                 b.appendNumber( "timems" , t.millis() );
+                b.append( "cursor" , cursorName );
                 result.append( "stats" , b.obj() );
             }
 
