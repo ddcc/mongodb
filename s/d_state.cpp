@@ -29,7 +29,7 @@
 #include "../db/commands.h"
 #include "../db/jsobj.h"
 #include "../db/db.h"
-
+#include "../db/replutil.h"
 #include "../client/connpool.h"
 
 #include "../util/queue.h"
@@ -318,6 +318,7 @@ namespace mongo {
         if (!done) {
             LOG(1) << "adding sharding hook" << endl;
             pool.addHook(new ShardingConnectionHook(false));
+            shardConnectionPool.addHook(new ShardingConnectionHook(true));
             done = true;
         }
     }
@@ -395,6 +396,7 @@ namespace mongo {
             help << " example: { setShardVersion : 'alleyinsider.foo' , version : 1 , configdb : '' } ";
         }
 
+        virtual bool slaveOk() const { return true; }
         virtual LockType locktype() const { return NONE; }
         
         bool checkConfigOrInit( const string& configdb , bool authoritative , string& errmsg , BSONObjBuilder& result , bool locked=false ) const {
@@ -430,8 +432,11 @@ namespace mongo {
             return checkConfigOrInit( configdb , authoritative , errmsg , result , true );
         }
         
-        bool checkMongosID( ShardedConnectionInfo* info, const BSONElement& id, string errmsg ) {
+        bool checkMongosID( ShardedConnectionInfo* info, const BSONElement& id, string& errmsg ) {
             if ( id.type() != jstOID ) {
+                if ( ! info->hasID() ) {
+                    warning() << "bad serverID set in setShardVersion and none in info: " << id << endl;
+                }
                 // TODO: fix this
                 //errmsg = "need serverID to be an OID";
                 //return 0;
@@ -465,6 +470,10 @@ namespace mongo {
             lastError.disableForCommand();
             ShardedConnectionInfo* info = ShardedConnectionInfo::get( true );
 
+            // make sure we have the mongos id for writebacks
+            if ( ! checkMongosID( info , cmdObj["serverID"] , errmsg ) ) 
+                return false;
+
             bool authoritative = cmdObj.getBoolField( "authoritative" );
             
             // check config server is ok or enable sharding
@@ -477,9 +486,19 @@ namespace mongo {
                 shardingState.gotShardHost( cmdObj["shardHost"].String() );
             }
             
-            // make sure we have the mongos id for writebacks
-            if ( ! checkMongosID( info , cmdObj["serverID"] , errmsg ) )
+
+            // Handle initial shard connection
+            if( cmdObj["version"].eoo() && cmdObj["init"].trueValue() ){
+                result.append( "initialized", true );
+                return true;
+            }
+
+            // we can run on a slave up to here
+            if ( ! isMaster( "admin" ) ) {
+                result.append( "errmsg" , "not master" );
+                result.append( "note" , "from post init in setShardVersion" );
                 return false;
+            }
 
             // step 2
             
@@ -656,6 +675,11 @@ namespace mongo {
     bool shardVersionOk( const string& ns , string& errmsg ) {
         if ( ! shardingState.enabled() )
             return true;
+
+        if ( ! isMasterNs( ns.c_str() ) )  {
+            // right now connections to secondaries aren't versioned at all
+            return true;
+        }
 
         ShardedConnectionInfo* info = ShardedConnectionInfo::get( false );
 
