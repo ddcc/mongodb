@@ -510,9 +510,11 @@ namespace mongo {
                     t.appendNumber( "mappedWithJournal" , m );
                 }
                 
-                if( v - m > 5000 ) { 
+                int overhead = v - m - connTicketHolder.used();
+
+                if( overhead > 4000 ) { 
                     t.append("note", "virtual minus mapped is large. could indicate a memory leak");
-                    log() << "warning: virtual size (" << v << "MB) - mapped size (" << m << "MB) is large. could indicate a memory leak" << endl;
+                    log() << "warning: virtual size (" << v << "MB) - mapped size (" << m << "MB) is large (" << overhead << "MB). could indicate a memory leak" << endl;
                 }
 
                 t.done();
@@ -949,7 +951,7 @@ namespace mongo {
             }
 
             list<BSONObj> all;
-            auto_ptr<DBClientCursor> i = db.getIndexes( toDeleteNs );
+            auto_ptr<DBClientCursor> i = db.query( dbname + ".system.indexes" , BSON( "ns" << toDeleteNs ) , 0 , 0 , 0 , QueryOption_SlaveOk );
             BSONObjBuilder b;
             while ( i->more() ) {
                 BSONObj o = i->next().removeField("v").getOwned();
@@ -1104,6 +1106,10 @@ namespace mongo {
             BSONObj sort = BSON( "files_id" << 1 << "n" << 1 );
 
             shared_ptr<Cursor> cursor = bestGuessCursor(ns.c_str(), query, sort);
+            if ( ! cursor ) {
+                errmsg = "need an index on { files_id : 1 , n : 1 }";
+                return false;
+            }
             auto_ptr<ClientCursor> cc (new ClientCursor(QueryOption_NoCursorTimeout, cursor, ns.c_str()));
 
             int n = 0;

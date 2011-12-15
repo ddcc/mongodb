@@ -28,6 +28,8 @@
 #include "../db/oplog.h"
 #include "../db/queryoptimizer.h"
 
+#include "../db/repl/rs.h"
+
 namespace mongo {
     void createOplog();
 }
@@ -107,12 +109,6 @@ namespace ReplTests {
             return count;
         }
         static void applyAllOperations() {
-            class Applier : public ReplSource {
-            public:
-                static void apply( const BSONObj &op ) {
-                    ReplSource::applyOperation( op );
-                }
-            };
             dblock lk;
             vector< BSONObj > ops;
             {
@@ -122,8 +118,13 @@ namespace ReplTests {
             }
             {
                 Client::Context ctx( ns() );
-                for( vector< BSONObj >::iterator i = ops.begin(); i != ops.end(); ++i )
-                    Applier::apply( *i );
+                BSONObjBuilder b;
+                b.append("host", "localhost");
+                b.appendTimestamp("syncedTo", 0);
+                ReplSource a(b.obj());
+                for( vector< BSONObj >::iterator i = ops.begin(); i != ops.end(); ++i ) {
+                    a.applyOperation( *i );
+                }
             }
         }
         static void printAll( const char *ns ) {
@@ -1014,7 +1015,7 @@ namespace ReplTests {
             ASSERT( !one( BSON( "_id" << 2 ) ).isEmpty() );
         }
     };
-    
+
     class DatabaseIgnorerBasic {
     public:
         void run() {
@@ -1047,10 +1048,10 @@ namespace ReplTests {
             d.doIgnoreUntilAfter( "a", OpTime( 5, 0 ) );
             ASSERT( d.ignoreAt( "a", OpTime( 5, 5 ) ) );
             ASSERT( d.ignoreAt( "a", OpTime( 6, 0 ) ) );
-            ASSERT( !d.ignoreAt( "a", OpTime( 6, 1 ) ) );            
+            ASSERT( !d.ignoreAt( "a", OpTime( 6, 1 ) ) );
         }
     };
-    
+
     /**
      * Check against oldest document in the oplog before scanning backward
      * from the newest document.
@@ -1075,7 +1076,7 @@ namespace ReplTests {
             ASSERT_EQUALS( 0, fsc.cursor()->current()[ "o" ].Obj()[ "_id" ].Int() );
         }
     };
-    
+
     /** Check unsuccessful yield recovery with FindingStartCursor */
     class FindingStartCursorYield : public Base {
     public:
@@ -1101,7 +1102,26 @@ namespace ReplTests {
             ASSERT_EXCEPTION( fsc.recoverFromYield(), MsgAssertionException );
         }
     };
-    
+
+    /** Check ReplSetConfig::MemberCfg equality */
+    class ReplSetMemberCfgEquality : public Base {
+    public:
+        void run() {
+            ReplSetConfig::MemberCfg m1, m2;
+            assert(m1 == m2);
+            m1.tags["x"] = "foo";
+            assert(m1 != m2);
+            m2.tags["y"] = "bar";
+            assert(m1 != m2);
+            m1.tags["y"] = "bar";
+            assert(m1 != m2);
+            m2.tags["x"] = "foo";
+            assert(m1 == m2);
+            m1.tags.clear();
+            assert(m1 != m2);
+        }
+    };
+
     class All : public Suite {
     public:
         All() : Suite( "repl" ) {
@@ -1158,6 +1178,7 @@ namespace ReplTests {
             add< DatabaseIgnorerUpdate >();
             add< FindingStartCursorStale >();
             add< FindingStartCursorYield >();
+            add< ReplSetMemberCfgEquality >();
         }
     } myall;
 

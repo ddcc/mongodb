@@ -93,6 +93,7 @@ namespace mongo {
 
         void noteARemoteIsPrimary(const Member *);
         void checkElectableSet();
+        void checkAuth();
         virtual void starting();
     public:
         Manager(ReplSetImpl *rs);
@@ -348,6 +349,9 @@ namespace mongo {
         const Member* getMemberToSyncTo();
         Member* _currentSyncTarget;
 
+        bool _blockSync;
+        void blockSync(bool block);
+
         // set of electable members' _ids
         set<unsigned> _electableSet;
     protected:
@@ -491,7 +495,7 @@ namespace mongo {
         void _syncThread();
         bool tryToGoLiveAsASecondary(OpTime&); // readlocks
         void syncTail();
-        void syncApply(const BSONObj &o);
+        bool syncApply(const BSONObj &o);
         unsigned _syncRollback(OplogReader& r);
         void syncRollback(OplogReader& r);
         void syncFixUp(HowToFixUp& h, OplogReader& r);
@@ -577,7 +581,7 @@ namespace mongo {
          * that still need to be checked for auth.
          */
         bool checkAuth(string& errmsg, BSONObjBuilder& result) {
-            if( !noauth && adminOnly() ) {
+            if( !noauth ) {
                 AuthenticationInfo *ai = cc().getAuthenticationInfo();
                 if (!ai->isAuthorizedForLock("admin", locktype())) {
                     errmsg = "replSet command unauthorized";

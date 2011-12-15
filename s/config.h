@@ -115,7 +115,8 @@ namespace mongo {
             : _name( name ) ,
               _primary("config","") ,
               _shardingEnabled(false),
-              _lock("DBConfig") {
+              _lock("DBConfig") ,
+              _hitConfigServerLock( "DBConfig::_hitConfigServerLock" ) {
             assert( name.size() );
         }
         virtual ~DBConfig() {}
@@ -142,8 +143,8 @@ namespace mongo {
          */
         bool isSharded( const string& ns );
 
-        ChunkManagerPtr getChunkManager( const string& ns , bool reload = false );
-        ChunkManagerPtr getChunkManagerIfExists( const string& ns , bool reload = false );
+        ChunkManagerPtr getChunkManager( const string& ns , bool reload = false, bool forceReload = false );
+        ChunkManagerPtr getChunkManagerIfExists( const string& ns , bool reload = false, bool forceReload = false );
 
         /**
          * @return the correct for shard for the ns
@@ -195,6 +196,7 @@ namespace mongo {
         Collections _collections;
 
         mutable mongo::mutex _lock; // TODO: change to r/w lock ??
+        mutable mongo::mutex _hitConfigServerLock;
     };
 
     class ConfigServer : public DBConfig {
