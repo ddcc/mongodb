@@ -1,3 +1,9 @@
+mongodb (1:2.0.2-3) unstable; urgency=low
+
+  * Describe jsonArray option for mongoimport in manpage (Closes: 656444)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 19 Jan 2012 14:11:14 +0100
+
 mongodb (1:2.0.2-2) unstable; urgency=low
 
   * added logrotate for mongodb-server (Closes: #656065)
