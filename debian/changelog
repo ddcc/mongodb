@@ -1,3 +1,9 @@
+mongodb (1:2.0.2-4) unstable; urgency=low
+
+  * Move socket from /tmp to /var/run/mongodb (Closes: #658177)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Wed, 01 Feb 2012 14:53:12 +0100
+
 mongodb (1:2.0.2-3) unstable; urgency=low
 
   * Describe jsonArray option for mongoimport in manpage (Closes: 656444)

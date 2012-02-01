@@ -34,6 +34,10 @@ case "$1" in
 	# create logdir -- note: this should agree with logpath in mongodb.conf
 	mkdir -p /var/log/mongodb
 	chown -R mongodb:mongodb /var/log/mongodb
+
+	# create rundir
+	mkdir -p /var/run/mongodb
+	chown -R mongodb:mongodb /var/run/mongodb
     ;;
 
     abort-upgrade|abort-remove|abort-deconfigure)
