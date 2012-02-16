@@ -13,6 +13,10 @@ endif
 ifneq (,$(findstring nostrip,$(DEB_BUILD_OPTIONS)))
 	DEB_SCONS_OPTIONS := --d=DEBUGBUILD
 endif
+ifneq (,$(findstring parallel,$(DEB_BUILD_OPTIONS)))
+       PROCS=$(subst parallel=,,$(DEB_BUILD_OPTIONS))
+       DEB_SCONS_OPTIONS := -j$(PROCS)
+endif
 
 DEB_SCONS_BUILD_TARGET = all
 DEB_SCONS_INSTALL_OPTIONS += --prefix=$(CURDIR)/debian/tmp/usr --full
