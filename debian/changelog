@@ -1,3 +1,12 @@
+mongodb (1:2.0.3-1) unstable; urgency=low
+
+  * New upstream release 2.0.2
+    https://jira.mongodb.org/browse/SERVER/fixforversion/11001
+  * added debian/copat
+  * added Replaces clause from Ubuntu patch
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 01 Mar 2012 14:14:34 +0100
+
 mongodb (1:2.0.2-5) unstable; urgency=low
 
   * Allow parallel build, patch courtesy of Andre Ferraz
