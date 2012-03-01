@@ -25,6 +25,17 @@ import buildscripts.bb
 import stat
 from buildscripts import utils
 
+
+def _rpartition(string, sep):
+    """A replacement for str.rpartition which is missing in Python < 2.5
+    """
+    idx = string.rfind(sep)
+    if idx == -1:
+        return '', '', string
+    return string[:idx], sep, string[idx + 1:]
+
+
+
 buildscripts.bb.checkOk()
 
 def findSettingsSetup():
@@ -38,7 +49,7 @@ def getThirdPartyShortNames():
         if not x.endswith( ".py" ) or x.find( "#" ) >= 0:
             continue
          
-        lst.append( x.rpartition( "." )[0] )
+        lst.append( _rpartition( x, "." )[0] )
     return lst
 
 
@@ -334,6 +345,7 @@ class InstallSetup:
         self.clientTestsDir = "client/examples/"
         
 installSetup = InstallSetup()
+env["installSetup"] = installSetup
 if distBuild:
     installSetup.bannerDir = "distsrc"
 
@@ -805,6 +817,29 @@ def add_exe(target):
         return target + ".exe"
     return target
 
+def smoke_python_name():
+    # if this script is being run by py2.5 or greater,
+    # then we assume that "python" points to a 2.5 or
+    # greater python VM. otherwise, explicitly use 2.5
+    # which we assume to be installed.
+    import subprocess
+    version = re.compile(r'[Pp]ython ([\d\.]+)', re.MULTILINE)
+    binaries = ['python2.5', 'python2.6', 'python2.7', 'python25', 'python26', 'python27', 'python']
+    for binary in binaries:
+        try:
+            # py-2.4 compatible replacement for shell backticks
+            out, err = subprocess.Popen([binary, '-V'], stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
+            for stream in (out, err):
+                match = version.search(stream)
+                if match:
+                    versiontuple = tuple(map(int, match.group(1).split('.')))
+                    if versiontuple >= (2, 5):
+                        return binary
+        except:
+            pass
+    # if that all fails, fall back to "python"
+    return "python"
+
 def setupBuildInfoFile( outFile ):
     version = utils.getGitVersion()
     if len(moduleNames) > 0:
@@ -1218,7 +1253,7 @@ def addSmoketest( name, deps ):
         else:
             target = name[5].lower() + name[6:]
 
-    addTest(name, deps, [ "python buildscripts/smoke.py " + " ".join(smokeFlags) + ' ' + target ])
+    addTest(name, deps, [ smoke_python_name() + " buildscripts/smoke.py " + " ".join(smokeFlags) + ' ' + target ])
 
 addSmoketest( "smoke", [ add_exe( "test" ) ] )
 addSmoketest( "smokePerf", [ "perftest" ]  )
@@ -1480,7 +1515,7 @@ if installSetup.headers:
 if installSetup.clientSrc:
     for x in allClientFiles:
         x = str(x)
-        env.Install( installDir + "/mongo/" + x.rpartition( "/" )[0] , x )
+        env.Install( installDir + "/mongo/" + _rpartition( x, "/" )[0] , x )
 
 #lib
 if installSetup.libraries:
@@ -1559,7 +1594,7 @@ def s3push( localName , remoteName=None , remotePrefix=None , fixName=True , pla
         remoteName = localName
 
     if fixName:
-        (root,dot,suffix) = localName.rpartition( "." )
+        (root,dot,suffix) = _rpartition( localName, "." )
         name = remoteName + "-" + getSystemInstallName()
         name += remotePrefix
         if dot == "." :
@@ -1616,7 +1651,7 @@ def build_and_test_client(env, target, source):
 
     call(scons_command + ["libmongoclient.a", "clientTests"], cwd=installDir)
 
-    return bool(call(["python", "buildscripts/smoke.py",
+    return bool(call([smoke_python_name(), "buildscripts/smoke.py",
                       "--test-path", installDir, "client"]))
 env.Alias("clientBuild", [mongod, installDir], [build_and_test_client])
 env.AlwaysBuild("clientBuild")
