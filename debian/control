@@ -35,6 +35,7 @@ Description: object/document-oriented database (metapackage)
 Package: mongodb-server
 Architecture: i386 amd64
 Depends: mongodb-clients, ${shlibs:Depends}, ${misc:Depends}, adduser
+Replaces: mongodb (<= 1:1.4.2-2)
 Description: object/document-oriented database (server package)
  MongoDB is a high-performance, open source, schema-free
  document-oriented  data store that's easy to deploy, manage
@@ -58,6 +59,7 @@ Description: object/document-oriented database (server package)
 Package: mongodb-clients
 Architecture: i386 amd64
 Depends: ${shlibs:Depends}, ${misc:Depends}
+Replaces: mongodb (<= 1:1.4.2-2)
 Description: object/document-oriented database (client apps)
  MongoDB is a high-performance, open source, schema-free
  document-oriented  data store that's easy to deploy, manage
@@ -82,6 +84,7 @@ Package: mongodb-dev
 Section: libdevel
 Architecture: i386 amd64
 Depends: mongodb-server, libboost-dev, ${shlibs:Depends}, ${misc:Depends}
+Replaces: mongodb (<= 1:1.4.2-2)
 Description: object/document-oriented database (development)
  MongoDB is a high-performance, open source, schema-free
  document-oriented  data store that's easy to deploy, manage
