@@ -72,7 +72,8 @@ namespace mongo {
         struct X {
             mongo::mutex z;
             DBClientConnection cc;
-            X() : z("X"), cc(/*reconnect*/ true, 0, /*timeout*/ 10.0) {
+            bool connected;
+            X() : z("X"), cc(/*reconnect*/ true, 0, /*timeout*/ 10.0), connected(false) {
                 cc._logLevel = 2;
             }
         } *x;
@@ -88,6 +89,7 @@ namespace mongo {
             log() << "couldn't connect to " << _hostport << ": " << err << rsLog;
             return false;
           }
+          x->connected = true;
 
           // if we cannot authenticate against a member, then either its key file
           // or our key file has to change.  if our key file has to change, we'll
@@ -113,11 +115,19 @@ namespace mongo {
                 connLock.reset( new scoped_lock(x->z) );
             }
         }
-        if( !first ) {
-            connLock.reset( new scoped_lock(x->z) );
+
+        // already locked connLock above
+        if (first) {
+            connect();
             return;
         }
 
+        connLock.reset( new scoped_lock(x->z) );
+        if (x->connected) {
+            return;
+        }
+
+        // Keep trying to connect if we're not yet connected
         connect();
     }
 

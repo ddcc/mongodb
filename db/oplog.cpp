@@ -627,12 +627,22 @@ namespace mongo {
 
     bool shouldRetry(const BSONObj& o, const string& hn) {
         OplogReader missingObjReader;
+        const char *ns = o.getStringField("ns");
+
+        // capped collections
+        NamespaceDetails *nsd = nsdetails(ns);
+        if (nsd && nsd->capped) {
+            log() << "replication missing doc, but this is okay for a capped collection (" << ns << ")" << endl;
+            return false;
+        }
+
+        // should already have write lock
+        Client::Context ctx(ns);
 
         // we don't have the object yet, which is possible on initial sync.  get it.
         log() << "replication info adding missing object" << endl; // rare enough we can log
         uassert(15916, str::stream() << "Can no longer connect to initial sync source: " << hn, missingObjReader.connect(hn));
 
-        const char *ns = o.getStringField("ns");
         // might be more than just _id in the update criteria
         BSONObj query = BSONObjBuilder().append(o.getObjectField("o2")["_id"]).obj();
         BSONObj missingObj;
@@ -651,7 +661,6 @@ namespace mongo {
             return false;
         }
         else {
-            Client::Context ctx(ns);
             DiskLoc d = theDataFileMgr.insert(ns, (void*) missingObj.objdata(), missingObj.objsize());
             uassert(15917, "Got bad disk location when attempting to insert", !d.isNull());
 
@@ -678,6 +687,7 @@ namespace mongo {
             o = fields[0].embeddedObject();
             
         const char *ns = fields[1].valuestrsafe();
+        NamespaceDetails *nsd = nsdetails(ns);
 
         // operation type -- see logOp() comments for types
         const char *opType = fields[2].valuestrsafe();
@@ -705,7 +715,7 @@ namespace mongo {
                 }
                 else {
                     /* erh 10/16/2009 - this is probably not relevant any more since its auto-created, but not worth removing */
-                    RARELY ensureHaveIdIndex(ns); // otherwise updates will be slow
+                    RARELY if (nsd && !nsd->capped) { ensureHaveIdIndex(ns); } // otherwise updates will be slow
 
                     /* todo : it may be better to do an insert here, and then catch the dup key exception and do update
                               then.  very few upserts will not be inserts...
@@ -722,9 +732,9 @@ namespace mongo {
             //  - if not, updates would be slow
             //    - but if were by id would be slow on primary too so maybe ok
             //    - if on primary was by another key and there are other indexes, this could be very bad w/out an index
-            //  - if do create, odd to have on secondary but not primary.  also can cause secondary to block for 
-            //    quite a while on creation.  
-            RARELY ensureHaveIdIndex(ns); // otherwise updates will be super slow
+            //  - if do create, odd to have on secondary but not primary.  also can cause secondary to block for
+            //    quite a while on creation.
+            RARELY if (nsd && !nsd->capped) { ensureHaveIdIndex(ns); } // otherwise updates will be super slow
             OpDebug debug;
             BSONObj updateCriteria = op.getObjectField("o2");
             bool upsert = fields[3].booleanSafe();
@@ -741,11 +751,17 @@ namespace mongo {
                     // of the form
                     //   { _id:..., { x : {$size:...} }
                     // thus this is not ideal.
-                    else if( nsdetails(ns) == NULL || Helpers::findById(nsdetails(ns), updateCriteria).isNull() ) {
-                        failedUpdate = true; 
-                    }
-                    else { 
-                        // it's present; zero objects were updated because of additional specifiers in the query for idempotence
+                    else {
+
+                        if (nsd == NULL ||
+                            (nsd->findIdIndex() >= 0 && Helpers::findById(nsd, updateCriteria).isNull()) ||
+                            // capped collections won't have an _id index
+                            (nsd->findIdIndex() < 0 && Helpers::findOne(ns, updateCriteria, false).isNull())) {
+                            failedUpdate = true;
+                        }
+
+                        // Otherwise, it's present; zero objects were updated because of additional specifiers
+                        // in the query for idempotence
                     }
                 }
                 else { 
