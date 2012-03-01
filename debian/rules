@@ -6,7 +6,7 @@ include /usr/share/cdbs/1/rules/debhelper.mk
 
 DEB_DH_INSTALLINIT_ARGS = --name=mongodb
 
-DEB_SCONS_OPTIONS := 
+DEB_SCONS_OPTIONS :=
 ifneq (,$(findstring debug,$(DEB_BUILD_OPTIONS)))
 	DEB_SCONS_OPTIONS := --d=DEBUGBUILD
 endif
@@ -15,7 +15,7 @@ ifneq (,$(findstring nostrip,$(DEB_BUILD_OPTIONS)))
 endif
 ifneq (,$(findstring parallel,$(DEB_BUILD_OPTIONS)))
        PROCS=$(subst parallel=,,$(DEB_BUILD_OPTIONS))
-       DEB_SCONS_OPTIONS := -j$(PROCS)
+       DEB_SCONS_OPTIONS += -j$(PROCS)
 endif
 
 DEB_SCONS_BUILD_TARGET = all
