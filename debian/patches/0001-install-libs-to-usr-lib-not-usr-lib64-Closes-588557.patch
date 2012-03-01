@@ -7,10 +7,10 @@ Subject: install libs to /usr/lib not /usr/lib64 (Closes: #588557)
  1 files changed, 1 insertions(+), 1 deletions(-)
 
 diff --git a/SConstruct b/SConstruct
-index 4f2aa3f..29565d7 100644
+index dbe95a3..e142f29 100644
 --- a/SConstruct
 +++ b/SConstruct
-@@ -513,7 +513,7 @@ elif "linux2" == os.sys.platform or "linux3" == os.sys.platform:
+@@ -525,7 +525,7 @@ elif "linux2" == os.sys.platform or "linux3" == os.sys.platform:
  
      if os.uname()[4] == "x86_64" and not force32:
          linux64 = True
@@ -19,4 +19,3 @@ index 4f2aa3f..29565d7 100644
          env.Append( LIBPATH=["/usr/lib64" , "/lib64" ] )
          env.Append( LIBS=["pthread"] )
  
--- 
