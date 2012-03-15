@@ -1,3 +1,9 @@
+mongodb (1:2.0.3-2) unstable; urgency=low
+
+  * Enable journaling by default (Closes:#664080)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 15 Mar 2012 16:48:06 +0100
+
 mongodb (1:2.0.3-1) unstable; urgency=low
 
   * New upstream release 2.0.2
