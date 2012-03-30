@@ -816,6 +816,7 @@ namespace mongo {
 
         curop.debug().ns = ns;
         curop.debug().ntoreturn = pq.getNumToReturn();
+        curop.debug().query = jsobj;
         curop.setQuery(jsobj);
 
         if ( pq.couldBeCommand() ) {
@@ -916,6 +917,19 @@ namespace mongo {
             Client& c = cc();
             bool found = Helpers::findById( c, ns , query , resObject , &nsFound , &indexFound );
             if ( nsFound == false || indexFound == true ) {
+
+                if ( shardingState.needShardChunkManager( ns ) ) {
+                    ShardChunkManagerPtr m = shardingState.getShardChunkManager( ns );
+                    if ( m && ! m->belongsToMe( resObject ) ) {
+                        // I have something this _id
+                        // but it doesn't belong to me
+                        // so return nothing
+                        resObject = BSONObj();
+                        found = false;
+                    }
+                }
+
+
                 BufBuilder bb(sizeof(QueryResult)+resObject.objsize()+32);
                 bb.skip(sizeof(QueryResult));
                 
