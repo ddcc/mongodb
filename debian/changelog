@@ -1,3 +1,10 @@
+mongodb (1:2.0.4-1) unstable; urgency=low
+
+  * New upstream release 2.0.4
+    https://jira.mongodb.org/browse/SERVER/fixforversion/11107
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Fri, 30 Mar 2012 21:41:35 +0200
+
 mongodb (1:2.0.3-2) unstable; urgency=low
 
   * Enable journaling by default (Closes:#664080)
@@ -6,7 +13,7 @@ mongodb (1:2.0.3-2) unstable; urgency=low
 
 mongodb (1:2.0.3-1) unstable; urgency=low
 
-  * New upstream release 2.0.2
+  * New upstream release 2.0.3
     https://jira.mongodb.org/browse/SERVER/fixforversion/11001
   * added debian/copat
   * added Replaces clause from Ubuntu patch
