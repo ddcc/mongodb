@@ -940,6 +940,7 @@ namespace mongo {
 
                 log(1) << "mr ns: " << config.ns << endl;
 
+                uassert( 16149 , "cannot run map reduce without the js engine", globalScriptEngine );
                 bool shouldHaveData = false;
 
                 long long num = 0;
@@ -1206,7 +1207,7 @@ namespace mongo {
 
                             BSONObj res = config.reducer->finalReduce( values , config.finalizer.get());
                             if (state.isOnDisk())
-                                state.insertToInc(res);
+                                state.insert( config.tempLong , res );
                             else
                                 state.emit(res);
                             values.clear();
