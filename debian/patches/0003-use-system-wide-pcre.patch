@@ -3,11 +3,11 @@ Date: Thu, 15 Dec 2011 11:22:43 +0100
 Subject: use system-wide pcre
 
 ---
- SConstruct |   98 ++++++++++++++++++++++++++++++++---------------------------
- 1 files changed, 53 insertions(+), 45 deletions(-)
+ SConstruct |   98 ++++++++++++++++++++++++++++++++----------------------------
+ 1 file changed, 53 insertions(+), 45 deletions(-)
 
 diff --git a/SConstruct b/SConstruct
-index 3bf6aca..15bd3f5 100644
+index 86518ff..42369ff 100644
 --- a/SConstruct
 +++ b/SConstruct
 @@ -48,7 +48,11 @@ def getThirdPartyShortNames():
@@ -228,7 +228,7 @@ index 3bf6aca..15bd3f5 100644
      env.Append( CPPFLAGS="-fPIC -fno-strict-aliasing -ggdb -pthread -Wall -Wsign-compare -Wno-unknown-pragmas -Winvalid-pch" )
      # env.Append( " -Wconversion" ) TODO: this doesn't really work yet
      if linux:
-@@ -729,7 +737,7 @@ if nix:
+@@ -732,7 +740,7 @@ if nix:
          #env.Append( LINKFLAGS=" -fprofile-generate" )
          # then:
          #env.Append( CPPFLAGS=" -fprofile-use" )
@@ -237,7 +237,7 @@ index 3bf6aca..15bd3f5 100644
  
      if debugLogging:
          env.Append( CPPFLAGS=" -D_DEBUG" );
-@@ -789,14 +797,14 @@ if not windows:
+@@ -792,14 +800,14 @@ if not windows:
          os.chmod( keyfile , stat.S_IWUSR|stat.S_IRUSR )
  
  moduleFiles = {}
@@ -255,7 +255,7 @@ index 3bf6aca..15bd3f5 100644
      if has_option( "use-system-" + shortName ) or has_option( "use-system-all" ):
          print( "using system version of: " + shortName )
          myModule.configureSystem( env , fileLists , options_topass )
-@@ -1003,7 +1011,7 @@ def doConfigure( myenv , shell=False ):
+@@ -983,7 +991,7 @@ def doConfigure( myenv , shell=False ):
              if not found:
                  raise "can't find a static %s" % l
  
@@ -264,7 +264,7 @@ index 3bf6aca..15bd3f5 100644
      # point.
      if has_option( "heapcheck" ) and not shell:
          if ( not debugBuild ) and ( not debugLogging ):
-@@ -1018,7 +1026,7 @@ def doConfigure( myenv , shell=False ):
+@@ -998,7 +1006,7 @@ def doConfigure( myenv , shell=False ):
          myenv.Append( CPPDEFINES=[ "HEAP_CHECKING" ] )
          myenv.Append( CPPFLAGS="-fno-omit-frame-pointer" )
  
@@ -273,7 +273,7 @@ index 3bf6aca..15bd3f5 100644
      # with shell==True, it'd be on its second call and it would need to rearrange the libraries'
      # order. The following removes tcmalloc from the LIB's list and reinserts it at the end.
      if has_option( "heapcheck" ) and shell:
-@@ -1128,7 +1136,7 @@ checkErrorCodes()
+@@ -1108,7 +1116,7 @@ checkErrorCodes()
  # main db target
  mongodOnlyFiles = [ "db/db.cpp", "db/compact.cpp" ]
  if windows:
@@ -282,7 +282,7 @@ index 3bf6aca..15bd3f5 100644
  mongod = env.Program( "mongod" , commonFiles + coreDbFiles + coreServerFiles + serverOnlyFiles + mongodOnlyFiles )
  Default( mongod )
  
-@@ -1215,7 +1223,7 @@ elif not onlyServer:
+@@ -1195,7 +1203,7 @@ elif not onlyServer:
      coreShellFiles.append( "third_party/linenoise/linenoise.cpp" )
  
      shellEnv.Prepend( LIBPATH=[ "." ] )
@@ -291,7 +291,7 @@ index 3bf6aca..15bd3f5 100644
      shellEnv = doConfigure( shellEnv , shell=True )
  
      shellEnv.Prepend( LIBS=[ "mongoshellfiles"] )
-@@ -1364,14 +1372,14 @@ env.AlwaysBuild("docs")
+@@ -1344,14 +1352,14 @@ env.AlwaysBuild("docs")
  #  ---- astyle ----
  
  def doStyling( env , target , source ):
@@ -308,7 +308,7 @@ index 3bf6aca..15bd3f5 100644
      files = filter( lambda x: not x.endswith( ".c" ) , files )
      files.remove( "./shell/mongo_vstudio.cpp" )
  
-@@ -1396,7 +1404,7 @@ def getSystemInstallName():
+@@ -1376,7 +1384,7 @@ def getSystemInstallName():
          n += "-debugsymbols"
      if nix and os.uname()[2].startswith( "8." ):
          n += "-tiger"
@@ -317,7 +317,7 @@ index 3bf6aca..15bd3f5 100644
      if len(moduleNames) > 0:
          n += "-" + "-".join( moduleNames )
  
-@@ -1408,7 +1416,7 @@ def getSystemInstallName():
+@@ -1388,7 +1396,7 @@ def getSystemInstallName():
      except:
          pass
  
@@ -326,7 +326,7 @@ index 3bf6aca..15bd3f5 100644
      dn = GetOption( "distmod" )
      if dn and len(dn) > 0:
          n = n + "-" + dn
-@@ -1521,7 +1529,7 @@ if installSetup.clientSrc:
+@@ -1501,7 +1509,7 @@ if installSetup.clientSrc:
  #lib
  if installSetup.libraries:
      env.Install( installDir + "/" + nixLibPrefix, clientLibName )
@@ -335,7 +335,7 @@ index 3bf6aca..15bd3f5 100644
          env.Install( installDir + "/" + nixLibPrefix, sharedClientLibName )
  
  
-@@ -1603,7 +1611,7 @@ def s3push( localName , remoteName=None , remotePrefix=None , fixName=True , pla
+@@ -1583,7 +1591,7 @@ def s3push( localName , remoteName=None , remotePrefix=None , fixName=True , pla
          name = name.lower()
      else:
          name = remoteName
