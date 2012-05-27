@@ -25,7 +25,7 @@ Description: object/document-oriented database (metapackage)
     * Replication and fail-over support
     * Efficient storage of binary data including large
       objects (e.g. videos)
-    * Auto-sharding for cloud-level scalability (Q209)
+    * Auto-sharding for cloud-level scalability
  .
  High performance, scalability, and reasonable depth of
  functionality are the goals for the project.
@@ -49,7 +49,7 @@ Description: object/document-oriented database (server package)
     * Replication and fail-over support
     * Efficient storage of binary data including large
       objects (e.g. videos)
-    * Auto-sharding for cloud-level scalability (Q209)
+    * Auto-sharding for cloud-level scalability
  .
  High performance, scalability, and reasonable depth of
  functionality are the goals for the project.
@@ -73,7 +73,7 @@ Description: object/document-oriented database (client apps)
     * Replication and fail-over support
     * Efficient storage of binary data including large
       objects (e.g. videos)
-    * Auto-sharding for cloud-level scalability (Q209)
+    * Auto-sharding for cloud-level scalability
  .
  High performance, scalability, and reasonable depth of
  functionality are the goals for the project.
@@ -83,7 +83,8 @@ Description: object/document-oriented database (client apps)
 Package: mongodb-dev
 Section: libdevel
 Architecture: i386 amd64
-Depends: mongodb-server, libboost-dev, ${shlibs:Depends}, ${misc:Depends}
+Depends: libboost-dev, ${shlibs:Depends}, ${misc:Depends}
+Suggests: mongodb-server
 Replaces: mongodb (<= 1:1.4.2-2)
 Description: object/document-oriented database (development)
  MongoDB is a high-performance, open source, schema-free
@@ -98,7 +99,7 @@ Description: object/document-oriented database (development)
     * Replication and fail-over support
     * Efficient storage of binary data including large
       objects (e.g. videos)
-    * Auto-sharding for cloud-level scalability (Q209)
+    * Auto-sharding for cloud-level scalability
  .
  High performance, scalability, and reasonable depth of
  functionality are the goals for the project.
