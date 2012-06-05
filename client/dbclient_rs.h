@@ -120,7 +120,7 @@ namespace mongo {
          * Use replSetGetStatus command to make sure hosts in host list are up
          * and readable.  Sets Node::ok appropriately.
          */
-        void _checkStatus(DBClientConnection *conn);
+        void _checkStatus( const string& hostAddr );
 
         /**
          * Add array of hosts to host list. Doesn't do anything if hosts are
@@ -181,9 +181,8 @@ namespace mongo {
         string _name;
         struct Node {
             Node( const HostAndPort& a , DBClientConnection* c ) 
-                : addr( a ) , conn(c) , ok(true) , 
+                : addr( a ) , conn(c) , ok( c != NULL ),
                   ismaster(false), secondary( false ) , hidden( false ) , pingTimeMillis(0) {
-                ok = conn.get() == NULL;
             }
 
             bool okForSecondaryQueries() const {
