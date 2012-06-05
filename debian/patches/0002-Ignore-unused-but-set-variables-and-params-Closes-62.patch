@@ -7,7 +7,7 @@ Subject: Ignore unused but set variables and params (Closes: #625401)
  1 file changed, 2 insertions(+), 1 deletion(-)
 
 diff --git a/SConstruct b/SConstruct
-index 02813ea..86518ff 100644
+index 5c48996..9d52617 100644
 --- a/SConstruct
 +++ b/SConstruct
 @@ -704,7 +704,8 @@ if nix:

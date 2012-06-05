@@ -7,7 +7,7 @@ Subject: use system-wide pcre
  1 file changed, 53 insertions(+), 45 deletions(-)
 
 diff --git a/SConstruct b/SConstruct
-index 86518ff..42369ff 100644
+index 9d52617..418cb4c 100644
 --- a/SConstruct
 +++ b/SConstruct
 @@ -48,7 +48,11 @@ def getThirdPartyShortNames():
