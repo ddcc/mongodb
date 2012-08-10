@@ -64,12 +64,21 @@ namespace mongo {
             size_t protectSize = protectEnd - protectStart;
             dassert(protectSize>0&&protectSize<=MemoryMappedFile::ChunkSize);
 
-            DWORD old;
-            bool ok = VirtualProtect((void*)protectStart, protectSize, PAGE_WRITECOPY, &old);
-            if( !ok ) {
-                DWORD e = GetLastError();
-                log() << "VirtualProtect failed (mcw) " << mmf->filename() << ' ' << chunkno << hex << protectStart << ' ' << protectSize << ' ' << errnoWithDescription(e) << endl;
-                assert(false);
+            DWORD oldProtection;
+            bool ok = VirtualProtect( reinterpret_cast<void*>( protectStart ),
+                                      protectSize,
+                                      PAGE_WRITECOPY,
+                                      &oldProtection );
+            if ( !ok ) {
+                DWORD dosError = GetLastError();
+                log() << "VirtualProtect for " << mmf->filename()
+                        << " chunk " << chunkno
+                        << " failed with " << errnoWithDescription( dosError )
+                        << " (chunk size is " << protectSize
+                        << ", address is " << hex << protectStart << dec << ")"
+                        << " in mongo::makeChunkWritable, terminating"
+                        << endl;
+                ::abort();
             }
         }
 
@@ -79,19 +88,25 @@ namespace mongo {
     void* MemoryMappedFile::createPrivateMap() {
         assert( maphandle );
         scoped_lock lk(mapViewMutex);
-        void *p = MapViewOfFile(maphandle, FILE_MAP_READ, 0, 0, 0);
-        if ( p == 0 ) {
-            DWORD e = GetLastError();
-            log() << "createPrivateMap failed " << filename() << " " << 
-                errnoWithDescription(e) << " filelen:" << len <<
-                ((sizeof(void*) == 4 ) ? " (32 bit build)" : "") <<
-                endl;
+        LPVOID thisAddress = getNextMemoryMappedFileLocation( len );
+        void* privateMapAddress = MapViewOfFileEx(
+                maphandle,          // file mapping handle
+                FILE_MAP_READ,      // access
+                0, 0,               // file offset, high and low
+                0,                  // bytes to map, 0 == all
+                thisAddress );      // address to place file
+        if ( privateMapAddress == 0 ) {
+            DWORD dosError = GetLastError();
+            log() << "MapViewOfFileEx for " << filename()
+                    << " failed with " << errnoWithDescription( dosError )
+                    << " (file size is " << len << ")"
+                    << " in MemoryMappedFile::createPrivateMap, terminating"
+                    << endl;
+            ::abort();
         }
-        else {
-            clearWritableBits(p);
-            views.push_back(p);
-        }
-        return p;
+        clearWritableBits( privateMapAddress );
+        views.push_back( privateMapAddress );
+        return privateMapAddress;
     }
 
     void* MemoryMappedFile::remapPrivateView(void *oldPrivateAddr) {
@@ -100,37 +115,34 @@ namespace mongo {
         // the mapViewMutex is to assure we get the same address on the remap
         scoped_lock lk(mapViewMutex);
 
+        RWLockRecursive::Exclusive lockMongoFiles(mmmutex);
+
         clearWritableBits(oldPrivateAddr);
-#if 1
-        // https://jira.mongodb.org/browse/SERVER-2942
-        DWORD old;
-        bool ok = VirtualProtect(oldPrivateAddr, (SIZE_T) len, PAGE_READONLY, &old);
-        if( !ok ) {
-            DWORD e = GetLastError();
-            log() << "VirtualProtect failed in remapPrivateView " << filename() << hex << oldPrivateAddr << ' ' << len << ' ' << errnoWithDescription(e) << endl;
-            assert(false);
-        }
-        return oldPrivateAddr;
-#else
         if( !UnmapViewOfFile(oldPrivateAddr) ) {
-            DWORD e = GetLastError();
-            log() << "UnMapViewOfFile failed " << filename() << ' ' << errnoWithDescription(e) << endl;
-            assert(false);
+            DWORD dosError = GetLastError();
+            log() << "UnMapViewOfFile for " << filename()
+                    << " failed with " << errnoWithDescription( dosError )
+                    << " in MemoryMappedFile::remapPrivateView, terminating"
+                    << endl;
+            ::abort();
         }
 
-        // we want the new address to be the same as the old address in case things keep pointers around (as namespaceindex does).
-        void *p = MapViewOfFileEx(maphandle, FILE_MAP_READ, 0, 0,
-                                  /*dwNumberOfBytesToMap 0 means to eof*/0 /*len*/,
-                                  oldPrivateAddr);
-        
-        if ( p == 0 ) {
-            DWORD e = GetLastError();
-            log() << "MapViewOfFileEx failed " << filename() << " " << errnoWithDescription(e) << endl;
-            assert(p);
+        void* newPrivateView = MapViewOfFileEx(
+                maphandle,          // file mapping handle
+                FILE_MAP_READ,      // access
+                0, 0,               // file offset, high and low
+                0,                  // bytes to map, 0 == all
+                oldPrivateAddr );   // we want the same address we had before
+        if ( oldPrivateAddr != newPrivateView ) {
+            DWORD dosError = GetLastError();
+            log() << "MapViewOfFileEx for " << filename()
+                    << " failed with " << errnoWithDescription( dosError )
+                    << " (file size is " << len << ")"
+                    << " in MemoryMappedFile::remapPrivateView, terminating"
+                    << endl;
+            ::abort();
         }
-        assert(p == oldPrivateAddr);
-        return p;
-#endif
+        return newPrivateView;
     }
 #endif
 

@@ -18,12 +18,17 @@
 
 #include "pch.h"
 
+#if defined(_WIN32)
+#   include <io.h>
+#endif
+
 #include "extsort.h"
 #include "namespace-inl.h"
 #include "../util/file.h"
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+
 
 namespace mongo {
 
@@ -217,24 +222,87 @@ namespace mongo {
     // -----------------------------------
 
     BSONObjExternalSorter::FileIterator::FileIterator( string file ) {
-        unsigned long long length;
-        _buf = (char*)_file.map( file.c_str() , length , MemoryMappedFile::SEQUENTIAL );
-        massert( 10308 ,  "mmap failed" , _buf );
-        assert( length == (unsigned long long) file_size( file ) );
-        _end = _buf + length;
+#ifdef _WIN32
+        _file = ::_open( file.c_str(), _O_BINARY | _O_RDWR | _O_CREAT , _S_IREAD | _S_IWRITE );
+#else
+        _file = ::open( file.c_str(), O_CREAT | O_RDWR | O_NOATIME , S_IRUSR | S_IWUSR );
+#endif
+        massert( 16392, 
+                 str::stream() << "FileIterator can't open file: " 
+                 << file << errnoWithDescription(), 
+                 _file >= 0 );
+
+#ifdef POSIX_FADV_DONTNEED
+        int err = posix_fadvise(_file, 0, 0, POSIX_FADV_SEQUENTIAL );
+        if ( err )
+            log() << "posix_fadvise failed: " << err << endl;
+#endif
+
+        _length = (unsigned long long)boost::filesystem::file_size( file );
+        _readSoFar = 0;
     }
-    BSONObjExternalSorter::FileIterator::~FileIterator() {}
+
+    BSONObjExternalSorter::FileIterator::~FileIterator() {
+        if ( _file >= 0 ) {
+#ifdef _WIN32
+            _close( _file );
+#else
+            ::close( _file );
+#endif
+        }
+    }
 
     bool BSONObjExternalSorter::FileIterator::more() {
-        return _buf < _end;
+        return _readSoFar < _length;
     }
 
+
+    bool BSONObjExternalSorter::FileIterator::_read( char* buf, long long count ) {
+        long long total = 0;
+        while ( total < count ) {
+#ifdef _WIN32
+            long long now = ::_read( _file, buf, count );
+#else
+            long long now = ::read( _file, buf, count );
+#endif
+            if ( now < 0 ) {
+                log() << "read failed for BSONObjExternalSorter " << errnoWithDescription() << endl;
+                return false;
+            }
+            if ( now == 0 ) {
+                return false;
+            }
+            total += now;
+            buf += now;
+        }
+        return true;
+    }
+    
     BSONObjExternalSorter::Data BSONObjExternalSorter::FileIterator::next() {
-        BSONObj o( _buf );
-        _buf += o.objsize();
-        DiskLoc * l = (DiskLoc*)_buf;
-        _buf += 8;
-        return Data( o , *l );
+        // read BSONObj
+
+        int size;
+        assert( _read( reinterpret_cast<char*>(&size), 4 ) );
+        char* buf = reinterpret_cast<char*>( malloc( sizeof(unsigned) + size ) );
+        assert( buf );
+
+        memset( buf, 0, 4 ); // for Holder
+        memcpy( buf+sizeof(unsigned), reinterpret_cast<char*>(&size), sizeof(int) ); // size of doc
+        if ( ! _read( buf + sizeof(unsigned) + sizeof(int), size-sizeof(int) ) ) { // doc content
+            free( buf );
+            msgasserted( 16394, std::string("reading doc for external sort failed:") + errnoWithDescription() );
+        }
+        
+        // read DiskLoc
+        DiskLoc l;
+        if ( ! _read( reinterpret_cast<char*>(&l), 8 ) ) {
+            free( buf );
+            msgasserted( 16393, std::string("reading DiskLoc for external sort failed") + errnoWithDescription() );            
+        }
+        _readSoFar += 8 + size;
+        
+        BSONObj::Holder* h = reinterpret_cast<BSONObj::Holder*>(buf);
+        return Data( BSONObj(h), l );
     }
 
 }

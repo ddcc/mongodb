@@ -38,7 +38,7 @@ namespace mongo {
         runQuery( m, q, response );
     }
     void __forceLinkGeoPlugin();
-    shared_ptr<Cursor> newQueryOptimizerCursor( const char *ns, const BSONObj &query, const BSONObj &order = BSONObj() );
+    boost::shared_ptr<Cursor> newQueryOptimizerCursor( const char *ns, const BSONObj &query, const BSONObj &order = BSONObj() );
 } // namespace mongo
 
 namespace QueryOptimizerTests {
@@ -50,8 +50,6 @@ namespace QueryOptimizerTests {
     }
     
     namespace QueryPlanTests {
-
-        using boost::shared_ptr;
 
         class Base {
         public:
@@ -935,9 +933,11 @@ namespace QueryOptimizerTests {
     protected:
         static const char *ns() { return "unittests.QueryOptimizerTests"; }
         static NamespaceDetails *nsd() { return nsdetails( ns() ); }
+        DBDirectClient &client() { return _client; }
     private:
         dblock lk_;
         Client::Context _ctx;
+        DBDirectClient _client;
     };
 
     class BestGuess : public Base {
@@ -969,10 +969,81 @@ namespace QueryOptimizerTests {
         }
     };
     
+    namespace MultiCursorTests {
+        
+        /**
+         * Helper class for validating a set of attempted candidate plans  The boiler plate
+         * implementation is similar to MultiCursor::NoOp.
+         */
+        class PlanValidatingCursorOp : public MultiCursor::CursorOp {
+        public:
+            PlanValidatingCursorOp( const BSONObj &expectedIndexKey ) :
+                _expectedIndexKey( expectedIndexKey ) {
+            }
+            virtual void _init() {
+                ASSERT_EQUALS( _expectedIndexKey, qp().indexKey() );
+            }
+            virtual void next() { setComplete(); }
+            virtual bool mayRecordPlan() const { return false; }
+            virtual QueryOp *_createChild() const {
+                return new PlanValidatingCursorOp( _expectedIndexKey );
+            }
+            virtual boost::shared_ptr<Cursor> newCursor() const { return qp().newCursor(); }
+            virtual long long nscanned() { return 0; }
+        private:
+            BSONObj _expectedIndexKey;
+        };
+        
+        /** Test MultiCursor with hintIdElseNatural set to true. */
+        class HintIdElseNaturalBase : public Base {
+        public:
+            virtual ~HintIdElseNaturalBase() {}
+            void run() {
+                client().insert( ns(), BSON( "a" << 1 << "b" << 1 ) );
+                client().insert( ns(), BSON( "a" << 1 << "b" << 1 ) );
+                client().ensureIndex( ns(), BSON( "a" << 1 ) );
+
+                // Create a MultiCursor and validate its plans in the planValidator.
+                boost::shared_ptr<MultiCursor::CursorOp> planValidator
+                        ( new PlanValidatingCursorOp( expectedPlanIndexKey() ) );
+                MultiCursor cursor( ns(), BSON( "a" << 1 << "b" << 1 ), BSONObj(), planValidator,
+                                   false, /* hintIdElseNatural */ true );
+                
+                // Validate the index key returned by the cursor iterates.
+                do {
+                    ASSERT_EQUALS( expectedCursorIndexKey(), cursor.indexKeyPattern() );
+                } while( cursor.advance() );
+            }
+        protected:
+            virtual BSONObj expectedPlanIndexKey() const = 0;
+            virtual BSONObj expectedCursorIndexKey() const { return expectedPlanIndexKey(); }
+        };
+        
+        /** An _id hint is used when possible if hintIdElseNatural is specified. */
+        class IdHint : public HintIdElseNaturalBase {
+            virtual BSONObj expectedPlanIndexKey() const { return BSON( "_id" << 1 ); }
+        };
+        
+        /**
+         * An $natural hint is used when hintIdElseNatural is specified and no _id index is
+         * available.
+         */
+        class NaturalHintFallback : public HintIdElseNaturalBase {
+        public:
+            NaturalHintFallback() {
+                client().dropCollection( ns() );
+                // Recreate the collection as capped, without an _id index.
+                client().createCollection( ns(), 5000, true );
+            }
+        private:
+            virtual BSONObj expectedPlanIndexKey() const { return BSON( "$natural" << 1 ); }
+            virtual BSONObj expectedCursorIndexKey() const { return BSONObj(); }
+        };
+        
+    } // namespace MultiCursorTests
+    
     namespace QueryOptimizerCursorTests {
         
-        using boost::shared_ptr;
-
         class Base {
         public:
             Base() {
@@ -1019,10 +1090,10 @@ namespace QueryOptimizerTests {
                  	advance();   
                 }
             }
-            shared_ptr<Cursor> c() { return _c; }
+            boost::shared_ptr<Cursor> c() { return _c; }
             long long nscanned() const { return _c->nscanned(); }
         private:
-            shared_ptr<Cursor> _c;
+            boost::shared_ptr<Cursor> _c;
         };
         
         /** No results for empty collection. */
@@ -1031,7 +1102,7 @@ namespace QueryOptimizerTests {
             void run() {
                 dblock lk;
                 Client::Context ctx( ns() );
-                shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSONObj() );
+                boost::shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSONObj() );
                 ASSERT( !c->ok() );
                 ASSERT_EXCEPTION( c->_current(), AssertionException );
                 ASSERT_EXCEPTION( c->current(), AssertionException );
@@ -1371,7 +1442,7 @@ namespace QueryOptimizerTests {
                 
                 dblock lk;
                 Client::Context ctx( ns() );
-                shared_ptr< Cursor > c = newQueryOptimizerCursor( ns(), BSON( "_id" << GT << 5 << "a" << GT << 5 ) );
+                boost::shared_ptr< Cursor > c = newQueryOptimizerCursor( ns(), BSON( "_id" << GT << 5 << "a" << GT << 5 ) );
                 ASSERT( c->ok() );
 
                 // _id 10 {_id:1}
@@ -1464,7 +1535,7 @@ namespace QueryOptimizerTests {
                 
                 dblock lk;
                 Client::Context ctx( ns() );
-                shared_ptr< Cursor > c = newQueryOptimizerCursor( ns(), fromjson( "{_id:/a/}" ) );
+                boost::shared_ptr< Cursor > c = newQueryOptimizerCursor( ns(), fromjson( "{_id:/a/}" ) );
                 ASSERT( c->ok() );
                 // "a"
                 ASSERT( c->matcher()->matchesCurrent( c.get() ) );
@@ -1496,7 +1567,7 @@ namespace QueryOptimizerTests {
                 
                 dblock lk;
                 Client::Context ctx( ns() );
-                shared_ptr< Cursor > c = newQueryOptimizerCursor( ns(), BSON( "$or" << BSON_ARRAY( BSON( "_id" << LT << 300 ) << BSON( "a" << 1 ) ) ) );
+                boost::shared_ptr< Cursor > c = newQueryOptimizerCursor( ns(), BSON( "$or" << BSON_ARRAY( BSON( "_id" << LT << 300 ) << BSON( "a" << 1 ) ) ) );
                 for( int i = 0; i < 151; ++i ) {
                     ASSERT( c->ok() );
                     ASSERT( c->matcher()->matchesCurrent( c.get() ) );
@@ -1516,7 +1587,7 @@ namespace QueryOptimizerTests {
                 
                 dblock lk;
                 Client::Context ctx( ns() );
-                shared_ptr< Cursor > c = newQueryOptimizerCursor( ns(), BSON( "a" << GT << 1 << LT << 5 ) );
+                boost::shared_ptr< Cursor > c = newQueryOptimizerCursor( ns(), BSON( "a" << GT << 1 << LT << 5 ) );
                 // Two sided bounds work.
                 ASSERT( !c->ok() );
             }
@@ -1551,7 +1622,7 @@ namespace QueryOptimizerTests {
                 
                 dblock lk;
                 Client::Context ctx( ns() );
-                shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSON( "a" << 0 << "b" << 0 ) );
+                boost::shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSON( "a" << 0 << "b" << 0 ) );
                 
                 ASSERT_EQUALS( BSON( "_id" << 0 << "a" << 0 << "b" << 0 ), c->current() );
                 ASSERT( c->advance() );
@@ -1583,7 +1654,7 @@ namespace QueryOptimizerTests {
                 
                 dblock lk;
                 Client::Context ctx( ns() );
-                shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSON( "$or" << BSON_ARRAY( BSON( "_id" << GT << 0 ) << BSON( "_id" << 1 ) ) ) );
+                boost::shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSON( "$or" << BSON_ARRAY( BSON( "_id" << GT << 0 ) << BSON( "_id" << 1 ) ) ) );
                 ASSERT( c->ok() );
                 ASSERT( !c->advance() );
             }
@@ -1600,7 +1671,7 @@ namespace QueryOptimizerTests {
                 
                 dblock lk;
                 Client::Context ctx( ns() );
-                shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSON( "$or" << BSON_ARRAY( BSON( "_id" << LT << 140 ) << BSON( "_id" << 145 ) << BSON( "a" << 145 ) ) ) );
+                boost::shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSON( "$or" << BSON_ARRAY( BSON( "_id" << LT << 140 ) << BSON( "_id" << 145 ) << BSON( "a" << 145 ) ) ) );
                 
                 while( c->current().getIntField( "_id" ) < 140 ) {
                  	ASSERT( c->advance() );
@@ -1644,7 +1715,7 @@ namespace QueryOptimizerTests {
                 
                 dblock lk;
                 Client::Context ctx( ns() );
-                shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSON( "$or" << BSON_ARRAY( BSON( "_id" << LTE << 147 ) << BSON( "_id" << 148 ) << BSON( "_id" << 149 ) ) ) );
+                boost::shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSON( "$or" << BSON_ARRAY( BSON( "_id" << LTE << 147 ) << BSON( "_id" << 148 ) << BSON( "_id" << 149 ) ) ) );
                 for( int i = 0; i < 150; ++i ) {
                     ASSERT( c->ok() );
                  	ASSERT_EQUALS( i, c->current().getIntField( "_id" ) );
@@ -1664,7 +1735,7 @@ namespace QueryOptimizerTests {
                 
                 dblock lk;
                 Client::Context ctx( ns() );
-                shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSON( "$or" << BSON_ARRAY( BSON( "a" << LT << 6 << "b" << 4 ) << BSON( "a" << GTE << 6 << "b" << 4 ) ) ) );
+                boost::shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSON( "$or" << BSON_ARRAY( BSON( "a" << LT << 6 << "b" << 4 ) << BSON( "a" << GTE << 6 << "b" << 4 ) ) ) );
                 
                 ASSERT( c->ok() );
                 
@@ -2207,7 +2278,7 @@ namespace QueryOptimizerTests {
                 _cli.insert( ns(), BSON( "a" << 1 << "b" << 1 ) );
                 _cli.ensureIndex( ns(), BSON( "a" << 1 ) );
                 
-                shared_ptr<Cursor> c;
+                boost::shared_ptr<Cursor> c;
                 {
                     dblock lk;
                     Client::Context ctx( ns() );
@@ -2248,7 +2319,7 @@ namespace QueryOptimizerTests {
                 _cli.insert( ns(), BSON( "_id" << 1 << "a" << 1 ) );
                 _cli.ensureIndex( ns(), BSON( "_id" << 1 ) );
                 
-                shared_ptr<Cursor> c;
+                boost::shared_ptr<Cursor> c;
                 {
                     dblock lk;
                     Client::Context ctx( ns() );
@@ -2518,7 +2589,7 @@ namespace QueryOptimizerTests {
                 
                 dblock lk;
                 Client::Context ctx( ns() );
-                shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSON( "a" << 2 ), BSON( "b" << 1 ) );
+                boost::shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSON( "a" << 2 ), BSON( "b" << 1 ) );
                 // Check that we are scanning {b:1} not {a:1}.
                 for( int i = 0; i < 3; ++i ) {
                  	ASSERT( c->ok() );
@@ -2555,7 +2626,7 @@ namespace QueryOptimizerTests {
                 
                 mongolock lk( false );
                 Client::Context ctx( ns() );
-                shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSON( "$or" << BSON_ARRAY( BSON( "_id" << GT << 0 ) << BSON( "b" << GT << 0 ) ) ) );
+                boost::shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSON( "$or" << BSON_ARRAY( BSON( "_id" << GT << 0 ) << BSON( "b" << GT << 0 ) ) ) );
                 ASSERT( c->ok() );
                 cc().curop()->kill();
                 // First advance() call throws, subsequent calls just fail.
@@ -2573,7 +2644,7 @@ namespace QueryOptimizerTests {
                 
                 dblock lk;
                 Client::Context ctx( ns() );
-                shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSON( "_id" << GTE << 0 << "a" << GTE << 0 ) );
+                boost::shared_ptr<Cursor> c = newQueryOptimizerCursor( ns(), BSON( "_id" << GTE << 0 << "a" << GTE << 0 ) );
                 ASSERT( c->ok() );
                 ASSERT_EQUALS( 2, c->nscanned() );
                 c->advance();
@@ -2600,7 +2671,7 @@ namespace QueryOptimizerTests {
                 void run() {
                     dblock lk;
                     Client::Context ctx( ns() );
-                    shared_ptr<Cursor> c = NamespaceDetailsTransient::getCursor( ns(), query(), order() );
+                    boost::shared_ptr<Cursor> c = NamespaceDetailsTransient::getCursor( ns(), query(), order() );
                     string type = c->toString().substr( 0, expectedType().length() );
                     ASSERT_EQUALS( expectedType(), type );
                     check( c );
@@ -2609,7 +2680,7 @@ namespace QueryOptimizerTests {
                 virtual string expectedType() const = 0;
                 virtual BSONObj query() const { return BSONObj(); }
                 virtual BSONObj order() const { return BSONObj(); }
-                virtual void check( const shared_ptr<Cursor> &c ) {
+                virtual void check( const boost::shared_ptr<Cursor> &c ) {
                     ASSERT( c->ok() );
                     ASSERT( !c->matcher() );
                     ASSERT_EQUALS( 5, c->current().getIntField( "_id" ) );
@@ -2640,7 +2711,7 @@ namespace QueryOptimizerTests {
                 }
                 string expectedType() const { return "BtreeCursor a_1"; }
                 BSONObj query() const { return BSON( "a" << GTE << 5 ); }
-                void check( const shared_ptr<Cursor> &c ) {
+                void check( const boost::shared_ptr<Cursor> &c ) {
                     ASSERT( c->ok() );
                     ASSERT( c->matcher() );
                     ASSERT_EQUALS( 5, c->current().getIntField( "a" ) );
@@ -2660,7 +2731,7 @@ namespace QueryOptimizerTests {
                 }
                 string expectedType() const { return "GeoSearchCursor"; }
                 BSONObj query() const { return fromjson( "{ loc : { $near : [50,50] } }" ); }
-                void check( const shared_ptr<Cursor> &c ) {
+                void check( const boost::shared_ptr<Cursor> &c ) {
                     ASSERT( c->ok() );
                     ASSERT( c->matcher() );
                     ASSERT( c->matcher()->matchesCurrent( c.get() ) );
@@ -2675,7 +2746,7 @@ namespace QueryOptimizerTests {
                     _cli.insert( ns(), BSON( "_id" << 5 ) );
                     dblock lk;
                     Client::Context ctx( ns() );
-                    shared_ptr<Cursor> c = NamespaceDetailsTransient::getCursor( ns(), BSONObj(), BSON( "b" << 1 ) );
+                    boost::shared_ptr<Cursor> c = NamespaceDetailsTransient::getCursor( ns(), BSONObj(), BSON( "b" << 1 ) );
                     ASSERT( !c );
                 }
             };
@@ -2690,7 +2761,7 @@ namespace QueryOptimizerTests {
                     ASSERT( _cli.query( ns(), QUERY( "_id" << GT << 0 << "b" << GT << 0 ).sort( "b" ) )->more() );
                     dblock lk;
                     Client::Context ctx( ns() );
-                    shared_ptr<Cursor> c = NamespaceDetailsTransient::getCursor( ns(), BSON( "_id" << GT << 0 << "b" << GT << 0 ), BSON( "b" << 1 ) );
+                    boost::shared_ptr<Cursor> c = NamespaceDetailsTransient::getCursor( ns(), BSON( "_id" << GT << 0 << "b" << GT << 0 ), BSON( "b" << 1 ) );
                     // {_id:1} requires scan and order, so {b:1} must be chosen.
                     ASSERT( c );
                     ASSERT_EQUALS( 5, c->current().getIntField( "_id" ) );
@@ -2704,7 +2775,7 @@ namespace QueryOptimizerTests {
                 }
                 string expectedType() const { return "QueryOptimizerCursor"; }
                 BSONObj query() const { return BSON( "_id" << GT << 0 << "a" << GT << 0 ); }
-                void check( const shared_ptr<Cursor> &c ) {}
+                void check( const boost::shared_ptr<Cursor> &c ) {}
             };
             
         } // namespace GetCursor
@@ -2755,6 +2826,8 @@ namespace QueryOptimizerTests {
             add<QueryPlanSetTests::EqualityThenIn>();
             add<QueryPlanSetTests::NotEqualityThenIn>();
             add<BestGuess>();
+            add<MultiCursorTests::IdHint>();
+            add<MultiCursorTests::NaturalHintFallback>();
             add<QueryOptimizerCursorTests::Empty>();
             add<QueryOptimizerCursorTests::Unindexed>();
             add<QueryOptimizerCursorTests::Basic>();
