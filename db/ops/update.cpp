@@ -623,6 +623,17 @@ namespace mongo {
 
     template< class Builder >
     void ModSetState::_appendNewFromMods( const string& root , ModState& m , Builder& b , set<string>& onedownseen ) {
+        Mod& m2 = *((Mod*)(m.m)); // HACK
+        switch (m2.op) {
+        // unset/pull/pullAll on nothing does nothing, so don't append anything
+        case Mod::UNSET:
+        case Mod::PULL:
+        case Mod::PULL_ALL:
+            return;
+        default:
+            ;// fall through
+        }
+
         const char * temp = m.fieldName();
         temp += root.size();
         const char * dot = strchr( temp , '.' );
@@ -1086,7 +1097,7 @@ namespace mongo {
         return UpdateResult( 1 , 0 , 1 );
     }
 
-    UpdateResult _updateObjects(bool god, const char *ns, const BSONObj& updateobj, BSONObj patternOrig, bool upsert, bool multi, bool logop , OpDebug& debug, RemoveSaver* rs ) {
+    UpdateResult _updateObjects(bool god, const char *ns, const BSONObj& updateobj, BSONObj patternOrig, bool upsert, bool multi, bool logop , OpDebug& debug, RemoveSaver* rs, bool hintIdElseNatural ) {
         DEBUGUPDATE( "update: " << ns << " update: " << updateobj << " query: " << patternOrig << " upsert: " << upsert << " multi: " << multi );
         Client& client = cc();
         int profile = client.database()->profile;
@@ -1135,7 +1146,7 @@ namespace mongo {
         int numModded = 0;
         long long nscanned = 0;
         shared_ptr< MultiCursor::CursorOp > opPtr( new UpdateOp( mods.get() && mods->hasDynamicArray() ) );
-        shared_ptr< MultiCursor > c( new MultiCursor( ns, patternOrig, BSONObj(), opPtr, true ) );
+        shared_ptr< MultiCursor > c( new MultiCursor( ns, patternOrig, BSONObj(), opPtr, true, hintIdElseNatural ) );
 
         d = nsdetails(ns);
         nsdt = &NamespaceDetailsTransient::get_w(ns);
@@ -1374,13 +1385,13 @@ namespace mongo {
         return UpdateResult( 0 , isOperatorUpdate , 0 );
     }
 
-    UpdateResult updateObjects(const char *ns, const BSONObj& updateobj, BSONObj patternOrig, bool upsert, bool multi, bool logop , OpDebug& debug ) {
+    UpdateResult updateObjects(const char *ns, const BSONObj& updateobj, BSONObj patternOrig, bool upsert, bool multi, bool logop , OpDebug& debug, bool hintIdElseNatural ) {
         uassert( 10155 , "cannot update reserved $ collection", strchr(ns, '$') == 0 );
         if ( strstr(ns, ".system.") ) {
             /* dm: it's very important that system.indexes is never updated as IndexDetails has pointers into it */
             uassert( 10156 , str::stream() << "cannot update system collection: " << ns << " q: " << patternOrig << " u: " << updateobj , legalClientSystemNS( ns , true ) );
         }
-        return _updateObjects(false, ns, updateobj, patternOrig, upsert, multi, logop, debug);
+        return _updateObjects(false, ns, updateobj, patternOrig, upsert, multi, logop, debug, 0, hintIdElseNatural);
     }
 
 }

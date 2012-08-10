@@ -1055,14 +1055,6 @@ namespace mongo {
 
 namespace mongo {
 
-    void pipeSigHandler( int signal ) {
-#ifdef psignal
-        psignal( signal, "Signal Received : ");
-#else
-        cout << "got pipe signal:" << signal << endl;
-#endif
-    }
-
     void abruptQuit(int x) {
         ostringstream ossSig;
         ossSig << "Got signal: " << x << " (" << strsignal( x ) << ")." << endl;
@@ -1134,7 +1126,7 @@ namespace mongo {
         
         assert( signal(SIGABRT, abruptQuit) != SIG_ERR );
         assert( signal(SIGQUIT, abruptQuit) != SIG_ERR );
-        assert( signal(SIGPIPE, pipeSigHandler) != SIG_ERR );
+        assert( signal(SIGPIPE, SIG_IGN) != SIG_ERR );
 
         setupSIGTRAPforGDB();
 
@@ -1154,31 +1146,41 @@ namespace mongo {
     }
 
 #else
-    void ctrlCTerminate() {
-        log() << "got kill or ctrl-c signal, will terminate after current cmd ends" << endl;
-        Client::initThread( "ctrlCTerminate" );
+    void consoleTerminate( const char* controlCodeName ) {
+        Client::initThread( "consoleTerminate" );
+        log() << "got " << controlCodeName << ", will terminate after current cmd ends" << endl;
         exitCleanly( EXIT_KILL );
     }
+
     BOOL CtrlHandler( DWORD fdwCtrlType ) {
+
         switch( fdwCtrlType ) {
+
         case CTRL_C_EVENT:
-            rawOut("Ctrl-C signal");
-            ctrlCTerminate();
-            return( TRUE );
+            rawOut( "Ctrl-C signal" );
+            consoleTerminate( "CTRL_C_EVENT" );
+            return TRUE ;
+
         case CTRL_CLOSE_EVENT:
-            rawOut("CTRL_CLOSE_EVENT signal");
-            ctrlCTerminate();
-            return( TRUE );
+            rawOut( "CTRL_CLOSE_EVENT signal" );
+            consoleTerminate( "CTRL_CLOSE_EVENT" );
+            return TRUE ;
+
         case CTRL_BREAK_EVENT:
-            rawOut("CTRL_BREAK_EVENT signal");
-            ctrlCTerminate();
+            rawOut( "CTRL_BREAK_EVENT signal" );
+            consoleTerminate( "CTRL_BREAK_EVENT" );
             return TRUE;
+
         case CTRL_LOGOFF_EVENT:
-            rawOut("CTRL_LOGOFF_EVENT signal (ignored)");
-            return FALSE;
+            rawOut( "CTRL_LOGOFF_EVENT signal" );
+            consoleTerminate( "CTRL_LOGOFF_EVENT" );
+            return TRUE;
+
         case CTRL_SHUTDOWN_EVENT:
-            rawOut("CTRL_SHUTDOWN_EVENT signal (ignored)");
-            return FALSE;
+            rawOut( "CTRL_SHUTDOWN_EVENT signal" );
+            consoleTerminate( "CTRL_SHUTDOWN_EVENT" );
+            return TRUE;
+
         default:
             return FALSE;
         }

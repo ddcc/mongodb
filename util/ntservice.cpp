@@ -17,6 +17,7 @@
 
 #include "pch.h"
 #include "ntservice.h"
+#include "../db/client.h"
 #include "winutil.h"
 #include "text.h"
 #include <direct.h>
@@ -131,14 +132,9 @@ namespace mongo {
 
         stringstream commandLine;
 
-        if ( strchr(argv[0], ':') ) { // a crude test for fully qualified path
-            commandLine << '"' << argv[0] << "\" ";
-        }
-        else {
-            char buffer[256];
-            assert( _getcwd(buffer, 256) );
-            commandLine << '"' << buffer << '\\' << argv[0] << "\" ";
-        }
+        char exePath[1024];
+        GetModuleFileNameA( NULL, exePath, sizeof exePath );
+        commandLine << '"' << exePath << "\" ";
 
         for ( int i = 1; i < argc; i++ ) {
             std::string arg( argv[ i ] );
@@ -348,14 +344,25 @@ namespace mongo {
         reportStatus( SERVICE_STOPPED );
     }
 
+    static void serviceShutdown( const char* controlCodeName ) {
+        Client::initThread( "serviceShutdown" );
+        log() << "got " << controlCodeName << " request from Windows Service Controller, " <<
+            ( inShutdown() ? "already in shutdown" : "will terminate after current cmd ends" ) << endl;
+        ServiceController::reportStatus( SERVICE_STOP_PENDING );
+        if ( ! inShutdown() ) {
+            exitCleanly( EXIT_WINDOWS_SERVICE_STOP );
+            ServiceController::reportStatus( SERVICE_STOPPED );
+        }
+    }
+
     void WINAPI ServiceController::serviceCtrl( DWORD ctrlCode ) {
         switch ( ctrlCode ) {
         case SERVICE_CONTROL_STOP:
+            serviceShutdown( "SERVICE_CONTROL_STOP" );
+            break;
         case SERVICE_CONTROL_SHUTDOWN:
-            reportStatus( SERVICE_STOP_PENDING );
-            shutdownServer();
-            reportStatus( SERVICE_STOPPED );
-            return;
+            serviceShutdown( "SERVICE_CONTROL_SHUTDOWN" );
+            break;
         }
     }
 
