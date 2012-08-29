@@ -1,6 +1,10 @@
 // Test sanity of geo queries with a lot of points
 
-var maxFields = 2;
+load( "jstests/libs/slow_weekly_util.js" )
+testServer = new SlowWeeklyMongod( "geo_mnypts_plus_fields" )
+db = testServer.getDB( "test" );
+
+var maxFields = 3;
 
 for( var fields = 1; fields < maxFields; fields++ ){
     
@@ -96,3 +100,4 @@ for( var fields = 1; fields < maxFields; fields++ ){
         
 }
 
+testServer.stop();

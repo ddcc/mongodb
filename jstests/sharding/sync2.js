@@ -2,10 +2,14 @@
 
 s = new ShardingTest( "sync2" , 3 , 50 , 2 , { sync : true } );
 
+s.stopBalancer()
+
 s2 = s._mongos[1];
 
 s.adminCommand( { enablesharding : "test" } );
 s.adminCommand( { shardcollection : "test.foo" , key : { num : 1 } } );
+
+s.config.settings.update( { _id: "balancer" }, { $set : { stopped: true } } , true );
 
 s.getDB( "test" ).foo.insert( { num : 1 } );
 s.getDB( "test" ).foo.insert( { num : 2 } );
@@ -78,7 +82,7 @@ for ( i=1; i<hashes.length; i++ ){
              hashes[i].collections[k] )
             continue;
         
-        if ( k == "mongos" || k == "changelog" || k == "locks" )
+        if ( k == "mongos" || k == "changelog" || k == "locks" || k == "lockpings" )
             continue;
         
         bad = true;

@@ -4,13 +4,13 @@ users.remove( {} );
 pass = "a" + Math.random();
 //print( "password [" + pass + "]" );
 
-db.addUser( "eliot" , pass );
+db.addUser( "eliot" , pass, false, 1 );
 
 assert( db.auth( "eliot" , pass ) , "auth failed" );
 assert( ! db.auth( "eliot" , pass + "a" ) , "auth should have failed" );
 
 pass2 = "b" + Math.random();
-db.addUser( "eliot" , pass2 );
+db.addUser( "eliot" , pass2, false, 1 );
 
 assert( ! db.auth( "eliot" , pass ) , "failed to change password failed" );
 assert( db.auth( "eliot" , pass2 ) , "new password didn't take" );
@@ -24,34 +24,34 @@ var a = db.getMongo().getDB( "admin" );
 users = a.getCollection( "system.users" );
 users.remove( {} );
 pass = "c" + Math.random();
-a.addUser( "super", pass );
+a.addUser( "super", pass, false, 1 );
 assert( a.auth( "super" , pass ) , "auth failed" );
 assert( !a.auth( "super" , pass + "a" ) , "auth should have failed" );
 
-db2 = new Mongo( db.getMongo().host ).getDB( db.getName() );
-
-users = db2.getCollection( "system.users" );
+users = db.getCollection( "system.users" );
 users.remove( {} );
-
 pass = "a" + Math.random();
 
-db2.addUser( "eliot" , pass );
+db.addUser( "eliot" , pass, false, 1 );
 
-assert.commandFailed( db2.runCommand( { authenticate: 1, user: "eliot", nonce: "foo", key: "bar" } ) );
+assert.commandFailed( db.runCommand( { authenticate: 1, user: "eliot", nonce: "foo", key: "bar" } ) );
 
 // check sanity check SERVER-3003
 
-before = db2.system.users.count()
+before = db.system.users.count()
 
 assert.throws( function(){
-    db2.addUser( "" , "abc" )
+    db.addUser( "" , "abc", false, 1 )
 } , null , "C1" )
-
 assert.throws( function(){
-    db2.addUser( "abc" , "" )
+    db.addUser( "abc" , "", false, 1 )
 } , null , "C2" )
 
 
-after = db2.system.users.count()
+after = db.system.users.count()
 assert( before > 0 , "C3" )
 assert.eq( before , after , "C4" )
+
+// Clean up after ourselves so other tests using authentication don't get messed up.
+db.system.users.remove({})
+db.getSiblingDB('admin').system.users.remove({})

@@ -4,8 +4,21 @@
 // 
 //   mongo --nodb rollback.js | tee out | grep -v ^m31
 //
+load("jstests/replsets/rslib.js");
 
 var debugging = 0;
+
+function ifReady(db, f) {
+    var stats = db.adminCommand({ replSetGetStatus: 1 });
+    
+
+    // only eval if state isn't recovery
+    if (stats && stats.myState != 3) {
+        return f();
+    }
+
+    return false;
+}
 
 function pause(s) {
     print(s);
@@ -185,7 +198,7 @@ doTest = function (signal) {
     doInitialWrites(a);
 
     // wait for secondary to get this data
-    wait(function () { return b.bar.count() == a.bar.count(); });
+    wait(function () { return ifReady(a, function() { return ifReady(b, function() { return b.bar.count() == a.bar.count(); }); }); });
 
     A.runCommand({ replSetTest: 1, blind: true });
     reconnect(a,b);
@@ -220,7 +233,9 @@ doTest = function (signal) {
     assert(A.isMaster().ismaster || A.isMaster().secondary, "A up");
     assert(B.isMaster().ismaster || B.isMaster().secondary, "B up");
     replTest.awaitReplication();
-    
+
+    assert.soon(function() { return B.isMaster().secondary; });
+
     assert( dbs_match(a,b), "server data sets do not match after rollback, something is wrong");
 
     pause("rollback3.js SUCCESS");

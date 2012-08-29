@@ -97,9 +97,21 @@ var startSlave = function(n) {
     config.version++;
     config.members.push({_id:n, host:hostname+":"+ports[n]});
 
-    result = admin.runCommand({replSetReconfig : config});
-    printjson(result);
-    assert(result.ok, "reconfig worked");
+    // When the slave is started, it'll try to load the config and find that it's
+    // not in the config and close all connections in preparation for transitioning
+    // to "removed" state.  If the reconfig adding it to the set happens to occur at
+    // this point, the heartbeat request's connection will be cut off, causing the
+    // reconfig to fail..
+    assert.soon(function() {
+        try {
+            result = admin.runCommand({replSetReconfig : config});
+        }
+        catch (e) {
+            print("failed to reconfig: "+e);
+            return false;
+        }
+        return result.ok;
+    });
     reconnect(p);
 
     print("4");
@@ -132,10 +144,16 @@ var startSlave = function(n) {
 
     admin.foo.insert({x:1});
     assert.soon(function() {
-        var last = local.oplog.rs.find().sort({$natural:-1}).limit(1).next();
-        var cur = conn.getDB("local").oplog.rs.find().sort({$natural:-1}).limit(1).next();
-        print("last: "+tojson(last)+" cur: "+tojson(cur));
-        return cur != null && last != null && cur.ts.t == last.ts.t && cur.ts.i == last.ts.i;
+        try {
+            var last = local.oplog.rs.find().sort({$natural:-1}).limit(1).next();
+            var cur = conn.getDB("local").oplog.rs.find().sort({$natural:-1}).limit(1).next();
+            print("last: "+tojson(last)+" cur: "+tojson(cur));
+            return cur != null && last != null && cur.ts.t == last.ts.t && cur.ts.i == last.ts.i;
+        }
+        catch (e) {
+            print(e);
+        }
+        return false;
     });
 
     return conn;
@@ -143,10 +161,19 @@ var startSlave = function(n) {
 
 var s1 = startSlave(1);
 
-var me1 = s1.getDB("local").me.findOne();
+var me1 = null;
 
-print("me: " +me1._id);
-assert(me1._id != null);
+// local.me will not be populated until the secondary reports back to the
+// primary that it is syncing
+assert.soon(function() {
+    me1 = s1.getDB("local").me.findOne();
+    if (me1 == null) {
+        return false;
+    }
+
+    print("me: " +me1._id);
+    return me1._id != null;
+});
 
 print("5");
 s1.getDB("admin").runCommand( {fsync:1,lock:1} );
@@ -172,14 +199,25 @@ sleep(10000);
 pargs = new MongodRunner( ports[ 3 ], basePath + "-p", false, false,
                           ["--replSet", basename, "--oplogSize", 2],
                           {no_bind : true} );
-p = pargs.start(true);
+pargs.start(true);
 
-printjson(p.getDB("admin").runCommand({replSetGetStatus:1}));
+p = new Mongo("localhost:"+ports[3]);
 
-p.getDB("admin").runCommand({replSetReconfig : {
-      _id : basename,
-      members : [{_id:0, host : hostname+":"+ports[3]}]
+// initFromConfig will keep closing sockets, so we'll a couple of times
+assert.soon(function() {
+    try {
+        p.getDB("admin").runCommand({replSetReconfig : {
+            _id : basename,
+            members : [{_id:0, host : hostname+":"+ports[3]}]
         }, force : true});
+    }
+    catch (e) {
+        print(e);
+        return false;
+    }
+
+    return true;
+});
 
 print("start waiting for primary...");
 assert.soon(function() {

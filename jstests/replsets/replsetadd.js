@@ -22,7 +22,9 @@ doTest = function( signal ) {
       return result['ok'] == 1;
     });
 
-    replTest.getMaster();
+    db = replTest.getMaster().getDB( "test");
+    db.foo.insert( { x : 1} );
+    db.foo.ensureIndex( { x : 1 } );
 
     // Start a second node
     var second = replTest.add();
@@ -50,8 +52,16 @@ doTest = function( signal ) {
 
     print("trying reconfig that shouldn't work");
     var result = master.getDB("admin").runCommand({replSetReconfig: config});
-    assert.eq(result.ok, 0);
-    assert.eq(result.assertionCode, 13645);
+    assert.eq(result.ok, 0, tojson(result));
+    assert.eq(result.code, 13645, tojson(result));
+
+    replTest.awaitReplication();
+    
+    hashes = replTest.getHashes( "test" );
+    printjson( hashes );
+    for ( i=0; i<hashes.slaves.length; i++ ) {
+        assert.eq( hashes.master.collections.foo , hashes.slaves[i].collections.foo );
+    }
 
     replTest.stopSet( signal );
 }

@@ -1,24 +1,31 @@
-// Test query retry with a query that is non multikey unusable and unsatisfiable.  SERVER-5581
+// Some unsatisfiable constraint tests.
 
 t = db.jstests_queryoptimizer7;
+
+function assertPlanWasRecorded( query ) {
+    var x = t.find( query ).explain( true );
+    assert.eq( 'BtreeCursor a_1', x.oldPlan.cursor , tojson(x) );
+}
+
+function assertNoPlanWasRecorded( query ) {
+    assert( !t.find( query ).explain( true ).oldPlan );
+}
+
+// A query plan can be recorded and reused in the presence of a single key index
+// constraint that would be impossible for a single key index, but is unindexed.
 t.drop();
+t.ensureIndex( {a:1} );
+t.find( {a:1,b:1,c:{$gt:5,$lt:5}} ).itcount();
+assertPlanWasRecorded( {a:1,b:1,c:{$gt:5,$lt:5}} );
 
-t.ensureIndex( { a:1 } );
-t.ensureIndex( { b:1 } );
+// A query plan for an indexed unsatisfiable single key index constraint is not recorded.
+t.drop();
+t.ensureIndex( {a:1} );
+t.find( {a:{$gt:5,$lt:5},b:1} ).itcount();
+assertNoPlanWasRecorded( {a:{$gt:5,$lt:5},b:1} );
 
-for( i = 0; i < 25; ++i ) {
-    t.save( { a:0, b:'' } ); // a:0 documents have small b strings.
-}
-big = new Array( 1000000 ).toString();
-for( i = 0; i < 50; ++i ) {
-    t.save( { a:[1,3], b:big } ); // a:[1,3] documents have very large b strings.
-}
-
-// Record the a:1 index for the query pattern for { a: { $lt:1 } }, { b:1 }.
-assert.eq( 'BtreeCursor a_1', t.find( { a:{ $lt:1 } } ).sort( { b:1 } ).explain().cursor );
-
-// The multikey query pattern for this query will match that of the previous query.
-// The a:1 index will be retried for this query but fail because an in memory sort must
-// be performed on a larger data set.  Because the query { a:{ $lt:2, $gt:2 } } is
-// unsatisfiable, no attempt will be made to clear its query pattern.
-assert.lt( -1, t.find( { a:{ $lt:2, $gt:2 } } ).sort( { b:1 } ).itcount() );
+// A query plan for an unsatisfiable multikey index constraint is not recorded.
+t.drop();
+t.ensureIndex( {a:1} );
+t.find( {a:{$in:[]},b:1} ).itcount();
+assertNoPlanWasRecorded( {a:{$in:[]},b:1} );

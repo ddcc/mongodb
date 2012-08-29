@@ -1,3 +1,4 @@
+if ( !_isWindows() ) { //SERVER-5024
 var name = "rs_auth2";
 var port = allocatePorts(3);
 var path = "jstests/libs/";
@@ -40,6 +41,7 @@ var checkInvalidAuthStates = function() {
     assert.soon(function() {
         try {
             var result = m.getDB("admin").runCommand({isMaster: 1});
+            printjson(result);
             return !result.ismaster && !result.secondary;
         }
         catch ( e ) {
@@ -53,6 +55,7 @@ var checkInvalidAuthStates = function() {
 
     assert.soon(function() {
         var result = m.getDB("admin").runCommand({isMaster: 1});
+        printjson(result);
         return !result.ismaster && !result.secondary;
     });
 
@@ -61,6 +64,7 @@ var checkInvalidAuthStates = function() {
 
     assert.soon(function() {
         var result = m.getDB("admin").runCommand({isMaster: 1});
+        printjson(result);
         return result.secondary;
     });
 
@@ -71,6 +75,7 @@ var checkInvalidAuthStates = function() {
 var checkValidAuthState = function() {
     assert.soon(function() {
         var result = m.getDB("admin").runCommand({isMaster : 1});
+        printjson(result);
         return result.secondary;
     });
 };
@@ -79,7 +84,7 @@ var rs = setupReplSet();
 var master = rs.getMaster();
 
 print("add an admin user");
-master.getDB("admin").addUser("foo","bar");
+master.getDB("admin").addUser("foo","bar",false,3);
 m = rs.nodes[0];
 
 print("starting 1 and 2 with key file");
@@ -101,3 +106,4 @@ rs.stop(0);
 m = rs.restart(0, {"keyFile" : path+"key1"});
 
 print("0 becomes a secondary");
+} // !_isWindows()

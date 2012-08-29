@@ -376,7 +376,7 @@ def make_deb(distro, arch, spec, srcdir):
     oldcwd=os.getcwd()
     try:
         os.chdir(sdir)
-        sysassert(["dpkg-buildpackage", "-a"+distro_arch])
+        sysassert(["dpkg-buildpackage", "-a"+distro_arch, "-k Richard Kreuter <richard@10gen.com>"])
     finally:
         os.chdir(oldcwd)
     r=distro.repodir(arch)
@@ -576,7 +576,7 @@ Description: An object/document-oriented database
 """
     s=re.sub("@@PACKAGE_BASENAME@@", "mongodb%s" % spec.suffix(), s)
     conflict_suffixes=["", "-stable", "-unstable", "-nightly", "-10gen", "-10gen-unstable"]
-    conflict_suffixes.remove(spec.suffix())
+    conflict_suffixes = [suff for suff in conflict_suffixes if suff != spec.suffix()]
     s=re.sub("@@PACKAGE_CONFLICTS@@", ", ".join(["mongodb"+suffix for suffix in conflict_suffixes]), s)
     f=open(path, 'w')
     try:
@@ -686,7 +686,8 @@ binary-arch: build install
 #\tdh_installinfo
 \tdh_installman
 \tdh_link
-\tdh_strip
+# Appears to be broken on Ubuntu 11.10...?
+#\tdh_strip
 \tdh_compress
 \tdh_fixperms
 \tdh_installdeb
@@ -901,8 +902,10 @@ fi
 %{_bindir}/mongo
 %{_bindir}/mongodump
 %{_bindir}/mongoexport
-%{_bindir}/mongofiles
+#@@VERSION!=2.1.0@@%{_bindir}/mongofiles
 %{_bindir}/mongoimport
+#@@VERSION>=2.1.0@@%{_bindir}/mongooplog
+#@@VERSION>=2.1.0@@%{_bindir}/mongoperf
 %{_bindir}/mongorestore
 #@@VERSION>1.9@@%{_bindir}/mongotop
 %{_bindir}/mongostat
@@ -952,9 +955,9 @@ fi
     s=re.sub("@@PACKAGE_REVISION@@", str(int(spec.param("revision"))+1) if spec.param("revision") else "1", s)
     s=re.sub("@@BINARYDIR@@", BINARYDIR, s)
     conflict_suffixes=["", "-10gen", "-10gen-unstable"]
-    conflict_suffixes.remove(suffix)
+    conflict_suffixes = [suff for suff in conflict_suffixes if suff != spec.suffix()]
     s=re.sub("@@PACKAGE_CONFLICTS@@", ", ".join(["mongo"+_ for _ in conflict_suffixes]), s)
-    if suffix == "-10gen":
+    if suffix.endswith("-10gen"):
         s=re.sub("@@PACKAGE_PROVIDES@@", "mongo-stable", s)
         s=re.sub("@@PACKAGE_OBSOLETES@@", "mongo-stable", s)
     elif suffix == "-10gen-unstable":
@@ -965,9 +968,25 @@ fi
 
     lines=[]
     for line in s.split("\n"):
-        m = re.search("@@VERSION>(.*)@@(.*)", line)
-        if m and spec.version_better_than(m.group(1)):
-            lines.append(m.group(2))
+        m = re.search("@@VERSION(>|>=|!=)(\d.*)@@(.*)", line)
+        if m:
+          op = m.group(1)
+          ver = m.group(2)
+          fn = m.group(3)
+          if op == '>':
+            if spec.version_better_than(ver):
+              lines.append(fn)
+          elif op == '>=':
+            if spec.version() == ver or spec.version_better_than(ver):
+              lines.append(fn)
+          elif op == '!=':
+            if spec.version() != ver:
+              lines.append(fn)
+          else:
+            # Since we're inventing our own template system for RPM
+            # specfiles here, we oughtn't use template syntax we don't
+            # support.
+            raise Exception("BUG: probable bug in packager script: %s, %s, %s" % (m.group(1), m.group(2), m.group(3)))
         else:
             lines.append(line)
     s="\n".join(lines)
