@@ -1,3 +1,11 @@
+mongodb (1:2.2.0-1) unstable; urgency=low
+
+  * New upstream release 2.2.0
+    http://jira.mongodb.org/browse/SERVER/fixforversion/11496
+    http://blog.mongodb.org/post/30451575525/mongodb-2-2-released
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Wed, 29 Aug 2012 21:06:20 +0200
+
 mongodb (1:2.0.7-1) unstable; urgency=low
 
   * New upstream release 2.0.7
