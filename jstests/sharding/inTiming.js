@@ -30,7 +30,7 @@ print("Unsharded $in query ran in " + unshardedTime);
 print("Sharded $in query ran in " + shardedTime);
 assert(unshardedTime * 10 > shardedTime, "Sharded query is more than 10 times as slow as unsharded query");
 
-s.getDB('config').settings.update( { _id: "balancer" }, { $set : { stopped: true } } , true );
+s.stopBalancer();
 
 db.adminCommand({split : "test.foo", middle : { a:1, b:10}});
 db.adminCommand({split : "test.foo", middle : { a:3, b:0}});

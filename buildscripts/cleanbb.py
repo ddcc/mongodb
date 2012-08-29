@@ -14,6 +14,16 @@ if os.path.basename(cwd) == 'buildscripts':
 print( "cwd [" + cwd + "]" )
 
 def shouldKill( c ):
+    
+    if "smoke.py" in c:
+        return False
+
+    if "emr.py" in c:
+        return False
+
+    if "java" in c:
+        return False
+
     if c.find( cwd ) >= 0:
         return True
 
@@ -25,7 +35,10 @@ def shouldKill( c ):
 def killprocs( signal="" ):
 
     killed = 0
-        
+
+    if sys.platform == 'win32':
+        return killed
+
     l = utils.getprocesslist()
     print( "num procs:" + str( len( l ) ) )
     if len(l) == 0:

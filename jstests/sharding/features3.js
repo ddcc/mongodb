@@ -1,4 +1,8 @@
 s = new ShardingTest( "features3" , 2 , 1 , 1 );
+
+// Stop balancer, since we're moving chunks 
+s.stopBalancer()
+
 s.adminCommand( { enablesharding : "test" } );
 
 a = s._connections[0].getDB( "test" );
@@ -12,6 +16,9 @@ s.adminCommand( { shardcollection : "test.foo" , key : { _id : 1 } } );
 N = 10000;
 s.adminCommand( { split : "test.foo" , middle : { _id : N/2 } } )
 s.adminCommand( { moveChunk : "test.foo", find : { _id : 3 } ,to : s.getNonPrimaries( "test" )[0] } )
+
+// Can restart balancer now
+s.setBalancer( true )
 
 for ( i=0; i<N; i++ )
     db.foo.insert( { _id : i } )
@@ -38,9 +45,11 @@ print( "about to fork shell: " + Date() )
 
 // TODO:  Still potential problem when our sampling of current ops misses when $where is active - 
 // solution is to increase sleep time
-parallelCommand = "try { while(true){" +
-                  " db.foo.find( function(){ x = ''; for ( i=0; i<10000; i++ ){ x+=i; } sleep( 1000 ); return true; } ).itcount() " +
-                  "}} catch(e){ print('PShell execution ended:'); printjson( e ) }"
+whereKillSleepTime = 10000;
+parallelCommand = 
+    "try { " +
+    "  db.foo.find( function(){ sleep( " + whereKillSleepTime + " ); return false; } ).itcount(); " +
+    "} catch(e){ print('PShell execution ended:'); printjson( e ) }"
 
 join = startParallelShell( parallelCommand )
 print( "after forking shell: " + Date() )
@@ -98,8 +107,8 @@ assert.eq( 2 , state , "failed killing" );
 
 killTime = (new Date()).getTime() - killTime.getTime()
 print( "killTime: " + killTime );
-
-assert.gt( 10000 , killTime , "took too long to kill" )
+print( "time if run full: " + ( N * whereKillSleepTime ) );
+assert.gt( whereKillSleepTime * N / 20 , killTime , "took too long to kill" )
 
 join()
 
@@ -117,5 +126,33 @@ assert( x.ok == 1 && x.numFiles > 0 , "fsync failed : " + tojson( x ) )
 
 x = db._adminCommand( { "fsync" :1, lock:true } )
 assert( ! x.ok , "lock should fail: " + tojson( x ) )
+
+
+// write back stuff
+// SERVER-4194
+
+function countWritebacks( curop ) {
+    print( "---------------" );
+    var num = 0;
+    for ( var i=0; i<curop.inprog.length; i++ ) {
+        var q = curop.inprog[i].query;
+        if ( q && q.writebacklisten ) {
+            printjson( curop.inprog[i] );
+            num++;
+        }
+    }
+    return num;
+}
+
+x = db.currentOp();
+assert.eq( 0 , countWritebacks( x ) , "without all");
+
+x = db.currentOp( true );
+y = countWritebacks( x )
+assert( y == 1 || y == 2  , "with all: "  + y );
+
+
+
+
 
 s.stop()

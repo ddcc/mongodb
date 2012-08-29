@@ -4,74 +4,50 @@ jsTestLog( "Starting sharded cluster..." )
 
 var st = new ShardingTest( { shards : 1, mongos : 2, other : { rs : true } } )
 
+// Uncomment to stop the balancer, since the balancer usually initializes the shard automatically
+// SERVER-4921 is otherwise hard to manifest
+// st.stopBalancer()
+
 var mongosA = st.s0
 var mongosB = st.s1
-var rs = st._rs[0].test
 var shard = st.shard0
-
-var sadmin = shard.getDB( "admin" )
-
-jsTestLog( "Stepping down replica set member..." )
-
-try{
-    sadmin.runCommand({ replSetStepDown : 3000, force : true })
-}
-catch( e ){
-    // stepdown errors out our conn to the shard
-    printjson( e )
-}
-
-jsTestLog( "Reconnecting..." )
-
-sadmin = new Mongo( st.shard0.host ).getDB("admin")
-
-assert.soon( 
-    function(){
-        var res = sadmin.runCommand( "replSetGetStatus" );
-        for ( var i=0; i<res.members.length; i++ ) {
-            if ( res.members[i].state == 1 )
-                return true;
-        }
-        return false;
-    }
-);
-
-jsTestLog( "New primary elected..." )
 
 coll = mongosA.getCollection( jsTestName() + ".coll" );
 
-start = new Date();
+// Wait for primary and then initialize shard SERVER-5130
+st.rs0.getPrimary()
+coll.findOne()
 
-ReplSetTest.awaitRSClientHosts( coll.getMongo(), rs.getPrimary(), { ismaster : true }, rs )
+var sadmin = shard.getDB( "admin" )
+assert.throws(function() { sadmin.runCommand({ replSetStepDown : 3000, force : true }); });
+
+st.rs0.getMaster();
+
+mongosA.getDB("admin").runCommand({ setParameter : 1, traceExceptions : true })
 
 try{
+    // This _almost_ always fails, unless the new primary is already detected.   If if fails, it should
+    // mark the master as bad, so mongos will reload the replica set master next request
+    // TODO: Can we just retry and succeed here?
     coll.findOne()
 }
 catch( e ){
+    print( "This error is expected : " )
     printjson( e )
-    assert( false )
 }
 
-end = new Date();
+jsTest.log( "Running query which should succeed..." )
 
-print( "time to work for primary: " + ( ( end.getTime() - start.getTime() ) / 1000 ) + " seconds" );
+// This should always succeed without throwing an error
+coll.findOne()
 
-jsTestLog( "Found data from collection..." )
+mongosA.getDB("admin").runCommand({ setParameter : 1, traceExceptions : false })
 
 // now check secondary
 
-try{
-    sadmin.runCommand({ replSetStepDown : 3000, force : true })
-}
-catch( e ){
-    // expected, since all conns closed
-    printjson( e )
-}
+assert.throws(function() { sadmin.runCommand({ replSetStepDown : 3000, force : true }); });
 
-sadmin = new Mongo( st.shard0.host ).getDB("admin")
-
-jsTestLog( "Stepped down secondary..." )
-
+// Can't use the mongosB - SERVER-5128
 other = new Mongo( mongosA.host );
 other.setSlaveOk( true );
 other = other.getCollection( jsTestName() + ".coll" );

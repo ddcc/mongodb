@@ -67,8 +67,8 @@ doCounts( "after wrong save" , total , true )
 e = a.find().explain();
 assert.eq( 3 , e.n , "ex1" )
 assert.eq( 4 , e.nscanned , "ex2" )
-assert.eq( 1 , e.nChunkSkips , "ex3" )
-
+assert.eq( 4 , e.nscannedObjects , "ex3" )
+assert.eq( 1 , e.nChunkSkips , "ex4" )
 
 // SERVER-4612 
 // make sure idhack obeys chunks

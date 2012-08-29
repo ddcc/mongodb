@@ -2,6 +2,7 @@
 
 s1 = new ShardingTest( "count2" , 2 , 1 , 2 );
 s2 = s1._mongos[1];
+s1.stopBalancer();
 
 s1.adminCommand( { enablesharding: "test" } );
 s1.adminCommand( { shardcollection: "test.foo" , key : { name : 1 } } );
@@ -39,5 +40,10 @@ assert.eq( 3, db2.find( { name : { $gte: "aaa" , $lt: "ddd" } } ).count() , "pos
 db2.findOne();
 
 assert.eq( 3, db2.count( { name : { $gte: "aaa" , $lt: "ddd" } } ) );
+
+assert.eq( 4, db2.find().limit( 4 ).count( true ));
+assert.eq( 4, db2.find().limit( -4 ).count( true ));
+assert.eq( 6, db2.find().limit( 0 ).count( true ));
+assert.eq( 6, db2.getDB().runCommand({ count: db2.getName(), limit: 0 }).n );
 
 s1.stop();

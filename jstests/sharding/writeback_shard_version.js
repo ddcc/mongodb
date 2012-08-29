@@ -1,17 +1,15 @@
-// Tests whether a newly sharded collection can be handled by the wbl
+// Tests whether a reset sharding version triggers errors
 
-jsTestLog( "Starting sharded cluster..." )
+jsTest.log( "Starting sharded cluster..." )
 
-// Need to start as a replica set here, just because there's no other way to trigger separate configs,
-// See SERVER-4222
-var st = new ShardingTest( { shards : 1, mongos : 2, verbose : 2, other : { rs : true } } )
+var st = new ShardingTest( { shards : 1, mongos : 2, verbose : 2, separateConfig : 1  } )
 
-st.setBalancer( false )
+st.stopBalancer()
 
 var mongosA = st.s0
 var mongosB = st.s1
 
-jsTestLog( "Adding new collections...")
+jsTest.log( "Adding new collections...")
 
 var collA = mongosA.getCollection( jsTestName() + ".coll" )
 collA.insert({ hello : "world" })
@@ -21,7 +19,7 @@ var collB = mongosB.getCollection( "" + collA )
 collB.insert({ hello : "world" })
 assert.eq( null, collB.getDB().getLastError() )
 
-jsTestLog( "Enabling sharding..." )
+jsTest.log( "Enabling sharding..." )
 
 printjson( mongosA.getDB( "admin" ).runCommand({ enableSharding : "" + collA.getDB() }) )
 printjson( mongosA.getDB( "admin" ).runCommand({ shardCollection : "" + collA, key : { _id : 1 } }) )
@@ -29,7 +27,7 @@ printjson( mongosA.getDB( "admin" ).runCommand({ shardCollection : "" + collA, k
 // MongoD doesn't know about the config shard version *until* MongoS tells it
 collA.findOne()
 
-jsTestLog( "Trigger wbl..." )
+jsTest.log( "Trigger wbl..." )
 
 collB.insert({ goodbye : "world" })
 assert.eq( null, collB.getDB().getLastError() )

@@ -11,13 +11,21 @@ print("initial sync");
 master.getDB("foo").bar.insert({X:1});
 replTest.awaitReplication();
 
+print("invalid reconfig");
+var config = master.getDB("local").system.replset.findOne();
+config.version++;
+config.members.push({_id : 5, host : "localhost:12345, votes:0"});
+var result = master.adminCommand({replSetReconfig : config});
+printjson(result);
+assert.eq(result.ok, 0);
+
 print("stopping 3 & 4");
 replTest.stop(3);
 replTest.stop(4);
 
 print("reconfiguring");
 master = replTest.getMaster();
-var config = master.getDB("local").system.replset.findOne();
+config = master.getDB("local").system.replset.findOne();
 var oldVersion = config.version++;
 config.members[0].votes = 2;
 config.members[3].votes = 2;
@@ -28,8 +36,16 @@ catch(e) {
     print(e);
 }
 
-var config = master.getDB("local").system.replset.findOne();
-assert.eq(oldVersion+1, config.version);
+assert.soon(function() {
+    try {
+        var config = master.getDB("local").system.replset.findOne();
+        return oldVersion+1 == config.version;
+    }
+    catch (e) {
+        print("Query failed: "+e);
+        return false;
+    }
+});
 
 
 print("0 & 3 up; 1, 2, 4 down");

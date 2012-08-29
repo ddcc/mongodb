@@ -1,4 +1,6 @@
-// Tests count and distinct using slaveOk
+/* Tests count and distinct using slaveOk. Also tests a scenario querying a set
+ * where only one secondary is up.
+ */
 
 var st = new ShardingTest( testName = "countSlaveOk",
                            numShards = 1,
@@ -43,17 +45,22 @@ printjson( rst.status() )
 // Wait for the mongos to recognize the slave
 ReplSetTest.awaitRSClientHosts( conn, sec, { ok : true, secondary : true } )
 
+// Make sure that mongos realizes that primary is already down
+ReplSetTest.awaitRSClientHosts( conn, primary, { ok : false });
+
 // Need to check slaveOk=true first, since slaveOk=false will destroy conn in pool when
 // master is down
 conn.setSlaveOk()
 
-// Should throw exception, since not slaveOk'd
+// count using the command path
 assert.eq( 30, coll.find({ i : 0 }).count() )
+// count using the query path
+assert.eq( 30, coll.find({ i : 0 }).itcount() );
 assert.eq( 10, coll.distinct("i").length )
 
 try {
-   
-    conn.setSlaveOk( false ) 
+    conn.setSlaveOk( false )
+    // Should throw exception, since not slaveOk'd
     coll.find({ i : 0 }).count()
     
     print( "Should not reach here!" )

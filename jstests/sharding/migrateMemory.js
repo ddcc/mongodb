@@ -40,11 +40,39 @@ printjson( stats )
 
 ss = []
 
+// Stop balancer for manual move
+s.stopBalancer()
+
 for ( var f = 0; f<num; f += ( 2 * num / t.stats().nchunks ) ){
     ss.push( s.getServer( "test" ).getDB( "admin" ).serverStatus() )
     print( f )
-    s.adminCommand( { movechunk : "test.foo" , find : { _id : f } , to : to } )
+    
+    //
+    // Since we're moving chunks fast here, there's no guarantee that the to-shard will be done
+    // before the from-shard with the migration.
+    // 
+    
+    while( true ){
+     
+        try {
+            s.adminCommand( { movechunk : "test.foo" , find : { _id : f } , to : to } )
+        }
+        catch( e ){
+            
+            // Not sure if thrown as string or obj
+            if( tojson( e ).indexOf( "TO-shard" ) >= 0 ) continue
+            
+            printjson( e )
+            throw e
+        }
+        
+        break;
+    }
+    
 }
+
+// Re-enable balancer
+s.setBalancer( true )
 
 for ( i=0; i<ss.length; i++ )
     printjson( ss[i].mem );
