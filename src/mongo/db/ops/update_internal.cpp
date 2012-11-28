@@ -21,6 +21,7 @@
 #include "mongo/db/oplog.h"
 #include "mongo/db/jsobjmanipulator.h"
 #include "mongo/db/pdfile.h"
+#include "mongo/util/mongoutils/str.h"
 
 #include "update_internal.h"
 
@@ -98,6 +99,9 @@ namespace mongo {
 
         case INC: {
             appendIncremented( builder , in , ms );
+            // We don't need to "fix" this operation into a $set, for oplog purposes,
+            // here. ModState::appendForOpLog will do that for us. It relies on the new value
+            // being in inc{int,long,double} inside the ModState that wraps around this Mod.
             break;
         }
 
@@ -114,27 +118,36 @@ namespace mongo {
 
         case PUSH: {
             uassert( 10131 ,  "$push can only be applied to an array" , in.type() == Array );
-            BSONObjBuilder bb( builder.subarrayStart( shortFieldName ) );
+            BSONArrayBuilder bb( builder.subarrayStart( shortFieldName ) );
             BSONObjIterator i( in.embeddedObject() );
-            int n=0;
             while ( i.more() ) {
                 bb.append( i.next() );
-                n++;
             }
 
-            ms.pushStartSize = n;
+            bb.append( elt );
 
-            bb.appendAs( elt ,  bb.numStr( n ) );
-            bb.done();
+            // We don't want to log a positional $set for which the '_checkForAppending' test
+            // won't pass. If we're in that case, fall back to non-optimized logging.
+            if ( (elt.type() == Object && elt.embeddedObject().okForStorage()) ||
+                 (elt.type() != Object) ) {
+                ms.fixedOpName = "$set";
+                ms.forcePositional = true;
+                ms.position = bb.arrSize() - 1;
+                bb.done();
+            }
+            else {
+                ms.fixedOpName = "$set";
+                ms.forceEmptyArray = true;
+                ms.fixedArray = BSONArray( bb.done().getOwned() );
+            }
+
             break;
         }
 
         case ADDTOSET: {
             uassert( 12592 ,  "$addToSet can only be applied to an array" , in.type() == Array );
-            BSONObjBuilder bb( builder.subarrayStart( shortFieldName ) );
-
+            BSONArrayBuilder bb( builder.subarrayStart( shortFieldName ) );
             BSONObjIterator i( in.embeddedObject() );
-            int n=0;
 
             if ( isEach() ) {
 
@@ -144,7 +157,6 @@ namespace mongo {
                 while ( i.more() ) {
                     BSONElement cur = i.next();
                     bb.append( cur );
-                    n++;
                     toadd.erase( cur );
                 }
 
@@ -153,64 +165,80 @@ namespace mongo {
                     while ( i.more() ) {
                         BSONElement e = i.next();
                         if ( toadd.count(e) ) {
-                            bb.appendAs( e , BSONObjBuilder::numStr( n++ ) );
+                            bb.append( e );
                             toadd.erase( e );
                         }
                     }
                 }
 
+                ms.fixedOpName = "$set";
+                ms.forceEmptyArray = true;
+                ms.fixedArray = BSONArray(bb.done().getOwned());
             }
             else {
 
                 bool found = false;
-
+                int pos = 0;
+                int count = 0;
                 while ( i.more() ) {
                     BSONElement cur = i.next();
                     bb.append( cur );
-                    n++;
-                    if ( elt.woCompare( cur , false ) == 0 )
+                    if ( elt.woCompare( cur , false ) == 0 ) {
                         found = true;
+                        pos = count;
+                    }
+                    count++;
                 }
 
-                if ( ! found )
-                    bb.appendAs( elt ,  bb.numStr( n ) );
+                if ( !found ) {
+                    bb.append( elt );
+                }
 
+                // We don't want to log a positional $set for which the '_checkForAppending'
+                // test won't pass. If we're in that case, fall back to non-optimized logging.
+                if ( (elt.type() == Object && elt.embeddedObject().okForStorage()) ||
+                     (elt.type() != Object) ) {
+                    ms.fixedOpName = "$set";
+                    ms.forcePositional = true;
+                    ms.position = found ? pos : bb.arrSize() - 1;
+                    bb.done();
+                }
+                else {
+                    ms.fixedOpName = "$set";
+                    ms.forceEmptyArray = true;
+                    ms.fixedArray = BSONArray(bb.done().getOwned());
+                }
             }
 
-            bb.done();
             break;
         }
-
-
 
         case PUSH_ALL: {
             uassert( 10132 ,  "$pushAll can only be applied to an array" , in.type() == Array );
             uassert( 10133 ,  "$pushAll has to be passed an array" , elt.type() );
 
-            BSONObjBuilder bb( builder.subarrayStart( shortFieldName ) );
+            BSONArrayBuilder bb( builder.subarrayStart( shortFieldName ) );
 
             BSONObjIterator i( in.embeddedObject() );
-            int n=0;
             while ( i.more() ) {
                 bb.append( i.next() );
-                n++;
             }
-
-            ms.pushStartSize = n;
 
             i = BSONObjIterator( elt.embeddedObject() );
             while ( i.more() ) {
-                bb.appendAs( i.next() , bb.numStr( n++ ) );
+                bb.append( i.next() );
             }
 
-            bb.done();
+            ms.fixedOpName = "$set";
+            ms.forceEmptyArray = true;
+            ms.fixedArray = BSONArray(bb.done().getOwned());
             break;
         }
 
         case PULL:
         case PULL_ALL: {
             uassert( 10134 ,  "$pull/$pullAll can only be applied to an array" , in.type() == Array );
-            BSONObjBuilder bb( builder.subarrayStart( shortFieldName ) );
+            BSONArrayBuilder bb( builder.subarrayStart( shortFieldName ) );
 
             //temporarily record the things to pull. only use this set while 'elt' in scope.
             BSONElementSet toPull;
@@ -220,8 +248,6 @@ namespace mongo {
                     toPull.insert( j.next() );
                 }
             }
-
-            int n = 0;
 
             BSONObjIterator i( in.embeddedObject() );
             while ( i.more() ) {
@@ -236,36 +262,36 @@ namespace mongo {
                 }
 
                 if ( allowed )
-                    bb.appendAs( e , bb.numStr( n++ ) );
+                    bb.append( e );
             }
 
-            bb.done();
+            // If this is the last element of the array, then we want to write the empty array to the
+            // oplog.
+            ms.fixedOpName = "$set";
+            ms.forceEmptyArray = true;
+            ms.fixedArray = BSONArray(bb.done().getOwned());
             break;
         }
 
         case POP: {
             uassert( 10135 ,  "$pop can only be applied to an array" , in.type() == Array );
-            BSONObjBuilder bb( builder.subarrayStart( shortFieldName ) );
+            BSONArrayBuilder bb( builder.subarrayStart( shortFieldName ) );
 
-            int n = 0;
 
             BSONObjIterator i( in.embeddedObject() );
             if ( elt.isNumber() && elt.number() < 0 ) {
                 // pop from front
                 if ( i.more() ) {
                     i.next();
-                    n++;
                 }
 
                 while( i.more() ) {
-                    bb.appendAs( i.next() , bb.numStr( n - 1 ) );
-                    n++;
+                    bb.append( i.next() );
                 }
             }
             else {
                 // pop from back
                 while( i.more() ) {
-                    n++;
                     BSONElement arrI = i.next();
                     if ( i.more() ) {
                         bb.append( arrI );
@@ -273,9 +299,9 @@ namespace mongo {
                 }
             }
 
-            ms.pushStartSize = n;
-            verify( ms.pushStartSize == in.embeddedObject().nFields() );
-            bb.done();
+            ms.fixedOpName = "$set";
+            ms.forceEmptyArray = true;
+            ms.fixedArray = BSONArray(bb.done().getOwned());
             break;
         }
 
@@ -311,8 +337,25 @@ namespace mongo {
             }
 
             switch( in.type() ) {
-            case NumberInt: builder.append( shortFieldName , x ); break;
-            case NumberLong: builder.append( shortFieldName , y ); break;
+
+            case NumberInt:
+                builder.append( shortFieldName , x );
+                // By recording the result of the bit manipulation into the ModSet, we'll be
+                // set up so that this $bit operation be "fixed" as a $set of the final result
+                // in the oplog. This will happen in appendForOpLog and what triggers it is
+                // setting the incType in the ModSet that is around this Mod.
+                ms.incType = NumberInt;
+                ms.incint = x;
+                break;
+
+            case NumberLong:
+                // Please see comment on fixing this $bit into a $set for logging purposes in
+                // the NumberInt case.
+                builder.append( shortFieldName , y );
+                ms.incType = NumberLong;
+                ms.inclong = y;
+                break;
+
             default: verify( 0 );
             }
 
@@ -320,10 +363,14 @@ namespace mongo {
         }
 
         case RENAME_FROM: {
+            // We don't need to "fix" this operation into a $set here. ModState::appendForOpLog
+            // will do that for us. It relies on the field name being stored on this Mod.
             break;
         }
 
         case RENAME_TO: {
+            // We don't need to "fix" this operation into a $set here, for the same reason we
+            // didn't either with RENAME_FROM.
             ms.handleRename( builder, shortFieldName );
             break;
         }
@@ -504,6 +551,7 @@ namespace mongo {
     }
 
     void ModState::appendForOpLog( BSONObjBuilder& b ) const {
+        // dontApply logic is deprecated for all but $rename.
         if ( dontApply ) {
             return;
         }
@@ -537,9 +585,23 @@ namespace mongo {
         DEBUGUPDATE( "\t\t\t\t\t appendForOpLog name:" << name << " fixed: " << fixed
                      << " fn: " << m->fieldName );
 
+        if (strcmp(name, "$unset") == 0) {
+            BSONObjBuilder bb(b.subobjStart(name));
+            bb.append(m->fieldName, 1);
+            bb.done();
+            return;
+        }
+
         BSONObjBuilder bb( b.subobjStart( name ) );
         if ( fixed ) {
             bb.appendAs( *fixed , m->fieldName );
+        }
+        else if ( ! fixedArray.isEmpty() || forceEmptyArray ) {
+            bb.append( m->fieldName, fixedArray );
+        }
+        else if ( forcePositional ) {
+            string positionalField = str::stream() << m->fieldName << "." << position;
+            bb.appendAs( m->elt, positionalField.c_str() );
         }
         else {
             bb.appendAs( m->elt , m->fieldName );
@@ -579,19 +641,33 @@ namespace mongo {
 
             switch ( m.m->op ) {
             case Mod::UNSET:
+                m.fixedOpName = "$unset";
+                break;
+
             case Mod::ADDTOSET:
+                m.fixedOpName = "$set";
+                m.fixed = &(m.old);
+                break;
+
             case Mod::RENAME_FROM:
             case Mod::RENAME_TO:
                 // this should have been handled by prepare
                 break;
+
             case Mod::PULL:
             case Mod::PULL_ALL:
                 // this should have been handled by prepare
+                m.fixedOpName = "$set";
+                m.fixed = &(m.old);
                 break;
+
             case Mod::POP:
-                verify( m.old.eoo() || ( m.old.isABSONObj() && m.old.Obj().isEmpty() ) );
+                verify( m.old.isABSONObj() && m.old.Obj().isEmpty() );
+                m.fixedOpName = "$set";
+                m.fixed = &(m.old);
                 break;
                 // [dm] the BSONElementManipulator statements below are for replication (correct?)
+
             case Mod::INC:
                 if ( isOnDisk )
                     m.m->IncrementMe( m.old );
@@ -600,12 +676,14 @@ namespace mongo {
                 m.fixedOpName = "$set";
                 m.fixed = &(m.old);
                 break;
+
             case Mod::SET:
                 if ( isOnDisk )
                     BSONElementManipulator( m.old ).ReplaceTypeAndValue( m.m->elt );
                 else
                     BSONElementManipulator( m.old ).replaceTypeAndValue( m.m->elt );
                 break;
+
             default:
                 uassert( 13478 ,  "can't apply mod in place - shouldn't have gotten here" , 0 );
             }
@@ -618,11 +696,25 @@ namespace mongo {
                                           set<string>& onedownseen ) {
         Mod& m = *((Mod*)(modState.m)); // HACK
         switch (m.op) {
-        // unset/pull/pullAll on nothing does nothing, so don't append anything
-        case Mod::UNSET:
+        // unset/pull/pullAll on nothing does nothing, so don't append anything. Still,
+        // explicitly log that the target array was reset.
+        case Mod::POP:
         case Mod::PULL:
         case Mod::PULL_ALL:
+        case Mod::UNSET:
+            modState.fixedOpName = "$unset";
             return;
+
+        // $rename may involve dotted path creation, so we want to make sure we're not
+        // creating a path here for a rename that's a no-op. In other words if we're
+        // issuing a {$rename: {a.b : c.d} } that's a no-op, we don't want to create
+        // the a and c paths here. See test NestedNoName in the 'repl' suite.
+        case Mod::RENAME_FROM:
+        case Mod::RENAME_TO:
+            if (modState.dontApply) {
+                return;
+            }
+
         default:
             ;// fall through
         }
@@ -714,9 +806,34 @@ namespace mongo {
             switch ( cmp ) {
 
             case LEFT_SUBFIELD: { // Mod is embedded under this element
-                uassert( 10145,
-                         str::stream() << "LEFT_SUBFIELD only supports Object: " << field
-                         << " not: " << e.type() , e.type() == Object || e.type() == Array );
+
+                // SERVER-4781
+                bool isObjOrArr = e.type() == Object || e.type() == Array;
+                if ( ! isObjOrArr ) {
+                    if (m->second->m->strictApply) {
+                        uasserted( 10145,
+                                   str::stream() << "LEFT_SUBFIELD only supports Object: " << field
+                                   << " not: " << e.type() );
+                    }
+                    else {
+                        // Since we're not applying the mod, we keep what was there before
+                        builder.append( e );
+
+                        // Skip both as we're not applying this mod. Note that we'll advance
+                        // the iterator on the mod side for all the mods that are under the
+                        // root we are now.
+                        e = es.next();
+                        m++;
+                        while ( m != mend &&
+                                ( compareDottedFieldNames( m->second->m->fieldName,
+                                                           field,
+                                                           lexNumCmp ) == LEFT_SUBFIELD ) ) {
+                            m++;
+                        }
+                        continue;
+                    }
+                }
+
                 if ( onedownseen.count( e.fieldName() ) == 0 ) {
                     onedownseen.insert( e.fieldName() );
                     if ( e.type() == Object ) {
@@ -734,6 +851,11 @@ namespace mongo {
                     // inc both as we handled both
                     e = es.next();
                     m++;
+                    while ( m != mend &&
+                            ( compareDottedFieldNames( m->second->m->fieldName , field , lexNumCmp ) ==
+                              LEFT_SUBFIELD ) ) {
+                        m++;
+                    }
                 }
                 else {
                     massert( 16069 , "ModSet::createNewFromMods - "
@@ -809,7 +931,7 @@ namespace mongo {
                     // we have something like { x : { $gt : 5 } }
                     // this can be a query piece
                     // or can be a dbref or something
-                    
+
                     int op = e.embeddedObject().firstElement().getGtLtOp( -1 );
                     if ( op >= 0 ) {
                         // this means this is a $gt type filter, so don't make part of the new object
@@ -845,7 +967,8 @@ namespace mongo {
     ModSet::ModSet(
         const BSONObj& from ,
         const set<string>& idxKeys,
-        const set<string>* backgroundKeys)
+        const set<string>* backgroundKeys,
+        bool forReplication)
         : _isIndexed(0) , _hasDynamicArray( false ) {
 
         BSONObjIterator it(from);
@@ -934,13 +1057,13 @@ namespace mongo {
                              strstr( target , ".$" ) == 0 );
 
                     Mod from;
-                    from.init( Mod::RENAME_FROM, f );
+                    from.init( Mod::RENAME_FROM, f , forReplication );
                     from.setFieldName( fieldName );
                     updateIsIndexed( from, idxKeys, backgroundKeys );
                     _mods[ from.fieldName ] = from;
 
                     Mod to;
-                    to.init( Mod::RENAME_TO, f );
+                    to.init( Mod::RENAME_TO, f , forReplication );
                     to.setFieldName( target );
                     updateIsIndexed( to, idxKeys, backgroundKeys );
                     _mods[ to.fieldName ] = to;
@@ -952,7 +1075,7 @@ namespace mongo {
                 _hasDynamicArray = _hasDynamicArray || strstr( fieldName , ".$" ) > 0;
 
                 Mod m;
-                m.init( op , f );
+                m.init( op , f , forReplication );
                 m.setFieldName( f.fieldName() );
                 updateIsIndexed( m, idxKeys, backgroundKeys );
                 _mods[m.fieldName] = m;

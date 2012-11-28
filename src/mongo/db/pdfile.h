@@ -314,6 +314,7 @@ namespace mongo {
     */
     class Extent {
     public:
+        enum { extentSignature = 0x41424344 };
         unsigned magic;
         DiskLoc myLoc;
         DiskLoc xnext, xprev; /* next/prev extent for this namespace */
@@ -330,10 +331,7 @@ namespace mongo {
 
         static int HeaderSize() { return sizeof(Extent)-4; }
 
-        bool validates() {
-            return !(firstRecord.isNull() ^ lastRecord.isNull()) &&
-                   length >= 0 && !myLoc.isNull();
-        }
+        bool validates(const DiskLoc diskLoc, BSONArrayBuilder* errors = NULL);
 
         BSONObj dump() {
             return BSON( "loc" << myLoc.toString() << "xnext" << xnext.toString() << "xprev" << xprev.toString()
@@ -356,7 +354,7 @@ namespace mongo {
         /* like init(), but for a reuse case */
         DiskLoc reuse(const char *nsname, bool newUseIsAsCapped);
 
-        bool isOk() const { return magic == 0x41424344; }
+        bool isOk() const { return magic == extentSignature; }
         void assertOk() const { verify(isOk()); }
 
         Record* newRecord(int len);

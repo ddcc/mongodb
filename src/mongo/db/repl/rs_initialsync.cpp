@@ -138,6 +138,8 @@ namespace mongo {
             return target;
         }
 
+        Member* primary = const_cast<Member*>(box.getPrimary());
+
         // wait for 2N pings before choosing a sync target
         if (_cfg) {
             int needMorePings = config().members.size()*2 - HeartbeatInfo::numPings;
@@ -148,6 +150,12 @@ namespace mongo {
             }
 
             buildIndexes = myConfig().buildIndexes;
+
+            // If we are only allowed to sync from the primary, return that
+            if (!_cfg->chainingAllowed()) {
+                // Returns NULL if we cannot reach the primary
+                return primary;
+            }
         }
 
         // find the member with the lowest ping time that has more data than me
@@ -156,8 +164,7 @@ namespace mongo {
         // MAX_SLACK_TIME seconds behind.
         OpTime primaryOpTime;
         static const unsigned maxSlackDurationSeconds = 10 * 60; // 10 minutes
-        const Member* primary = box.getPrimary();
-        if (primary) 
+        if (primary)
             primaryOpTime = primary->hbinfo().opTime;
         else
             // choose a time that will exclude no candidates, since we don't see a primary
@@ -204,8 +211,8 @@ namespace mongo {
                     (m->hbinfo().ping > closest->hbinfo().ping))
                     continue;
 
-                if ( attempts == 0 &&
-                     myConfig().slaveDelay < m->config().slaveDelay ) {
+                if (attempts == 0 &&
+                    (myConfig().slaveDelay < m->config().slaveDelay || m->config().hidden)) {
                     continue; // skip this one in the first attempt
                 }
 
@@ -248,8 +255,21 @@ namespace mongo {
         _veto[host] = time(0)+secs;
     }
 
-    bool ReplSetImpl::_syncDoInitialSync_applyToHead( replset::InitialSync& init, OplogReader* r, 
-                                                      const Member* source, const BSONObj& lastOp , 
+    /**
+     * Replays the sync target's oplog from lastOp to the latest op on the sync target.
+     *
+     * @param syncer either initial sync (can reclone missing docs) or "normal" sync (no recloning)
+     * @param r      the oplog reader
+     * @param source the sync target
+     * @param lastOp the op to start syncing at.  replset::InitialSync writes this and then moves to
+     *               the queue.  replset::SyncTail does not write this, it moves directly to the
+     *               queue.
+     * @param minValid populated by this function. The most recent op on the sync target's oplog,
+     *                 this function syncs to this value (inclusive)
+     * @return if applying the oplog succeeded
+     */
+    bool ReplSetImpl::_syncDoInitialSync_applyToHead( replset::SyncTail& syncer, OplogReader* r,
+                                                      const Member* source, const BSONObj& lastOp ,
                                                       BSONObj& minValid ) {
         /* our cloned copy will be strange until we apply oplog events that occurred
            through the process.  we note that time point here. */
@@ -282,7 +302,7 @@ namespace mongo {
         // apply startingTS..mvoptime portion of the oplog
         {
             try {
-                init.oplogApplication(lastOp, minValid);
+                minValid = syncer.oplogApplication(lastOp, minValid);
             }
             catch (const DBException&) {
                 log() << "replSet initial sync failed during oplog application phase" << rsLog;
@@ -310,10 +330,26 @@ namespace mongo {
     }
 
     /**
-     * Do the initial sync for this member.
+     * Do the initial sync for this member.  There are several steps to this process:
+     *
+     *     1. Record start time.
+     *     2. Clone.
+     *     3. Set minValid1 to sync target's latest op time.
+     *     4. Apply ops from start to minValid1, fetching missing docs as needed.
+     *     5. Set minValid2 to sync target's latest op time.
+     *     6. Apply ops from minValid1 to minValid2.
+     *     7. Build indexes.
+     *     8. Set minValid3 to sync target's latest op time.
+     *     9. Apply ops from minValid2 to minValid3.
+     *
+     * At that point, initial sync is finished.  Note that the oplog from the sync target is applied
+     * three times: step 4, 6, and 8.  4 may involve refetching, 6 should not.  By the end of 6,
+     * this member should have consistent data.  8 is "cosmetic," it is only to get this member
+     * closer to the latest op time before it can transition to secondary state.
      */
     void ReplSetImpl::_syncDoInitialSync() {
         replset::InitialSync init(replset::BackgroundSync::get());
+        replset::SyncTail tail(replset::BackgroundSync::get());
         sethbmsg("initial sync pending",0);
 
         // if this is the first node, it may have already become primary
@@ -345,6 +381,9 @@ namespace mongo {
             return;
         }
 
+        // written by applyToHead calls
+        BSONObj minValid;
+
         if (replSettings.fastsync) {
             log() << "fastsync: skipping database clone" << rsLog;
 
@@ -367,28 +406,24 @@ namespace mongo {
             }
 
             sethbmsg("initial sync data copy, starting syncup",0);
-            
-            BSONObj minValid;
+
+            log() << "oplog sync 1 of 3" << endl;
             if ( ! _syncDoInitialSync_applyToHead( init, &r , source , lastOp , minValid ) ) {
                 return;
             }
 
             lastOp = minValid;
-            // its currently important that lastOp is equal to the last op we actually pulled
-            // this is because the background thread only pulls each op once now
-            // so if its now, we'll be waiting forever
-            {
-                // this takes whatever the last op the we got is
-                // and stores it locally before we wipe it out below
-                Lock::DBRead lk(rsoplog);
-                Helpers::getLast(rsoplog, lastOp);
-                lastOp = lastOp.getOwned();
-            }
 
-            // reset state, as that "didn't count"
-            emptyOplog(); 
-            lastOpTimeWritten = OpTime();
-            lastH = 0;
+            // Now we sync to the latest op on the sync target _again_, as we may have recloned ops
+            // that were "from the future" compared with minValid. During this second application,
+            // nothing should need to be recloned.
+            log() << "oplog sync 2 of 3" << endl;
+            if (!_syncDoInitialSync_applyToHead(tail, &r , source , lastOp , minValid)) {
+                return;
+            }
+            // data should now be consistent
+
+            lastOp = minValid;
 
             sethbmsg("initial sync building indexes",0);
             if ( ! _syncDoInitialSync_clone( sourceHostname.c_str(), dbs, false ) ) {
@@ -398,10 +433,8 @@ namespace mongo {
             }
         }
 
-        sethbmsg("initial sync query minValid",0);
-
-        BSONObj minValid;
-        if ( ! _syncDoInitialSync_applyToHead( init, &r, source, lastOp, minValid ) ) {
+        log() << "oplog sync 3 of 3" << endl;
+        if (!_syncDoInitialSync_applyToHead(tail, &r, source, lastOp, minValid)) {
             return;
         }
         
@@ -419,7 +452,9 @@ namespace mongo {
                 log() << "replSet set minValid=" << minValid["ts"]._opTime().toString() << rsLog;
             }
             catch(...) { }
-            Helpers::putSingleton("local.replset.minvalid", minValid);
+
+            theReplSet->setMinValid(minValid);
+
             cx.ctx().db()->flushFiles(true);
         }
 

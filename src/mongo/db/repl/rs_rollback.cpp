@@ -304,18 +304,6 @@ namespace mongo {
         bson::bo goodVersionOfObject;
     };
 
-    static void setMinValid(bo newMinValid) {
-        try {
-            log() << "replSet minvalid=" << newMinValid["ts"]._opTime().toStringLong() << rsLog;
-        }
-        catch(...) { }
-        {
-            Helpers::putSingleton("local.replset.minvalid", newMinValid);
-            Client::Context cx( "local." );
-            cx.db()->flushFiles(true);
-        }
-    }
-
     void ReplSetImpl::syncFixUp(HowToFixUp& h, OplogReader& r) {
         DBClientConnection *them = r.conn();
 
@@ -378,6 +366,7 @@ namespace mongo {
 
         /* we have items we are writing that aren't from a point-in-time.  thus best not to come online
            until we get to that point in freshness. */
+        log() << "replSet minvalid=" << newMinValid["ts"]._opTime().toStringLong() << rsLog;
         setMinValid(newMinValid);
 
         /** any full collection resyncs required? */
@@ -411,6 +400,7 @@ namespace mongo {
                         err = "can't get minvalid from primary";
                     }
                     else {
+                        log() << "replSet minvalid=" << newMinValid["ts"]._opTime().toStringLong() << rsLog;
                         setMinValid(newMinValid);
                     }
                 }
@@ -583,6 +573,23 @@ namespace mongo {
     }
 
     void ReplSetImpl::syncRollback(OplogReader&r) {
+        // check that we are at minvalid, otherwise we cannot rollback as we may be in an
+        // inconsistent state
+        {
+            Lock::DBRead lk("local.replset.minvalid");
+            BSONObj mv;
+            if( Helpers::getSingleton("local.replset.minvalid", mv) ) {
+                OpTime minvalid = mv["ts"]._opTime();
+                if( minvalid > lastOpTimeWritten ) {
+                    log() << "replSet need to rollback, but in inconsistent state" << endl;
+                    log() << "minvalid: " << minvalid.toString() << " our last optime: "
+                          << lastOpTimeWritten.toString() << endl;
+                    changeState(MemberState::RS_FATAL);
+                    return;
+                }
+            }
+        }
+
         unsigned s = _syncRollback(r);
         if( s )
             sleepsecs(s);

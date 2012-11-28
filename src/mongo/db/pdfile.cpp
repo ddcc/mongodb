@@ -659,8 +659,14 @@ namespace mongo {
     }
 
     DiskLoc Extent::_reuse(const char *nsname, bool capped) {
-        LOG(3) << "reset extent was:" << nsDiagnostic.toString() << " now:" << nsname << '\n';
-        massert( 10360 ,  "Extent::reset bad magic value", magic == 0x41424344 );
+        LOG(3) << "_reuse extent was:" << nsDiagnostic.toString() << " now:" << nsname << endl;
+        if (magic != extentSignature) {
+            StringBuilder sb;
+            sb << "bad extent signature " << toHex(&magic, 4)
+               << " for namespace '" << nsDiagnostic.toString()
+               << "' found in Extent::_reuse";
+            msgasserted(10360, sb.str());
+        }
         nsDiagnostic = nsname;
         markEmpty();
 
@@ -680,7 +686,7 @@ namespace mongo {
 
     /* assumes already zeroed -- insufficient for block 'reuse' perhaps */
     DiskLoc Extent::init(const char *nsname, int _length, int _fileNo, int _offset, bool capped) {
-        magic = 0x41424344;
+        magic = extentSignature;
         myLoc.set(_fileNo, _offset);
         xnext.Null();
         xprev.Null();
@@ -699,6 +705,56 @@ namespace mongo {
 
         return emptyLoc;
     }
+
+        bool Extent::validates(const DiskLoc diskLoc, BSONArrayBuilder* errors) {
+            bool extentOk = true;
+            if (magic != extentSignature) {
+                if (errors) {
+                    StringBuilder sb;
+                    sb << "bad extent signature " << toHex(&magic, 4)
+                       << " in extent " << diskLoc.toString();
+                    *errors << sb.str();
+                }
+                extentOk = false;
+            }
+            if (myLoc != diskLoc) {
+                if (errors) {
+                    StringBuilder sb;
+                    sb << "extent " << diskLoc.toString()
+                       << " self-pointer is " << myLoc.toString();
+                    *errors << sb.str();
+                }
+                extentOk = false;
+            }
+            if (firstRecord.isNull() != lastRecord.isNull()) {
+                if (errors) {
+                    StringBuilder sb;
+                    if (firstRecord.isNull()) {
+                        sb << "in extent " << diskLoc.toString()
+                           << ", firstRecord is null but lastRecord is "
+                           << lastRecord.toString();
+                    }
+                    else {
+                        sb << "in extent " << diskLoc.toString()
+                           << ", firstRecord is " << firstRecord.toString()
+                           << " but lastRecord is null";
+                    }
+                    *errors << sb.str();
+                }
+                extentOk = false;
+            }
+            if (length < minSize()) {
+                if (errors) {
+                    StringBuilder sb;
+                    sb << "length of extent " << diskLoc.toString()
+                       << " is " << length
+                       << ", which is less than minimum length of " << minSize();
+                    *errors << sb.str();
+                }
+                extentOk = false;
+            }
+            return extentOk;
+        }
 
     /*
       Record* Extent::newRecord(int len) {
@@ -1229,6 +1285,8 @@ namespace mongo {
         for ( int idxNo = 0; idxNo < d->nIndexes; idxNo++ ) {
             if( d->idx(idxNo).unique() ) {
                 IndexDetails& idx = d->idx(idxNo);
+                if (ignoreUniqueIndex(idx))
+                    continue;
                 BSONObjSet keys;
                 idx.getKeysFromObject(obj, keys);
                 BSONObj order = idx.keyPattern();
@@ -1341,7 +1399,7 @@ namespace mongo {
 
         BSONObj info = loc.obj();
         bool background = info["background"].trueValue();
-        if( background && cc().isSyncThread() ) {
+        if (background && !isMasterNs(tabletoidxns.c_str())) {
             /* don't do background indexing on slaves.  there are nuances.  this could be added later
                 but requires more code.
                 */
@@ -1448,10 +1506,13 @@ namespace mongo {
         }
 
         int lenWHdr = d->getRecordAllocationSize( len + Record::HeaderSize );
-
+        fassert( 16440, lenWHdr >= ( len + Record::HeaderSize ) );
+        
         // If the collection is capped, check if the new object will violate a unique index
         // constraint before allocating space.
-        if ( d->nIndexes && d->isCapped() && !god ) {
+        if (d->nIndexes && 
+            d->isCapped() && 
+            !god) {
             checkNoIndexConflicts( d, BSONObj( reinterpret_cast<const char *>( obuf ) ) );
         }
 
