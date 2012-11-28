@@ -308,6 +308,9 @@ namespace mongo {
 
         if ( useDirectClient )
             dbexit( EXIT_CLEAN );
+
+        fflush(stdout);
+        fflush(stderr);
         return ret;
     }
 
@@ -423,8 +426,10 @@ namespace mongo {
         }
 
         string errmsg;
-        if ( _conn->auth( dbname , _username , _password , errmsg, true, level ) ) {
-            return;
+        if (dbname.size()) {
+            if ( _conn->auth( dbname , _username , _password , errmsg, true, level ) ) {
+                return;
+            }
         }
 
         // try against the admin db

@@ -159,7 +159,7 @@ public:
         drillDown(root, _db != "", _coll != "", true);
 
         // should this happen for oplog replay as well?
-        conn().getLastError();
+        conn().getLastError(_db == "" ? "admin" : _db);
 
         if (doOplog) {
             log() << "\t Replaying oplog" << endl;
@@ -353,7 +353,7 @@ public:
 
             // wait for ops to propagate to "w" nodes (doesn't warn if w used without replset)
             if ( _w > 1 ) {
-                conn().getLastError(false, false, _w);
+                conn().getLastError(db, false, false, _w);
             }
         }
         else if ( endsWith( _curns.c_str() , ".system.indexes" )) {
@@ -370,7 +370,7 @@ public:
 
             // wait for insert to propagate to "w" nodes (doesn't warn if w used without replset)
             if ( _w > 1 ) {
-                conn().getLastErrorDetailed(false, false, _w);
+                conn().getLastErrorDetailed(_curdb, false, false, _w);
             }
         }
     }
@@ -478,20 +478,28 @@ private:
         conn().insert( _curdb + ".system.indexes" ,  o );
 
         // We're stricter about errors for indexes than for regular data
-        BSONObj err = conn().getLastErrorDetailed(false, false, _w);
+        BSONObj err = conn().getLastErrorDetailed(_curdb, false, false, _w);
 
-        if ( ! ( err["err"].isNull() ) ) {
-            if (err["err"].String() == "norepl" && _w > 1) {
+        if (err.hasField("err") && !err["err"].isNull()) {
+            if (err["err"].str() == "norepl" && _w > 1) {
                 error() << "Cannot specify write concern for non-replicas" << endl;
             }
             else {
-                error() << "Error creating index " << o["ns"].String();
-                error() << ": " << err["code"].Int() << " " << err["err"].String() << endl;
-                error() << "To resume index restoration, run " << _name << " on file" << _fileName << " manually." << endl;
+                string errCode;
+
+                if (err.hasField("code")) {
+                    errCode = str::stream() << err["code"].numberInt();
+                }
+
+                error() << "Error creating index " << o["ns"].String() << ": "
+                        << errCode << " " << err["err"] << endl;
             }
 
             ::abort();
         }
+
+        massert(16441, str::stream() << "Error calling getLastError: " << err["errmsg"],
+                err["ok"].trueValue());
     }
 };
 

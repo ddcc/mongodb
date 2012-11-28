@@ -100,25 +100,20 @@ namespace mongo {
 
             if ( logop ) {
                 DEV verify( mods->size() );
-
                 BSONObj pattern = patternOrig;
-                if ( mss->haveArrayDepMod() ) {
-                    BSONObjBuilder patternBuilder;
-                    patternBuilder.appendElements( pattern );
-                    mss->appendSizeSpecForArrayDepMods( patternBuilder );
-                    pattern = patternBuilder.obj();
-                }
+                BSONObj logObj = mss->getOpLogRewrite();
+                DEBUGUPDATE( "\t rewrite update: " << logObj );
 
-                if( mss->needOpLogRewrite() ) {
-                    DEBUGUPDATE( "\t rewrite update: " << mss->getOpLogRewrite() );
-                    logOp("u", ns, mss->getOpLogRewrite() ,
-                          &pattern, 0, fromMigrate );
-                }
-                else {
-                    logOp("u", ns, updateobj, &pattern, 0, fromMigrate );
+                // It is possible that the entire mod set was a no-op over this document.  We
+                // would have an empty log record in that case. If we call logOp, with an empty
+                // record, that would be replicated as "clear this record", which is not what
+                // we want. Therefore, to get a no-op in the replica, we simply don't log.
+                if ( logObj.nFields() ) {
+                    logOp("u", ns, logObj, &pattern, 0, fromMigrate );
                 }
             }
             return UpdateResult( 1 , 1 , 1 , BSONObj() );
+
         } // end $operator update
 
         // regular update
@@ -142,7 +137,8 @@ namespace mongo {
                                  OpDebug& debug,
                                  RemoveSaver* rs,
                                  bool fromMigrate,
-                                 const QueryPlanSelectionPolicy& planPolicy ) {
+                                 const QueryPlanSelectionPolicy& planPolicy,
+                                 bool forReplication ) {
 
         DEBUGUPDATE( "update: " << ns
                      << " update: " << updateobj
@@ -168,10 +164,10 @@ namespace mongo {
             if( d && d->indexBuildInProgress ) {
                 set<string> bgKeys;
                 d->inProgIdx().keyPattern().getFieldNames(bgKeys);
-                mods.reset( new ModSet(updateobj, nsdt->indexKeys(), &bgKeys) );
+                mods.reset( new ModSet(updateobj, nsdt->indexKeys(), &bgKeys, forReplication) );
             }
             else {
-                mods.reset( new ModSet(updateobj, nsdt->indexKeys()) );
+                mods.reset( new ModSet(updateobj, nsdt->indexKeys(), NULL, forReplication) );
             }
             modsIsIndexed = mods->isIndexed();
         }
@@ -336,13 +332,11 @@ namespace mongo {
                     const BSONObj& onDisk = loc.obj();
 
                     ModSet* useMods = mods.get();
-                    bool forceRewrite = false;
 
                     auto_ptr<ModSet> mymodset;
                     if ( details.hasElemMatchKey() && mods->hasDynamicArray() ) {
                         useMods = mods->fixDynamicArray( details.elemMatchKey() );
                         mymodset.reset( useMods );
-                        forceRewrite = true;
                     }
 
                     auto_ptr<ModSetState> mss = useMods->prepare( onDisk );
@@ -394,21 +388,16 @@ namespace mongo {
 
                     if ( logop ) {
                         DEV verify( mods->size() );
+                        BSONObj logObj = mss->getOpLogRewrite();
+                        DEBUGUPDATE( "\t rewrite update: " << logObj );
 
-                        if ( mss->haveArrayDepMod() ) {
-                            BSONObjBuilder patternBuilder;
-                            patternBuilder.appendElements( pattern );
-                            mss->appendSizeSpecForArrayDepMods( patternBuilder );
-                            pattern = patternBuilder.obj();
-                        }
-
-                        if ( forceRewrite || mss->needOpLogRewrite() ) {
-                            DEBUGUPDATE( "\t rewrite update: " << mss->getOpLogRewrite() );
-                            logOp("u", ns, mss->getOpLogRewrite() ,
-                                  &pattern, 0, fromMigrate );
-                        }
-                        else {
-                            logOp("u", ns, updateobj, &pattern, 0, fromMigrate );
+                        // It is possible that the entire mod set was a no-op over this
+                        // document.  We would have an empty log record in that case. If we
+                        // call logOp, with an empty record, that would be replicated as "clear
+                        // this record", which is not what we want. Therefore, to get a no-op
+                        // in the replica, we simply don't log.
+                        if ( logObj.nFields() ) {
+                            logOp("u", ns, logObj , &pattern, 0, fromMigrate );
                         }
                     }
                     numModded++;
@@ -463,6 +452,18 @@ namespace mongo {
         return UpdateResult( 0 , isOperatorUpdate , 0 , BSONObj() );
     }
 
+    void validateUpdate( const char* ns , const BSONObj& updateobj, const BSONObj& patternOrig ) {
+        uassert( 10155 , "cannot update reserved $ collection", strchr(ns, '$') == 0 );
+        if ( strstr(ns, ".system.") ) {
+            /* dm: it's very important that system.indexes is never updated as IndexDetails
+               has pointers into it */
+            uassert( 10156,
+                     str::stream() << "cannot update system collection: "
+                                   << ns << " q: " << patternOrig << " u: " << updateobj,
+                     legalClientSystemNS( ns , true ) );
+        }
+    }
+
     UpdateResult updateObjects( const char* ns,
                                 const BSONObj& updateobj,
                                 const BSONObj& patternOrig,
@@ -473,17 +474,39 @@ namespace mongo {
                                 bool fromMigrate,
                                 const QueryPlanSelectionPolicy& planPolicy ) {
 
-        uassert( 10155 , "cannot update reserved $ collection", strchr(ns, '$') == 0 );
-        if ( strstr(ns, ".system.") ) {
-            /* dm: it's very important that system.indexes is never updated as IndexDetails has pointers into it */
-            uassert( 10156,
-                     str::stream() << "cannot update system collection: " << ns << " q: " << patternOrig << " u: " << updateobj,
-                     legalClientSystemNS( ns , true ) );
-        }
+        validateUpdate( ns , updateobj , patternOrig );
 
         UpdateResult ur = _updateObjects(false, ns, updateobj, patternOrig,
                                          upsert, multi, logop,
-                                         debug, 0, fromMigrate, planPolicy );
+                                         debug, NULL, fromMigrate, planPolicy );
+        debug.nupdated = ur.num;
+        return ur;
+    }
+
+    UpdateResult updateObjectsForReplication( const char* ns,
+                                              const BSONObj& updateobj,
+                                              const BSONObj& patternOrig,
+                                              bool upsert,
+                                              bool multi,
+                                              bool logop ,
+                                              OpDebug& debug,
+                                              bool fromMigrate,
+                                              const QueryPlanSelectionPolicy& planPolicy ) {
+
+        validateUpdate( ns , updateobj , patternOrig );
+
+        UpdateResult ur = _updateObjects(false,
+                                         ns,
+                                         updateobj,
+                                         patternOrig,
+                                         upsert,
+                                         multi,
+                                         logop,
+                                         debug,
+                                         NULL /* no remove saver */,
+                                         fromMigrate,
+                                         planPolicy,
+                                         true /* for replication */ );
         debug.nupdated = ur.num;
         return ur;
     }

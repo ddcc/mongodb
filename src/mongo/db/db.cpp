@@ -1290,9 +1290,8 @@ namespace mongo {
             return TRUE;
 
         case CTRL_LOGOFF_EVENT:
-            rawOut( "CTRL_LOGOFF_EVENT signal" );
-            consoleTerminate( "CTRL_LOGOFF_EVENT" );
-            return TRUE;
+            // only sent to services, and only in pre-Vista Windows; FALSE means ignore
+            return FALSE;
 
         case CTRL_SHUTDOWN_EVENT:
             rawOut( "CTRL_SHUTDOWN_EVENT signal" );
@@ -1384,14 +1383,11 @@ namespace mongo {
         printWindowsStackTrace( *excPointers->ContextRecord );
         doMinidump(excPointers);
 
-        // In release builds, let dbexit() try to shut down cleanly
-#if !defined(_DEBUG)
-        dbexit( EXIT_UNCAUGHT, "unhandled exception" );
-#endif
+        // Don't go through normal shutdown procedure. It may make things worse.
+        log() << "*** immediate exit due to unhandled exception" << endl;
+        ::_exit(EXIT_ABRUPT);
 
-        // In debug builds, give debugger a chance to run
-        if( filtLast )
-            return filtLast( excPointers );
+        // We won't reach here
         return EXCEPTION_EXECUTE_HANDLER;
     }
 
