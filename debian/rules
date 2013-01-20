@@ -26,4 +26,5 @@ clean::
 	find . -name "*.pyc" -delete
 	rm -f buildinfo.cpp
 	rm -rf debian/tmp-test
+	rm -rf .scons
 

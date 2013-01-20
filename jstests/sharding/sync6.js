@@ -4,11 +4,20 @@
 // Note that this test will always have random factors, since we can't control the
 // thread scheduling.
 
-test = new SyncCCTest( "sync6", { logpath : "/dev/null" } )
+// NOTE: this test is skipped when running smoke.py with --auth or --keyFile to force authentication
+// in all tests.
+var bitbucket;
+if ( _isWindows() ) {
+    bitbucket = "NUL:";
+}
+else {
+    bitbucket = "/dev/null";
+}
+test = new SyncCCTest( "sync6", { logpath : bitbucket , logappend : "" } )
 
 // Startup another process to handle our commands to the cluster, mostly so it's 
 // easier to read.
-var commandConn = startMongodTest( 30000 + 4, "syncCommander", false, {})//{ logpath : "/dev/null" } )//{verbose : ""} )
+var commandConn = startMongodTest( 30000 + 4, "syncCommander", false, {})//{ logpath : bitbucket } )//{verbose : ""} )
 // { logpath : "/data/db/syncCommander/mongod.log" } );
 
 // Up the log level for this test

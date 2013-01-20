@@ -36,16 +36,18 @@ assert.eq( 1 , s1.onNumShards( "foo" ) , "on 1 shards" );
 //   where we try to issue a move chunk from a mongos that's stale
 //   followed by a split on a valid chunk, albeit one with not the highest lastmod
 
+s1.stopBalancer()
+
 // split in [Minkey->1), [1->N), [N,Maxkey)
 s1.adminCommand( { split : "test.foo" , middle : { num : 1 } } );
 s1.adminCommand( { split : "test.foo" , middle : { num : N } } );
 
 // s2 is now stale w.r.t boundaires around { num: 1 }
-res = s2.getDB( "admin" ).runCommand( { movechunk : "test.foo" , find : { num : 1 } , to : s1.getOther( s1.getServer( "test" ) ).name } );
+res = s2.getDB( "admin" ).runCommand( { movechunk : "test.foo" , find : { num : 1 } , to : s1.getOther( s1.getServer( "test" ) ).name, _waitForDelete : true } );
 assert.eq( 0 , res.ok , "a move with stale boundaries should not have succeeded" + tojson(res) ); 
 
 // s2 must have reloaded as a result of a failed move; retrying should work
-res = s2.getDB( "admin" ).runCommand( { movechunk : "test.foo" , find : { num : 1 } , to : s1.getOther( s1.getServer( "test" ) ).name } );
+res = s2.getDB( "admin" ).runCommand( { movechunk : "test.foo" , find : { num : 1 } , to : s1.getOther( s1.getServer( "test" ) ).name, _waitForDelete : true } );
 assert.eq( 1 , res.ok , "mongos did not reload after a failed migrate" + tojson(res) );
 
 // s1 is not stale about the boundaries of [MinKey->1) 
@@ -55,6 +57,8 @@ assert.eq( 1 , res.ok , "mongos did not reload after a failed migrate" + tojson(
 // s.printShardingStatus()
 res = s1.getDB( "admin" ).runCommand( { split : "test.foo" , middle : { num : N+1 } } ); // replace with { num: -1 } instead in 1.6
 assert.eq( 1, res.ok , "split over accurate boudaries should have succeeded" + tojson(res) );
+
+s1.setBalancer( true )
 
 // { num : 4 } is on primary
 // { num : 1 , 2 , 3 } are on secondary

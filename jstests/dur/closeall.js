@@ -1,16 +1,13 @@
 // testing closealldatabases concurrency
 // this is also a test of recoverFromYield() as that will get exercised by the update
 
-function f() {
-    var variant = (new Date()) % 4;
+function f(variant, quickCommits, paranoid) {
     var path = "/data/db/closeall";
     var path2 = "/data/db/closeall_slave";
     var ourdb = "closealltest";
 
-    print("closeall.js start mongod variant:" + variant);
-    var R = (new Date()-0)%2;
-    var QuickCommits = (new Date()-0)%3 == 0;
-    var options = R==0 ? 8 : 0; // 8 is DurParanoid
+    print("closeall.js start mongod variant:" + variant + "." + quickCommits + "." + paranoid);
+    var options = (paranoid==1 ? 8 : 0); // 8 is DurParanoid
     print("closeall.js --durOptions " + options);
     var N = 1000;
     if (options) 
@@ -25,31 +22,42 @@ function f() {
     // we'll use two connections to make a little parallelism
     var db1 = conn.getDB(ourdb);
     var db2 = new Mongo(db1.getMongo().host).getDB(ourdb);
-    if( QuickCommits ) {
-	print("closeall.js QuickCommits variant (using a small syncdelay)");
-	assert( db2.adminCommand({setParameter:1, syncdelay:5}).ok );
+    if( quickCommits ) {
+        print("closeall.js QuickCommits variant (using a small syncdelay)");
+        assert( db2.adminCommand({setParameter:1, syncdelay:5}).ok );
     }
 
     print("closeall.js run test");
 
+    print("wait for initial sync to finish") // SERVER-4852
+    db1.foo.insert({});
+    err = db1.getLastErrorObj(2);
+    printjson(err)
+    assert.isnull(err.err);
+    db1.foo.remove({});
+    err = db1.getLastErrorObj(2);
+    printjson(err)
+    assert.isnull(err.err);
+    print("initial sync done")
+
     for( var i = 0; i < N; i++ ) { 
-    	db1.foo.insert({x:1}); // this does wait for a return code so we will get some parallelism
-	    if( i % 7 == 0 )
-	        db1.foo.insert({x:99, y:2});
-	    if( i %     49 == 0 )
-	        db1.foo.update({ x: 99 }, { a: 1, b: 2, c: 3, d: 4 });
-	    if (i % 100 == 0)
-	        db1.foo.find();
-	    if( i == 800 )
-	        db1.foo.ensureIndex({ x: 1 });
+            db1.foo.insert({x:1}); // this does wait for a return code so we will get some parallelism
+            if( i % 7 == 0 )
+                db1.foo.insert({x:99, y:2});
+            if( i %     49 == 0 )
+                db1.foo.update({ x: 99 }, { a: 1, b: 2, c: 3, d: 4 });
+            if (i % 100 == 0)
+                db1.foo.find();
+            if( i == 800 )
+                db1.foo.ensureIndex({ x: 1 });
         var res = null;
         try {
-	    if( variant == 1 )
-		sleep(0);
-	    else if( variant == 2 ) 
-		sleep(1);
-	    else if( variant == 3 && i % 10 == 0 )
-		print(i);
+            if( variant == 1 )
+                sleep(0);
+            else if( variant == 2 ) 
+                sleep(1);
+            else if( variant == 3 && i % 10 == 0 )
+                print(i);
             res = db2.adminCommand("closeAllDatabases");
         }
         catch (e) {
@@ -70,17 +78,23 @@ function f() {
             sleep(2000);
             throw e;
         }
-	    assert( res.ok, "closeAllDatabases res.ok=false");
-	}
+        assert( res.ok, "closeAllDatabases res.ok=false");
+    }
 
-	print("closeall.js end test loop.  slave.foo.count:");
-	print(slave.foo.count());
+    print("closeall.js end test loop.  slave.foo.count:");
+    print(slave.foo.count());
 
-	print("closeall.js shutting down servers");
-	stopMongod(30002);
-	stopMongod(30001);
+    print("closeall.js shutting down servers");
+    stopMongod(30002);
+    stopMongod(30001);
 }
 
-f();
-sleep(500);
+for (var variant=0; variant < 4; variant++){
+    for (var quickCommits=0; quickCommits <= 1; quickCommits++){ // false then true
+        for (var paranoid=0; paranoid <= 1; paranoid++){ // false then true
+            f(variant, quickCommits, paranoid);
+            sleep(500);
+        }
+    }
+}
 print("SUCCESS closeall.js");

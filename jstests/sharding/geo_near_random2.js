@@ -4,6 +4,8 @@ load("jstests/libs/geo_near_random.js");
 var testName = "geo_near_random2";
 var s = new ShardingTest( testName , 3 );
 
+s.stopBalancer();
+
 db = s.getDB("test"); // global db
 
 var test = new GeoNearRandomTest(testName);
@@ -16,7 +18,7 @@ test.insertPts(5000);
 for (var i = (test.nPts/10); i < test.nPts; i+= (test.nPts/10)){
     s.adminCommand({split: ('test.' + testName), middle: {_id: i} });
     try {
-        s.adminCommand({moveChunk: ('test.' + testName), find: {_id: i-1}, to: ('shard000' + (i%3))});
+        s.adminCommand({moveChunk: ('test.' + testName), find: {_id: i-1}, to: ('shard000' + (i%3)), _waitForDelete : true });
     } catch (e) {
         // ignore this error
         if (! e.match(/that chunk is already on that shard/)){
@@ -24,6 +26,9 @@ for (var i = (test.nPts/10); i < test.nPts; i+= (test.nPts/10)){
         }
     }
 }
+
+//Turn balancer back on, for actual tests
+s.setBalancer( true );
 
 printShardingSizes()
 

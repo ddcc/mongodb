@@ -9,7 +9,7 @@ var st = new ShardingTest({ shards : 1,
                             other : { 
                                 
                                 chunksize : chunkSize,
-                                extraOptions : { noAutoSplit : "" }
+                                mongosOptions : { noAutoSplit : "" }
                                 
                             } })
 

@@ -8,9 +8,7 @@ var path = "jstests/libs/";
 
 
 print("try starting mongod with auth");
-var pargs = new MongodRunner( port[4], "/data/db/wrong-auth", false, false,
-                              ["--auth"], {no_bind : true} );
-var m = pargs.start();
+var m = MongoRunner.runMongod({auth : "", port : port[4], dbpath : "/data/db/wrong-auth"});
 
 assert.eq(m.getDB("local").auth("__system", ""), 0);
 
@@ -25,8 +23,9 @@ run("chmod", "644", path+"key2");
 print("try starting mongod");
 m = runMongoProgram( "mongod", "--keyFile", path+"key1", "--port", port[0], "--dbpath", "/data/db/" + name);
 
+
 print("should fail with wrong permissions");
-assert.eq(m, 2, "mongod should exit w/ 2: permissions too open");
+assert.eq(m, _isWindows()? 100 : 2, "mongod should exit w/ 2: permissions too open");
 stopMongod(port[0]);
 
 
@@ -43,6 +42,7 @@ print("make sure user is written before shutting down");
 m.getDB("test").getLastError();
 stopMongod(port[0]);
 
+if ( !_isWindows() ) {  // SERVER-5024
 
 print("start up rs");
 var rs = new ReplSetTest({"name" : name, "nodes" : 3, "startPort" : port[0]});
@@ -160,7 +160,7 @@ conn.start();
 
 master.getSisterDB("admin").auth("foo", "bar");
 var config = master.getSisterDB("local").system.replset.findOne();
-config.members.push({_id : 3, host : getHostName()+":"+port[3]});
+config.members.push({_id : 3, host : rs.host+":"+port[3]});
 config.version++;
 try {
     master.adminCommand({replSetReconfig:config});
@@ -214,3 +214,4 @@ assert.soon(function() {
         }
         return true;
     });
+    } // !isWindows

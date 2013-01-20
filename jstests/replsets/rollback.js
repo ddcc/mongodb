@@ -1,11 +1,23 @@
 // test rollback in replica sets
 
 // try running as :
-// 
+//
 //   mongo --nodb rollback.js | tee out | grep -v ^m31
 //
 
 var debugging = 0;
+
+function ifReady(db, f) {
+    var stats = db.adminCommand({ replSetGetStatus: 1 });
+
+
+    // only eval if state isn't recovery
+    if (stats && stats.myState != 3) {
+        return f();
+    }
+
+    return false;
+}
 
 function pause(s) {
     print(s);
@@ -15,10 +27,10 @@ function pause(s) {
     }
 }
 
-function deb(obj) { 
+function deb(obj) {
     if( debugging ) {
         print("\n\n\n" + obj + "\n\n");
-    }  
+    }
 }
 
 w = 0;
@@ -105,7 +117,7 @@ doTest = function (signal) {
     assert(a.bar.count() == 3, "t.count");
 
     // wait for secondary to get this data
-    wait(function () { return b.bar.count() == 3; });
+    wait(function () { return ifReady(b, function() { return b.bar.count() == 3 }); });
 
     A.runCommand({ replSetTest: 1, blind: true });
     reconnect(a,b);
@@ -126,7 +138,7 @@ doTest = function (signal) {
     print("*************** B ****************");
     wait(function () { try { return !B.isMaster().ismaster; } catch(e) { return false; } });
     print("*************** A ****************");
-    reconnect(a,b); 
+    reconnect(a,b);
     wait(function () {
         try {
           return A.isMaster().ismaster;
@@ -151,16 +163,21 @@ doTest = function (signal) {
     // A is 1 2 3 7 8
     // B is 1 2 3 4 5 6
 
-    // bring B back online  
+    // bring B back online
     B.runCommand({ replSetTest: 1, blind: false });
     reconnect(a,b);
 
-    wait(function () { return B.isMaster().ismaster || B.isMaster().secondary; });
+    assert.soon(function() {
+        return (A.isMaster().ismaster || A.isMaster().secondary) &&
+            (B.isMaster().ismaster || B.isMaster().secondary);
+    });
 
-    // everyone is up here...
-    assert(A.isMaster().ismaster || A.isMaster().secondary, "A up");
-    assert(B.isMaster().ismaster || B.isMaster().secondary, "B up");
     replTest.awaitReplication();
+
+    assert.soon(function() {
+        return (A.isMaster().ismaster || A.isMaster().secondary) &&
+            (B.isMaster().ismaster || B.isMaster().secondary);
+    });
 
     friendlyEqual(a.bar.find().sort({ _id: 1 }).toArray(), b.bar.find().sort({ _id: 1 }).toArray(), "server data sets do not match");
 
@@ -170,7 +187,7 @@ doTest = function (signal) {
 
 
 var reconnect = function(a,b) {
-  wait(function() { 
+  wait(function() {
       try {
         a.bar.stats();
         b.bar.stats();

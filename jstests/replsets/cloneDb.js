@@ -19,7 +19,10 @@ doTest = function( signal ) {
     print("Insert data");
     for (var i = 0; i < N; i++) {
         db1['foo'].insert({x: i, text: Text})
-        db1.getLastError(2)  // wait to be copied to at least one secondary
+        var le = db1.getLastErrorObj(2, 1000);  // wait to be copied to at least one secondary
+        if (le.err) {
+            printjson(le);
+        }
     }
     
     print("Create single server");
@@ -50,5 +53,9 @@ doTest = function( signal ) {
     repset.stopSet( signal )
 }
 
-doTest( 15 );
-print("replsets/cloneDb.js SUCCESS");
+if (jsTest.options().keyFile) {
+    print("Skipping test because clone command doesn't work with authentication enabled: SERVER-4245")
+} else {
+    doTest( 15 );
+    print("replsets/cloneDb.js SUCCESS");
+}

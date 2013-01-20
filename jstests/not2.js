@@ -71,10 +71,10 @@ check( {i:{$not:{$all:["a","b"]}}}, null, 0 );
 check( {i:{$not:{$all:["c"]}}}, ["a","b"] );
 
 t.remove( {} );
-t.save( {i:{j:"a"}} );
-t.save( {i:{j:"b"}} );
-check( {i:{$not:{$elemMatch:{j:"a"}}}}, {j:"b"} );
-check( {i:{$not:{$elemMatch:{j:"f"}}}}, {j:"a"}, 2 );
+t.save( {i:[{j:"a"}]} );
+t.save( {i:[{j:"b"}]} );
+check( {i:{$not:{$elemMatch:{j:"a"}}}}, [{j:"b"}] );
+check( {i:{$not:{$elemMatch:{j:"f"}}}}, [{j:"a"}], 2 );
 
 }
 
@@ -140,4 +140,4 @@ t.ensureIndex( {"i.j":1} );
 indexed( {i:{$elemMatch:{j:1}}}, 1, 1 );
 //indexed( {i:{$not:{$elemMatch:{j:1}}}}, {$minElement:1}, {$maxElement:1} );
 not( {i:{$not:{$elemMatch:{j:1}}}} );
-indexed( {i:{$not:{$elemMatch:{j:{$ne:1}}}}}, 1, 1 );
+not( {i:{$not:{$elemMatch:{j:{$ne:1}}}}}, 1, 1 );

@@ -16,6 +16,7 @@ types =  [
     ]
 
 s = new ShardingTest( "key_many" , 2 );
+s.setBalancer( false )
 
 s.adminCommand( { enablesharding : "test" } )
 db = s.getDB( "test" );
@@ -97,7 +98,7 @@ for ( var i=0; i<types.length; i++ ){
     s.adminCommand( { split : longName , find : makeObjectDotted( curT.values[3] ) } );
     s.adminCommand( { split : longName , find : makeObjectDotted( curT.values[3] ) } );
 
-    s.adminCommand( { movechunk : longName , find : makeObjectDotted( curT.values[0] ) , to : secondary.getMongo().name } );
+    s.adminCommand( { movechunk : longName , find : makeObjectDotted( curT.values[0] ) , to : secondary.getMongo().name, _waitForDelete : true } );
     
     s.printChunks();
     

@@ -8,6 +8,26 @@ mongofiles \- a simple GridFS interface
 .PP
 \fBmongofiles\fR
 is used to list, get, and insert files in the database.
+.TP
+Commands:
+.TP
+.B list
+list all files.  FILENAME is an optional prefix which listed filenames
+must begin with.
+.TP
+.B search
+search all files. FILENAME is a substring which listed
+filenames must contain.
+.TP
+.B put
+add a file with filename FILENAME
+.TP
+.B get
+get a file with filename FILENAME
+.TP
+.B delete
+delete all files with filename FILENAME
+
 .SH "EXAMPLES"
 .TP
 .B mongofiles list
@@ -23,11 +43,36 @@ retrieves photo.jpg from test.fs.files and saves it locally
 .B \-\-help
 show usage information
 .TP
-.B \-h, \-\-host HOST
-mongo host to which to connect
+.B \-\-version
+show version information
 .TP
-.B \-d, \-\-db DB
-database to use (default DB=test)
+.B \-v, \-\-verbose
+be more verbose (include multiple times for more verbosity
+e.g. \-vvvvv)
+.TP
+.B \-h, \-\-host HOST
+server to connect to (default HOST=localhost)
+.TP
+.B \-\-port arg
+server port. Can also use \-\-host hostname:port
+.TP
+.B \-\-ipv6
+enable IPv6 support (disabled by default)
+.TP
+.B \-u|\-\-username USERNAME
+specify user to log in as
+.TP
+.B \-p|\-\-password PASSWORD
+specify password of user
+.TP
+.B \-\-dbpath PATH
+directly access mongod data files in this path, instead of connecting to a mongod instance
+.TP
+.B \-\-directoryperdb
+if dbpath specified, each db is in a separate directory
+.TP
+.B \-d, \-\-db DATABASE
+database to use
 .TP
 .B \-c, \-\-collection COLLECTION (default COLLECTION=fs.files)
 collection to use
@@ -45,7 +90,7 @@ list all files.  takes an optional filename.  the file has to start with the fil
 search all files for something that contains the string
 .SH "COPYRIGHT"
 .PP
-Copyright 2007\-2009 10gen
+Copyright 2007\-2011 10gen
 .SH "SEE ALSO"
 For more information, please refer to the MongoDB wiki, available at http://www.mongodb.org.
 .SH "AUTHOR"
