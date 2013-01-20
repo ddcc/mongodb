@@ -98,8 +98,6 @@
 #include <boost/thread/condition.hpp>
 #include <boost/thread/recursive_mutex.hpp>
 #include <boost/thread/xtime.hpp>
-#undef assert
-#define assert MONGO_assert
 
 namespace mongo {
 
@@ -131,6 +129,7 @@ namespace mongo {
         EXIT_FS = 45 ,
         EXIT_CLOCK_SKEW = 47 ,
         EXIT_NET_ERROR = 48 ,
+        EXIT_WINDOWS_SERVICE_STOP = 49 ,
         EXIT_POSSIBLE_CORRUPTION = 60 , // this means we detected a possible corruption situation, like a buf overflow
         EXIT_UNCAUGHT = 100 , // top level exception that wasn't caught
         EXIT_TEST = 101 ,
@@ -152,6 +151,8 @@ namespace mongo {
 }
 
 
+#include "util/allocator.h"
+#include "client/redef_macros.h"
 
 // TODO: Rework the headers so we don't need this craziness
 #include "bson/inline_decls.h"
@@ -160,7 +161,7 @@ namespace mongo {
 #include "util/debug_util.h"
 #include "util/goodies.h"
 #include "util/log.h"
-#include "util/allocator.h"
+
 #include "util/assert_util.h"
 
 namespace mongo {

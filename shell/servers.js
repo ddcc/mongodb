@@ -235,7 +235,8 @@ ShardingTest = function( testName , numShards , verboseLevel , numMongos , other
             rs.awaitReplication();
 	    var xxx = new Mongo( rs.getURL() );
 	    xxx.name = rs.getURL();
-            this._connections.push( xxx );
+            this._connections.push( xxx )
+            this["shard" + i] = xxx
         }
         
         this._configServers = []
@@ -260,6 +261,7 @@ ShardingTest = function( testName , numShards , verboseLevel , numMongos , other
             var conn = startMongodTest( 30000 + i , testName + i, 0, options );
             this._alldbpaths.push( testName +i )
             this._connections.push( conn );
+            this["shard" + i] = conn
         }
 
         if ( otherParams.sync ){
@@ -544,7 +546,7 @@ printShardingStatus = function( configDB , verbose ){
             output( "\t" + tojsononeline(db,"",true) );
         
             if (db.partitioned){
-                configDB.collections.find( { _id : new RegExp( "^" + db._id + "\." ) } ).sort( { _id : 1 } ).forEach(
+                configDB.collections.find( { _id : new RegExp( "^" + db._id + "\\." ) } ).sort( { _id : 1 } ).forEach(
                     function( coll ){
                         if ( coll.dropped == false ){
                             output("\t\t" + coll._id + " chunks:");
@@ -760,8 +762,8 @@ ShardingTest.prototype.isSharded = function( collName ){
 
 ShardingTest.prototype.shardGo = function( collName , key , split , move , dbName ){
     
-    split = split || key;
-    move = move || split;
+    split = ( split != false ? ( split || key ) : split )
+    move = ( split != false && move != false ? ( move || split ) : false )
     
     if( collName.getDB )
         dbName = "" + collName.getDB()
@@ -782,12 +784,16 @@ ShardingTest.prototype.shardGo = function( collName , key , split , move , dbNam
         assert( false )
     }
     
+    if( split == false ) return
+    
     result = this.s.adminCommand( { split : c , middle : split } );
     if( ! result.ok ){
         printjson( result )
         assert( false )
     }
         
+    if( move == false ) return
+    
     var result = null
     for( var i = 0; i < 5; i++ ){
         result = this.s.adminCommand( { movechunk : c , find : move , to : this.getOther( this.getServer( dbName ) ).name } );
@@ -1854,7 +1860,11 @@ ReplSetTest.prototype.waitForIndicator = function( node, states, ind, timeout ){
             printjson( status )
             lastTime = new Date().getTime()
         }
-        
+
+        if (typeof status.members == 'undefined') {
+            return false;
+        }
+
         for( var i = 0; i < status.members.length; i++ ){
             if( status.members[i].name == node.host ){
                 for( var j = 0; j < states.length; j++ ){

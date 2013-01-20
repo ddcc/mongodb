@@ -221,7 +221,8 @@ namespace mongo {
             _skip( spec["skip"].numberLong() ),
             _limit( spec["limit"].numberLong() ),
             _nscanned(),
-            _bc() {
+            _bc(),
+            _yieldRecoveryFailed() {
         }
 
         virtual void _init() {
@@ -251,6 +252,7 @@ namespace mongo {
 
         virtual void recoverFromYield() {
             if ( _cc && !ClientCursor::recoverFromYield( _yieldData ) ) {
+                _yieldRecoveryFailed = true;
                 _c.reset();
                 _cc.reset();
 
@@ -309,7 +311,7 @@ namespace mongo {
         }
         long long count() const { return _count; }
         virtual bool mayRecordPlan() const {
-            return ( _myCount > _limit / 2 ) || ( complete() && !stopRequested() );
+            return !_yieldRecoveryFailed && ( ( _myCount > _limit / 2 ) || ( complete() && !stopRequested() ) );
         }
     private:
 
@@ -343,6 +345,7 @@ namespace mongo {
 
         ClientCursor::CleanupPointer _cc;
         ClientCursor::YieldData _yieldData;
+        bool _yieldRecoveryFailed;
     };
 
     /* { count: "collectionname"[, query: <query>] }
@@ -474,7 +477,8 @@ namespace mongo {
             _oplogReplay( pq.hasOption( QueryOption_OplogReplay) ),
             _response( response ),
             _eb( eb ),
-            _curop( curop )
+            _curop( curop ),
+            _yieldRecoveryFailed()
         {}
 
         virtual void _init() {
@@ -531,6 +535,7 @@ namespace mongo {
                 _findingStartCursor->recoverFromYield();
             }
             else if ( _cc && !ClientCursor::recoverFromYield( _yieldData ) ) {
+                _yieldRecoveryFailed = true;
                 _c.reset();
                 _cc.reset();
                 _so.reset();
@@ -723,7 +728,7 @@ namespace mongo {
         }
 
         virtual bool mayRecordPlan() const {
-            return ( _pq.getNumToReturn() != 1 ) && ( ( _n > _pq.getNumToReturn() / 2 ) || ( complete() && !stopRequested() ) );
+            return !_yieldRecoveryFailed && ( _pq.getNumToReturn() != 1 ) && ( ( _n > _pq.getNumToReturn() / 2 ) || ( complete() && !stopRequested() ) );
         }
 
         virtual QueryOp *_createChild() const {
@@ -791,6 +796,8 @@ namespace mongo {
         ExplainBuilder &_eb;
         CurOp &_curop;
         OpTime _slaveReadTill;
+
+        bool _yieldRecoveryFailed;
     };
 
     /* run a query -- includes checking for and running a Command \
@@ -809,6 +816,7 @@ namespace mongo {
 
         curop.debug().ns = ns;
         curop.debug().ntoreturn = pq.getNumToReturn();
+        curop.debug().query = jsobj;
         curop.setQuery(jsobj);
 
         if ( pq.couldBeCommand() ) {
@@ -909,6 +917,19 @@ namespace mongo {
             Client& c = cc();
             bool found = Helpers::findById( c, ns , query , resObject , &nsFound , &indexFound );
             if ( nsFound == false || indexFound == true ) {
+
+                if ( shardingState.needShardChunkManager( ns ) ) {
+                    ShardChunkManagerPtr m = shardingState.getShardChunkManager( ns );
+                    if ( m && ! m->belongsToMe( resObject ) ) {
+                        // I have something this _id
+                        // but it doesn't belong to me
+                        // so return nothing
+                        resObject = BSONObj();
+                        found = false;
+                    }
+                }
+
+
                 BufBuilder bb(sizeof(QueryResult)+resObject.objsize()+32);
                 bb.skip(sizeof(QueryResult));
                 

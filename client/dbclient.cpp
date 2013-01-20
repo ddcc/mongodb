@@ -247,6 +247,11 @@ namespace mongo {
         return o["ok"].trueValue();
     }
 
+    bool DBClientWithCommands::isNotMasterErrorString( const BSONElement& e ) {
+        return e.type() == String && str::contains( e.valuestr() , "not master" );
+    }
+
+
     enum QueryOptions DBClientWithCommands::availableOptions() {
         if ( !_haveCachedAvailableOptions ) {
             BSONObj ret;
@@ -599,6 +604,20 @@ namespace mongo {
         return true;
     }
 
+
+    inline bool DBClientConnection::runCommand(const string &dbname, const BSONObj& cmd, BSONObj &info, int options) {
+        if ( DBClientWithCommands::runCommand( dbname , cmd , info , options ) )
+            return true;
+        
+        if ( clientSet && isNotMasterErrorString( info["errmsg"] ) ) {
+            clientSet->isntMaster();
+            // At this point, we've probably deleted *this* object, do *not* use afterward
+        }
+
+        return false;
+    }
+
+
     void DBClientConnection::_checkConnection() {
         if ( !_failed )
             return;
@@ -933,6 +952,7 @@ namespace mongo {
                  an exception.  we should make it return void and just throw an exception anytime
                  it fails
         */
+        checkConnection();
         try {
             if ( !port().call(toSend, response) ) {
                 _failed = true;
@@ -982,8 +1002,7 @@ namespace mongo {
         if ( clientSet && nReturned ) {
             assert(data);
             BSONObj o(data);
-            BSONElement e = getErrField(o);
-            if ( e.type() == String && str::contains( e.valuestr() , "not master" ) ) {
+            if ( isNotMasterErrorString( getErrField(o) ) ) {
                 clientSet->isntMaster();
             }
         }

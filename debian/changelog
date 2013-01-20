@@ -1,3 +1,91 @@
+mongodb (1:2.0.7-1) unstable; urgency=low
+
+  * New upstream release 2.0.7
+    https://jira.mongodb.org/browse/SERVER/fixforversion/11201
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Fri, 10 Aug 2012 14:58:19 +0200
+
+mongodb (1:2.0.6-1) unstable; urgency=low
+
+  * New upstream release 2.0.6
+    https://jira.mongodb.org/browse/SERVER/fixforversion/11165
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Tue, 05 Jun 2012 19:52:28 +0200
+
+mongodb (1:2.0.5-2) unstable; urgency=low
+
+  * Removed mongodb-server as dependency of mongodb-dev (Closes:#672634)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Sun, 27 May 2012 13:00:38 +0200
+
+mongodb (1:2.0.5-1) unstable; urgency=low
+
+  * New upstream release 2.0.5
+    https://jira.mongodb.org/browse/SERVER/fixforversion/11137
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 10 May 2012 07:05:43 +0200
+
+mongodb (1:2.0.4-1) unstable; urgency=low
+
+  * New upstream release 2.0.4
+    https://jira.mongodb.org/browse/SERVER/fixforversion/11107
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Fri, 30 Mar 2012 21:41:35 +0200
+
+mongodb (1:2.0.3-2) unstable; urgency=low
+
+  * Enable journaling by default (Closes:#664080)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 15 Mar 2012 16:48:06 +0100
+
+mongodb (1:2.0.3-1) unstable; urgency=low
+
+  * New upstream release 2.0.3
+    https://jira.mongodb.org/browse/SERVER/fixforversion/11001
+  * added debian/copat
+  * added Replaces clause from Ubuntu patch
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 01 Mar 2012 14:14:34 +0100
+
+mongodb (1:2.0.2-5) unstable; urgency=low
+
+  * Allow parallel build, patch courtesy of Andre Ferraz
+    <deferraz@terra.com.br> (Closes:#646759)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 16 Feb 2012 10:25:06 +0100
+
+mongodb (1:2.0.2-4) unstable; urgency=low
+
+  * Move socket from /tmp to /var/run/mongodb (Closes: #658177)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Wed, 01 Feb 2012 14:53:12 +0100
+
+mongodb (1:2.0.2-3) unstable; urgency=low
+
+  * Describe jsonArray option for mongoimport in manpage (Closes: 656444)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 19 Jan 2012 14:11:14 +0100
+
+mongodb (1:2.0.2-2) unstable; urgency=low
+
+  * added logrotate for mongodb-server (Closes: #656065)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Mon, 16 Jan 2012 10:46:36 +0100
+
+mongodb (1:2.0.2-1) unstable; urgency=low
+
+  * New upstream release 2.0.2
+    https://jira.mongodb.org/browse/SERVER/fixforversion/10991
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Thu, 15 Dec 2011 11:26:24 +0100
+
+mongodb (1:2.0.0-2) unstable; urgency=low
+
+  * need to reupload package to get it build on i386 which failed because of
+    cdbs error
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Sun, 25 Sep 2011 20:22:08 +0200
+
 mongodb (1:2.0.0-1) unstable; urgency=low
 
   * New upstream release 2.0.0 (Closes: #641646)

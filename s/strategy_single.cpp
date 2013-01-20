@@ -21,6 +21,7 @@
 #include "cursors.h"
 #include "../client/connpool.h"
 #include "../db/commands.h"
+#include "grid.h"
 
 namespace mongo {
 
@@ -68,7 +69,15 @@ namespace mongo {
                             throw e;
 
                         loops--;
-                        log() << "retrying command: " << q.query << endl;
+                        log() << "retrying command: " << q.query << " (" << loops << " attempts remain)" << endl;
+                        if( loops < 4 ){
+                            // In newer versions, can just use forceRemoteCheckShardVersion
+                            DBConfigPtr conf = grid.getDBConfig( e.getns() );
+                            if ( conf ){
+                                conf->reload();
+                                conf->getChunkManagerIfExists( e.getns(), true, true );
+                            }
+                        }
                         ShardConnection::checkMyConnectionVersions( e.getns() );
                     }
                     catch ( AssertionException& e ) {
@@ -182,6 +191,9 @@ namespace mongo {
             vector<Shard> shards;
 
             if ( strcmp( ns , "inprog" ) == 0 ) {
+
+                r.checkAuth();
+
                 Shard::getAllShards( shards );
 
                 BSONArrayBuilder arr( b.subarrayStart( "inprog" ) );
@@ -189,7 +201,7 @@ namespace mongo {
                 for ( unsigned i=0; i<shards.size(); i++ ) {
                     Shard shard = shards[i];
                     ScopedDbConnection conn( shard );
-                    BSONObj temp = conn->findOne( r.getns() , BSONObj() );
+                    BSONObj temp = conn->findOne( r.getns() , q.query );
                     if ( temp["inprog"].isABSONObj() ) {
                         BSONObjIterator i( temp["inprog"].Obj() );
                         while ( i.more() ) {
@@ -219,6 +231,9 @@ namespace mongo {
                 arr.done();
             }
             else if ( strcmp( ns , "killop" ) == 0 ) {
+
+                r.checkAuth();
+
                 BSONElement e = q.query["op"];
                 if ( strstr( r.getns() , "admin." ) != 0 ) {
                     b.append( "err" , "unauthorized" );

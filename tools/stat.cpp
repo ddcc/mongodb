@@ -365,11 +365,6 @@ namespace mongo {
         }
 
         int run() {
-            if ( !(_username.empty() || _password.empty()) && isMongos()) {
-                cout << "You cannot use mongostat on a mongos running with authentication enabled" << endl;
-                return -1;
-            }
-
             _sleep = getParam( "sleep" , _sleep );
             _all = hasParam( "all" );
             if ( _many )
@@ -422,6 +417,8 @@ namespace mongo {
             bool showHeaders = ! hasParam( "noheaders" );
             int rowCount = getParam( "rowcount" , 0 );
             int rowNum = 0;
+
+            auth();
 
             BSONObj prev = stats();
             if ( prev.isEmpty() )
@@ -478,6 +475,9 @@ namespace mongo {
 
             string error;
             bool mongos;
+
+            string username;
+            string password;
         };
 
         static void serverThread( shared_ptr<ServerState> state ) {
@@ -487,8 +487,10 @@ namespace mongo {
                 string errmsg;
                 if ( ! conn.connect( state->host , errmsg ) )
                     state->error = errmsg;
-
                 long long cycleNumber = 0;
+                
+                if (! (state->username.empty() && state->password.empty()))
+                    conn.auth("admin", state->username, state->password, errmsg);
 
                 while ( ++cycleNumber ) {
                     try {
@@ -547,6 +549,9 @@ namespace mongo {
             state.reset( new ServerState() );
             state->host = host;
             state->thr.reset( new boost::thread( boost::bind( serverThread , state ) ) );
+            state->username = _username;
+            state->password = _password;
+
             return true;
         }
 
@@ -603,7 +608,7 @@ namespace mongo {
 
         int runMany() {
             StateMap threads;
-
+            
             {
                 string orig = getParam( "host" );
                 if ( orig == "" )

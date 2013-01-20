@@ -708,6 +708,12 @@ int main(int argc, char* argv[]) {
         else {
             dbpath = "/data/db/";
         }
+#ifdef _WIN32
+        if (dbpath.size() > 1 && dbpath[dbpath.size()-1] == '/') {
+            // size() check is for the unlikely possibility of --dbpath "/"
+            dbpath = dbpath.erase(dbpath.size()-1);
+        }
+#endif
 
         if ( params.count("directoryperdb")) {
             directoryperdb = true;
@@ -983,22 +989,6 @@ int main(int argc, char* argv[]) {
                     procPath = (str::stream() << "/proc/" << pid);
                     if (!boost::filesystem::exists(procPath))
                         failed = true;
-
-                    string exePath = procPath + "/exe";
-                    if (boost::filesystem::exists(exePath)){
-                        char buf[256];
-                        int ret = readlink(exePath.c_str(), buf, sizeof(buf)-1);
-                        buf[ret] = '\0'; // readlink doesn't terminate string
-                        if (ret == -1) {
-                            int e = errno;
-                            cerr << "Error resolving " << exePath << ": " << errnoWithDescription(e);
-                            failed = true;
-                        }
-                        else if (!endsWith(buf, "mongod")){
-                            cerr << "Process " << pid << " is running " << buf << " not mongod" << endl;
-                            ::exit(-1);
-                        }
-                    }
                 }
                 catch (const std::exception& e){
                     cerr << "Error reading pid from lock file [" << name << "]: " << e.what() << endl;
@@ -1064,14 +1054,6 @@ namespace mongo {
 #include <string.h>
 
 namespace mongo {
-
-    void pipeSigHandler( int signal ) {
-#ifdef psignal
-        psignal( signal, "Signal Received : ");
-#else
-        cout << "got pipe signal:" << signal << endl;
-#endif
-    }
 
     void abruptQuit(int x) {
         ostringstream ossSig;
@@ -1144,7 +1126,7 @@ namespace mongo {
         
         assert( signal(SIGABRT, abruptQuit) != SIG_ERR );
         assert( signal(SIGQUIT, abruptQuit) != SIG_ERR );
-        assert( signal(SIGPIPE, pipeSigHandler) != SIG_ERR );
+        assert( signal(SIGPIPE, SIG_IGN) != SIG_ERR );
 
         setupSIGTRAPforGDB();
 
@@ -1164,31 +1146,41 @@ namespace mongo {
     }
 
 #else
-    void ctrlCTerminate() {
-        log() << "got kill or ctrl-c signal, will terminate after current cmd ends" << endl;
-        Client::initThread( "ctrlCTerminate" );
+    void consoleTerminate( const char* controlCodeName ) {
+        Client::initThread( "consoleTerminate" );
+        log() << "got " << controlCodeName << ", will terminate after current cmd ends" << endl;
         exitCleanly( EXIT_KILL );
     }
+
     BOOL CtrlHandler( DWORD fdwCtrlType ) {
+
         switch( fdwCtrlType ) {
+
         case CTRL_C_EVENT:
-            rawOut("Ctrl-C signal");
-            ctrlCTerminate();
-            return( TRUE );
+            rawOut( "Ctrl-C signal" );
+            consoleTerminate( "CTRL_C_EVENT" );
+            return TRUE ;
+
         case CTRL_CLOSE_EVENT:
-            rawOut("CTRL_CLOSE_EVENT signal");
-            ctrlCTerminate();
-            return( TRUE );
+            rawOut( "CTRL_CLOSE_EVENT signal" );
+            consoleTerminate( "CTRL_CLOSE_EVENT" );
+            return TRUE ;
+
         case CTRL_BREAK_EVENT:
-            rawOut("CTRL_BREAK_EVENT signal");
-            ctrlCTerminate();
+            rawOut( "CTRL_BREAK_EVENT signal" );
+            consoleTerminate( "CTRL_BREAK_EVENT" );
             return TRUE;
+
         case CTRL_LOGOFF_EVENT:
-            rawOut("CTRL_LOGOFF_EVENT signal (ignored)");
-            return FALSE;
+            rawOut( "CTRL_LOGOFF_EVENT signal" );
+            consoleTerminate( "CTRL_LOGOFF_EVENT" );
+            return TRUE;
+
         case CTRL_SHUTDOWN_EVENT:
-            rawOut("CTRL_SHUTDOWN_EVENT signal (ignored)");
-            return FALSE;
+            rawOut( "CTRL_SHUTDOWN_EVENT signal" );
+            consoleTerminate( "CTRL_SHUTDOWN_EVENT" );
+            return TRUE;
+
         default:
             return FALSE;
         }

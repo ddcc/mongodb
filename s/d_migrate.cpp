@@ -482,32 +482,53 @@ namespace mongo {
             
             while ( 1 ) {
                 bool filledBuffer = false;
-                
-                readlock l( _ns );
-                Client::Context ctx( _ns );
-                scoped_spinlock lk( _trackerLocks );
-                set<DiskLoc>::iterator i = _cloneLocs.begin();
-                for ( ; i!=_cloneLocs.end(); ++i ) {
-                    if (tracker.ping()) // should I yield?
-                        break;
 
-                    DiskLoc dl = *i;
-                    BSONObj o = dl.obj();
+                auto_ptr<RWLockRecursive::Shared> fileLock;
+                Record* recordToTouch = NULL;
 
-                    // use the builder size instead of accumulating 'o's size so that we take into consideration
-                    // the overhead of BSONArray indices
-                    if ( a.len() + o.objsize() + 1024 > BSONObjMaxUserSize ) {
-                        filledBuffer = true; // break out of outer while loop
-                        break;
+                {
+                    readlock rlk(_ns);
+                    Client::Context ctx( _ns ); // ReadContext?
+                    scoped_spinlock lk( _trackerLocks );
+                    set<DiskLoc>::iterator i = _cloneLocs.begin();
+                    for ( ; i!=_cloneLocs.end(); ++i ) {
+                        if (tracker.ping()) // should I yield?
+                            break;
+
+                        DiskLoc dl = *i;
+                        Record* r = dl.rec();
+                        if ( ! r->likelyInPhysicalMemory() ) {
+                            fileLock.reset( new RWLockRecursive::Shared( MongoFile::mmmutex) );
+                            recordToTouch = r;
+                            break;
+                        }
+
+                        BSONObj o = dl.obj();
+
+                        // use the builder size instead of accumulating 'o's size so that we take into consideration
+                        // the overhead of BSONArray indices
+                        if ( a.len() + o.objsize() + 1024 > BSONObjMaxUserSize ) {
+                            filledBuffer = true; // break out of outer while loop
+                            break;
+                        }
+
+                        a.append( o );
                     }
-
-                    a.append( o );
-                }
 
                 _cloneLocs.erase( _cloneLocs.begin() , i );
 
                 if ( _cloneLocs.empty() || filledBuffer )
                     break;
+                }
+                if ( recordToTouch ) {
+                    // its safe to touch here because we have a LockMongoFilesShared
+                    // we can't do where we get the lock because we would have to unlock the main readlock and tne _trackerLocks
+                    // simpler to handle this out there
+                    recordToTouch->touch();
+                    recordToTouch = NULL;
+                }
+
+
             }
 
             result.appendArray( "objects" , a.arr() );
@@ -1445,13 +1466,13 @@ namespace mongo {
             bool didAnything = false;
 
             if ( xfer["deleted"].isABSONObj() ) {
-                writelock lk(ns);
-                Client::Context cx(ns);
-
                 RemoveSaver rs( "moveChunk" , ns , "removedDuring" );
 
                 BSONObjIterator i( xfer["deleted"].Obj() );
                 while ( i.more() ) {
+                    writelock lk(ns);
+                    Client::Context cx(ns);
+
                     BSONObj id = i.next().Obj();
 
                     // do not apply deletes if they do not belong to the chunk being migrated
@@ -1472,11 +1493,11 @@ namespace mongo {
             }
 
             if ( xfer["reload"].isABSONObj() ) {
-                writelock lk(ns);
-                Client::Context cx(ns);
-
                 BSONObjIterator i( xfer["reload"].Obj() );
                 while ( i.more() ) {
+                    writelock lk(ns);
+                    Client::Context cx(ns);
+
                     BSONObj it = i.next().Obj();
 
                     Helpers::upsert( ns , it );

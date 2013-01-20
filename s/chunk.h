@@ -160,6 +160,8 @@ namespace mongo {
         static string chunkMetadataNS;
         static int MaxChunkSize;
         static int MaxObjectPerChunk;
+        static bool ShouldAutoSplit;
+
         //
         // accessors and helpers
         //
@@ -292,18 +294,16 @@ namespace mongo {
         int numChunks() const { return _chunkMap.size(); }
         bool hasShardKey( const BSONObj& obj ) const;
 
-        void createFirstChunk( const Shard& shard ) const; // only call from DBConfig::shardCollection
+        void createFirstChunks( const Shard& shard ) const; // only call from DBConfig::shardCollection
         ChunkPtr findChunk( const BSONObj& obj ) const;
         ChunkPtr findChunkOnServer( const Shard& shard ) const;
 
         const ShardKeyPattern& getShardKey() const {  return _key; }
         bool isUnique() const { return _unique; }
 
-        void maybeChunkCollection() const;
-
         void getShardsForQuery( set<Shard>& shards , const BSONObj& query ) const;
         void getAllShards( set<Shard>& all ) const;
-        void getShardsForRange(set<Shard>& shards, const BSONObj& min, const BSONObj& max) const; // [min, max)
+        void getShardsForRange(set<Shard>& shards, const BSONObj& min, const BSONObj& max, bool fullKeyReq = true) const; // [min, max)
 
         string toString() const;
 
@@ -355,6 +355,8 @@ namespace mongo {
 
         const unsigned long long _sequenceNumber;
 
+        mutable TicketHolder _splitTickets; // number of concurrent splitVector we can do from a splitIfShould per collection
+        
         friend class Chunk;
         friend class ChunkRangeManager; // only needed for CRM::assertValid()
         static AtomicUInt NextSequenceNumber;

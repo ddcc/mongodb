@@ -52,10 +52,18 @@ namespace mongo {
         tv.tv_usec = (int)((long long)(secs*1000*1000) % (1000*1000));
         bool report = logLevel > 3; // solaris doesn't provide these
         DEV report = true;
-        bool ok = setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *) &tv, sizeof(tv) ) == 0;
-        if( report && !ok ) log() << "unabled to set SO_RCVTIMEO" << endl;
-        ok = setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char *) &tv, sizeof(tv) ) == 0;
-        DEV if( report && !ok ) log() << "unabled to set SO_RCVTIMEO" << endl;
+#if defined(_WIN32)
+        tv.tv_sec *= 1000; // Windows timeout is a DWORD, in milliseconds.
+        int status = setsockopt( sock, SOL_SOCKET, SO_RCVTIMEO, (char *) &tv.tv_sec, sizeof(DWORD) ) == 0;
+        if( report && (status == SOCKET_ERROR) ) log() << "unable to set SO_RCVTIMEO" << endl;
+        status = setsockopt( sock, SOL_SOCKET, SO_SNDTIMEO, (char *) &tv.tv_sec, sizeof(DWORD) ) == 0;
+        DEV if( report && (status == SOCKET_ERROR) ) log() << "unable to set SO_SNDTIMEO" << endl;
+#else
+        bool ok = setsockopt( sock, SOL_SOCKET, SO_RCVTIMEO, (char *) &tv, sizeof(tv) ) == 0;
+        if( report && !ok ) log() << "unable to set SO_RCVTIMEO" << endl;
+        ok = setsockopt( sock, SOL_SOCKET, SO_SNDTIMEO, (char *) &tv, sizeof(tv) ) == 0;
+        DEV if( report && !ok ) log() << "unable to set SO_SNDTIMEO" << endl;
+#endif
     }
 
 #if defined(_WIN32)
@@ -342,6 +350,67 @@ namespace mongo {
     // ------------ SSLManager -----------------
 
 #ifdef MONGO_SSL
+    static unsigned long _ssl_id_callback();
+    static void _ssl_locking_callback(int mode, int type, const char *file, int line);
+
+    class SSLThreadInfo {
+    public:
+        
+        SSLThreadInfo() {
+            _id = ++_next;
+            CRYPTO_set_id_callback(_ssl_id_callback);
+            CRYPTO_set_locking_callback(_ssl_locking_callback);
+        }
+        
+        ~SSLThreadInfo() {
+            CRYPTO_set_id_callback(0);
+        }
+
+        unsigned long id() const { return _id; }
+        
+        void lock_callback( int mode, int type, const char *file, int line ) {
+            if ( mode & CRYPTO_LOCK ) {
+                _mutex[type]->lock();
+            }
+            else {
+                _mutex[type]->unlock();
+            }
+        }
+        
+        static void init() {
+            while ( (int)_mutex.size() < CRYPTO_num_locks() )
+                _mutex.push_back( new SimpleMutex("SSLThreadInfo") );
+        }
+
+        static SSLThreadInfo* get() {
+            SSLThreadInfo* me = _thread.get();
+            if ( ! me ) {
+                me = new SSLThreadInfo();
+                _thread.reset( me );
+            }
+            return me;
+        }
+
+    private:
+        unsigned _id;
+        
+        static AtomicUInt _next;
+        static vector<SimpleMutex*> _mutex;
+        static boost::thread_specific_ptr<SSLThreadInfo> _thread;
+    };
+
+    static unsigned long _ssl_id_callback() {
+        return SSLThreadInfo::get()->id();
+    }
+    static void _ssl_locking_callback(int mode, int type, const char *file, int line) {
+        SSLThreadInfo::get()->lock_callback( mode , type , file , line );
+    }
+
+    AtomicUInt SSLThreadInfo::_next;
+    vector<SimpleMutex*> SSLThreadInfo::_mutex;
+    boost::thread_specific_ptr<SSLThreadInfo> SSLThreadInfo::_thread;
+
+
     SSLManager::SSLManager( bool client ) {
         _client = client;
         SSL_library_init();
@@ -352,6 +421,8 @@ namespace mongo {
         massert( 15864 , mongoutils::str::stream() << "can't create SSL Context: " << ERR_error_string(ERR_get_error(), NULL) , _context );
         
         SSL_CTX_set_options( _context, SSL_OP_ALL);   
+        SSLThreadInfo::init();
+        SSLThreadInfo::get();
     }
 
     void SSLManager::setupPubPriv( const string& privateKeyFile , const string& publicKeyFile ) {
@@ -387,6 +458,7 @@ namespace mongo {
     }
         
     SSL * SSLManager::secure( int fd ) {
+        SSLThreadInfo::get();
         SSL * ssl = SSL_new( _context );
         massert( 15861 , "can't create SSL" , ssl );
         SSL_set_fd( ssl , fd );
@@ -415,13 +487,18 @@ namespace mongo {
         _bytesOut = 0;
         _bytesIn = 0;
 #ifdef MONGO_SSL
+        _ssl = 0;
         _sslAccepted = 0;
 #endif
     }
 
     void Socket::close() {
 #ifdef MONGO_SSL
-        _ssl.reset();
+        if ( _ssl ) {
+            SSL_shutdown( _ssl );
+            SSL_free( _ssl );
+            _ssl = 0;
+        }
 #endif
         if ( _fd >= 0 ) {
             closesocket( _fd );
@@ -433,8 +510,8 @@ namespace mongo {
     void Socket::secure( SSLManager * ssl ) {
         assert( ssl );
         assert( _fd >= 0 );
-        _ssl.reset( ssl->secure( _fd ) );
-        SSL_connect( _ssl.get() );
+        _ssl = ssl->secure( _fd );
+        SSL_connect( _ssl );
     }
 
     void Socket::secureAccepted( SSLManager * ssl ) { 
@@ -446,8 +523,8 @@ namespace mongo {
 #ifdef MONGO_SSL
         if ( _sslAccepted ) {
             assert( _fd );
-            _ssl.reset( _sslAccepted->secure( _fd ) );
-            SSL_accept( _ssl.get() );
+            _ssl = _sslAccepted->secure( _fd );
+            SSL_accept( _ssl );
             _sslAccepted = 0;
         }
 #endif
@@ -510,7 +587,7 @@ namespace mongo {
     int Socket::_send( const char * data , int len ) {
 #ifdef MONGO_SSL
         if ( _ssl ) {
-            return SSL_write( _ssl.get() , data , len );
+            return SSL_write( _ssl , data , len );
         }
 #endif
         return ::send( _fd , data , len , portSendFlags );
@@ -524,7 +601,7 @@ namespace mongo {
                 
 #ifdef MONGO_SSL
                 if ( _ssl ) {
-                    log() << "SSL Error ret: " << ret << " err: " << SSL_get_error( _ssl.get() , ret ) 
+                    log() << "SSL Error ret: " << ret << " err: " << SSL_get_error( _ssl , ret ) 
                           << " " << ERR_error_string(ERR_get_error(), NULL) 
                           << endl;
                 }
@@ -679,22 +756,14 @@ namespace mongo {
     int Socket::_recv( char *buf, int max ) {
 #ifdef MONGO_SSL
         if ( _ssl ){
-            return SSL_read( _ssl.get() , buf , max );
+            return SSL_read( _ssl , buf , max );
         }
 #endif
         return ::recv( _fd , buf , max , portRecvFlags );
     }
 
     void Socket::setTimeout( double secs ) {
-        struct timeval tv;
-        tv.tv_sec = (int)secs;
-        tv.tv_usec = (int)((long long)(secs*1000*1000) % (1000*1000));
-        bool report = logLevel > 3; // solaris doesn't provide these
-        DEV report = true;
-        bool ok = setsockopt(_fd, SOL_SOCKET, SO_RCVTIMEO, (char *) &tv, sizeof(tv) ) == 0;
-        if( report && !ok ) log() << "unabled to set SO_RCVTIMEO" << endl;
-        ok = setsockopt(_fd, SOL_SOCKET, SO_SNDTIMEO, (char *) &tv, sizeof(tv) ) == 0;
-        DEV if( report && !ok ) log() << "unabled to set SO_RCVTIMEO" << endl;
+        setSockTimeouts( _fd, secs );
     }
 
 #if defined(_WIN32)

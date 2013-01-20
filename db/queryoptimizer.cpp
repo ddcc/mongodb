@@ -214,22 +214,6 @@ doneCheckOrder:
         if ( willScanTable() ) {
             if ( _frs.nNontrivialRanges() ) {
                 checkTableScanAllowed( _frs.ns() );
-                
-                // if we are doing a table scan on _id
-                // and its a capped collection
-                // we disallow as its a common user error
-                // .system. and local collections are exempt
-                if ( _d && _d->capped && _frs.range( "_id" ).nontrivial() ) {
-                    if ( cc().isSyncThread() ||
-                         str::contains( _frs.ns() , ".system." ) || 
-                         str::startsWith( _frs.ns() , "local." ) ) {
-                        // ok
-                    }
-                    else {
-                        warning() << "_id query on capped collection without an _id index, performance will be poor collection: " << _frs.ns() << endl;
-                        //uassert( 14820, str::stream() << "doing _id query on a capped collection without an index is not allowed: " << _frs.ns() ,
-                    }
-                }
             }
             return findTableScan( _frs.ns(), _order, startLoc );
         }
@@ -482,16 +466,18 @@ doneCheckOrder:
                 }
 
                 massert( 10368 ,  "Unable to locate previously recorded index", p.get() );
-                if ( !( _bestGuessOnly && p->scanAndOrderRequired() ) ) {
+                if ( !p->unhelpful() && !( _bestGuessOnly && p->scanAndOrderRequired() ) ) {
                     _usingPrerecordedPlan = true;
                     _mayRecordPlan = false;
                     _plans.push_back( p );
+                    warnOnCappedIdTableScan();
                     return;
                 }
             }
         }
 
         addOtherPlans( false );
+        warnOnCappedIdTableScan();
     }
 
     void QueryPlanSet::addOtherPlans( bool checkFirst ) {
@@ -632,6 +618,31 @@ doneCheckOrder:
             return QueryPlanPtr();
         }
         return _plans[0];
+    }
+    
+    void QueryPlanSet::warnOnCappedIdTableScan() const {
+        // if we are doing a table scan on _id
+        // and it's a capped collection
+        // we warn as it's a common user error
+        // .system. and local collections are exempt
+        const char *ns = _frsp->ns();
+        NamespaceDetails *d = nsdetails( ns );
+        if ( d &&
+            d->capped &&
+            nPlans() == 1 &&
+            firstPlan()->willScanTable() &&
+            firstPlan()->multikeyFrs().range( "_id" ).nontrivial() ) {
+            if ( cc().isSyncThread() ||
+                str::contains( ns , ".system." ) ||
+                str::startsWith( ns , "local." ) ) {
+                // ok
+            }
+            else {
+                warning()
+                << "unindexed _id query on capped collection, "
+                << "performance will be poor collection: " << ns << endl;
+            }
+        }
     }
 
     QueryPlanSet::Runner::Runner( QueryPlanSet &plans, QueryOp &op ) :
@@ -995,8 +1006,12 @@ doneCheckOrder:
         return QueryUtilIndexed::uselessOr( *_org, nsd, -1 );
     }
     
-    MultiCursor::MultiCursor( const char *ns, const BSONObj &pattern, const BSONObj &order, shared_ptr<CursorOp> op, bool mayYield )
-    : _mps( new MultiPlanScanner( ns, pattern, order, 0, true, BSONObj(), BSONObj(), !op.get(), mayYield ) ), _nscanned() {
+    MultiCursor::MultiCursor( const char *ns, const BSONObj &pattern, const BSONObj &order, shared_ptr<CursorOp> op, bool mayYield, bool hintIdElseNatural ) :
+        _hint( hintIdElseNatural ? idElseNaturalHint( ns ) : BSONObj() ),
+        _hintElt( _hint.firstElement() ),
+        _mps( new MultiPlanScanner( ns, pattern, order, _hintElt.eoo() ? 0 : &_hintElt, true,
+                                   BSONObj(), BSONObj(), !op.get(), mayYield ) ),
+        _nscanned() {
         if ( op.get() ) {
             _op = op;
         }
@@ -1035,7 +1050,15 @@ doneCheckOrder:
         _matcher = best->matcher( _c );
         _op = best;
     }    
-    
+
+    BSONObj MultiCursor::idElseNaturalHint( const char *ns ) {
+        NamespaceDetails *nsd = nsdetails( ns );
+        if ( !nsd || !nsd->haveIdIndex() ) {
+            return BSON( "$hint" << BSON( "$natural" << 1 ) );
+        }
+        return BSON( "$hint" << nsd->idx( nsd->findIdIndex() ).indexName() );
+    }
+
     bool indexWorks( const BSONObj &idxPattern, const BSONObj &sampleKey, int direction, int firstSignificantField ) {
         BSONObjIterator p( idxPattern );
         BSONObjIterator k( sampleKey );
@@ -1247,8 +1270,12 @@ doneCheckOrder:
     void QueryUtilIndexed::clearIndexesForPatterns( const FieldRangeSetPair &frsp, const BSONObj &order ) {
         SimpleMutex::scoped_lock lk(NamespaceDetailsTransient::_qcMutex);
         NamespaceDetailsTransient& nsd = NamespaceDetailsTransient::get_inlock( frsp.ns() );
-        nsd.registerIndexForPattern( frsp._singleKey.pattern( order ), BSONObj(), 0 );
-        nsd.registerIndexForPattern( frsp._multiKey.pattern( order ), BSONObj(), 0 );
+        if ( frsp._singleKey.matchPossible() ) {
+            nsd.registerIndexForPattern( frsp._singleKey.pattern( order ), BSONObj(), 0 );
+        }
+        if ( frsp._multiKey.matchPossible() ) {
+            nsd.registerIndexForPattern( frsp._multiKey.pattern( order ), BSONObj(), 0 );
+        }
     }
     
     pair< BSONObj, long long > QueryUtilIndexed::bestIndexForPatterns( const FieldRangeSetPair &frsp, const BSONObj &order ) {

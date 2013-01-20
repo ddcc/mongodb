@@ -138,9 +138,10 @@ namespace mongo {
         assert( !haveLimit );
         auto_ptr<Message> response(new Message());
         assert( _client );
-        _client->recv(*response);
-        b.m = response;
-        dataReceived();
+        if ( _client->recv(*response) ) {
+            b.m = response;
+            dataReceived();
+        }
     }
 
     void DBClientCursor::dataReceived( bool& retry, string& host ) {
@@ -290,12 +291,23 @@ namespace mongo {
             m.setData( dbKillCursors , b.buf() , b.len() );
 
             if ( _client ) {
-                _client->sayPiggyBack( m );
+
+                // Kill the cursor the same way the connection itself would.  Usually, non-lazily
+                if( DBClientConnection::getLazyKillCursor() )
+                    _client->sayPiggyBack( m );
+                else
+                    _client->say( m );
+
             }
             else {
                 assert( _scopedHost.size() );
                 ScopedDbConnection conn( _scopedHost );
-                conn->sayPiggyBack( m );
+
+                if( DBClientConnection::getLazyKillCursor() )
+                    conn->sayPiggyBack( m );
+                else
+                    conn->say( m );
+
                 conn.done();
             }
         }

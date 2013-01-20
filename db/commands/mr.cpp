@@ -940,6 +940,7 @@ namespace mongo {
 
                 log(1) << "mr ns: " << config.ns << endl;
 
+                uassert( 16149 , "cannot run map reduce without the js engine", globalScriptEngine );
                 bool shouldHaveData = false;
 
                 long long num = 0;
@@ -1119,6 +1120,7 @@ namespace mongo {
 
             virtual LockType locktype() const { return NONE; }
             bool run(const string& dbname , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
+                ShardedConnectionInfo::addHook();
                 string shardedOutputCollection = cmdObj["shardedOutputCollection"].valuestrsafe();
                 string postProcessCollection = cmdObj["postProcessCollection"].valuestrsafe();
                 bool postProcessOnly = !(postProcessCollection.empty());
@@ -1205,7 +1207,7 @@ namespace mongo {
 
                             BSONObj res = config.reducer->finalReduce( values , config.finalizer.get());
                             if (state.isOnDisk())
-                                state.insertToInc(res);
+                                state.insert( config.tempLong , res );
                             else
                                 state.emit(res);
                             values.clear();

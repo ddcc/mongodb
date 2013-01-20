@@ -22,6 +22,7 @@
 namespace mongo {
 
     LabeledLevel DistributedLock::logLvl( 1 );
+    DistributedLock::LastPings DistributedLock::lastPings;
 
     ThreadLocalValue<string> distLockIds("");
 
@@ -84,7 +85,7 @@ namespace mongo {
                 Date_t pingTime;
 
                 try {
-                    ScopedDbConnection conn( addr );
+                    ScopedDbConnection conn( addr, 30.0 );
 
                     pingTime = jsTime();
 
@@ -110,6 +111,9 @@ namespace mongo {
                     // replace it for a quite a while)
                     // if the lock is taken, the take-over mechanism should handle the situation
                     auto_ptr<DBClientCursor> c = conn->query( DistributedLock::locksNS , BSONObj() );
+                    // TODO:  Would be good to make clear whether query throws or returns empty on errors
+                    uassert( 16060, str::stream() << "cannot query locks collection on config server " << conn.getHost(), c.get() );
+
                     set<string> pids;
                     while ( c->more() ) {
                         BSONObj lock = c->next();
@@ -224,7 +228,7 @@ namespace mongo {
             string s = pingThreadId( conn, processId );
 
             // Ignore if we already have a pinging thread for this process.
-            if ( _seen.count( s ) > 0 ) return "";
+            if ( _seen.count( s ) > 0 ) return s;
 
             // Check our clock skew
             try {
@@ -300,9 +304,22 @@ namespace mongo {
           _lockTimeout( lockTimeout == 0 ? LOCK_TIMEOUT : lockTimeout ), _maxClockSkew( _lockTimeout / LOCK_SKEW_FACTOR ), _maxNetSkew( _maxClockSkew ), _lockPing( _maxClockSkew ),
           _mutex( "DistributedLock" )
     {
-        log( logLvl - 1 ) << "created new distributed lock for " << name << " on " << conn
-                          << " ( lock timeout : " << _lockTimeout
-                          << ", ping interval : " << _lockPing << ", process : " << asProcess << " )" << endl;
+        log( logLvl ) << "created new distributed lock for " << name << " on " << conn
+                      << " ( lock timeout : " << _lockTimeout
+                      << ", ping interval : " << _lockPing << ", process : " << asProcess << " )"
+                      << endl;
+
+
+    }
+
+    DistributedLock::PingData DistributedLock::LastPings::getLastPing( const ConnectionString& conn, const string& lockName ){
+        scoped_lock lock( _mutex );
+        return _lastPings[ std::pair< string, string >( conn.toString(), lockName ) ];
+    }
+
+    void DistributedLock::LastPings::setLastPing( const ConnectionString& conn, const string& lockName, const PingData& pd ){
+        scoped_lock lock( _mutex );
+        _lastPings[ std::pair< string, string >( conn.toString(), lockName ) ] = pd;
     }
 
     Date_t DistributedLock::getRemoteTime() {
@@ -458,6 +475,11 @@ namespace mongo {
         // This should always be true, if not, we are using the lock incorrectly.
         assert( _name != "" );
 
+        log( logLvl ) << "trying to acquire new distributed lock for " << _name << " on " << _conn
+                      << " ( lock timeout : " << _lockTimeout
+                      << ", ping interval : " << _lockPing << ", process : " << _processId << " )"
+                      << endl;
+
         // write to dummy if 'other' is null
         BSONObj dummyOther;
         if ( other == NULL )
@@ -512,6 +534,7 @@ namespace mongo {
 
                 unsigned long long elapsed = 0;
                 unsigned long long takeover = _lockTimeout;
+                PingData _lastPingCheck = getLastPing();
 
                 log( logLvl ) << "checking last ping for lock '" << lockName << "'" << " against process " << _lastPingCheck.get<0>() << " and ping " << _lastPingCheck.get<1>() << endl;
 
@@ -527,8 +550,7 @@ namespace mongo {
 
                     if( recPingChange || recTSChange ) {
                         // If the ping has changed since we last checked, mark the current date and time
-                        scoped_lock lk( _mutex );
-                        _lastPingCheck = boost::tuple<string, Date_t, Date_t, OID>( lastPing["_id"].String().c_str(), lastPing["ping"].Date(), remote, o["ts"].OID() );
+                        setLastPing( PingData( lastPing["_id"].String().c_str(), lastPing["ping"].Date(), remote, o["ts"].OID() ) );
                     }
                     else {
 
@@ -540,7 +562,6 @@ namespace mongo {
                         else
                             elapsed = remote - _lastPingCheck.get<2>();
                     }
-
                 }
                 catch( LockException& e ) {
 

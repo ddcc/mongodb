@@ -68,7 +68,7 @@ namespace mongo {
         /** copy the entire database */
         bool go(const char *masterHost, string& errmsg, const string& fromdb, bool logForRepl, bool slaveOk, bool useReplAuth, bool snapshot, bool mayYield, bool mayBeInterrupted, int *errCode = 0);
 
-        bool copyCollection( const string& from , const string& ns , const BSONObj& query , string& errmsg , bool mayYield, bool mayBeInterrupted, bool copyIndexes = true, bool logForRepl = true );
+        bool copyCollection( const string& ns , const BSONObj& query , string& errmsg , bool mayYield, bool mayBeInterrupted, bool copyIndexes = true, bool logForRepl = true );
     };
 
     /* for index info object:
@@ -83,6 +83,12 @@ namespace mongo {
             BSONElement e = i.next();
             if ( e.eoo() )
                 break;
+
+            // for now, skip the "v" field so that v:0 indexes will be upgraded to v:1
+            if ( string("v") == e.fieldName() ) {
+                continue;
+            }
+
             if ( string("ns") == e.fieldName() ) {
                 uassert( 10024 , "bad ns field for index during dbcopy", e.type() == String);
                 const char *p = strchr(e.valuestr(), '.');
@@ -163,7 +169,8 @@ namespace mongo {
                     getDur().commitIfNeeded();
                 }
                 catch( UserException& e ) {
-                    log() << "warning: exception cloning object in " << from_collection << ' ' << e.what() << " obj:" << js.toString() << '\n';
+                    error() << "error: exception cloning object in " << from_collection << ' ' << e.what() << " obj:" << js.toString() << '\n';
+                    throw;
                 }
 
                 RARELY if ( time( 0 ) - saveLast > 60 ) {
@@ -232,24 +239,26 @@ namespace mongo {
                     getDur().commitIfNeeded();
                 }
                 catch( UserException& e ) {
-                    log() << "warning: exception cloning object in " << from_collection << ' ' << e.what() << " obj:" << js.toString() << '\n';
+                    error() << "error: exception cloning object in " << from_collection << ' ' << e.what() << " obj:" << js.toString() << '\n';
+                    throw;
                 }
             }
         }
     }
 
-    bool copyCollectionFromRemote(const string& host, const string& ns, const BSONObj& query, string& errmsg, bool logForRepl, bool mayYield, bool mayBeInterrupted) {
+    bool copyCollectionFromRemote(const string& host, const string& ns, string& errmsg) {
         Cloner c;
-        return c.copyCollection(host, ns, query, errmsg, mayYield, mayBeInterrupted, /*copyIndexes*/ true, logForRepl);
+
+        DBClientConnection *conn = new DBClientConnection();
+        // cloner owns conn in auto_ptr
+        c.setConnection(conn);
+        uassert(15908, errmsg, conn->connect(host, errmsg) && replAuthenticate(conn));
+
+        return c.copyCollection(ns, BSONObj(), errmsg, true, false, /*copyIndexes*/ true, false);
     }
 
-    bool Cloner::copyCollection( const string& from , const string& ns , const BSONObj& query , string& errmsg , bool mayYield, bool mayBeInterrupted, bool copyIndexes, bool logForRepl ) {
-        auto_ptr<DBClientConnection> myconn;
-        myconn.reset( new DBClientConnection() );
-        if ( ! myconn->connect( from , errmsg ) )
-            return false;
-
-        conn.reset( myconn.release() );
+    bool Cloner::copyCollection( const string& ns, const BSONObj& query, string& errmsg,
+                                 bool mayYield, bool mayBeInterrupted, bool copyIndexes, bool logForRepl ) {
 
         writelock lk(ns); // TODO: make this lower down
         Client::Context ctx(ns);
@@ -259,7 +268,7 @@ namespace mongo {
             string temp = ctx.db()->name + ".system.namespaces";
             BSONObj config = conn->findOne( temp , BSON( "name" << ns ) );
             if ( config["options"].isABSONObj() )
-                if ( ! userCreateNS( ns.c_str() , config["options"].Obj() , errmsg, true , 0 ) )
+                if ( ! userCreateNS( ns.c_str() , config["options"].Obj() , errmsg, logForRepl , 0 ) )
                     return false;
         }
 
@@ -515,7 +524,14 @@ namespace mongo {
                   << " query: " << query << " " << ( copyIndexes ? "" : ", not copying indexes" ) << endl;
 
             Cloner c;
-            return c.copyCollection( fromhost , collection , query, errmsg , true, false, copyIndexes );
+            auto_ptr<DBClientConnection> myconn;
+            myconn.reset( new DBClientConnection() );
+            if ( ! myconn->connect( fromhost , errmsg ) )
+                return false;
+
+            c.setConnection( myconn.release() );
+
+            return c.copyCollection( collection , query, errmsg , true, false, copyIndexes );
         }
     } cmdclonecollection;
 

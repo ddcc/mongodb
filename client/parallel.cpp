@@ -67,7 +67,7 @@ namespace mongo {
         assert( cursor );
         
         if ( cursor->hasResultFlag( ResultFlag_ShardConfigStale ) ) {
-            throw StaleConfigException( _ns , "ClusteredCursor::query" );
+            throw StaleConfigException( _ns , "ClusteredCursor::_checkCursor" );
         }
         
         if ( cursor->hasResultFlag( ResultFlag_ErrSet ) ) {
@@ -90,7 +90,7 @@ namespace mongo {
             
             if ( conn.setVersion() ) {
                 conn.done();
-                throw StaleConfigException( _ns , "ClusteredCursor::query ShardConnection had to change" , true );
+                throw StaleConfigException( _ns , "ClusteredCursor::query" , true );
             }
             
             LOG(5) << "ClusteredCursor::query (" << type() << ") server:" << server
@@ -365,6 +365,7 @@ namespace mongo {
 
     void ParallelSortClusteredCursor::_finishCons() {
         _numServers = _servers.size();
+        _lastFrom = 0;
         _cursors = 0;
 
         if ( ! _sortKey.isEmpty() && ! _fields.isEmpty() ) {
@@ -490,7 +491,7 @@ namespace mongo {
 
                 if ( conns[i]->setVersion() ) {
                     conns[i]->done();
-                    staleConfigExs.push_back( StaleConfigException( _ns , "ClusteredCursor::query ShardConnection had to change" , true ).what() + errLoc );
+                    staleConfigExs.push_back( (string)"stale config detected for " + StaleConfigException( _ns , "ParallelCursor::_init" , true ).what() + errLoc );
                     break;
                 }
 
@@ -503,7 +504,19 @@ namespace mongo {
                                                             0 , // nToSkip
                                                             _fields.isEmpty() ? 0 : &_fields , // fieldsToReturn
                                                             _options ,
-                                                            _batchSize == 0 ? 0 : _batchSize + _needToSkip // batchSize
+                                                            // NtoReturn is weird.
+                                                            // If zero, it means use default size, so we do that for all cursors
+                                                            // If positive, it's the batch size (we don't want this cursor limiting results), tha
+                                                            // done at a higher level
+                                                            // If negative, it's the batch size, but we don't create a cursor - so we don't want
+                                                            // to create a child cursor either.
+                                                            // Either way, if non-zero, we want to pull back the batch size + the skip amount as
+                                                            // quickly as possible.  Potentially, for a cursor on a single shard or if we keep be
+                                                            // chunks, we can actually add the skip value into the cursor and/or make some assump
+                                                            // return value size ( (batch size + skip amount) / num_servers ).
+                                                            _batchSize == 0 ? 0 :
+                                                                ( _batchSize > 0 ? _batchSize + _needToSkip :
+                                                                                   _batchSize - _needToSkip ) // batchSize
                                                             ) );
 
                 try{
@@ -592,7 +605,7 @@ namespace mongo {
                     // when we throw our exception
                     allConfigStale = true;
 
-                    staleConfigExs.push_back( e.what() + errLoc );
+                    staleConfigExs.push_back( (string)"stale config detected for " + e.what() + errLoc );
                     _cursors[i].reset( NULL );
                     conns[i]->done();
                     continue;
@@ -681,7 +694,13 @@ namespace mongo {
         BSONObj best = BSONObj();
         int bestFrom = -1;
 
-        for ( int i=0; i<_numServers; i++) {
+        for( int j = 0; j < _numServers; j++ ){
+
+            // Iterate _numServers times, starting one past the last server we used.
+            // This means we actually start at server #1, not #0, but shouldn't matter
+
+            int i = ( j + _lastFrom + 1 ) % _numServers;
+
             if ( ! _cursors[i].more() )
                 continue;
 
@@ -701,6 +720,8 @@ namespace mongo {
             best = me;
             bestFrom = i;
         }
+
+        _lastFrom = bestFrom;
 
         uassert( 10019 ,  "no more elements" , ! best.isEmpty() );
         _cursors[bestFrom].next();

@@ -83,7 +83,7 @@ namespace mongo {
                 bool ok = conn->runCommand( db , cmdObj , res , passOptions() ? options : 0 );
                 if ( ! ok && res["code"].numberInt() == StaleConfigInContextCode ) {
                     conn.done();
-                    throw StaleConfigException("foo","command failed because of stale config");
+                    throw StaleConfigException( res["ns"].toString(), "command failed because of stale config" );
                 }
                 result.appendElements( res );
                 conn.done();
@@ -304,6 +304,11 @@ namespace mongo {
         public:
             DropDBCmd() : PublicGridCommand( "dropDatabase" ) {}
             bool run(const string& dbName , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
+                // disallow dropping the config database from mongos
+                if( dbName == "config" ) {
+                    errmsg = "Cannot drop 'config' database via mongos";
+                    return false;
+                }
 
                 BSONElement e = cmdObj.firstElement();
 
@@ -432,9 +437,17 @@ namespace mongo {
 
                 long long total = 0;
                 map<string,long long> shardCounts;
+                int numTries = 0;
+                bool hadToBreak = false;
 
                 ChunkManagerPtr cm = conf->getChunkManagerIfExists( fullns );
-                while ( true ) {
+                while ( numTries < 5 ) {
+                    numTries++;
+
+                    // This all should eventually be replaced by new pcursor framework, but for now match query
+                    // retry behavior manually
+                    if( numTries >= 2 ) sleepsecs( numTries - 1 );
+
                     if ( ! cm ) {
                         // probably unsharded now
                         return run( dbName , cmdObj , options , errmsg , result, false );
@@ -444,17 +457,20 @@ namespace mongo {
                     cm->getShardsForQuery( shards , filter );
                     assert( shards.size() );
 
-                    bool hadToBreak = false;
+                    hadToBreak = false;
 
                     for (set<Shard>::iterator it=shards.begin(), end=shards.end(); it != end; ++it) {
                         ShardConnection conn(*it, fullns);
-                        if ( conn.setVersion() ) {
-                            total = 0;
-                            shardCounts.clear();
-                            cm = conf->getChunkManagerIfExists( fullns );
-                            conn.done();
-                            hadToBreak = true;
-                            break;
+                        if ( conn.setVersion() ){
+                            ChunkManagerPtr newCM = conf->getChunkManagerIfExists( fullns );
+                            if( newCM->getVersion() != cm->getVersion() ){
+                                cm = newCM;
+                                total = 0;
+                                shardCounts.clear();
+                                conn.done();
+                                hadToBreak = true;
+                                break;
+                            }
                         }
 
                         BSONObj temp;
@@ -472,7 +488,7 @@ namespace mongo {
                             // my version is old
                             total = 0;
                             shardCounts.clear();
-                            cm = conf->getChunkManagerIfExists( fullns , true );
+                            cm = conf->getChunkManagerIfExists( fullns , true, numTries > 2 ); // Force reload on third attempt
                             hadToBreak = true;
                             break;
                         }
@@ -484,6 +500,10 @@ namespace mongo {
                     }
                     if ( ! hadToBreak )
                         break;
+                }
+                if (hadToBreak) {
+                    errmsg = "Tried 5 times without success to get count for " + fullns + " from all shards";
+                    return false;
                 }
 
                 total = applySkipLimit( total , cmdObj );

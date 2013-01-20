@@ -21,6 +21,7 @@
 #pragma once
 
 #include "mutex.h"
+#include "spin_lock.h"
 
 namespace mongo {
 
@@ -36,7 +37,7 @@ namespace mongo {
         builds at runtime.
     */
     template <typename T, mutex& BY>
-    class Guarded {
+    class Guarded : boost::noncopyable {
         T _val;
     public:
         T& ref(const scoped_lock& lk) {
@@ -47,29 +48,85 @@ namespace mongo {
 
     class DiagStr {
         string _s;
-        static mutex m;
+        mutable SpinLock m;
     public:
         DiagStr(const DiagStr& r) : _s(r.get()) { }
         DiagStr() { }
         bool empty() const { 
-            mutex::scoped_lock lk(m);
+            scoped_spinlock lk(m);
             return _s.empty();
         }
         string get() const { 
-            mutex::scoped_lock lk(m);
+            scoped_spinlock lk(m);
             return _s;
         }
 
         void set(const char *s) {
-            mutex::scoped_lock lk(m);
+            scoped_spinlock lk(m);
             _s = s;
         }
         void set(const string& s) { 
-            mutex::scoped_lock lk(m);
+            scoped_spinlock lk(m);
             _s = s;
         }
         operator string() const { return get(); }
         void operator=(const string& s) { set(s); }
+        void operator=(const DiagStr& rhs) { 
+            scoped_spinlock lk(m);
+            _s = rhs.get();
+        }
     };
 
+#if 0 // not including in 2.0
+
+    /** Thread safe map.  
+        Be careful not to use this too much or it could make things slow;
+        if not a hot code path no problem.
+    
+        Examples:
+
+        mapsf<int,int> mp;
+
+        int x = mp.get();
+
+        map<int,int> two;
+        mp.swap(two);
+
+        {
+            mapsf<int,int>::ref r(mp);
+            r[9] = 1;
+            map<int,int>::iterator i = r.r.begin();
+        }
+        
+    */
+    template< class K, class V >
+    struct mapsf : boost::noncopyable {
+        SimpleMutex m;
+        map<K,V> val;
+        friend struct ref;
+    public:
+        mapsf() : m("mapsf") { }
+        void swap(map<K,V>& rhs) {
+            SimpleMutex::scoped_lock lk(m);
+            val.swap(rhs);
+        }
+        // safe as we pass by value:
+        V get(K k) { 
+            SimpleMutex::scoped_lock lk(m);
+            map<K,V>::iterator i = val.find(k);
+            if( i == val.end() )
+                return K();
+            return i->second;
+        }
+        // think about deadlocks when using ref.  the other methods
+        // above will always be safe as they are "leaf" operations.
+        struct ref {
+            SimpleMutex::scoped_lock lk;
+        public:
+            map<K,V> const &r;
+            ref(mapsf<K,V> &m) : lk(m.m), r(m.val) { }
+            V& operator[](const K& k) { return r[k]; }
+        };
+    };
+#endif
 }

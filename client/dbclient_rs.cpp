@@ -72,6 +72,15 @@ namespace mongo {
 
     } replicaSetMonitorWatcher;
 
+    string seedString( const vector<HostAndPort>& servers ){
+        string seedStr;
+        for ( unsigned i = 0; i < servers.size(); i++ ){
+            seedStr += servers[i].toString();
+            if( i < servers.size() - 1 ) seedStr += ",";
+        }
+
+        return seedStr;
+    }
 
     ReplicaSetMonitor::ReplicaSetMonitor( const string& name , const vector<HostAndPort>& servers )
         : _lock( "ReplicaSetMonitor instance" ) , _checkConnectionLock( "ReplicaSetMonitor check connection lock" ), _name( name ) , _master(-1), _nextSlave(0) {
@@ -82,28 +91,36 @@ namespace mongo {
             warning() << "replica set name empty, first node: " << servers[0] << endl;
         }
 
+        log() << "starting new replica set monitor for replica set " << _name << " with seed of " << seedString( servers ) << endl;
+
         string errmsg;
+        for ( unsigned i = 0; i < servers.size(); i++ ) {
 
-        for ( unsigned i=0; i<servers.size(); i++ ) {
-
-            bool haveAlready = false;
-            for ( unsigned n = 0; n < _nodes.size() && ! haveAlready; n++ )
-                haveAlready = ( _nodes[n].addr == servers[i] );
-            if( haveAlready ) continue;
+            // Don't check servers we have already
+            if( _find_inlock( servers[i] ) >= 0 ) continue;
 
             auto_ptr<DBClientConnection> conn( new DBClientConnection( true , 0, 5.0 ) );
-            if (!conn->connect( servers[i] , errmsg ) ) {
-                log(1) << "error connecting to seed " << servers[i] << ": " << errmsg << endl;
+            try{
+                if( ! conn->connect( servers[i] , errmsg ) ){
+                    throw DBException( errmsg, 15928 );
+                }
+                log() << "successfully connected to seed " << servers[i] << " for replica set " << this->_name << endl;
+            }
+            catch( DBException& e ){
+                log() << "error connecting to seed " << servers[i] << causedBy( e ) << endl;
                 // skip seeds that don't work
                 continue;
             }
 
-            _nodes.push_back( Node( servers[i] , conn.release() ) );
-            
-            int myLoc = _nodes.size() - 1;
             string maybePrimary;
-            _checkConnection( _nodes[myLoc].conn.get() , maybePrimary, false, myLoc );
+            _checkConnection( conn.get(), maybePrimary, false, -1 );
         }
+
+        // Check everything to get the first data
+        _check( true );
+
+        log() << "replica set monitor for replica set " << _name << " started, address is " << getServerAddress() << endl;
+
     }
 
     ReplicaSetMonitor::~ReplicaSetMonitor() {
@@ -164,18 +181,21 @@ namespace mongo {
     }
     
     string ReplicaSetMonitor::getServerAddress() const {
+        scoped_lock lk( _lock );
+        return _getServerAddress_inlock();
+    }
+
+    string ReplicaSetMonitor::_getServerAddress_inlock() const {
         StringBuilder ss;
         if ( _name.size() )
             ss << _name << "/";
 
-        {
-            scoped_lock lk( _lock );
-            for ( unsigned i=0; i<_nodes.size(); i++ ) {
-                if ( i > 0 )
-                    ss << ",";
-                ss << _nodes[i].addr.toString();
-            }
+        for ( unsigned i=0; i<_nodes.size(); i++ ) {
+            if ( i > 0 )
+                ss << ",";
+            ss << _nodes[i].addr.toString();
         }
+
         return ss.str();
     }
 
@@ -191,6 +211,7 @@ namespace mongo {
 
     void ReplicaSetMonitor::notifyFailure( const HostAndPort& server ) {
         scoped_lock lk( _lock );
+        
         if ( _master >= 0 && _master < (int)_nodes.size() ) {
             if ( server == _nodes[_master].addr ) {
                 _nodes[_master].ok = false; 
@@ -204,6 +225,7 @@ namespace mongo {
     HostAndPort ReplicaSetMonitor::getMaster() {
         {
             scoped_lock lk( _lock );
+            assert(_master < static_cast<int>(_nodes.size()));
             if ( _master >= 0 && _nodes[_master].ok )
                 return _nodes[_master].addr;
         }
@@ -212,6 +234,7 @@ namespace mongo {
 
         scoped_lock lk( _lock );
         uassert( 10009 , str::stream() << "ReplicaSetMonitor no master found for set: " << _name , _master >= 0 );
+        assert(_master < static_cast<int>(_nodes.size()));
         return _nodes[_master].addr;
     }
     
@@ -247,43 +270,32 @@ namespace mongo {
     }
 
     HostAndPort ReplicaSetMonitor::getSlave() {
+        LOG(2) << "dbclient_rs getSlave " << getServerAddress() << endl;
 
-        LOG(2) << "selecting new slave from replica set " << getServerAddress() << endl;
+        scoped_lock lk( _lock );
 
-        // Logic is to retry three times for any secondary node, if we can't find any secondary, we'll take
-        // any "ok" node
-        // TODO: Could this query hidden nodes?
-        const int MAX = 3;
-        for ( int xxx=0; xxx<MAX; xxx++ ) {
-
-            {
-                scoped_lock lk( _lock );
-                
-                unsigned i = 0;
-                for ( ; i<_nodes.size(); i++ ) {
-                    _nextSlave = ( _nextSlave + 1 ) % _nodes.size();
-                    if ( _nextSlave == _master ){
-                        LOG(2) << "not selecting " << _nodes[_nextSlave] << " as it is the current master" << endl;
-                        continue;
-                    }
-                    if ( _nodes[ _nextSlave ].okForSecondaryQueries() || ( _nodes[ _nextSlave ].ok && ( xxx + 1 ) >= MAX ) )
-                        return _nodes[ _nextSlave ].addr;
-                    
-                    LOG(2) << "not selecting " << _nodes[_nextSlave] << " as it is not ok to use" << endl;
-                }
-                
+        for ( unsigned ii = 0; ii < _nodes.size(); ii++ ) {
+            _nextSlave = ( _nextSlave + 1 ) % _nodes.size();
+            if ( _nextSlave != _master ) {
+                if ( _nodes[ _nextSlave ].okForSecondaryQueries() )
+                    return _nodes[ _nextSlave ].addr;
+                LOG(2) << "dbclient_rs getSlave not selecting " << _nodes[_nextSlave] << ", not currently okForSecondaryQueries" << endl;
             }
+        }
 
-            check(false);
+        if( _master >= 0 ) { 
+            assert( static_cast<unsigned>(_master) < _nodes.size() );
+            LOG(2) << "dbclient_rs getSlave no member in secondary state found, returning primary " << _nodes[ _master ] << endl;
+            return _nodes[_master].addr;
         }
         
-        LOG(2) << "no suitable slave nodes found, returning default node " << _nodes[ 0 ] << endl;
-
+        LOG(2) << "dbclient_rs getSlave no suitable member found, returning first node " << _nodes[ 0 ] << endl;
+        assert( _nodes.size() > 0 );
         return _nodes[0].addr;
     }
 
     /**
-     * notify the monitor that server has faild
+     * notify the monitor that server has failed
      */
     void ReplicaSetMonitor::notifySlaveFailure( const HostAndPort& server ) {
         int x = _find( server );
@@ -293,12 +305,29 @@ namespace mongo {
         }
     }
 
-    void ReplicaSetMonitor::_checkStatus(DBClientConnection *conn) {
+    void ReplicaSetMonitor::_checkStatus( const string& hostAddr ) {
         BSONObj status;
 
-        if (!conn->runCommand("admin", BSON("replSetGetStatus" << 1), status) ||
-                !status.hasField("members") ||
-                status["members"].type() != Array) {
+        /* replSetGetStatus requires admin auth so use a connection from the pool,
+         * which are authenticated with the keyFile credentials.
+         */
+        ScopedDbConnection authenticatedConn( hostAddr );
+
+        if ( !authenticatedConn->runCommand( "admin", BSON( "replSetGetStatus" << 1 ), status )) {
+            LOG(1) << "dbclient_rs replSetGetStatus failed" << endl;
+            authenticatedConn.done(); // connection worked properly, but we got an error from server
+            return;
+        }
+
+        // Make sure we return when finished
+        authenticatedConn.done();
+
+        if( !status.hasField("members") ) { 
+            log() << "dbclient_rs error expected members field in replSetGetStatus result" << endl;
+            return;
+        }
+        if( status["members"].type() != Array) {
+            log() << "dbclient_rs error expected members field in replSetGetStatus result to be an array" << endl;
             return;
         }
 
@@ -324,51 +353,172 @@ namespace mongo {
         }
     }
 
-    void ReplicaSetMonitor::_checkHosts( const BSONObj& hostList, bool& changed ) {
+    NodeDiff ReplicaSetMonitor::_getHostDiff_inlock( const BSONObj& hostList ){
+
+        NodeDiff diff;
+        set<int> nodesFound;
+
+        int index = 0;
+        BSONObjIterator hi( hostList );
+        while( hi.more() ){
+
+            string toCheck = hi.next().String();
+            int nodeIndex = _find_inlock( toCheck );
+
+            // Node-to-add
+            if( nodeIndex < 0 ) diff.first.insert( toCheck );
+            else nodesFound.insert( nodeIndex );
+
+            index++;
+        }
+
+        for( size_t i = 0; i < _nodes.size(); i++ ){
+            if( nodesFound.find( static_cast<int>(i) ) == nodesFound.end() ) diff.second.insert( static_cast<int>(i) );
+        }
+
+        return diff;
+    }
+
+    bool ReplicaSetMonitor::_shouldChangeHosts( const BSONObj& hostList, bool inlock ){
+
+        int origHosts = 0;
+        if( ! inlock ){
+            scoped_lock lk( _lock );
+            origHosts = _nodes.size();
+        }
+        else origHosts = _nodes.size();
+        int numHosts = 0;
+        bool changed = false;
+
         BSONObjIterator hi(hostList);
         while ( hi.more() ) {
             string toCheck = hi.next().String();
 
-            if ( _find( toCheck ) >= 0 )
-                continue;
+            numHosts++;
+            int index = 0;
+            if( ! inlock ) index = _find( toCheck );
+            else index = _find_inlock( toCheck );
 
-            HostAndPort h( toCheck );
-            DBClientConnection * newConn = new DBClientConnection( true, 0, 5.0 );
-            string temp;
-            newConn->connect( h , temp );
-            {
-                scoped_lock lk( _lock );
-                if ( _find_inlock( toCheck ) >= 0 ) {
-                    // we need this check inside the lock so there isn't thread contention on adding to vector
-                    continue;
-                }
-                _nodes.push_back( Node( h , newConn ) );
-            }
-            log() << "updated set (" << _name << ") to: " << getServerAddress() << endl;
+            if ( index >= 0 ) continue;
+
             changed = true;
+            break;
         }
+
+        return changed || origHosts != numHosts;
+
+    }
+
+    void ReplicaSetMonitor::_checkHosts( const BSONObj& hostList, bool& changed ) {
+
+        // Fast path, still requires intermittent locking
+        if( ! _shouldChangeHosts( hostList, false ) ){
+            changed = false;
+            return;
+        }
+
+        // Slow path, double-checked though
+        scoped_lock lk( _lock );
+
+        // Our host list may have changed while waiting for another thread in the meantime,
+        // so double-check here
+        // TODO:  Do we really need this much protection, this should be pretty rare and not
+        // triggered from lots of threads, duping old behavior for safety
+        if( ! _shouldChangeHosts( hostList, true ) ){
+            changed = false;
+            return;
+        }
+
+        // LogLevel can be pretty low, since replica set reconfiguration should be pretty rare and
+        // we want to record our changes
+        log() << "changing hosts to " << hostList << " from " << _getServerAddress_inlock() << endl;
+
+        NodeDiff diff = _getHostDiff_inlock( hostList );
+        set<string> added = diff.first;
+        set<int> removed = diff.second;
+
+        assert( added.size() > 0 || removed.size() > 0 );
+        changed = true;
+
+        // Delete from the end so we don't invalidate as we delete, delete indices are ascending
+        for( set<int>::reverse_iterator i = removed.rbegin(), end = removed.rend(); i != end; ++i ){
+
+            log() << "erasing host " << _nodes[ *i ] << " from replica set " << this->_name << endl;
+            _nodes.erase( _nodes.begin() + *i );
+        }
+
+        // Add new nodes
+        for( set<string>::iterator i = added.begin(), end = added.end(); i != end; ++i ){
+
+            log() << "trying to add new host " << *i << " to replica set " << this->_name << endl;
+
+            // Connect to new node
+            HostAndPort h( *i );
+            DBClientConnection * newConn = new DBClientConnection( true, 0, 5.0 );
+
+            string errmsg;
+            try{
+                if( ! newConn->connect( h , errmsg ) ){
+                    throw DBException( errmsg, 15927 );
+                }
+                log() << "successfully connected to new host " << *i << " in replica set " << this->_name << endl;
+            }
+            catch( DBException& e ){
+                warning() << "cannot connect to new host " << *i << " to replica set " << this->_name << causedBy( e ) << endl;
+            }
+
+            _nodes.push_back( Node( h , newConn ) );
+        }
+
+        // Invalidate the cached _master index since the _nodes structure has
+        // already been modified.
+        _master = -1;
     }
     
-    
 
-    bool ReplicaSetMonitor::_checkConnection( DBClientConnection * c , string& maybePrimary , bool verbose , int nodesOffset ) {
+    bool ReplicaSetMonitor::_checkConnection( DBClientConnection* conn,
+            string& maybePrimary, bool verbose, int nodesOffset ) {
+
+        assert( conn );
+
         scoped_lock lk( _checkConnectionLock );
         bool isMaster = false;
         bool changed = false;
+        bool errorOccured = false;
+
+        if ( nodesOffset >= 0 ){
+            scoped_lock lk( _lock );
+            if ( !_checkConnMatch_inlock( conn, nodesOffset )) {
+                /* Another thread modified _nodes -> invariant broken.
+                 * This also implies that another thread just passed
+                 * through here and refreshed _nodes. So no need to do
+                 * duplicate work.
+                 */
+                return false;
+            }
+        }
+        
         try {
             Timer t;
             BSONObj o;
-            c->isMaster(isMaster, &o);
-            
+            conn->isMaster( isMaster, &o );
+
             if ( o["setName"].type() != String || o["setName"].String() != _name ) {
-                warning() << "node: " << c->getServerAddress() << " isn't a part of set: " << _name 
+                warning() << "node: " << conn->getServerAddress()
+                          << " isn't a part of set: " << _name
                           << " ismaster: " << o << endl;
-                if ( nodesOffset >= 0 )
+
+                if ( nodesOffset >= 0 ) {
+                    scoped_lock lk( _lock );
                     _nodes[nodesOffset].ok = false;
+                }
+
                 return false;
             }
 
             if ( nodesOffset >= 0 ) {
+                scoped_lock lk( _lock );
+
                 _nodes[nodesOffset].pingTimeMillis = t.millis();
                 _nodes[nodesOffset].hidden = o["hidden"].trueValue();
                 _nodes[nodesOffset].secondary = o["secondary"].trueValue();
@@ -377,26 +527,42 @@ namespace mongo {
                 _nodes[nodesOffset].lastIsMaster = o.copy();
             }
 
-            log( ! verbose ) << "ReplicaSetMonitor::_checkConnection: " << c->toString() << ' ' << o << endl;
+            log( ! verbose ) << "ReplicaSetMonitor::_checkConnection: " << conn->toString()
+                             << ' ' << o << endl;
             
             // add other nodes
+            BSONArrayBuilder b;
             if ( o["hosts"].type() == Array ) {
                 if ( o["primary"].type() == String )
                     maybePrimary = o["primary"].String();
 
-                _checkHosts(o["hosts"].Obj(), changed);
+                BSONObjIterator it( o["hosts"].Obj() );
+                while( it.more() ) b.append( it.next() );
             }
-            if (o.hasField("passives") && o["passives"].type() == Array) {
-                _checkHosts(o["passives"].Obj(), changed);
-            }
-            
-            _checkStatus(c);
 
+            if (o.hasField("passives") && o["passives"].type() == Array) {
+                BSONObjIterator it( o["passives"].Obj() );
+                while( it.more() ) b.append( it.next() );
+            }
             
+            _checkHosts( b.arr(), changed);
+            _checkStatus( conn->getServerAddress() );
+
         }
         catch ( std::exception& e ) {
-            log( ! verbose ) << "ReplicaSetMonitor::_checkConnection: caught exception " << c->toString() << ' ' << e.what() << endl;
-            _nodes[nodesOffset].ok = false;
+            log( ! verbose ) << "ReplicaSetMonitor::_checkConnection: caught exception "
+                             << conn->toString() << ' ' << e.what() << endl;
+
+            errorOccured = true;
+        }
+
+        if ( errorOccured && nodesOffset >= 0 ) {
+            scoped_lock lk( _lock );
+
+            if (_checkConnMatch_inlock(conn, nodesOffset)) {
+                // Make sure _checkHosts didn't modify the _nodes structure
+                _nodes[nodesOffset].ok = false;
+            }
         }
 
         if ( changed && _hook )
@@ -406,63 +572,116 @@ namespace mongo {
     }
 
     void ReplicaSetMonitor::_check( bool checkAllSecondaries ) {
-
-        bool triedQuickCheck = false;
-
         LOG(1) <<  "_check : " << getServerAddress() << endl;
 
         int newMaster = -1;
+        shared_ptr<DBClientConnection> nodeConn;
         
         for ( int retry = 0; retry < 2; retry++ ) {
-            for ( unsigned i=0; i<_nodes.size(); i++ ) {
-                shared_ptr<DBClientConnection> c;
+            bool triedQuickCheck = false;
+
+            if ( !checkAllSecondaries ) {
+                scoped_lock lk( _lock );
+                assert(_master < static_cast<int>(_nodes.size()));
+                if ( _master >= 0 ) {
+                  /* Nothing else to do since another thread already
+                   * found the _master
+                   */
+                  return;
+                }
+            }
+
+            for ( unsigned i = 0; /* should not check while outside of lock! */ ; i++ ) {
                 {
                     scoped_lock lk( _lock );
-                    c = _nodes[i].conn;
+                    if ( i >= _nodes.size() ) break;
+                    nodeConn = _nodes[i].conn;
                 }
 
                 string maybePrimary;
-                if ( _checkConnection( c.get() , maybePrimary , retry , i ) ) {
-                    _master = i;
-                    newMaster = i;
-                    if ( ! checkAllSecondaries )
-                        return;
-                }
+                if ( _checkConnection( nodeConn.get(), maybePrimary, retry, i ) ) {
+                    scoped_lock lk( _lock );
+                    if ( _checkConnMatch_inlock( nodeConn.get(), i )) {
+                        _master = i;
+                        newMaster = i;
 
-                if ( ! triedQuickCheck && maybePrimary.size() ) {
-                    int x = _find( maybePrimary );
-                    if ( x >= 0 ) {
-                        triedQuickCheck = true;
-                        string dummy;
-                        shared_ptr<DBClientConnection> testConn;
-                        {
-                            scoped_lock lk( _lock );
-                            testConn = _nodes[x].conn;
-                        }
-                        if ( _checkConnection( testConn.get() , dummy , false , x ) ) {
-                            _master = x;
-                            newMaster = x;
-                            if ( ! checkAllSecondaries )
-                                return;
-                        }
+                        if ( !checkAllSecondaries )
+                            return;
+                    }
+                    else {
+                        /*
+                         * Somebody modified _nodes and most likely set the new
+                         * _master, so try again.
+                         */
+                        break;
                     }
                 }
 
+
+                if ( ! triedQuickCheck && ! maybePrimary.empty() ) {
+                    int probablePrimaryIdx = -1;
+                    shared_ptr<DBClientConnection> probablePrimaryConn;
+
+                    {
+                        scoped_lock lk( _lock );
+                        probablePrimaryIdx = _find_inlock( maybePrimary );
+                        probablePrimaryConn = _nodes[probablePrimaryIdx].conn;
+                    }
+
+                    if ( probablePrimaryIdx >= 0 ) {
+                        triedQuickCheck = true;
+
+                        string dummy;
+                        if ( _checkConnection( probablePrimaryConn.get(), dummy,
+                                false, probablePrimaryIdx ) ) {
+
+                            scoped_lock lk( _lock );
+
+                            if ( _checkConnMatch_inlock( probablePrimaryConn.get(),
+                                                         probablePrimaryIdx )) {
+                              
+                                _master = probablePrimaryIdx;
+                                newMaster = probablePrimaryIdx;
+
+                                if ( ! checkAllSecondaries )
+                                    return;
+                            }
+                            else {
+                                /*
+                                 * Somebody modified _nodes and most likely set the
+                                 * new _master, so try again.
+                                 */
+                                break;
+                            }
+                        }
+                    }
+                }
             }
             
             if ( newMaster >= 0 )
                 return;
 
-            sleepsecs(1);
+            sleepsecs( 1 );
         }
-
     }
 
     void ReplicaSetMonitor::check( bool checkAllSecondaries ) {
-        // first see if the current master is fine
-        if ( _master >= 0 ) {
+        shared_ptr<DBClientConnection> masterConn;
+
+        {
+            scoped_lock lk( _lock );
+
+            // first see if the current master is fine
+            if ( _master >= 0 ) {
+                assert(_master < static_cast<int>(_nodes.size()));
+                masterConn = _nodes[_master].conn;
+            }
+        }
+
+        if ( masterConn.get() != NULL ) {
             string temp;
-            if ( _checkConnection( _nodes[_master].conn.get() , temp , false , _master ) ) {
+
+            if ( _checkConnection( masterConn.get(), temp, false, _master )) {
                 if ( ! checkAllSecondaries ) {
                     // current master is fine, so we're done
                     return;
@@ -480,21 +699,17 @@ namespace mongo {
     }
 
     int ReplicaSetMonitor::_find_inlock( const string& server ) const {
-        for ( unsigned i=0; i<_nodes.size(); i++ )
-            if ( _nodes[i].addr == server )
+        const size_t size = _nodes.size();
+
+        for ( unsigned i = 0; i < size; i++ ) {
+            if ( _nodes[i].addr == server ) {
                 return i;
+            }
+        }
+
         return -1;
     }
 
-
-    int ReplicaSetMonitor::_find( const HostAndPort& server ) const {
-        scoped_lock lk( _lock );
-        for ( unsigned i=0; i<_nodes.size(); i++ )
-            if ( _nodes[i].addr == server )
-                return i;
-        return -1;
-    }
-    
     void ReplicaSetMonitor::appendInfo( BSONObjBuilder& b ) const {
         scoped_lock lk( _lock );
         BSONArrayBuilder hosts( b.subarrayStart( "hosts" ) );
@@ -514,6 +729,13 @@ namespace mongo {
         b.append( "nextSlave" , _nextSlave );
     }
     
+    bool ReplicaSetMonitor::_checkConnMatch_inlock( DBClientConnection* conn,
+            size_t nodeOffset ) const {
+        
+        return ( nodeOffset < _nodes.size() &&
+            conn->getServerAddress() == _nodes[nodeOffset].conn->getServerAddress() );
+    }
+
 
     mongo::mutex ReplicaSetMonitor::_setsLock( "ReplicaSetMonitor" );
     map<string,ReplicaSetMonitorPtr> ReplicaSetMonitor::_sets;
@@ -537,6 +759,7 @@ namespace mongo {
             // a master is selected.  let's just make sure connection didn't die
             if ( ! _master->isFailed() )
                 return _master.get();
+
             _monitor->notifyFailure( _masterHost );
         }
 
@@ -579,7 +802,6 @@ namespace mongo {
                 warning() << "cached auth failed for set: " << _monitor->getName() << " db: " << a.dbname << " user: " << a.username << endl;
 
         }
-
     }
 
     DBClientConnection& DBClientReplicaSet::masterConn() {
@@ -686,6 +908,8 @@ namespace mongo {
     }
 
     auto_ptr<DBClientCursor> DBClientReplicaSet::checkSlaveQueryResult( auto_ptr<DBClientCursor> result ){
+        if ( result.get() == NULL ) return result;
+
         BSONObj error;
         bool isError = result->peekError( &error );
         if( ! isError ) return result;
@@ -820,10 +1044,14 @@ namespace mongo {
 
 
     bool DBClientReplicaSet::call( Message &toSend, Message &response, bool assertOk , string * actualServer ) {
+        const char * ns = 0;
+
         if ( toSend.operation() == dbQuery ) {
             // TODO: might be possible to do this faster by changing api
             DbMessage dm( toSend );
             QueryMessage qm( dm );
+            ns = qm.ns;
+
             if ( qm.queryOptions & QueryOption_SlaveOk ) {
                 for ( int i=0; i<3; i++ ) {
                     try {
@@ -844,7 +1072,26 @@ namespace mongo {
         DBClientConnection* m = checkMaster();
         if ( actualServer )
             *actualServer = m->getServerAddress();
-        return m->call( toSend , response , assertOk );
+        
+        if ( ! m->call( toSend , response , assertOk ) )
+            return false;
+
+        if ( ns ) {
+            QueryResult * res = (QueryResult*)response.singleData();
+            if ( res->nReturned == 1 ) {
+                BSONObj x(res->data() );
+                if ( str::contains( ns , "$cmd" ) ) {
+                    if ( isNotMasterErrorString( x["errmsg"] ) )
+                        isntMaster();
+                }
+                else {
+                    if ( isNotMasterErrorString( getErrField( x ) ) )
+                        isntMaster();
+                }
+            }
+        }
+
+        return true;
     }
 
 }

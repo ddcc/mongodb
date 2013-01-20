@@ -143,25 +143,37 @@ namespace mongo {
 
             log() << "enable sharding on: " << ns << " with shard key: " << fieldsAndOrder << endl;
 
-            // From this point on, 'ns' is going to be treated as a sharded collection. We assume this is the first
-            // time it is seen by the sharded system and thus create the first chunk for the collection. All the remaining
-            // chunks will be created as a by-product of splitting.
             ci.shard( ns , fieldsAndOrder , unique );
             ChunkManagerPtr cm = ci.getCM();
             uassert( 13449 , "collections already sharded" , (cm->numChunks() == 0) );
-            cm->createFirstChunk( getPrimary() );
+            cm->createFirstChunks( getPrimary() );
             _save();
         }
 
-        try {
-            getChunkManager(ns, true)->maybeChunkCollection();
-        }
-        catch ( UserException& e ) {
-            // failure to chunk is not critical enough to abort the command (and undo the _save()'d configDB state)
-            log() << "couldn't chunk recently created collection: " << ns << " " << e << endl;
+        ChunkManagerPtr manager = getChunkManager(ns,true,true);
+
+        // Tell the primary mongod to refresh it's data
+        // TODO:  Think the real fix here is for mongos to just assume all collections sharded, when we get there
+        for( int i = 0; i < 4; i++ ){
+            if( i == 3 ){
+                warning() << "too many tries updating initial version of " << ns << " on shard primary " << getPrimary() <<
+                             ", other mongoses may not see the collection as sharded immediately" << endl;
+                break;
+            }
+            try {
+                ShardConnection conn( getPrimary(), ns );
+                conn.setVersion();
+                conn.done();
+                break;
+            }
+            catch( DBException& e ){
+                warning() << "could not update initial version of " << ns << " on shard primary " << getPrimary() <<
+                             causedBy( e ) << endl;
+            }
+            sleepsecs( i );
         }
 
-        return getChunkManager(ns);
+        return manager;
     }
 
     bool DBConfig::removeSharding( const string& ns ) {
@@ -185,9 +197,9 @@ namespace mongo {
         return true;
     }
 
-    ChunkManagerPtr DBConfig::getChunkManagerIfExists( const string& ns, bool shouldReload ){
+    ChunkManagerPtr DBConfig::getChunkManagerIfExists( const string& ns, bool shouldReload, bool forceReload ){
         try{
-            return getChunkManager( ns, shouldReload );
+            return getChunkManager( ns, shouldReload, forceReload );
         }
         catch( AssertionException& e ){
             warning() << "chunk manager not found for " << ns << causedBy( e ) << endl;
@@ -195,7 +207,7 @@ namespace mongo {
         }
     }
 
-    ChunkManagerPtr DBConfig::getChunkManager( const string& ns , bool shouldReload ) {
+    ChunkManagerPtr DBConfig::getChunkManager( const string& ns , bool shouldReload, bool forceReload ) {
         BSONObj key;
         bool unique;
         ShardChunkVersion oldVersion;
@@ -203,18 +215,17 @@ namespace mongo {
         {
             scoped_lock lk( _lock );
             
-            CollectionInfo& ci = _collections[ns];
-            
-            bool earlyReload = ! ci.isSharded() && shouldReload;
+            bool earlyReload = ! _collections[ns].isSharded() && ( shouldReload || forceReload );
             if ( earlyReload ) {
                 // this is to catch cases where there this is a new sharded collection
                 _reload();
-                ci = _collections[ns];
             }
+
+            CollectionInfo& ci = _collections[ns];
             massert( 10181 ,  (string)"not sharded:" + ns , ci.isSharded() );
             assert( ! ci.key().isEmpty() );
             
-            if ( ! shouldReload || earlyReload )
+            if ( ! ( shouldReload || forceReload ) || earlyReload )
                 return ci.getCM();
 
             key = ci.key().copy();
@@ -225,10 +236,11 @@ namespace mongo {
         
         assert( ! key.isEmpty() );
         
-        if ( oldVersion > 0 ) {
+        BSONObj newest;
+        if ( oldVersion > 0 && ! forceReload ) {
             ScopedDbConnection conn( configServer.modelServer() , 30.0 );
-            BSONObj newest = conn->findOne( ShardNS::chunk , 
-                                            Query( BSON( "ns" << ns ) ).sort( "lastmod" , -1 ) );
+            newest = conn->findOne( ShardNS::chunk , 
+                                    Query( BSON( "ns" << ns ) ).sort( "lastmod" , -1 ) );
             conn.done();
             
             if ( ! newest.isEmpty() ) {
@@ -240,16 +252,41 @@ namespace mongo {
                     return ci.getCM();
                 }
             }
-            
+
+        }
+        else if( oldVersion == 0 ){
+            warning() << "version 0 found when " << ( forceReload ? "reloading" : "checking" ) << " chunk manager"
+                      << ", collection '" << ns << "' initially detected as sharded" << endl;
         }
 
         // we are not locked now, and want to load a new ChunkManager
         
-        auto_ptr<ChunkManager> temp( new ChunkManager( ns , key , unique ) );
-        if ( temp->numChunks() == 0 ) {
-            // maybe we're not sharded any more
-            reload(); // this is a full reload
-            return getChunkManager( ns , false );
+        auto_ptr<ChunkManager> temp;
+
+        {
+            scoped_lock lll ( _hitConfigServerLock );
+            
+            if ( ! newest.isEmpty() && ! forceReload ) {
+                // if we have a target we're going for
+                // see if we've hit already
+                
+                scoped_lock lk( _lock );
+                CollectionInfo& ci = _collections[ns];
+                if ( ci.isSharded() && ci.getCM() ) {
+                    ShardChunkVersion currentVersion = newest["lastmod"];
+                    if ( currentVersion == ci.getCM()->getVersion() ) {
+                        return ci.getCM();
+                    }
+                }
+                
+            }
+            
+            temp.reset( new ChunkManager( ns , key , unique ) );
+            if ( temp->numChunks() == 0 ) {
+                // maybe we're not sharded any more
+                reload(); // this is a full reload
+                return getChunkManager( ns , false );
+            }
         }
 
         scoped_lock lk( _lock );
@@ -257,8 +294,15 @@ namespace mongo {
         CollectionInfo& ci = _collections[ns];
         massert( 14822 ,  (string)"state changed in the middle: " + ns , ci.isSharded() );
         
-        if ( temp->getVersion() > ci.getCM()->getVersion() ) {
-            // we only want to reset if we're newer
+        bool forced = false;
+        if ( temp->getVersion() > ci.getCM()->getVersion() ||
+            (forced = (temp->getVersion() == ci.getCM()->getVersion() && forceReload ) ) ) {
+
+            if( forced ){
+                warning() << "chunk manager reload forced for collection '" << ns << "', config version is " << temp->getVersion() << endl;
+            }
+
+            // we only want to reset if we're newer or equal and forced
             // otherwise we go into a bad cycle
             ci.resetCM( temp.release() );
         }
@@ -577,7 +621,11 @@ namespace mongo {
                 }
                 conn.done();
             }
-            catch ( SocketException& e ) {
+            catch ( const DBException& e ) {
+
+                // We need to catch DBExceptions b/c sometimes we throw them
+                // instead of socket exceptions when findN fails
+
                 warning() << " couldn't check on config server:" << _config[i] << " ok for now : " << e.toString() << endl;
             }
             res.push_back(x);
@@ -688,42 +736,53 @@ namespace mongo {
         set<string> got;
 
         ScopedDbConnection conn( _primary, 30.0 );
-        auto_ptr<DBClientCursor> c = conn->query( ShardNS::settings , BSONObj() );
-        assert( c.get() );
-        while ( c->more() ) {
-            BSONObj o = c->next();
-            string name = o["_id"].valuestrsafe();
-            got.insert( name );
-            if ( name == "chunksize" ) {
-                LOG(1) << "MaxChunkSize: " << o["value"] << endl;
-                Chunk::MaxChunkSize = o["value"].numberInt() * 1024 * 1024;
-            }
-            else if ( name == "balancer" ) {
-                // ones we ignore here
-            }
-            else {
-                log() << "warning: unknown setting [" << name << "]" << endl;
-            }
-        }
 
-        if ( ! got.count( "chunksize" ) ) {
-            conn->insert( ShardNS::settings , BSON( "_id" << "chunksize"  <<
-                                                    "value" << (Chunk::MaxChunkSize / ( 1024 * 1024 ) ) ) );
-        }
-
-
-        // indexes
         try {
+
+            auto_ptr<DBClientCursor> c = conn->query( ShardNS::settings , BSONObj() );
+            assert( c.get() );
+            while ( c->more() ) {
+
+                BSONObj o = c->next();
+                string name = o["_id"].valuestrsafe();
+                got.insert( name );
+                if ( name == "chunksize" ) {
+                    int csize = o["value"].numberInt();
+
+                    // validate chunksize before proceeding
+                    if ( csize == 0 ) {
+                        // setting was not modified; mark as such
+                        got.erase(name);
+                        log() << "warning: invalid chunksize (" << csize << ") ignored" << endl;
+                    } else {
+                        LOG(1) << "MaxChunkSize: " << csize << endl;
+                        Chunk::MaxChunkSize = csize * 1024 * 1024;
+                    }
+                }
+                else if ( name == "balancer" ) {
+                    // ones we ignore here
+                }
+                else {
+                    log() << "warning: unknown setting [" << name << "]" << endl;
+                }
+            }
+
+            if ( ! got.count( "chunksize" ) ) {
+                conn->insert( ShardNS::settings , BSON( "_id" << "chunksize"  <<
+                                                        "value" << (Chunk::MaxChunkSize / ( 1024 * 1024 ) ) ) );
+            }
+
+            // indexes
             conn->ensureIndex( ShardNS::chunk , BSON( "ns" << 1 << "min" << 1 ) , true );
             conn->ensureIndex( ShardNS::chunk , BSON( "ns" << 1 << "shard" << 1 << "min" << 1 ) , true );
             conn->ensureIndex( ShardNS::chunk , BSON( "ns" << 1 << "lastmod" << 1 ) , true );
             conn->ensureIndex( ShardNS::shard , BSON( "host" << 1 ) , true );
+                
+            conn.done();
         }
-        catch ( std::exception& e ) {
-            log( LL_WARNING ) << "couldn't create indexes on config db: " << e.what() << endl;
+        catch ( DBException& e ) {
+            warning() << "couldn't load settings or create indexes on config db: " << e.what() << endl;
         }
-
-        conn.done();
     }
 
     string ConfigServer::getHost( string name , bool withPort ) {

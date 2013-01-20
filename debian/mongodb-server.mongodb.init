@@ -55,7 +55,8 @@ DESC=database
 # Default defaults.  Can be overridden by the /etc/default/$NAME
 NAME=mongodb
 CONF=/etc/mongodb.conf
-PIDFILE=/var/run/$NAME.pid
+RUNDIR=/var/run/mongodb
+PIDFILE=$RUNDIR/$NAME.pid
 ENABLE_MONGODB=yes
 
 # Include mongodb defaults if available
@@ -81,7 +82,7 @@ DIETIME=10                   # Time to wait for the server to die, in seconds
                             # 'restart' will not work
 
 DAEMONUSER=${DAEMONUSER:-mongodb}
-DAEMON_OPTS=${DAEMON_OPTS:-"--config $CONF run"}
+DAEMON_OPTS=${DAEMON_OPTS:-"--unixSocketPrefix=$RUNDIR --config $CONF run"}
 
 set -e
 
@@ -110,6 +111,7 @@ running() {
 }
 
 start_server() {
+            test -e "$RUNDIR" || install -m 755 -o mongodb -g mongodb -d "$RUNDIR"
 # Start the process using the wrapper
             start-stop-daemon --background --start --quiet --pidfile $PIDFILE \
                         --make-pidfile --chuid $DAEMONUSER \

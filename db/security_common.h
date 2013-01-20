@@ -57,14 +57,16 @@ namespace mongo {
         virtual bool slaveOk() const {
             return true;
         }
-        virtual LockType locktype() const { return READ; }
+        virtual LockType locktype() const { return NONE; }
         virtual void help(stringstream& ss) const { ss << "internal"; }
         CmdAuthenticate() : Command("authenticate") {}
         bool run(const string& dbname , BSONObj& cmdObj, int options, string& errmsg, BSONObjBuilder& result, bool fromRepl);
+        void authenticate(const string& dbname, const string& user, const bool readOnly);
     private:
         bool getUserObj(const string& dbname, const string& user, BSONObj& userObj, string& pwd);
-        void authenticate(const string& dbname, const string& user, const bool readOnly);
     };
+    
+    extern CmdAuthenticate cmdAuthenticate;
 
     class CmdLogout : public Command {
     public:

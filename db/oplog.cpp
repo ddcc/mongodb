@@ -625,9 +625,56 @@ namespace mongo {
         }
     }
 
-    void applyOperation_inlock(const BSONObj& op , bool fromRepl ) {
+    bool shouldRetry(const BSONObj& o, const string& hn) {
+        OplogReader missingObjReader;
+        const char *ns = o.getStringField("ns");
+
+        // should already have write lock
+        Client::Context ctx(ns);
+
+        // capped collections
+        NamespaceDetails *nsd = nsdetails(ns);
+        if (nsd && nsd->capped) {
+            log() << "replication missing doc, but this is okay for a capped collection (" << ns << ")" << endl;
+            return false;
+        }
+        
+        // we don't have the object yet, which is possible on initial sync.  get it.
+        log() << "replication info adding missing object" << endl; // rare enough we can log
+        uassert(15916, str::stream() << "Can no longer connect to initial sync source: " << hn, missingObjReader.connect(hn));
+
+        // might be more than just _id in the update criteria
+        BSONObj query = BSONObjBuilder().append(o.getObjectField("o2")["_id"]).obj();
+        BSONObj missingObj;
+        try {
+            missingObj = missingObjReader.findOne(ns, query);
+        } catch(DBException& e) {
+            log() << "replication assertion fetching missing object: " << e.what() << endl;
+            throw;
+        }
+
+        if( missingObj.isEmpty() ) {
+            log() << "replication missing object not found on source. presumably deleted later in oplog" << endl;
+            log() << "replication o2: " << o.getObjectField("o2").toString() << endl;
+            log() << "replication o firstfield: " << o.getObjectField("o").firstElementFieldName() << endl;
+
+            return false;
+        }
+        else {
+            DiskLoc d = theDataFileMgr.insert(ns, (void*) missingObj.objdata(), missingObj.objsize());
+            uassert(15917, "Got bad disk location when attempting to insert", !d.isNull());
+
+            return true;
+        }
+    }
+
+    /** @param fromRepl false if from ApplyOpsCmd
+        @return true if was and update should have happened and the document DNE.  see replset initial sync code.
+     */
+    bool applyOperation_inlock(const BSONObj& op , bool fromRepl ) {
         assertInWriteLock();
         LOG(6) << "applying op: " << op << endl;
+        bool failedUpdate = false;
 
         OpCounters * opCounters = fromRepl ? &replOpCounters : &globalOpCounters;
 
@@ -640,6 +687,7 @@ namespace mongo {
             o = fields[0].embeddedObject();
             
         const char *ns = fields[1].valuestrsafe();
+        NamespaceDetails *nsd = nsdetails(ns);
 
         // operation type -- see logOp() comments for types
         const char *opType = fields[2].valuestrsafe();
@@ -660,29 +708,71 @@ namespace mongo {
                 if( !o.getObjectID(_id) ) {
                     /* No _id.  This will be very slow. */
                     Timer t;
-                    updateObjects(ns, o, o, true, false, false, debug );
+                    updateObjects(ns, o, o, true, false, false, debug, true );
                     if( t.millis() >= 2 ) {
                         RARELY OCCASIONALLY log() << "warning, repl doing slow updates (no _id field) for " << ns << endl;
                     }
                 }
                 else {
                     /* erh 10/16/2009 - this is probably not relevant any more since its auto-created, but not worth removing */
-                    RARELY ensureHaveIdIndex(ns); // otherwise updates will be slow
+                    RARELY if (nsd && !nsd->capped) { ensureHaveIdIndex(ns); } // otherwise updates will be slow
 
                     /* todo : it may be better to do an insert here, and then catch the dup key exception and do update
                               then.  very few upserts will not be inserts...
                               */
                     BSONObjBuilder b;
                     b.append(_id);
-                    updateObjects(ns, o, b.done(), true, false, false , debug );
+                    updateObjects(ns, o, b.done(), true, false, false , debug, true );
                 }
             }
         }
         else if ( *opType == 'u' ) {
             opCounters->gotUpdate();
-            RARELY ensureHaveIdIndex(ns); // otherwise updates will be super slow
+            // dm do we create this for a capped collection?
+            //  - if not, updates would be slow
+            //    - but if were by id would be slow on primary too so maybe ok
+            //    - if on primary was by another key and there are other indexes, this could be very bad w/out an index
+            //  - if do create, odd to have on secondary but not primary.  also can cause secondary to block for
+            //    quite a while on creation.
+            RARELY if (nsd && !nsd->capped) { ensureHaveIdIndex(ns); } // otherwise updates will be super slow
             OpDebug debug;
-            updateObjects(ns, o, op.getObjectField("o2"), /*upsert*/ fields[3].booleanSafe(), /*multi*/ false, /*logop*/ false , debug );
+            BSONObj updateCriteria = op.getObjectField("o2");
+            bool upsert = fields[3].booleanSafe();
+            UpdateResult ur = updateObjects(ns, o, updateCriteria, upsert, /*multi*/ false, /*logop*/ false , debug, true );
+            if( ur.num == 0 ) { 
+                if( ur.mod ) {
+                    if( updateCriteria.nFields() == 1 ) {
+                        // was a simple { _id : ... } update criteria
+                        failedUpdate = true; 
+                        // todo: probably should assert in these failedUpdate cases if not in initialSync
+                    }
+                    // need to check to see if it isn't present so we can set failedUpdate correctly.
+                    // note that adds some overhead for this extra check in some cases, such as an updateCriteria
+                    // of the form
+                    //   { _id:..., { x : {$size:...} }
+                    // thus this is not ideal.
+                    else {
+
+                        if (nsd == NULL ||
+                            (nsd->findIdIndex() >= 0 && Helpers::findById(nsd, updateCriteria).isNull()) ||
+                            // capped collections won't have an _id index
+                            (nsd->findIdIndex() < 0 && Helpers::findOne(ns, updateCriteria, false).isNull())) {
+                            failedUpdate = true;
+                        }
+
+                        // Otherwise, it's present; zero objects were updated because of additional specifiers
+                        // in the query for idempotence
+                    }
+                }
+                else { 
+                    // this could happen benignly on an oplog duplicate replay of an upsert
+                    // (because we are idempotent), 
+                    // if an regular non-mod update fails the item is (presumably) missing.
+                    if( !upsert ) {
+                        failedUpdate = true;
+                    }
+                }
+            }
         }
         else if ( *opType == 'd' ) {
             opCounters->gotDelete();
@@ -703,7 +793,7 @@ namespace mongo {
         else {
             throw MsgAssertionException( 14825 , ErrorMsg("error in applyOperation : unknown opType ", *opType) );
         }
-
+        return failedUpdate;
     }
 
     class ApplyOpsCmd : public Command {

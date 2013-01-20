@@ -4,13 +4,13 @@ Subject: Ignore unused but set variables and params (Closes: #625401)
 
 ---
  SConstruct |    3 ++-
- 1 files changed, 2 insertions(+), 1 deletions(-)
+ 1 file changed, 2 insertions(+), 1 deletion(-)
 
 diff --git a/SConstruct b/SConstruct
-index 7417daa..05d0dfe 100644
+index 5c48996..9d52617 100644
 --- a/SConstruct
 +++ b/SConstruct
-@@ -674,7 +674,8 @@ if nix:
+@@ -704,7 +704,8 @@ if nix:
      # env.Append( " -Wconversion" ) TODO: this doesn't really work yet
      if linux:
          env.Append( CPPFLAGS=" -Werror " )
@@ -20,4 +20,3 @@ index 7417daa..05d0dfe 100644
              env.Append( CPPFLAGS=" -fno-builtin-memcmp " ) # glibc's memcmp is faster than gcc's
  
      env.Append( CPPDEFINES="_FILE_OFFSET_BITS=64" )
--- 

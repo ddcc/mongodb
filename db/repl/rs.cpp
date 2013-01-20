@@ -100,23 +100,24 @@ namespace mongo {
         lock lk(this);
 
         Member *max = 0;
-
-        for (set<unsigned>::iterator it = _electableSet.begin(); it != _electableSet.end(); it++) {
+        set<unsigned>::iterator it = _electableSet.begin();
+        while ( it != _electableSet.end() ) {
             const Member *temp = findById(*it);
             if (!temp) {
                 log() << "couldn't find member: " << *it << endl;
-                _electableSet.erase(*it);
+                set<unsigned>::iterator it_delete = it;
+                it++;
+                _electableSet.erase(it_delete);
                 continue;
             }
             if (!max || max->config().priority < temp->config().priority) {
                 max = (Member*)temp;
             }
+            it++;
         }
 
         return max;
     }
-
-    const bool closeOnRelinquish = true;
 
     void ReplSetImpl::relinquish() {
         LOG(2) << "replSet attempting to relinquish" << endl;
@@ -126,9 +127,7 @@ namespace mongo {
             
                 log() << "replSet relinquishing primary state" << rsLog;
                 changeState(MemberState::RS_SECONDARY);
-            }
-            
-            if( closeOnRelinquish ) {
+
                 /* close sockets that were talking to us so they don't blithly send many writes that will fail
                    with "not master" (of course client could check result code, but in case they are not)
                 */
@@ -329,6 +328,7 @@ namespace mongo {
 
     ReplSetImpl::ReplSetImpl(ReplSetCmdline& replSetCmdline) : elect(this),
         _currentSyncTarget(0),
+        _blockSync(false),
         _hbmsgTime(0),
         _self(0),
         _maintenanceMode(0),

@@ -205,6 +205,9 @@ int _main(int argc, char* argv[]) {
     ("noscripting", "disable scripting engine")
     ;
 
+    hidden.add_options()
+    ( "noAutoSplit", "do not send split commands with writes" );
+
     options.add(sharding_options);
     // parse options
     po::variables_map params;
@@ -246,6 +249,11 @@ int _main(int argc, char* argv[]) {
 
     if (params.count("noscripting")) {
         scriptingEnabled = false;
+    }
+
+    if (params.count("noAutoSplit")) {
+        warning() << "running with auto-splitting disabled" << endl;
+        Chunk::ShouldAutoSplit = false;
     }
 
     if ( ! params.count( "configdb" ) ) {
@@ -290,7 +298,7 @@ int _main(int argc, char* argv[]) {
     shardConnectionPool.addHook( new ShardingConnectionHook( true ) );
     shardConnectionPool.setName( "mongos shardconnection connectionpool" );
 
-    
+    // Mongos shouldn't lazily kill cursors, otherwise we can end up with extras from migration
     DBClientConnection::setLazyKillCursor( false );
 
     ReplicaSetMonitor::setConfigChangeHook( boost::bind( &ConfigServer::replicaSetChange , &configServer , _1 ) );

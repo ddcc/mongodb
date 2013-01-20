@@ -353,20 +353,19 @@ namespace mongo {
         }
         currentOp.ensureStarted();
         currentOp.done();
-        int ms = currentOp.totalTimeMillis();
+        debug.executionTime = currentOp.totalTimeMillis();
 
         //DEV log = true;
-        if ( log || ms > logThreshold ) {
-            if( logLevel < 3 && op == dbGetMore && strstr(ns, ".oplog.") && ms < 4300 && !log ) {
+        if ( log || debug.executionTime > logThreshold ) {
+            if( logLevel < 3 && op == dbGetMore && strstr(ns, ".oplog.") && debug.executionTime < 4300 && !log ) {
                 /* it's normal for getMore on the oplog to be slow because of use of awaitdata flag. */
             }
             else {
-                debug.executionTime = ms;
                 mongo::tlog() << debug << endl;
             }
         }
 
-        if ( currentOp.shouldDBProfile( ms ) ) {
+        if ( currentOp.shouldDBProfile( debug.executionTime ) ) {
             // performance profiling is on
             if ( dbMutex.getState() < 0 ) {
                 mongo::log(1) << "note: not profiling because recursive read lock" << endl;
@@ -606,6 +605,8 @@ namespace mongo {
                 break;
             js = d.nextJsObj(); // TODO: refactor to do objcheck outside of writelock
         }
+
+        globalOpCounters.incInsertInWriteLock(n);
     }
 
     void receivedInsert(Message& m, CurOp& op) {
@@ -873,6 +874,15 @@ namespace mongo {
         }
         catch (...) { }
 
+#ifdef _WIN32
+        // Windows Service Controller wants to be told when we are down,
+        //  so don't call ::exit() yet, or say "really exiting now"
+        //
+        if ( rc == EXIT_WINDOWS_SERVICE_STOP ) {
+            if ( c ) c->shutdown();
+            return;
+        }
+#endif
         tryToOutputFatal( "dbexit: really exiting now" );
         if ( c ) c->shutdown();
         ::exit(rc);
