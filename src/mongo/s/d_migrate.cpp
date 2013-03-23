@@ -23,57 +23,72 @@
  */
 
 #include "pch.h"
+
+#include <algorithm>
+#include <boost/thread/thread.hpp>
 #include <map>
 #include <string>
-#include <algorithm>
+#include <vector>
 
-#include <boost/thread/thread.hpp>
-
-#include "mongo/db/dbhelpers.h"
-#include "../db/commands.h"
-#include "../db/jsobj.h"
-#include "../db/cmdline.h"
-#include "../db/queryoptimizer.h"
-#include "../db/btree.h"
-#include "../db/repl_block.h"
-#include "../db/dur.h"
-#include "../db/clientcursor.h"
-#include "../db/pagefault.h"
-#include "../db/repl.h"
-
-#include "../client/connpool.h"
-#include "../client/distlock.h"
+#include "mongo/client/connpool.h"
 #include "mongo/client/dbclientcursor.h"
-
-#include "../util/queue.h"
-#include "../util/startup_test.h"
-#include "../util/processinfo.h"
-#include "../util/ramlog.h"
-
-#include "shard.h"
-#include "d_logic.h"
-#include "config.h"
-#include "chunk.h"
+#include "mongo/client/distlock.h"
+#include "mongo/db/auth/action_set.h"
+#include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/privilege.h"
+#include "mongo/db/btreecursor.h"
+#include "mongo/db/clientcursor.h"
+#include "mongo/db/cmdline.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/dbhelpers.h"
+#include "mongo/db/dur.h"
+#include "mongo/db/hasher.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/db/kill_current_op.h"
+#include "mongo/db/pagefault.h"
+#include "mongo/db/queryoptimizer.h"
+#include "mongo/db/repl.h"
+#include "mongo/db/repl_block.h"
+#include "mongo/db/repl/rs.h"
+#include "mongo/db/repl/rs_config.h"
+#include "mongo/s/chunk.h"
+#include "mongo/s/chunk_version.h"
+#include "mongo/s/config.h"
+#include "mongo/s/d_logic.h"
+#include "mongo/s/shard.h"
+#include "mongo/s/type_chunk.h"
+#include "mongo/util/elapsed_tracker.h"
+#include "mongo/util/processinfo.h"
+#include "mongo/util/queue.h"
+#include "mongo/util/ramlog.h"
+#include "mongo/util/startup_test.h"
 
 using namespace std;
 
 namespace mongo {
 
-    BSONObj findShardKeyIndexPattern_locked( const string& ns , const BSONObj& shardKeyPattern ) {
+    bool findShardKeyIndexPattern_locked( const string& ns,
+                                          const BSONObj& shardKeyPattern,
+                                          BSONObj* indexPattern ) {
         verify( Lock::isLocked() );
-        NamespaceDetails* nsd = nsdetails( ns.c_str() );
-        verify( nsd );
+        NamespaceDetails* nsd = nsdetails( ns );
+        if ( !nsd )
+            return false;
         const IndexDetails* idx = nsd->findIndexByPrefix( shardKeyPattern , true );  /* require single key */
-        verify( idx );
-        return idx->keyPattern().getOwned();
+        if ( !idx )
+            return false;
+        *indexPattern = idx->keyPattern().getOwned();
+        return true;
     }
 
-
-    BSONObj findShardKeyIndexPattern_unlocked( const string& ns , const BSONObj& shardKeyPattern ) {
+    bool findShardKeyIndexPattern_unlocked( const string& ns,
+                                            const BSONObj& shardKeyPattern,
+                                            BSONObj* indexPattern ) {
         Client::ReadContext context( ns );
-        return findShardKeyIndexPattern_locked( ns , shardKeyPattern ).getOwned();
+        return findShardKeyIndexPattern_locked( ns, shardKeyPattern, indexPattern );
     }
-    
+
     Tee* migrateLog = new RamLog( "migrate" );
 
     class MoveTimingHelper {
@@ -188,7 +203,7 @@ namespace mongo {
         string toString() const {
             return str::stream() << ns << " from " << min << " -> " << max;
         }
-        
+
         void doRemove() {
             ShardForceVersionOkModeBlock sf;
             {
@@ -196,21 +211,27 @@ namespace mongo {
 
                 log() << "moveChunk starting delete for: " << this->toString() << migrateLog;
 
+                BSONObj indexKeyPattern;
+                if ( !findShardKeyIndexPattern_unlocked( ns, shardKeyPattern, &indexKeyPattern ) ) {
+                    warning() << "collection or index dropped before data could be cleaned" << endl;
+                    return;
+                }
+
                 long long numDeleted =
-                        Helpers::removeRange( ns ,
-                                              min ,
-                                              max ,
-                                              findShardKeyIndexPattern_unlocked( ns , shardKeyPattern ) , 
-                                              false , /*maxInclusive*/
-                                              secondaryThrottle ,
-                                              cmdLine.moveParanoia ? &rs : 0 , /*callback*/
-                                              true ); /*fromMigrate*/
+                        Helpers::removeRange( ns,
+                                              min,
+                                              max,
+                                              indexKeyPattern,
+                                              false, /*maxInclusive*/
+                                              secondaryThrottle,
+                                              cmdLine.moveParanoia ? &rs : 0, /*callback*/
+                                              true, /*fromMigrate*/
+                                              true ); /*onlyRemoveOrphans*/ 
 
                 log() << "moveChunk deleted " << numDeleted << " documents for "
                       << this->toString() << migrateLog;
             }
-            
-            
+
             ReplTime lastOpApplied = cc().getLastOp().asDate();
             Timer t;
             for ( int i=0; i<3600; i++ ) {
@@ -245,9 +266,12 @@ namespace mongo {
 
     };
 
-    bool isInRange( const BSONObj& obj , const BSONObj& min , const BSONObj& max ) {
-        BSONObj k = obj.extractFields( min, true );
-
+    bool isInRange( const BSONObj& obj ,
+                    const BSONObj& min ,
+                    const BSONObj& max ,
+                    const BSONObj& shardKeyPattern ) {
+        ShardKeyPattern shardKey( shardKeyPattern );
+        BSONObj k = shardKey.extractKey( obj );
         return k.woCompare( min ) >= 0 && k.woCompare( max ) < 0;
     }
 
@@ -255,26 +279,27 @@ namespace mongo {
     class MigrateFromStatus {
     public:
 
-        MigrateFromStatus() : _m("MigrateFromStatus") , _workLock("MigrateFromStatus::workLock") {
+        MigrateFromStatus() : _mutex("MigrateFromStatus"),
+			      _cleanupTickets(1) /* only one cleanup thread at once */ {
             _active = false;
             _inCriticalSection = false;
             _memoryUsed = 0;
         }
 
-        void start( string ns ,
+        /**
+         * @return false if cannot start. One of the reason for not being able to
+         *     start is there is already an existing migration in progress.
+         */
+        bool start( const std::string& ns ,
                     const BSONObj& min ,
                     const BSONObj& max ,
                     const BSONObj& shardKeyPattern ) {
 
-            //
-            // Do not hold _workLock
-            //
+            scoped_lock l(_mutex); // reads and writes _active
 
-            //scoped_lock ll(_workLock);
-
-            scoped_lock l(_m); // reads and writes _active
-
-            verify( ! _active );
+            if (_active) {
+                return false;
+            }
 
             verify( ! min.isEmpty() );
             verify( ! max.isEmpty() );
@@ -291,6 +316,7 @@ namespace mongo {
             verify( _memoryUsed == 0 );
 
             _active = true;
+            return true;
         }
 
         void done() {
@@ -307,9 +333,10 @@ namespace mongo {
             }
             _memoryUsed = 0;
 
-            scoped_lock l(_m);
+            scoped_lock l(_mutex);
             _active = false;
             _inCriticalSection = false;
+            _inCriticalSectionCV.notify_all();
         }
 
         void logOp( const char * opstr , const char * ns , const BSONObj& obj , BSONObj * patt ) {
@@ -369,7 +396,7 @@ namespace mongo {
 
             }
 
-            if ( ! isInRange( it , _min , _max ) )
+            if ( ! isInRange( it , _min , _max , _shardKeyPattern ) )
                 return;
 
             _reload.push_back( ide.wrap() );
@@ -438,7 +465,7 @@ namespace mongo {
          */
         bool storeCurrentLocs( long long maxChunkSize , string& errmsg , BSONObjBuilder& result ) {
             Client::ReadContext ctx( _ns );
-            NamespaceDetails *d = nsdetails( _ns.c_str() );
+            NamespaceDetails *d = nsdetails( _ns );
             if ( ! d ) {
                 errmsg = "ns not found, should be impossible";
                 return false;
@@ -452,8 +479,9 @@ namespace mongo {
                 return false;
             }
             // Assume both min and max non-empty, append MinKey's to make them fit chosen index
-            BSONObj min = Helpers::modifiedRangeBound( _min , idx->keyPattern() , -1 );
-            BSONObj max = Helpers::modifiedRangeBound( _max , idx->keyPattern() , -1 );
+            KeyPattern kp( idx->keyPattern() );
+            BSONObj min = Helpers::toKeyFormat( kp.extendRangeBound( _min, false ) );
+            BSONObj max = Helpers::toKeyFormat( kp.extendRangeBound( _max, false ) );
 
             BtreeCursor* btreeCursor = BtreeCursor::make( d , *idx , min , max , false , 1 );
             auto_ptr<ClientCursor> cc(
@@ -529,7 +557,7 @@ namespace mongo {
             int allocSize;
             {
                 Client::ReadContext ctx( _ns );
-                NamespaceDetails *d = nsdetails( _ns.c_str() );
+                NamespaceDetails *d = nsdetails( _ns );
                 verify( d );
                 scoped_spinlock lk( _trackerLocks );
                 allocSize = std::min(BSONObjMaxUserSize, (int)((12 + d->averageObjectSize()) * _cloneLocs.size()));
@@ -578,7 +606,7 @@ namespace mongo {
                 }
                 
                 if ( recordToTouch ) {
-                    // its safe to touch here bceause we have a LockMongoFilesShared
+                    // its safe to touch here because we have a LockMongoFilesShared
                     // we can't do where we get the lock because we would have to unlock the main readlock and tne _trackerLocks
                     // simpler to handle this out there
                     recordToTouch->touch();
@@ -611,28 +639,51 @@ namespace mongo {
 
         long long mbUsed() const { return _memoryUsed / ( 1024 * 1024 ); }
 
-        bool getInCriticalSection() const { scoped_lock l(_m); return _inCriticalSection; }
-        void setInCriticalSection( bool b ) { scoped_lock l(_m); _inCriticalSection = b; }
+        bool getInCriticalSection() const {
+            scoped_lock l(_mutex);
+            return _inCriticalSection;
+        }
+
+        void setInCriticalSection( bool b ) {
+            scoped_lock l(_mutex);
+            _inCriticalSection = b;
+            _inCriticalSectionCV.notify_all();
+        }
+
+        /**
+         * @return true if we are NOT in the critical section
+         */
+        bool waitTillNotInCriticalSection( int maxSecondsToWait ) {
+            verify( !Lock::isLocked() );
+
+            boost::xtime xt;
+            boost::xtime_get(&xt, MONGO_BOOST_TIME_UTC);
+            xt.sec += maxSecondsToWait;
+
+            scoped_lock l(_mutex);
+            while ( _inCriticalSection ) {
+                if ( ! _inCriticalSectionCV.timed_wait( l.boost(), xt ) )
+                    return false;
+            }
+
+            return true;
+        }
 
         bool isActive() const { return _getActive(); }
         
         void doRemove( OldDataCleanup& cleanup ) {
-            int it = 0;
-            while ( true ) { 
-                if ( it > 20 && it % 10 == 0 ) log() << "doRemote iteration " << it << " for: " << cleanup << endl;
-                {
-                    scoped_lock ll(_workLock);
-                    if ( ! _active ) {
-                        cleanup.doRemove();
-                        return;
-                    }
-                }
-                sleepmillis( 1000 );
-            }
+
+            log() << "waiting to remove documents for " << cleanup.toString() << endl;
+
+            ScopedTicket ticket(&_cleanupTickets);
+
+            cleanup.doRemove();
         }
 
     private:
-        mutable mongo::mutex _m; // protect _inCriticalSection and _active
+        mutable mongo::mutex _mutex; // protect _inCriticalSection and _active
+        boost::condition _inCriticalSectionCV;
+
         bool _inCriticalSection;
         bool _active;
 
@@ -655,24 +706,33 @@ namespace mongo {
         list<BSONObj> _deleted; // objects deleted during clone that should be deleted later
         long long _memoryUsed; // bytes in _reload + _deleted
 
-        mutable mongo::mutex _workLock; // this is used to make sure only 1 thread is doing serious work
-                                        // for now, this means migrate or removing old chunk data
+        // this is used to make sure only a certain number of threads are doing cleanup at once.
+        mutable TicketHolder _cleanupTickets;
 
-        bool _getActive() const { scoped_lock l(_m); return _active; }
-        void _setActive( bool b ) { scoped_lock l(_m); _active = b; }
+        bool _getActive() const { scoped_lock l(_mutex); return _active; }
+        void _setActive( bool b ) { scoped_lock l(_mutex); _active = b; }
 
     } migrateFromStatus;
 
     struct MigrateStatusHolder {
-        MigrateStatusHolder( string ns ,
+        MigrateStatusHolder( const std::string& ns ,
                              const BSONObj& min ,
                              const BSONObj& max ,
                              const BSONObj& shardKeyPattern ) {
-            migrateFromStatus.start( ns , min , max , shardKeyPattern );
+            _isAnotherMigrationActive = !migrateFromStatus.start(ns, min, max, shardKeyPattern);
         }
         ~MigrateStatusHolder() {
-            migrateFromStatus.done();
+            if (!_isAnotherMigrationActive) {
+                migrateFromStatus.done();
+            }
         }
+
+        bool isAnotherMigrationActive() const {
+            return _isAnotherMigrationActive;
+        }
+
+    private:
+        bool _isAnotherMigrationActive;
     };
 
     void _cleanupOldData( OldDataCleanup cleanup ) {
@@ -681,7 +741,7 @@ namespace mongo {
                                                         OID::gen().toString()).c_str());
 
         if (!noauth) {
-            cc().getAuthenticationInfo()->authorize("local", internalSecurity.user);
+            cc().getAuthorizationManager()->grantInternalAuthorization("_cleanupOldData");
         }
 
         log() << " (start) waiting to cleanup " << cleanup
@@ -740,14 +800,22 @@ namespace mongo {
         migrateFromStatus.logOp( opstr , ns , obj , patt );
     }
 
-    void aboutToDeleteForSharding( const Database* db , const DiskLoc& dl ) {
+    void aboutToDeleteForSharding( const Database* db, const NamespaceDetails* nsd, const DiskLoc& dl ) {
+        if ( nsd->isCapped() )
+            return;
         migrateFromStatus.aboutToDelete( db , dl );
     }
 
     class TransferModsCommand : public ChunkCommandHelper {
     public:
         TransferModsCommand() : ChunkCommandHelper( "_transferMods" ) {}
-
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+            ActionSet actions;
+            actions.addAction(ActionType::_transferMods);
+            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+        }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             return migrateFromStatus.transferMods( errmsg, result );
         }
@@ -757,7 +825,13 @@ namespace mongo {
     class InitialCloneCommand : public ChunkCommandHelper {
     public:
         InitialCloneCommand() : ChunkCommandHelper( "_migrateClone" ) {}
-
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+            ActionSet actions;
+            actions.addAction(ActionType::_migrateClone);
+            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+        }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             return migrateFromStatus.clone( errmsg, result );
         }
@@ -780,7 +854,13 @@ namespace mongo {
         virtual bool slaveOk() const { return false; }
         virtual bool adminOnly() const { return true; }
         virtual LockType locktype() const { return NONE; }
-
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+            ActionSet actions;
+            actions.addAction(ActionType::moveChunk);
+            out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+        }
 
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             // 1. parse options
@@ -812,12 +892,33 @@ namespace mongo {
             if( cmdObj["toShard"].type() == String ){
                 to = cmdObj["toShard"].String();
             }
-            
-            // if we do a w=2 after very write
+
+            // if we do a w=2 after every write
             bool secondaryThrottle = cmdObj["secondaryThrottle"].trueValue();
-            if ( secondaryThrottle && ! anyReplEnabled() ) {
-                secondaryThrottle = false;
-                warning() << "secondaryThrottle selected but no replication" << endl;
+            if ( secondaryThrottle ) {
+                if ( theReplSet ) {
+                    if ( theReplSet->config().getMajority() <= 1 ) {
+                        secondaryThrottle = false;
+                        warning() << "not enough nodes in set to use secondaryThrottle: "
+                                  << " majority: " << theReplSet->config().getMajority()
+                                  << endl;
+                    }
+                }
+                else if ( !anyReplEnabled() ) {
+                    secondaryThrottle = false;
+                    warning() << "secondaryThrottle selected but no replication" << endl;
+                }
+                else {
+                    // master/slave
+                    secondaryThrottle = false;
+                    warning() << "secondaryThrottle not allowed with master/slave" << endl;
+                }
+            }
+
+            // Do inline deletion
+            bool waitForDelete = cmdObj["waitForDelete"].trueValue();
+            if (waitForDelete) {
+                log() << "moveChunk waiting for full cleanup after move" << endl;
             }
 
             BSONObj min  = cmdObj["min"].Obj();
@@ -866,8 +967,7 @@ namespace mongo {
                     return false;
                 }
                 string configdb = cmdObj["configdb"].String();
-                shardingState.enable( configdb );
-                configServer.init( configdb );
+                ShardingState::initialize(configdb);
             }
 
             MoveTimingHelper timing( "from" , ns , min , max , 6 /* steps */ , errmsg );
@@ -915,21 +1015,23 @@ namespace mongo {
             BSONObj chunkInfo = BSON("min" << min << "max" << max << "from" << fromShard.getName() << "to" << toShard.getName() );
             configServer.logChange( "moveChunk.start" , ns , chunkInfo );
 
-            ShardChunkVersion maxVersion;
-            ShardChunkVersion startingVersion;
+            ChunkVersion maxVersion;
+            ChunkVersion startingVersion;
             string myOldShard;
             {
                 scoped_ptr<ScopedDbConnection> conn(
                         ScopedDbConnection::getInternalScopedDbConnection(
-                                shardingState.getConfigServer() ) );
+                                shardingState.getConfigServer(), 30));
 
                 BSONObj x;
                 BSONObj currChunk;
                 try{
-                    x = conn->get()->findOne( ShardNS::chunk,
-                                              Query( BSON( "ns" << ns ) )
-                                                  .sort( BSON( "lastmod" << -1 ) ) );
-                    currChunk = conn->get()->findOne( ShardNS::chunk , shardId.wrap( "_id" ) );
+                    x = conn->get()->findOne(ChunkType::ConfigNS,
+                                             Query(BSON(ChunkType::ns(ns)))
+                                                  .sort(BSON(ChunkType::DEPRECATED_lastmod() << -1)));
+
+                    currChunk = conn->get()->findOne(ChunkType::ConfigNS,
+                                                     shardId.wrap(ChunkType::name().c_str()));
                 }
                 catch( DBException& e ){
                     errmsg = str::stream() << "aborted moveChunk because could not get chunk data from config server " << shardingState.getConfigServer() << causedBy( e );
@@ -937,15 +1039,15 @@ namespace mongo {
                     return false;
                 }
 
-                maxVersion = ShardChunkVersion::fromBSON( x, "lastmod" );
-                verify( currChunk["shard"].type() );
-                verify( currChunk["min"].type() );
-                verify( currChunk["max"].type() );
-                myOldShard = currChunk["shard"].String();
+                maxVersion = ChunkVersion::fromBSON(x, ChunkType::DEPRECATED_lastmod());
+                verify(currChunk[ChunkType::shard()].type());
+                verify(currChunk[ChunkType::min()].type());
+                verify(currChunk[ChunkType::max()].type());
+                myOldShard = currChunk[ChunkType::shard()].String();
                 conn->done();
 
-                BSONObj currMin = currChunk["min"].Obj();
-                BSONObj currMax = currChunk["max"].Obj();
+                BSONObj currMin = currChunk[ChunkType::min()].Obj();
+                BSONObj currMax = currChunk[ChunkType::max()].Obj();
                 if ( currMin.woCompare( min ) || currMax.woCompare( max ) ) {
                     errmsg = "boundaries are outdated (likely a split occurred)";
                     result.append( "currMin" , currMin );
@@ -988,6 +1090,12 @@ namespace mongo {
                 startingVersion = maxVersion;
                 shardingState.trySetVersion( ns , startingVersion /* will return updated */ );
 
+                if (startingVersion.majorVersion() == 0) {
+                   // It makes no sense to migrate if our version is zero and we have no chunks, so return
+                   warning() << "moveChunk cannot start migration with zero version" << endl;
+                   return false;
+                }
+
                 log() << "moveChunk request accepted at version " << startingVersion << migrateLog;
             }
 
@@ -1004,6 +1112,11 @@ namespace mongo {
             }
 
             MigrateStatusHolder statusHolder( ns , min , max , shardKeyPattern );
+            if (statusHolder.isAnotherMigrationActive()) {
+                errmsg = "moveChunk is already in progress from this shard";
+                return false;
+            }
+
             {
                 // this gets a read lock, so we know we have a checkpoint for mods
                 if ( ! migrateFromStatus.storeCurrentLocs( maxChunkSize , errmsg , result ) )
@@ -1049,7 +1162,9 @@ namespace mongo {
             // 4.
             for ( int i=0; i<86400; i++ ) { // don't want a single chunk move to take more than a day
                 verify( !Lock::isLocked() );
-                sleepsecs( 1 );
+                // Exponential sleep backoff, up to 1024ms. Don't sleep much on the first few
+                // iterations, since we want empty chunk migrations to be fast.
+                sleepmillis( 1 << std::min( i , 10 ) );
                 scoped_ptr<ScopedDbConnection> conn(
                         ScopedDbConnection::getScopedDbConnection( toShard.getConnString() ) );
                 BSONObj res;
@@ -1066,7 +1181,7 @@ namespace mongo {
 
                 conn->done();
 
-                log(0) << "moveChunk data transfer progress: " << res << " my mem used: " << migrateFromStatus.mbUsed() << migrateLog;
+                LOG(0) << "moveChunk data transfer progress: " << res << " my mem used: " << migrateFromStatus.mbUsed() << migrateLog;
 
                 if ( ! ok || res["state"].String() == "fail" ) {
                     warning() << "moveChunk error transferring data caused migration abort: " << res << migrateLog;
@@ -1103,7 +1218,7 @@ namespace mongo {
                 // 5.a
                 // we're under the collection lock here, so no other migrate can change maxVersion or ShardChunkManager state
                 migrateFromStatus.setInCriticalSection( true );
-                ShardChunkVersion myVersion = maxVersion;
+                ChunkVersion myVersion = maxVersion;
                 myVersion.incMajor();
 
                 {
@@ -1168,7 +1283,7 @@ namespace mongo {
                 // version at which the next highest lastmod will be set
                 // if the chunk being moved is the last in the shard, nextVersion is that chunk's lastmod
                 // otherwise the highest version is from the chunk being bumped on the FROM-shard
-                ShardChunkVersion nextVersion;
+                ChunkVersion nextVersion;
 
                 // we want to go only once to the configDB but perhaps change two chunks, the one being migrated and another
                 // local one (so to bump version for the entire shard)
@@ -1183,19 +1298,19 @@ namespace mongo {
                     BSONObjBuilder op;
                     op.append( "op" , "u" );
                     op.appendBool( "b" , false /* no upserting */ );
-                    op.append( "ns" , ShardNS::chunk );
+                    op.append( "ns" , ChunkType::ConfigNS );
 
                     BSONObjBuilder n( op.subobjStart( "o" ) );
-                    n.append( "_id" , Chunk::genID( ns , min ) );
-                    myVersion.addToBSON( n, "lastmod" );
-                    n.append( "ns" , ns );
-                    n.append( "min" , min );
-                    n.append( "max" , max );
-                    n.append( "shard" , toShard.getName() );
+                    n.append(ChunkType::name(), Chunk::genID(ns, min));
+                    myVersion.addToBSON(n, ChunkType::DEPRECATED_lastmod());
+                    n.append(ChunkType::ns(), ns);
+                    n.append(ChunkType::min(), min);
+                    n.append(ChunkType::max(), max);
+                    n.append(ChunkType::shard(), toShard.getName());
                     n.done();
 
                     BSONObjBuilder q( op.subobjStart( "o2" ) );
-                    q.append( "_id" , Chunk::genID( ns , min ) );
+                    q.append(ChunkType::name(), Chunk::genID(ns, min));
                     q.done();
 
                     updates.append( op.obj() );
@@ -1222,20 +1337,20 @@ namespace mongo {
                     BSONObjBuilder op;
                     op.append( "op" , "u" );
                     op.appendBool( "b" , false );
-                    op.append( "ns" , ShardNS::chunk );
+                    op.append( "ns" , ChunkType::ConfigNS );
 
                     nextVersion.incMinor();  // same as used on donateChunk
                     BSONObjBuilder n( op.subobjStart( "o" ) );
-                    n.append( "_id" , Chunk::genID( ns , bumpMin ) );
-                    nextVersion.addToBSON( n, "lastmod" );
-                    n.append( "ns" , ns );
-                    n.append( "min" , bumpMin );
-                    n.append( "max" , bumpMax );
-                    n.append( "shard" , fromShard.getName() );
+                    n.append(ChunkType::name(), Chunk::genID(ns, bumpMin));
+                    nextVersion.addToBSON(n, ChunkType::DEPRECATED_lastmod());
+                    n.append(ChunkType::ns(), ns);
+                    n.append(ChunkType::min(), bumpMin);
+                    n.append(ChunkType::max(), bumpMax);
+                    n.append(ChunkType::shard(), fromShard.getName());
                     n.done();
 
                     BSONObjBuilder q( op.subobjStart( "o2" ) );
-                    q.append( "_id" , Chunk::genID( ns , bumpMin  ) );
+                    q.append(ChunkType::name(), Chunk::genID(ns, bumpMin));
                     q.done();
 
                     updates.append( op.obj() );
@@ -1254,12 +1369,13 @@ namespace mongo {
                 BSONArrayBuilder preCond( cmdBuilder.subarrayStart( "preCondition" ) );
                 {
                     BSONObjBuilder b;
-                    b.append( "ns" , ShardNS::chunk );
-                    b.append( "q" , BSON( "query" << BSON( "ns" << ns ) << "orderby" << BSON( "lastmod" << -1 ) ) );
+                    b.append("ns", ChunkType::ConfigNS);
+                    b.append("q", BSON("query" << BSON(ChunkType::ns(ns)) <<
+                                       "orderby" << BSON(ChunkType::DEPRECATED_lastmod() << -1)));
                     {
                         BSONObjBuilder bb( b.subobjStart( "res" ) );
                         // TODO: For backwards compatibility, we can't yet require an epoch here
-                        bb.appendTimestamp( "lastmod", maxVersion.toLong() );
+                        bb.appendTimestamp(ChunkType::DEPRECATED_lastmod(), maxVersion.toLong());
                         bb.done();
                     }
                     preCond.append( b.obj() );
@@ -1275,7 +1391,8 @@ namespace mongo {
                 try {
                     scoped_ptr<ScopedDbConnection> conn(
                             ScopedDbConnection::getInternalScopedDbConnection(
-                                    shardingState.getConfigServer() ) );
+                                    shardingState.getConfigServer(),
+                                    10.0 ) );
                     ok = conn->get()->runCommand( "config" , cmd , cmdResult );
                     conn->done();
                 }
@@ -1302,14 +1419,17 @@ namespace mongo {
                     try {
                         scoped_ptr<ScopedDbConnection> conn(
                                 ScopedDbConnection::getInternalScopedDbConnection(
-                                        shardingState.getConfigServer() ) );
+                                        shardingState.getConfigServer(),
+                                        10.0 ) );
 
                         // look for the chunk in this shard whose version got bumped
                         // we assume that if that mod made it to the config, the applyOps was successful
-                        BSONObj doc = conn->get()->findOne( ShardNS::chunk,
-                                                            Query(BSON( "ns" << ns ))
-                                                                .sort( BSON("lastmod" << -1)));
-                        ShardChunkVersion checkVersion = ShardChunkVersion::fromBSON( doc["lastmod"] );
+                        BSONObj doc = conn->get()->findOne(ChunkType::ConfigNS,
+                                                           Query(BSON(ChunkType::ns(ns)))
+                                                               .sort(BSON(ChunkType::DEPRECATED_lastmod() << -1)));
+
+                        ChunkVersion checkVersion =
+                            ChunkVersion::fromBSON(doc[ChunkType::DEPRECATED_lastmod()]);
 
                         if ( checkVersion.isEquivalentTo( nextVersion ) ) {
                             log() << "moveChunk commit confirmed" << migrateLog;
@@ -1350,17 +1470,17 @@ namespace mongo {
                 c.max = max.getOwned();
                 c.shardKeyPattern = shardKeyPattern.getOwned();
                 ClientCursor::find( ns , c.initial );
-                if ( c.initial.size() ) {
-                    log() << "forking for cleaning up chunk data" << migrateLog;
+
+                if (!waitForDelete) {
+                    // 7.
+                    log() << "forking for cleanup of chunk data" << migrateLog;
                     boost::thread t( boost::bind( &cleanupOldData , c ) );
                 }
                 else {
-                    log() << "doing delete inline" << migrateLog;
                     // 7.
+                    log() << "doing delete inline for cleanup of chunk data" << migrateLog;
                     c.doRemove();
                 }
-
-
             }
             timing.done(6);
 
@@ -1372,6 +1492,10 @@ namespace mongo {
 
     bool ShardingState::inCriticalMigrateSection() {
         return migrateFromStatus.getInCriticalSection();
+    }
+
+    bool ShardingState::waitTillNotInCriticalSection( int maxSecondsToWait ) {
+        return migrateFromStatus.waitTillNotInCriticalSection( maxSecondsToWait );
     }
 
     /* -----
@@ -1432,6 +1556,10 @@ namespace mongo {
             
             slaveCount = ( getSlaveCount() / 2 ) + 1;
 
+            log() << "starting receiving-end of migration of chunk " << min << " -> " << max <<
+                    " for collection " << ns << " from " << from <<
+                    " (" << getSlaveCount() << " slaves detected)" << endl;
+
             string errmsg;
             MoveTimingHelper timing( "to" , ns , min , max , 5 /* steps */ , errmsg );
 
@@ -1444,7 +1572,7 @@ namespace mongo {
                 // 0. copy system.namespaces entry if collection doesn't already exist
                 Client::WriteContext ctx( ns );
                 // Only copy if ns doesn't already exist
-                if ( ! nsdetails( ns.c_str() ) ) {
+                if ( ! nsdetails( ns ) ) {
                     string system_namespaces = NamespaceString( ns ).db + ".system.namespaces";
                     BSONObj entry = conn->findOne( system_namespaces, BSON( "name" << ns ) );
                     if ( entry["options"].isABSONObj() ) {
@@ -1479,15 +1607,24 @@ namespace mongo {
             }
 
             {
+
+                BSONObj indexKeyPattern;
+                if ( !findShardKeyIndexPattern_unlocked( ns, shardKeyPattern, &indexKeyPattern ) ) {
+                    errmsg = "collection or index dropped during migrate";
+                    warning() << errmsg << endl;
+                    state = FAIL;
+                    return;
+                }
+
                 // 2. delete any data already in range
                 RemoveSaver rs( "moveChunk" , ns , "preCleanup" );
-                long long num = Helpers::removeRange( ns ,
-                                                      min ,
-                                                      max ,
-                                                      findShardKeyIndexPattern_unlocked( ns , shardKeyPattern ) , 
-                                                      false , /*maxInclusive*/
-                                                      secondaryThrottle , /* secondaryThrottle */
-                                                      cmdLine.moveParanoia ? &rs : 0 , /*callback*/
+                long long num = Helpers::removeRange( ns,
+                                                      min,
+                                                      max,
+                                                      indexKeyPattern,
+                                                      false, /*maxInclusive*/
+                                                      secondaryThrottle, /* secondaryThrottle */
+                                                      cmdLine.moveParanoia ? &rs : 0, /*callback*/
                                                       true ); /* flag fromMigrate in oplog */
                 if ( num )
                     warning() << "moveChunkCmd deleted data already in chunk # objects: " << num << migrateLog;
@@ -1534,7 +1671,7 @@ namespace mongo {
                         numCloned++;
                         clonedBytes += o.objsize();
 
-                        if ( secondaryThrottle ) {
+                        if ( secondaryThrottle && thisTime > 0 ) {
                             if ( ! waitForReplication( cc().getLastOp(), 2, 60 /* seconds to wait */ ) ) {
                                 warning() << "secondaryThrottle on, but doc insert timed out after 60 seconds, continuing" << endl;
                             }
@@ -1698,7 +1835,7 @@ namespace mongo {
                     // do not apply deletes if they do not belong to the chunk being migrated
                     BSONObj fullObj;
                     if ( Helpers::findById( cc() , ns.c_str() , id, fullObj ) ) {
-                        if ( ! isInRange( fullObj , min , max ) ) {
+                        if ( ! isInRange( fullObj , min , max , shardKeyPattern ) ) {
                             log() << "not applying out of range deletion: " << fullObj << migrateLog;
 
                             continue;
@@ -1707,8 +1844,7 @@ namespace mongo {
 
                     // id object most likely has form { _id : ObjectId(...) }
                     // infer from that correct index to use, e.g. { _id : 1 }
-                    BSONObj idIndexPattern;
-                    Helpers::toKeyFormat( id , idIndexPattern );
+                    BSONObj idIndexPattern = Helpers::inferKeyPattern( id );
 
                     // TODO: create a better interface to remove objects directly
                     Helpers::removeRange( ns ,
@@ -1841,7 +1977,7 @@ namespace mongo {
         Client::initThread( "migrateThread" );
         if (!noauth) {
             ShardedConnectionInfo::addHook();
-            cc().getAuthenticationInfo()->authorize("local", internalSecurity.user);
+            cc().getAuthorizationManager()->grantInternalAuthorization("_migrateThread");
         }
         migrateStatus.go();
         cc().shutdown();
@@ -1852,7 +1988,13 @@ namespace mongo {
         RecvChunkStartCommand() : ChunkCommandHelper( "_recvChunkStart" ) {}
 
         virtual LockType locktype() const { return WRITE; }  // this is so don't have to do locking internally
-
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+            ActionSet actions;
+            actions.addAction(ActionType::_recvChunkStart);
+            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+        }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
 
             if ( migrateStatus.getActive() ) {
@@ -1869,7 +2011,7 @@ namespace mongo {
             }
 
             if ( ! configServer.ok() )
-                configServer.init( cmdObj["configServer"].String() );
+                ShardingState::initialize(cmdObj["configServer"].String());
 
             migrateStatus.prepare();
 
@@ -1884,9 +2026,8 @@ namespace mongo {
                 // shardKeyPattern may not be provided if another shard is from pre 2.2
                 // In that case, assume the shard key pattern is the same as the range
                 // specifiers provided.
-                BSONObj keya , keyb;
-                Helpers::toKeyFormat( migrateStatus.min , keya );
-                Helpers::toKeyFormat( migrateStatus.max , keyb );
+                BSONObj keya = Helpers::inferKeyPattern( migrateStatus.min );
+                BSONObj keyb = Helpers::inferKeyPattern( migrateStatus.max );
                 verify( keya == keyb );
 
                 warning() << "No shard key pattern provided by source shard for migration."
@@ -1913,7 +2054,13 @@ namespace mongo {
     class RecvChunkStatusCommand : public ChunkCommandHelper {
     public:
         RecvChunkStatusCommand() : ChunkCommandHelper( "_recvChunkStatus" ) {}
-
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+            ActionSet actions;
+            actions.addAction(ActionType::_recvChunkStatus);
+            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+        }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             migrateStatus.status( result );
             return 1;
@@ -1924,7 +2071,13 @@ namespace mongo {
     class RecvChunkCommitCommand : public ChunkCommandHelper {
     public:
         RecvChunkCommitCommand() : ChunkCommandHelper( "_recvChunkCommit" ) {}
-
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+            ActionSet actions;
+            actions.addAction(ActionType::_recvChunkCommit);
+            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+        }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             bool ok = migrateStatus.startCommit();
             migrateStatus.status( result );
@@ -1936,7 +2089,13 @@ namespace mongo {
     class RecvChunkAbortCommand : public ChunkCommandHelper {
     public:
         RecvChunkAbortCommand() : ChunkCommandHelper( "_recvChunkAbort" ) {}
-
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+            ActionSet actions;
+            actions.addAction(ActionType::_recvChunkAbort);
+            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+        }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             migrateStatus.abort();
             migrateStatus.status( result );
@@ -1951,13 +2110,23 @@ namespace mongo {
         void run() {
             BSONObj min = BSON( "x" << 1 );
             BSONObj max = BSON( "x" << 5 );
+            BSONObj skey = BSON( "x" << 1 );
 
-            verify( ! isInRange( BSON( "x" << 0 ) , min , max ) );
-            verify( isInRange( BSON( "x" << 1 ) , min , max ) );
-            verify( isInRange( BSON( "x" << 3 ) , min , max ) );
-            verify( isInRange( BSON( "x" << 4 ) , min , max ) );
-            verify( ! isInRange( BSON( "x" << 5 ) , min , max ) );
-            verify( ! isInRange( BSON( "x" << 6 ) , min , max ) );
+            verify( ! isInRange( BSON( "x" << 0 ) , min , max , skey ) );
+            verify( isInRange( BSON( "x" << 1 ) , min , max , skey ) );
+            verify( isInRange( BSON( "x" << 3 ) , min , max , skey ) );
+            verify( isInRange( BSON( "x" << 4 ) , min , max , skey ) );
+            verify( ! isInRange( BSON( "x" << 5 ) , min , max , skey ) );
+            verify( ! isInRange( BSON( "x" << 6 ) , min , max , skey ) );
+
+            BSONObj obj = BSON( "n" << 3 );
+            BSONObj min2 = BSON( "x" << BSONElementHasher::hash64( obj.firstElement() , 0 ) - 2 );
+            BSONObj max2 = BSON( "x" << BSONElementHasher::hash64( obj.firstElement() , 0 ) + 2 );
+            BSONObj hashedKey =  BSON( "x" << "hashed" );
+
+            verify( isInRange( BSON( "x" << 3 ) , min2 , max2 , hashedKey ) );
+            verify( ! isInRange( BSON( "x" << 3 ) , min , max , hashedKey ) );
+            verify( ! isInRange( BSON( "x" << 4 ) , min2 , max2 , hashedKey ) );
 
             LOG(1) << "isInRangeTest passed" << migrateLog;
         }

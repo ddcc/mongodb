@@ -18,6 +18,7 @@
 
 #include "pch.h"
 
+#include "mongo/base/initializer.h"
 #include "db/json.h"
 #include "../util/text.h"
 #include "tool.h"
@@ -149,8 +150,11 @@ namespace mongo {
         int run() {
             _sleep = getParam( "sleep" , _sleep );
 
-            auth();
-            
+            if (isMongos()) {
+                log() << "mongotop only works on instances of mongod." << endl;
+                return EXIT_FAILURE;
+            }
+
             NamespaceStats prev = getData();
 
             while ( true ) {
@@ -187,7 +191,8 @@ namespace mongo {
 
 }
 
-int main( int argc , char ** argv ) {
+int main( int argc , char ** argv, char ** envp ) {
+    mongo::runGlobalInitializersOrDie(argc, argv, envp);
     mongo::TopTool top;
     return top.main( argc , argv );
 }

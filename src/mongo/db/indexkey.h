@@ -34,6 +34,7 @@ namespace mongo {
     class IndexType; // TODO: this name sucks
     class IndexPlugin;
     class IndexDetails;
+    class FieldRangeSet;
 
     enum IndexSuitability { USELESS = 0 , HELPFUL = 1 , OPTIMAL = 2 };
 
@@ -49,6 +50,21 @@ namespace mongo {
         virtual ~IndexType();
 
         virtual void getKeys( const BSONObj &obj, BSONObjSet &keys ) const = 0;
+
+        /**
+         * Returns the element placed in an index key when indexing a field absent from a document.
+         * By default this is a null BSONElement.
+         */
+        virtual BSONElement missingField() const;
+
+        /* Full semantics of numWanted:
+         * numWanted == 0 : Return any number of results, but try to return in batches of 101.
+         * numWanted == 1 : Return exactly one result.
+         * numWanted  > 1 : Return any number of results, but try to return in batches of numWanted.
+         *
+         * In practice, your cursor can ignore numWanted, as enforcement of limits is done
+         * by the caller.
+         */
         virtual shared_ptr<Cursor> newCursor( const BSONObj& query , const BSONObj& order , int numWanted ) const = 0;
 
         /** optional op : changes query to match what's in the index */
@@ -62,7 +78,15 @@ namespace mongo {
 
         const BSONObj& keyPattern() const;
 
-        virtual IndexSuitability suitability( const BSONObj& query , const BSONObj& order ) const ;
+        /* Determines the suitability level of this index for answering a given query. The query is
+         * represented as a set of constraints given by a FieldRangeSet, and a desired ordering of
+         * the output.
+         *
+         * Note: it is the responsibility of the caller to pass in the correct FieldRangeSet, which
+         * may depend upon whether this is a single or multi-key index at the time of calling.
+         */
+        virtual IndexSuitability suitability( const FieldRangeSet& queryConstraints ,
+                                              const BSONObj& order ) const;
 
         virtual bool scanAndOrderRequired( const BSONObj& query , const BSONObj& order ) const ;
 
@@ -92,6 +116,15 @@ namespace mongo {
          */
         virtual BSONObj adjustIndexSpec( const BSONObj& spec ) const { return spec; }
 
+        /**
+         * Hook function to run after an index that uses this plugin is built.
+         *
+         * This will be called with an active write context (and lock) on the database.
+         *
+         * @param spec The IndexSpec of the newly built index.
+         */
+        virtual void postBuildHook( const IndexSpec& spec ) const { }
+
         // ------- static below -------
 
         static IndexPlugin* get( const string& name ) {
@@ -109,6 +142,19 @@ namespace mongo {
          */
         static string findPluginName( const BSONObj& keyPattern );
 
+        /**
+         * True if is a regular (non-plugin) index or uses a plugin that existed before 2.4.
+         * These plugins are grandfathered in and allowed to exist in DBs with
+         * PDFILE_MINOR_VERSION_22_AND_OLDER
+         */
+        static bool existedBefore24(const string& name) {
+            return name.empty()
+                || name == "2d"
+                || name == "geoHaystack"
+                || name == "hashed"
+                ;
+        }
+
     private:
         string _name;
         static map<string,IndexPlugin*> * _plugins;
@@ -119,6 +165,12 @@ namespace mongo {
        */
     class IndexSpec {
     public:
+        enum PluginRules {
+            NoPlugins,
+            RulesFor22, // if !IndexPlugin::existedBefore24() treat as ascending
+            RulesFor24, // allow new plugins but error if unknown
+        };
+
         BSONObj keyPattern; // e.g., { name : 1 }
         BSONObj info; // this is the same as IndexDetails::info.obj()
 
@@ -126,26 +178,37 @@ namespace mongo {
             : _details(0) , _finishedInit(false) {
         }
 
-        explicit IndexSpec( const BSONObj& k , const BSONObj& m = BSONObj() )
+        explicit IndexSpec(const BSONObj& k, const BSONObj& m=BSONObj(),
+                           PluginRules rules=RulesFor24)
             : keyPattern(k) , info(m) , _details(0) , _finishedInit(false) {
-            _init();
+            _init(rules);
         }
 
         /**
            this is a DiscLoc of an IndexDetails info
            should have a key field
          */
-        explicit IndexSpec( const DiskLoc& loc ) {
-            reset( loc );
+        explicit IndexSpec(const DiskLoc& loc, PluginRules rules=RulesFor24) {
+            reset(loc, rules);
         }
 
-        void reset( const BSONObj& info );
-        void reset( const DiskLoc& infoLoc ) { reset(infoLoc.obj()); }
-        void reset( const IndexDetails * details );
+        void reset(const BSONObj& info, PluginRules rules=RulesFor24);
+        void reset(const IndexDetails * details); // determines rules based on pdfile version
+        void reset(const DiskLoc& infoLoc, PluginRules rules=RulesFor24) {
+            reset(infoLoc.obj(), rules);
+        }
 
         void getKeys( const BSONObj &obj, BSONObjSet &keys ) const;
 
-        BSONElement missingField() const { return _nullElt; }
+        /**
+         * Returns the element placed in an index key when indexing a field absent from a document.
+         * By default this is a null BSONElement.
+         */
+        BSONElement missingField() const {
+            if ( _indexType.get() )
+                return _indexType->missingField();
+            return _nullElt;
+        }
 
         string getTypeName() const {
             if ( _indexType.get() )
@@ -161,15 +224,19 @@ namespace mongo {
             return _details;
         }
 
-        IndexSuitability suitability( const BSONObj& query , const BSONObj& order ) const ;
+        IndexSuitability suitability( const FieldRangeSet& queryConstraints ,
+                                      const BSONObj& order ) const ;
 
         bool isSparse() const { return _sparse; }
+
+        string toString() const;
 
     protected:
 
         int indexVersion() const;
         
-        IndexSuitability _suitability( const BSONObj& query , const BSONObj& order ) const ;
+        IndexSuitability _suitability( const FieldRangeSet& queryConstraints ,
+                                       const BSONObj& order ) const ;
 
         BSONSizeTracker _sizeTracker;
         vector<const char*> _fieldNames;
@@ -187,7 +254,7 @@ namespace mongo {
         shared_ptr<IndexType> _indexType;
         const IndexDetails * _details;
 
-        void _init();
+        void _init(PluginRules rules);
 
         friend class IndexType;
         friend class KeyGeneratorV0;

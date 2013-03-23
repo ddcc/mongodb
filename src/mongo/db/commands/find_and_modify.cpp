@@ -1,6 +1,7 @@
 // find_and_modify.cpp
 
 /**
+*    Copyright (C) 2012 10gen Inc.
 *
 *    This program is free software: you can redistribute it and/or  modify
 *    it under the terms of the GNU Affero General Public License, version 3,
@@ -16,14 +17,17 @@
 */
 
 #include "pch.h"
-#include "../commands.h"
-#include "../instance.h"
-#include "../clientcursor.h"
-#include "../pagefault.h"
-#include "../dbhelpers.h"
-#include "../ops/delete.h"
-#include "../ops/update.h"
-#include "../queryutil.h"
+
+#include "mongo/db/commands/find_and_modify.h"
+
+#include "mongo/db/commands.h"
+#include "mongo/db/instance.h"
+#include "mongo/db/clientcursor.h"
+#include "mongo/db/pagefault.h"
+#include "mongo/db/dbhelpers.h"
+#include "mongo/db/ops/delete.h"
+#include "mongo/db/ops/update.h"
+#include "mongo/db/queryutil.h"
 
 namespace mongo {
 
@@ -42,7 +46,11 @@ namespace mongo {
         virtual bool logTheOp() { return false; } // the modifications will be logged directly
         virtual bool slaveOk() const { return false; }
         virtual LockType locktype() const { return WRITE; }
-        
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+            find_and_modify::addPrivilegesRequiredForFindAndModify(dbname, cmdObj, out);
+        }
         /* this will eventually replace run,  once sort is handled */
         bool runNoDirectClient( const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             verify( cmdObj["sort"].eoo() );
@@ -270,7 +278,7 @@ namespace mongo {
                 uassert(13330, "upsert mode requires query field", !origQuery.isEmpty());
                 db.update(ns, origQuery, update.embeddedObjectUserCheck(), true);
 
-                BSONObj gle = db.getLastErrorDetailed();
+                BSONObj gle = db.getLastErrorDetailed(dbname);
                 result.append("lastErrorObject", gle);
                 if (gle["err"].type() == String) {
                     errmsg = gle["err"].String();
@@ -292,7 +300,7 @@ namespace mongo {
                     uassert(12515, "can't remove and update", cmdObj["update"].eoo());
                     db.remove(ns, QUERY("_id" << out["_id"]), 1);
 
-                    BSONObj gle = db.getLastErrorDetailed();
+                    BSONObj gle = db.getLastErrorDetailed(dbname);
                     result.append("lastErrorObject", gle);
                     if (gle["err"].type() == String) {
                         errmsg = gle["err"].String();
@@ -324,7 +332,7 @@ namespace mongo {
                     uassert(12516, "must specify remove or update", !update.eoo());
                     db.update(ns, q, update.embeddedObjectUserCheck());
 
-                    BSONObj gle = db.getLastErrorDetailed();
+                    BSONObj gle = db.getLastErrorDetailed(dbname);
                     result.append("lastErrorObject", gle);
                     if (gle["err"].type() == String) {
                         errmsg = gle["err"].String();

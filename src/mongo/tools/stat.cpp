@@ -1,5 +1,3 @@
-// stat.cpp
-
 /**
 *    Copyright (C) 2008 10gen Inc.
 *
@@ -18,18 +16,21 @@
 
 #include "pch.h"
 
-#include <boost/thread/thread.hpp>
+#include "mongo/tools/tool.h"
 
-#include "db/json.h"
-#include "../util/net/httpclient.h"
-#include "../util/text.h"
-#include "mongo/client/dbclientcursor.h"
-#include "mongo/db/jsobjmanipulator.h"
-#include "tool.h"
-#include "stat_util.h"
+#include <boost/program_options.hpp>
+#include <boost/thread/thread.hpp>
 #include <fstream>
 #include <iostream>
-#include <boost/program_options.hpp>
+
+#include "mongo/base/initializer.h"
+#include "mongo/client/dbclientcursor.h"
+#include "mongo/db/jsobjmanipulator.h"
+#include "mongo/db/json.h"
+#include "mongo/s/type_shard.h"
+#include "mongo/tools/stat_util.h"
+#include "mongo/util/net/httpclient.h"
+#include "mongo/util/text.h"
 
 namespace po = boost::program_options;
 
@@ -203,8 +204,6 @@ namespace mongo {
             int rowCount = getParam( "rowcount" , 0 );
             int rowNum = 0;
 
-            auth();
-
             BSONObj prev = stats();
             if ( prev.isEmpty() )
                 return -1;
@@ -283,11 +282,10 @@ namespace mongo {
             string error;
             bool mongos;
 
-            string username;
-            string password;
+            BSONObj authParams;
         };
 
-        static void serverThread( shared_ptr<ServerState> state ) {
+        static void serverThread( shared_ptr<ServerState> state , int sleepTime) {
             try {
                 DBClientConnection conn( true );
                 conn._logLevel = 1;
@@ -296,8 +294,8 @@ namespace mongo {
                     state->error = errmsg;
                 long long cycleNumber = 0;
 
-                if (! (state->username.empty() && state->password.empty()))
-                    conn.auth("admin", state->username, state->password, errmsg);
+                if (! (state->authParams["user"].str().empty()) )
+                    conn.auth(state->authParams);
 
                 while ( ++cycleNumber ) {
                     try {
@@ -315,10 +313,11 @@ namespace mongo {
                             state->lastUpdate = time(0);
                         }
 
-                        if ( out["shardCursorType"].type() == Object ) {
+                        if ( out["shardCursorType"].type() == Object ||
+                             out["process"].String() == "mongos" ) {
                             state->mongos = true;
                             if ( cycleNumber % 10 == 1 ) {
-                                auto_ptr<DBClientCursor> c = conn.query( "config.shards" , BSONObj() );
+                                auto_ptr<DBClientCursor> c = conn.query( ShardType::ConfigNS , BSONObj() );
                                 vector<BSONObj> shards;
                                 while ( c->more() ) {
                                     shards.push_back( c->next().getOwned() );
@@ -333,7 +332,7 @@ namespace mongo {
                         state->error = e.what();
                     }
 
-                    sleepsecs( 1 );
+                    sleepsecs( sleepTime );
                 }
 
 
@@ -355,10 +354,14 @@ namespace mongo {
 
             state.reset( new ServerState() );
             state->host = host;
-            state->thr.reset( new boost::thread( boost::bind( serverThread , state ) ) );
-            state->username = _username;
-            state->password = _password;
-
+            /* For each new thread, pass in a thread state object and the delta between samples */
+            state->thr.reset( new boost::thread( boost::bind( serverThread,
+                                                              state,
+                                                              (int)ceil(_statUtil.getSeconds()) ) ) );
+            state->authParams = BSON( "user" << _username <<
+                                      "pwd" << _password <<
+                                      "userSource" << _authenticationDatabase <<
+                                      "mechanism" << _authenticationMechanism );
             return true;
         }
 
@@ -572,7 +575,8 @@ namespace mongo {
 
 }
 
-int main( int argc , char ** argv ) {
+int main( int argc , char ** argv, char ** envp ) {
+    mongo::runGlobalInitializersOrDie(argc, argv, envp);
     mongo::Stat stat;
     return stat.main( argc , argv );
 }
