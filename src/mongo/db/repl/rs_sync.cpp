@@ -25,18 +25,40 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands/fsync.h"
 #include "mongo/db/d_concurrency.h"
+#include "mongo/db/namespacestring.h"
 #include "mongo/db/prefetch.h"
 #include "mongo/db/repl.h"
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/rs.h"
 #include "mongo/db/repl/rs_sync.h"
+#include "mongo/util/fail_point_service.h"
+#include "mongo/db/commands/server_status.h"
+#include "mongo/db/stats/timer_stats.h"
+#include "mongo/base/counter.h"
+
+
 
 namespace mongo {
 
     using namespace bson;
     extern unsigned replSetForceInitialSyncFailure;
 
+    const int ReplSetImpl::maxSyncSourceLagSecs = 30;
+
 namespace replset {
+
+    MONGO_FP_DECLARE(rsSyncApplyStop);
+
+    // Number and time of each ApplyOps worker pool round
+    static TimerStats applyBatchStats;
+    static ServerStatusMetricField<TimerStats> displayOpBatchesApplied(
+                                                    "repl.apply.batches",
+                                                    &applyBatchStats );
+    //The oplog entries applied
+    static Counter64 opsAppliedStats;
+    static ServerStatusMetricField<Counter64> displayOpsApplied( "repl.apply.ops",
+                                                                &opsAppliedStats );
+
 
     SyncTail::SyncTail(BackgroundSyncInterface *q) :
         Sync(""), oplogVersion(0), _networkQueue(q)
@@ -77,11 +99,12 @@ namespace replset {
             lk.reset(new Lock::DBWrite(ns)); 
         }
 
-        Client::Context ctx(ns, dbpath, false);
+        Client::Context ctx(ns, dbpath);
         ctx.getClient()->curop()->reset();
         // For non-initial-sync, we convert updates to upserts
         // to suppress errors when replaying oplog entries.
         bool ok = !applyOperation_inlock(op, true, convertUpdateToUpsert);
+        opsAppliedStats.increment();
         getDur().commitIfNeeded();
 
         return ok;
@@ -164,6 +187,8 @@ namespace replset {
         const char *ns = op.getStringField("ns");
         if (ns && (ns[0] != '\0')) {
             try {
+                // one possible tweak here would be to stay in the read lock for this database 
+                // for multiple prefetches if they are for the same database.
                 Client::ReadContext ctx(ns);
                 prefetchPagesForReplicatedOp(op);
             }
@@ -192,6 +217,7 @@ namespace replset {
     void SyncTail::applyOps(const std::vector< std::vector<BSONObj> >& writerVectors, 
                                      MultiSyncApplyFunc applyFunc) {
         ThreadPool& writerPool = theReplSet->getWriterPool();
+        TimerHolder timer(&applyBatchStats);
         for (std::vector< std::vector<BSONObj> >::const_iterator it = writerVectors.begin();
              it != writerVectors.end();
              ++it) {
@@ -354,6 +380,7 @@ namespace replset {
                    (ops.getSize() < replBatchLimitBytes)) {
 
                 if (theReplSet->isPrimary()) {
+                    massert(16620, "there are ops to sync, but I'm primary", ops.empty());
                     return;
                 }
 
@@ -386,6 +413,7 @@ namespace replset {
                         // When would mgr be null?  During replsettest'ing.
                         if (mgr) mgr->send(boost::bind(&Manager::msgCheckNewState, theReplSet->mgr));
                         sleepsecs(1);
+                        // There should never be ops to sync in a 1-member set, anyway
                         return;
                     }
                 }
@@ -403,6 +431,11 @@ namespace replset {
                         break;
                     }
                 }
+            }
+
+            // For pausing replication in tests
+            while (MONGO_FAIL_POINT(rsSyncApplyStop)) {
+                sleepmillis(0);
             }
 
             const BSONObj& lastOp = ops.getDeque().back();
@@ -448,7 +481,7 @@ namespace replset {
         if ((op["op"].valuestrsafe()[0] == 'c') ||
             // Index builds are acheived through the use of an insert op, not a command op.
             // The following line is the same as what the insert code uses to detect an index build.
-            (strstr(op["ns"].valuestrsafe(), ".system.indexes"))) {
+            (NamespaceString(op["ns"].valuestrsafe()).coll == "system.indexes")) {
             if (ops->empty()) {
                 // apply commands one-at-a-time
                 ops->push_back(op);
@@ -546,40 +579,33 @@ namespace replset {
     bool ReplSetImpl::tryToGoLiveAsASecondary(OpTime& /*out*/ minvalid) {
         bool golive = false;
 
-        // make sure we're not primary or secondary already
-        if (box.getState().primary() || box.getState().secondary()) {
+        lock rsLock( this );
+        Lock::GlobalWrite writeLock;
+
+        // make sure we're not primary, secondary, or fatal already
+        if (box.getState().primary() || box.getState().secondary() || box.getState().fatal()) {
             return false;
         }
 
-        {
-            lock lk( this );
-
-            if (_maintenanceMode > 0) {
-                // we're not actually going live
-                return true;
-            }
-
-            // if we're blocking sync, don't change state
-            if (_blockSync) {
-                return false;
-            }
+        if (_maintenanceMode > 0) {
+            // we're not actually going live
+            return true;
         }
 
-        {
-            Lock::DBRead lk("local.replset.minvalid");
-            BSONObj mv;
-            if( Helpers::getSingleton("local.replset.minvalid", mv) ) {
-                minvalid = mv["ts"]._opTime();
-                if( minvalid <= lastOpTimeWritten ) {
-                    golive=true;
-                }
-                else {
-                    sethbmsg(str::stream() << "still syncing, not yet to minValid optime " << minvalid.toString());
-                }
-            }
-            else
-                golive = true; /* must have been the original member */
+        // if we're blocking sync, don't change state
+        if (_blockSync) {
+            return false;
         }
+
+        minvalid = getMinValid();
+        if( minvalid <= lastOpTimeWritten ) {
+            golive=true;
+        }
+        else {
+            sethbmsg(str::stream() << "still syncing, not yet to minValid optime " <<
+                     minvalid.toString());
+        }
+
         if( golive ) {
             sethbmsg("");
             changeState(MemberState::RS_SECONDARY);
@@ -596,14 +622,14 @@ namespace replset {
             errmsg = "arbiters don't sync";
             return false;
         }
-	if (box.getState().primary()) {
-	    errmsg = "primaries don't sync";
-	    return false;
-	}
-	if (_self != NULL && host == _self->fullName()) {
-	    errmsg = "I cannot sync from myself";
-	    return false;
-	}
+        if (box.getState().primary()) {
+            errmsg = "primaries don't sync";
+            return false;
+        }
+        if (_self != NULL && host == _self->fullName()) {
+            errmsg = "I cannot sync from myself";
+            return false;
+        }
 
         // find the member we want to sync from
         Member *newTarget = 0;
@@ -647,7 +673,7 @@ namespace replset {
         }
 
         // record the previous member we were syncing from
-        Member *prev = replset::BackgroundSync::get()->getSyncTarget();
+        const Member *prev = replset::BackgroundSync::get()->getSyncTarget();
         if (prev) {
             result.append("prevSyncTarget", prev->fullName());
         }
@@ -662,6 +688,17 @@ namespace replset {
         return _forceSyncTarget != 0;
     }
 
+    bool ReplSetImpl::shouldChangeSyncTarget(const OpTime& targetOpTime) const {
+        for (Member *m = _members.head(); m; m = m->next()) {
+            if (m->syncable() &&
+                targetOpTime.getSecs()+maxSyncSourceLagSecs < m->hbinfo().opTime.getSecs()) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     void ReplSetImpl::_syncThread() {
         StateBox::SP sp = box.get();
         if( sp.state.primary() ) {
@@ -673,8 +710,10 @@ namespace replset {
             return;
         }
 
-        /* do we have anything at all? */
-        if( lastOpTimeWritten.isNull() ) {
+        // Check criteria for doing an initial sync:
+        // 1. If the oplog is empty, do an initial sync
+        // 2. If minValid has _initialSyncFlag set, do an initial sync
+        if (lastOpTimeWritten.isNull() || getInitialSyncFlag()) {
             syncDoInitialSync();
             return; // _syncThread will be recalled, starts from top again in case sync failed.
         }
@@ -725,7 +764,6 @@ namespace replset {
         n++;
 
         Client::initThread("rsSync");
-        cc().iAmSyncThread(); // for isSyncThread() (which is used not used much, is used in secondary create index code
         replLocalAuth();
         theReplSet->syncThread();
         cc().shutdown();
@@ -737,6 +775,7 @@ namespace replset {
     }
 
     void ReplSetImpl::blockSync(bool block) {
+        // RS lock is already taken in Manager::checkAuth
         _blockSync = block;
         if (_blockSync) {
             // syncing is how we get into SECONDARY state, so we'll be stuck in
@@ -824,6 +863,11 @@ namespace replset {
                     return;
                 }
                 slave->reader.ghostQueryGTE(rsoplog, last);
+                // if we lose the connection between connecting and querying, the cursor may not
+                // exist so we have to check again before using it.
+                if (!slave->reader.haveCursor()) {
+                    return;
+                }
             }
 
             LOG(1) << "replSet last: " << slave->last.toString() << " to " << last.toString() << rsLog;

@@ -1,10 +1,30 @@
 // record.cpp
 
+/**
+*    Copyright (C) 2012 10gen Inc.
+*
+*    This program is free software: you can redistribute it and/or  modify
+*    it under the terms of the GNU Affero General Public License, version 3,
+*    as published by the Free Software Foundation.
+*
+*    This program is distributed in the hope that it will be useful,
+*    but WITHOUT ANY WARRANTY; without even the implied warranty of
+*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+*    GNU Affero General Public License for more details.
+*
+*    You should have received a copy of the GNU Affero General Public License
+*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
 #include "pch.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/databaseholder.h"
 #include "mongo/db/pagefault.h"
 #include "mongo/db/pdfile.h"
 #include "mongo/db/record.h"
+#include "mongo/db/commands/server_status.h"
+#include "mongo/platform/bits.h"
+#include "mongo/platform/unordered_set.h"
 #include "mongo/util/net/listen.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/stack_introspect.h"
@@ -51,7 +71,7 @@ namespace mongo {
                 
         /**
          * simple hash map for region -> status
-         * this constitures a single region of time
+         * this constitutes a single region of time
          * it does chaining, but very short chains
          */
         class Slice {
@@ -69,6 +89,7 @@ namespace mongo {
             
             void reset() {
                 memset( _data , 0 , SliceSize * sizeof(Entry) );
+                _lastReset = time(0);
             }
 
             State get( int regionHash , size_t region  , short offset ) {
@@ -78,7 +99,7 @@ namespace mongo {
                 if ( ! e )
                     return Unk;
                 
-                return ( e->value & ( ((unsigned long long)1) << offset ) ) ? In : Out;
+                return ( e->value & ( 1ULL << offset ) ) ? In : Out;
             }
             
             /**
@@ -91,10 +112,27 @@ namespace mongo {
                 if ( ! e )
                     return false;
                 
-                e->value |= ((unsigned long long)1) << offset;
+                e->value |= 1ULL << offset;
                 return true;
             }
 
+
+            void addPages( unordered_set<size_t>* pages ) {
+                for ( int i = 0; i < SliceSize; i++ ) {
+                    unsigned long long v = _data[i].value;
+                    
+                    while ( v ) {
+                        int offset = firstBitSet( v ) - 1;
+                        
+                        size_t page = ( _data[i].region << 6 | offset );
+                        pages->insert( page );
+
+                        v &= ~( 1ULL << offset );
+                    }
+                }
+            }
+
+            time_t lastReset() const { return _lastReset; }
         private:
 
             Entry* _get( int start , size_t region , bool add ) {
@@ -118,6 +156,7 @@ namespace mongo {
             }
 
             Entry _data[SliceSize];
+            time_t _lastReset;
         };
         
         
@@ -147,7 +186,7 @@ namespace mongo {
                 SimpleMutex::scoped_lock lk( _lock );
 
                 static int rarely_count = 0;
-                if ( rarely_count++ % 2048 == 0 ) {
+                if ( rarely_count++ % ( 2048 / BigHashSize ) == 0 ) {
                     long long now = Listener::getElapsedTimeMillis();
                     RARELY if ( now == 0 ) {
                         tlog() << "warning Listener::getElapsedTimeMillis returning 0ms" << endl;
@@ -179,7 +218,33 @@ namespace mongo {
                 }
                 return false;
             }
-            
+
+            /**
+             * @param pages OUT adds each page to the set
+             * @param mySlices temporary space for copy
+             * @return the oldest timestamp we have
+             */
+            time_t addPages( unordered_set<size_t>* pages, Slice* mySlices ) {
+                time_t oldestTimestamp = std::numeric_limits<time_t>::max();
+                {
+                    // by doing this, we're in the lock only about half as long as the naive way
+                    // that's measure with a small data set
+                    // Assumption is that with a large data set, actually adding to set may get more costly
+                    // so this way the time in lock should be totally constant
+                    SimpleMutex::scoped_lock lk( _lock );
+                    memcpy( mySlices, _slices, NumSlices * sizeof(Slice) );
+
+                    for ( int i = 0; i < NumSlices; i++ ) {
+                        oldestTimestamp = std::min( oldestTimestamp, _slices[i].lastReset() );
+                    }
+                }
+
+                for ( int i = 0; i < NumSlices; i++ ) {
+                    mySlices[i].addPages( pages );
+                }
+
+                return oldestTimestamp;
+            }
         private:
             
             void _rotate() {
@@ -290,6 +355,26 @@ namespace mongo {
             Data* getData();
 
         };
+     
+        void appendWorkingSetInfo( BSONObjBuilder& b ) {
+            boost::scoped_array<Slice> mySlices( new Slice[NumSlices] );
+
+            unordered_set<size_t> totalPages;
+            Timer t;
+
+            time_t timestamp = 0;
+
+            for ( int i = 0; i < BigHashSize; i++ ) {
+                time_t myOldestTimestamp = rolling[i].addPages( &totalPages, mySlices.get() );
+                timestamp = std::max( timestamp, myOldestTimestamp );
+            }
+
+            b.append( "note", "thisIsAnEstimate" );
+            b.appendNumber( "pagesInMemory", totalPages.size() );
+            b.appendNumber( "computationTimeMicros", static_cast<long long>(t.micros()) );
+            b.append( "overSeconds", static_cast<int>( time(0) - timestamp ) );
+
+        }
         
     }
 
@@ -337,6 +422,15 @@ namespace mongo {
 
     const bool blockSupported = ProcessInfo::blockCheckSupported();
 
+    void Record::appendWorkingSetInfo( BSONObjBuilder& b ) {
+        if ( ! blockSupported ) {
+            b.append( "info", "not supported" );
+            return;
+        }
+        
+        ps::appendWorkingSetInfo( b );
+    }
+
     bool Record::blockCheckSupported() { 
         return ProcessInfo::blockCheckSupported();
     }
@@ -382,7 +476,7 @@ namespace mongo {
         if (seen || ps::rolling[ps::bigHash(region)].access( region , offset , false ) ) {
         
 #ifdef _DEBUG
-            if ( blockSupported && ! ProcessInfo::blockInMemory( const_cast<char*>(data) ) ) {
+            if ( blockSupported && ! ProcessInfo::blockInMemory(data) ) {
                 warning() << "we think data is in ram but system says no"  << endl;
             }
 #endif
@@ -450,4 +544,49 @@ namespace mongo {
 
     }
 
+    namespace {
+        
+        class WorkingSetSSS : public ServerStatusSection {
+        public:
+            WorkingSetSSS() : ServerStatusSection( "workingSet" ){}
+            virtual bool includeByDefault() const { return false; }
+            
+            BSONObj generateSection(const BSONElement& configElement) const {
+                BSONObjBuilder b;
+                Record::appendWorkingSetInfo( b );
+                return b.obj();
+            }
+                
+        } asserts;
+
+        class RecordStats : public ServerStatusSection {
+        public:
+            RecordStats() : ServerStatusSection( "recordStats" ){}
+            virtual bool includeByDefault() const { return true; }
+            
+            BSONObj generateSection(const BSONElement& configElement) const {
+                BSONObjBuilder record;
+                
+                Record::appendStats( record );
+
+                set<string> dbs;
+                {
+                    Lock::DBRead read( "local" );
+                    dbHolder().getAllShortNames( dbs );
+                }
+
+                for ( set<string>::iterator i = dbs.begin(); i != dbs.end(); ++i ) {
+                    string db = *i;
+                    Client::ReadContext ctx( db );
+                    BSONObjBuilder temp( record.subobjStart( db ) );
+                    ctx.ctx().db()->recordStats().record( temp );
+                    temp.done();
+                }
+
+                return record.obj();
+            }
+                
+        } recordStats;
+
+    }
 }

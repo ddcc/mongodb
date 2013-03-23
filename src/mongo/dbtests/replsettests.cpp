@@ -44,15 +44,14 @@ namespace ReplSetTests {
     public:
         static const int replWriterThreadCount;
         static const int replPrefetcherThreadCount;
+        static ReplSetTest* make() {
+            auto_ptr<ReplSetTest> ret(new ReplSetTest());
+            ret->init();
+            return ret.release();
+        }
         virtual ~ReplSetTest() {
             delete _myConfig;
             delete _config;
-        }
-        ReplSetTest() : _syncTail(0) {
-            BSONArrayBuilder members;
-            members.append(BSON("_id" << 0 << "host" << "host1"));
-            _config = new ReplSetConfig(BSON("_id" << "foo" << "members" << members.arr()));
-            _myConfig = new ReplSetConfig::MemberCfg();
         }
         virtual bool isSecondary() {
             return true;
@@ -74,6 +73,16 @@ namespace ReplSetTests {
         }
         void setSyncTail(replset::BackgroundSyncInterface *syncTail) {
             _syncTail = syncTail;
+        }
+    private:
+        ReplSetTest() :
+            _syncTail(0) {
+        }
+        void init() {
+            BSONArrayBuilder members;
+            members.append(BSON("_id" << 0 << "host" << "host1"));
+            _config = ReplSetConfig::make(BSON("_id" << "foo" << "members" << members.arr()));
+            _myConfig = new ReplSetConfig::MemberCfg();
         }
     };
 
@@ -113,7 +122,7 @@ namespace ReplSetTests {
     public:
         Base() {
             cmdLine._replSet = "foo";
-            cmdLine.oplogSize = 5;
+            cmdLine.oplogSize = 5 * 1024 * 1024;
             createOplog();
             setup();
         }
@@ -131,7 +140,7 @@ namespace ReplSetTests {
         static void insert( const BSONObj &o, bool god = false ) {
             Lock::DBWrite lk(ns());
             Client::Context ctx( ns() );
-            theDataFileMgr.insert( ns(), o.objdata(), o.objsize(), god );
+            theDataFileMgr.insert( ns(), o.objdata(), o.objsize(), false, god );
         }
 
         BSONObj findOne( const BSONObj &query = BSONObj() ) const {
@@ -157,7 +166,7 @@ namespace ReplSetTests {
             _tailer = new replset::SyncTail(_bgsync);
 
             // setup theReplSet
-            ReplSetTest *rst = new ReplSetTest();
+            ReplSetTest *rst = ReplSetTest::make();
             rst->setSyncTail(_bgsync);
             delete theReplSet;
             theReplSet = rst;
@@ -165,7 +174,6 @@ namespace ReplSetTests {
     };
 
     DBDirectClient Base::client_;
-
 
     class MockInitialSync : public replset::InitialSync {
         int step;
@@ -284,7 +292,7 @@ namespace ReplSetTests {
 
         void dropCapped() {
             Client::Context c(_cappedNs);
-            if (nsdetails(_cappedNs.c_str()) != NULL) {
+            if (nsdetails(_cappedNs) != NULL) {
                 string errmsg;
                 BSONObjBuilder result;
                 dropCollection( string(_cappedNs), errmsg, result );
@@ -354,7 +362,11 @@ namespace ReplSetTests {
         void insert() {
             Client::Context ctx( cappedNs() );
             BSONObj o = BSON(GENOID << "x" << 456);
-            DiskLoc loc = theDataFileMgr.insert( cappedNs().c_str(), o.objdata(), o.objsize(), false );
+            DiskLoc loc = theDataFileMgr.insert( cappedNs().c_str(),
+                                                 o.objdata(),
+                                                 o.objsize(),
+                                                 false,
+                                                 false );
             verify(!loc.isNull());
         }
     public:
@@ -372,7 +384,7 @@ namespace ReplSetTests {
 
             // check _id index created
             Client::Context ctx(cappedNs());
-            NamespaceDetails *nsd = nsdetails(cappedNs().c_str());
+            NamespaceDetails *nsd = nsdetails(cappedNs());
             verify(nsd->findIdIndex() > -1);
         }
     };
@@ -400,14 +412,14 @@ namespace ReplSetTests {
             // this changed in 2.1.2
             // we now have indexes on capped collections
             Client::Context ctx(cappedNs());
-            NamespaceDetails *nsd = nsdetails(cappedNs().c_str());
+            NamespaceDetails *nsd = nsdetails(cappedNs());
             verify(nsd->findIdIndex() >= 0);
         }
     };
 
     class TestRSSync : public Base {
 
-        void addOp(const string& op, BSONObj o, BSONObj* o2 = NULL, const char* coll = NULL, 
+        void addOp(const string& op, BSONObj o, BSONObj* o2 = NULL, const char* coll = NULL,
                    int version = 0) {
             OpTime ts;
             {
@@ -448,7 +460,7 @@ namespace ReplSetTests {
                 addOp("i", BSON("_id" << i << "x" << 789), NULL, NULL, i);
             }
         }
-            
+
         void addUpdates() {
             BSONObj id = BSON("_id" << "123456something");
             addOp("i", id);
@@ -471,7 +483,7 @@ namespace ReplSetTests {
             addOp("i", first);
 
             BSONObj filter = BSON("_id" << "asdfasdfasdf" << "sp" << BSON("$size" << 2));
-            // Test an op with no version, op is ignored and replication continues (code assumes 
+            // Test an op with no version, op is ignored and replication continues (code assumes
             // version 1)
             addOp("u", BSON("$push" << BSON("sp" << 42)), &filter, NULL, 0);
             // The following line generates an fassert because it's version 2
@@ -513,7 +525,7 @@ namespace ReplSetTests {
             ASSERT_EQUALS(1334810820, obj["requests"]["100002_1"]["timestamp"].number());
 
             drop();
-            
+
             // test converting updates to upserts but only for version 2.2.1 and greater,
             // which means oplog version 2 and greater.
             addConflictingUpdates();

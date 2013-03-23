@@ -19,10 +19,14 @@
 #include "pch.h"
 #include "namespace-inl.h"
 #include "index.h"
-#include "btree.h"
 #include "background.h"
 #include "../util/stringutils.h"
+#include "mongo/util/mongoutils/str.h"
 #include "../util/text.h"
+#include "mongo/db/client.h"
+#include "mongo/db/database.h"
+#include "mongo/db/pdfile.h"
+#include "mongo/db/queryutil.h"
 
 namespace mongo {
 
@@ -39,6 +43,10 @@ namespace mongo {
     }
 
     IndexType::~IndexType() {
+    }
+
+    BSONElement IndexType::missingField() const {
+        return _spec->_nullElt;
     }
 
     const BSONObj& IndexType::keyPattern() const {
@@ -73,7 +81,7 @@ namespace mongo {
         return l.woCompare( r , _spec->keyPattern );
     }
 
-    void IndexSpec::_init() {
+    void IndexSpec::_init(PluginRules rules) {
         verify( keyPattern.objsize() );
 
         // some basics
@@ -118,16 +126,56 @@ namespace mongo {
             string pluginName = IndexPlugin::findPluginName( keyPattern );
             if ( pluginName.size() ) {
                 IndexPlugin * plugin = IndexPlugin::get( pluginName );
-                if ( ! plugin ) {
-                    log() << "warning: can't find plugin [" << pluginName << "]" << endl;
+
+                switch (rules) {
+                case NoPlugins:
+                    uasserted(16735,
+                              str::stream()
+                                << "Attempting to use index type '" << pluginName << "' "
+                                << "where index types are not allowed (1 or -1 only).");
+                    break;
+
+                case RulesFor22: {
+                    if ( ! plugin ) {
+                        log() << "warning: can't find plugin [" << pluginName << "]" << endl;
+                    }
+
+                    if (!IndexPlugin::existedBefore24(pluginName)) {
+                        warning() << "Treating index " << info << " as ascending since "
+                                  << "it was created before 2.4 and '" << pluginName << "' "
+                                  << "was not a valid type at that time."
+                                  << endl;
+
+                        plugin = NULL;
+                    }
+                    break;
                 }
-                else {
+                case RulesFor24:
+                    // This assert will be triggered when downgrading from a future version that
+                    // supports an index plugin unsupported by this version.
+                    uassert(16736, str::stream() << "Invalid index type '" << pluginName << "' "
+                                                 << "in index " << info
+                           , plugin);
+                    break;
+                }
+
+                if (plugin)
                     _indexType.reset( plugin->generate( this ) );
-                }
             }
         }
 
         _finishedInit = true;
+    }
+
+    string IndexSpec::toString() const {
+        stringstream s;
+        s << "IndexSpec @ " << hex << this << dec << ", "
+          << "Details @ " << hex << _details << dec << ", "
+          << "Type: " << getTypeName() << ", "
+          << "nFields: " << _nFields << ", "
+          << "KeyPattern: " << keyPattern << ", "
+          << "Info: " << info;
+        return s.str();
     }
 
     void assertParallelArrays( const char *first, const char *second ) {
@@ -296,7 +344,12 @@ namespace mongo {
             bool haveArrField = !arrField.eoo();
 
             // An index component field name cannot exist in both a document array and one of that array's children.
-            uassert( 15855 ,  str::stream() << "Ambiguous field name found in array (do not use numeric field names in embedded elements in an array), field: '" << arrField.fieldName() << "' for array: " << arr, !haveObjField || !haveArrField );
+            uassert( 15855,
+                     mongoutils::str::stream() <<
+                         "Ambiguous field name found in array (do not use numeric field names in "
+                         "embedded elements in an array), field: '" << arrField.fieldName() <<
+                         "' for array: " << arr,
+                     !haveObjField || !haveArrField );
 
             arrayNestedArray = false;
 			if ( haveObjField ) {
@@ -416,37 +469,39 @@ namespace mongo {
         }
     }
 
-    bool anyElementNamesMatch( const BSONObj& a , const BSONObj& b ) {
-        BSONObjIterator x(a);
-        while ( x.more() ) {
-            BSONElement e = x.next();
-            BSONObjIterator y(b);
-            while ( y.more() ) {
-                BSONElement f = y.next();
-                FieldCompareResult res = compareDottedFieldNames( e.fieldName() , f.fieldName() ,
-                                                                 LexNumCmp( true ) );
-                if ( res == SAME || res == LEFT_SUBFIELD || res == RIGHT_SUBFIELD )
-                    return true;
-            }
-        }
-        return false;
-    }
 
-    IndexSuitability IndexSpec::suitability( const BSONObj& query , const BSONObj& order ) const {
+    IndexSuitability IndexSpec::suitability( const FieldRangeSet& queryConstraints ,
+                                             const BSONObj& order ) const {
         if ( _indexType.get() )
-            return _indexType->suitability( query , order );
-        return _suitability( query , order );
+            return _indexType->suitability( queryConstraints , order );
+        return _suitability( queryConstraints , order );
     }
 
-    IndexSuitability IndexSpec::_suitability( const BSONObj& query , const BSONObj& order ) const {
-        // TODO: optimize
-        if ( anyElementNamesMatch( keyPattern , query ) == 0 && anyElementNamesMatch( keyPattern , order ) == 0 )
-            return USELESS;
-        return HELPFUL;
+    IndexSuitability IndexSpec::_suitability( const FieldRangeSet& queryConstraints ,
+                                              const BSONObj& order ) const {
+        // This is a quick first pass to determine the suitability of the index.  It produces some
+        // false positives (returns HELPFUL for some indexes which are not particularly). When we
+        // return HELPFUL a more precise determination of utility is done by the query optimizer.
+
+        // check whether any field in the index is constrained at all by the query
+        BSONForEach( elt, keyPattern ){
+            const FieldRange& frange = queryConstraints.range( elt.fieldName() );
+            if( ! frange.universal() )
+                return HELPFUL;
+        }
+        // or whether any field in the desired sort order is in the index
+        set<string> orderFields;
+        order.getFieldNames( orderFields );
+        BSONForEach( k, keyPattern ) {
+            if ( orderFields.find( k.fieldName() ) != orderFields.end() )
+                return HELPFUL;
+        }
+        return USELESS;
     }
 
-    IndexSuitability IndexType::suitability( const BSONObj& query , const BSONObj& order ) const {
-        return _spec->_suitability( query , order );
+    IndexSuitability IndexType::suitability( const FieldRangeSet& queryConstraints ,
+                                             const BSONObj& order ) const {
+        return _spec->_suitability( queryConstraints , order );
     }
     
     int IndexSpec::indexVersion() const {

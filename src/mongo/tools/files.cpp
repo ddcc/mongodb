@@ -18,6 +18,7 @@
 
 #include "pch.h"
 #include "client/gridfs.h"
+#include "mongo/base/initializer.h"
 #include "mongo/client/dbclientcursor.h"
 
 #include "tool.h"
@@ -81,7 +82,6 @@ public:
             return -1;
         }
 
-        auth();
         GridFS g( conn() , _db );
 
         string filename = getParam( "file" );
@@ -162,7 +162,8 @@ public:
     }
 };
 
-int main( int argc , char ** argv ) {
+int main( int argc , char ** argv, char** envp ) {
+    mongo::runGlobalInitializersOrDie(argc, argv, envp);
     Files f;
     return f.main( argc , argv );
 }

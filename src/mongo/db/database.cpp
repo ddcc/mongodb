@@ -16,19 +16,20 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "pch.h"
-#include "pdfile.h"
-#include "database.h"
-#include "instance.h"
-#include "introspect.h"
-#include "clientcursor.h"
-#include "databaseholder.h"
+#include "mongo/pch.h"
+
+#include "mongo/db/database.h"
 
 #include <boost/filesystem/operations.hpp>
 
-namespace mongo {
+#include "mongo/db/auth/auth_index_d.h"
+#include "mongo/db/clientcursor.h"
+#include "mongo/db/databaseholder.h"
+#include "mongo/db/instance.h"
+#include "mongo/db/introspect.h"
+#include "mongo/db/pdfile.h"
 
-    bool Database::_openAllFiles = true;
+namespace mongo {
 
     void assertDbAtLeastReadLocked(const Database *db) { 
         if( db ) { 
@@ -88,14 +89,13 @@ namespace mongo {
 #endif
             }
             newDb = namespaceIndex.exists();
-            profile = cmdLine.defaultProfile;
+            _profile = cmdLine.defaultProfile;
             checkDuplicateUncasedNames(true);
             // If already exists, open.  Otherwise behave as if empty until
             // there's a write, then open.
             if (!newDb) {
                 namespaceIndex.init();
-                if( _openAllFiles )
-                    openAllFiles();
+                openAllFiles();
             }
             magic = 781231;
         } catch(std::exception& e) {
@@ -231,6 +231,49 @@ namespace mongo {
         }
     }
 
+    void Database::clearTmpCollections() {
+
+        Lock::assertWriteLocked( name );
+        Client::Context ctx( name );
+
+        string systemNamespaces =  name + ".system.namespaces";
+
+        // Note: we build up a toDelete vector rather than dropping the collection inside the loop
+        // to avoid modifying the system.namespaces collection while iterating over it since that
+        // would corrupt the cursor.
+        vector<string> toDelete;
+        shared_ptr<Cursor> cursor = theDataFileMgr.findAll(systemNamespaces);
+        while ( cursor && cursor->ok() ) {
+            BSONObj nsObj = cursor->current();
+            cursor->advance();
+
+            BSONElement e = nsObj.getFieldDotted( "options.temp" );
+            if ( !e.trueValue() )
+                continue;
+
+            string ns = nsObj["name"].String();
+
+            // Do not attempt to drop indexes
+            if ( !NamespaceString::normal(ns.c_str()) )
+                continue;
+
+            toDelete.push_back(ns);
+        }
+
+        for (size_t i=0; i < toDelete.size(); i++) {
+            const string& ns = toDelete[i];
+
+            string errmsg;
+            BSONObjBuilder result;
+            dropCollection(ns, errmsg, result);
+
+            if ( errmsg.size() > 0 ) {
+                warning() << "could not delete temp collection: " << ns
+                          << " because of: " << errmsg << endl;
+            }
+        }
+    }
+
     // todo: this is called a lot. streamline the common case
     MongoDataFile* Database::getFile( int n, int sizeNeeded , bool preallocateOnly) {
         verify(this);
@@ -253,7 +296,7 @@ namespace mongo {
                 if( !Lock::isWriteLocked(this->name) ) {
                     log() << "error: getFile() called in a read lock, yet file to return is not yet open" << endl;
                     log() << "       getFile(" << n << ") _files.size:" <<_files.size() << ' ' << fileName(n).string() << endl;
-                    log() << "       context ns: " << cc().ns() << " openallfiles:" << _openAllFiles << endl;
+                    log() << "       context ns: " << cc().ns() << endl;
                     verify(false);
                 }
                 _files.push_back(0);
@@ -364,7 +407,7 @@ namespace mongo {
 
 
     bool Database::setProfilingLevel( int newLevel , string& errmsg ) {
-        if ( profile == newLevel )
+        if ( _profile == newLevel )
             return true;
 
         if ( newLevel < 0 || newLevel > 2 ) {
@@ -373,16 +416,16 @@ namespace mongo {
         }
 
         if ( newLevel == 0 ) {
-            profile = 0;
+            _profile = 0;
             return true;
         }
 
         verify( cc().database() == this );
 
-        if (!getOrCreateProfileCollection(this, true))
+        if (!getOrCreateProfileCollection(this, true, &errmsg))
             return false;
 
-        profile = newLevel;
+        _profile = newLevel;
         return true;
     }
 
@@ -434,6 +477,10 @@ namespace mongo {
             massert(15927, "can't open database in a read lock. if db was just closed, consider retrying the query. might otherwise indicate an internal error", !cant);
         }
 
+        // we mark our thread as having done writes now as we do not want any exceptions
+        // once we start creating a new database
+        cc().writeHappened();
+
         // this locks _m for defensive checks, so we don't want to be locked right here : 
         Database *db = new Database( dbname.c_str() , justCreated , path );
 
@@ -444,6 +491,10 @@ namespace mongo {
             m[dbname] = db;
             _size++;
         }
+
+        authindex::configureSystemIndexes(dbname);
+
+        db->clearTmpCollections();
 
         return db;
     }

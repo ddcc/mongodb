@@ -5,11 +5,11 @@ Building MongoDB
 SCONS
 ---------------
 
-For detail information about building, please see [the wiki](http://dochub.mongodb.org/core/building).
+For detail information about building, please see [the manual](http://dochub.mongodb.org/core/building).
 
 If you want to build everything (mongod, mongo, tools, etc):
 
-    $ scons .
+    $ scons all
 
 If you only want to build the database:
 

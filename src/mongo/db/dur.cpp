@@ -73,6 +73,7 @@
 #include "mongo/util/stacktrace.h"
 #include "../server.h"
 #include "mongo/db/commands/fsync.h"
+#include "mongo/db/commands/server_status.h"
 
 using namespace mongoutils;
 
@@ -110,7 +111,7 @@ namespace mongo {
         Stats::S * Stats::other() {
             return curr == &_a ? &_b : &_a;
         }
-                        string _CSVHeader();
+        string _CSVHeader();
 
         string Stats::S::_CSVHeader() { 
             return "cmts  jrnMB\twrDFMB\tcIWLk\tearly\tprpLgB  wrToJ\twrToDF\trmpPrVw";
@@ -149,11 +150,6 @@ namespace mongo {
                              "writeToDataFiles" << (unsigned) (_writeToDataFilesMicros/1000) <<
                              "remapPrivateView" << (unsigned) (_remapPrivateViewMicros/1000)
                            );
-            /*int r = getAgeOutJournalFiles();
-            if( r == -1 )
-                b << "ageOutJournalFiles" << "mutex timeout";
-            if( r == 0 )
-                b << "ageOutJournalFiles" << false;*/
             if( cmdLine.journalCommitInterval != 0 )
                 b << "journalCommitIntervalMs" << cmdLine.journalCommitInterval;
             return b.obj();
@@ -217,7 +213,7 @@ namespace mongo {
             is created first, and the journal will just replay the creation if the create didn't
             happen because of crashing.
         */
-        void DurableImpl::createdFile(string filename, unsigned long long len) {
+        void DurableImpl::createdFile(const std::string& filename, unsigned long long len) {
             shared_ptr<DurOp> op( new FileCreatedOp(filename, len) );
             commitJob.noteOp(op);
         }
@@ -287,7 +283,7 @@ namespace mongo {
                         return false;
                     }
 
-                    log(1) << "commitIfNeeded upgrading from shared write to exclusive write state"
+                    LOG(1) << "commitIfNeeded upgrading from shared write to exclusive write state"
                            << endl;
                     Lock::DBWrite::UpgradeToExclusive ex;
                     if (ex.gotUpgrade()) {
@@ -311,12 +307,12 @@ namespace mongo {
 
         /** we may need to commit earlier than normal if data are being written at 
             very high rates. 
-        
+
             note you can call this unlocked, and that is a good idea as if you are in 
             say, a 'w' lock state, we can't do the commit
 
-	        @param force force a commit now even if seemingly not needed - ie the caller may 
- 	           know something we don't such as that files will be closed
+            @param force force a commit now even if seemingly not needed - ie the caller may 
+            know something we don't such as that files will be closed
 
             perf note: this function is called a lot, on every lock_w() ... and usually returns right away
         */
@@ -779,7 +775,7 @@ namespace mongo {
 
             bool samePartition = true;
             try {
-                const string dbpathDir = boost::filesystem::path(dbpath).native_directory_string();
+                const string dbpathDir = boost::filesystem::path(dbpath).string();
                 samePartition = onSamePartition(getJournalDir().string(), dbpathDir);
             }
             catch(...) {
@@ -887,6 +883,20 @@ namespace mongo {
 
             verify(!haveJournalFiles()); // Double check post-conditions
         }
+        
+        class DurSSS : public ServerStatusSection {
+        public:
+            DurSSS() : ServerStatusSection( "dur" ){}
+            virtual bool includeByDefault() const { return true; }
+            
+            BSONObj generateSection(const BSONElement& configElement) const {
+                if ( ! cmdLine.dur )
+                    return BSONObj();
+                return dur::stats.asObj();
+            }
+                
+        } durSSS;
+
 
     } // namespace dur
 

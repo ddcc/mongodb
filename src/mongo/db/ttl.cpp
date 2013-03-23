@@ -18,15 +18,26 @@
 
 #include "pch.h"
 
-#include "mongo/db/commands/fsync.h"
 #include "mongo/db/ttl.h"
+
+#include "mongo/base/counter.h"
+#include "mongo/db/commands/fsync.h"
+#include "mongo/db/commands/server_status.h"
 #include "mongo/db/databaseholder.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/ops/delete.h"
-#include "mongo/util/background.h"
 #include "mongo/db/replutil.h"
+#include "mongo/util/background.h"
 
 namespace mongo {
+
+    Counter64 ttlPasses;
+    Counter64 ttlDeletedDocuments;
+
+    ServerStatusMetricField<Counter64> ttlPassesDisplay("ttl.passes", &ttlPasses);
+    ServerStatusMetricField<Counter64> ttlDeletedDocumentsDisplay("ttl.deletedDocuments", &ttlDeletedDocuments);
+
+
     
     class TTLMonitor : public BackgroundJob {
     public:
@@ -80,7 +91,7 @@ namespace mongo {
                 {
                     string ns = idx["ns"].String();
                     Client::WriteContext ctx( ns );
-                    NamespaceDetails* nsd = nsdetails( ns.c_str() );
+                    NamespaceDetails* nsd = nsdetails( ns );
                     if ( ! nsd ) {
                         // collection was dropped
                         continue;
@@ -94,6 +105,7 @@ namespace mongo {
                     }
 
                     n = deleteObjects( ns.c_str() , query , false , true );
+                    ttlDeletedDocuments.increment( n );
                 }
 
                 LOG(1) << "\tTTL deleted: " << n << endl;
@@ -127,6 +139,8 @@ namespace mongo {
                     dbHolder().getAllShortNames( dbs );
                 }
                 
+                ttlPasses.increment();
+
                 for ( set<string>::const_iterator i=dbs.begin(); i!=dbs.end(); ++i ) {
                     string db = *i;
                     try {

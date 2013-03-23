@@ -16,10 +16,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "../pch.h"
-#include "../db/db.h"
-#include "mongo/client/dbclientcursor.h"
-#include "tool.h"
+#include "mongo/pch.h"
 
 #include <fcntl.h>
 #include <map>
@@ -27,6 +24,12 @@
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/convenience.hpp>
+
+#include "mongo/base/initializer.h"
+#include "mongo/client/dbclientcursor.h"
+#include "mongo/db/db.h"
+#include "mongo/db/namespacestring.h"
+#include "mongo/tools/tool.h"
 
 using namespace mongo;
 
@@ -124,7 +127,8 @@ public:
         FilePtr f (fopen(outputFile.string().c_str(), "wb"));
         uassert(10262, errnoWithPrefix("couldn't open file"), f);
 
-        ProgressMeter m( conn( true ).count( coll.c_str() , BSONObj() , QueryOption_SlaveOk ) );
+        ProgressMeter m(conn(true).count(coll.c_str(), BSONObj(), QueryOption_SlaveOk));
+        m.setName("Collection File Writing Progress");
         m.setUnits("objects");
 
         doCollection(coll, f, &m);
@@ -199,7 +203,7 @@ public:
 
             // skip namespaces with $ in them only if we don't specify a collection to dump
             if ( _coll == "" && name.find( ".$" ) != string::npos ) {
-                log(1) << "\tskipping collection: " << name << endl;
+                LOG(1) << "\tskipping collection: " << name << endl;
                 continue;
             }
 
@@ -215,9 +219,12 @@ public:
               error() << "Cannot dump "  << name << ". Collection has '/' or null in the collection name." << endl;
               continue;
             }
-            
-            // Don't dump indexes
-            if ( endsWith(name.c_str(), ".system.indexes") ) {
+
+            if (NamespaceString(name).coll == "system.indexes") {
+              // Create system.indexes.bson for compatibility with pre 2.2 mongorestore
+              const string filename = name.substr( db.size() + 1 );
+              writeCollectionFile( name.c_str() , outdir / ( filename + ".bson" ) );
+              // Don't dump indexes as *.metadata.json
               continue;
             }
             
@@ -287,7 +294,7 @@ public:
                 error() << "offset is 0 for record which should be impossible" << endl;
                 break;
             }
-            log(1) << loc << endl;
+            LOG(1) << loc << endl;
             Record* rec = loc.rec();
             BSONObj obj;
             try {
@@ -324,7 +331,7 @@ public:
     }
 
     void _repair( Database* db , string ns , boost::filesystem::path outfile ){
-        NamespaceDetails * nsd = nsdetails( ns.c_str() );
+        NamespaceDetails * nsd = nsdetails( ns );
         log() << "nrecords: " << nsd->stats.nrecords 
               << " datasize: " << nsd->stats.datasize 
               << " firstExtent: " << nsd->firstExtent 
@@ -347,6 +354,7 @@ public:
 
         // init with double the docs count because we make two passes 
         ProgressMeter m( nsd->stats.nrecords * 2 );
+        m.setName("Repair Progress");
         m.setUnits("objects");
         
         Writer w( f , &m );
@@ -454,8 +462,6 @@ public:
                 }
             }
 
-            auth("local");
-
             BSONObj op = conn(true).findOne(opLogName, Query().sort("$natural", -1), 0, QueryOption_SlaveOk);
             if (op.isEmpty()) {
                 log() << "No operations in oplog. Please ensure you are connecting to a master." << endl;
@@ -470,7 +476,6 @@ public:
         string out = getParam("out");
         if ( out == "-" ) {
             if ( _db != "" && _coll != "" ) {
-                auth( _db );
                 writeCollectionStdout( _db+"."+_coll );
                 return 0;
             }
@@ -486,8 +491,12 @@ public:
         string db = _db;
 
         if ( db == "" ) {
+            if ( _coll != "" ) {
+                error() << "--db must be specified with --collection" << endl;
+                return -1;
+            }
+
             log() << "all dbs" << endl;
-            auth( "admin" );
 
             BSONObj res = conn( true ).findOne( "admin.$cmd" , BSON( "listDatabases" << 1 ) );
             if ( ! res["databases"].isABSONObj() ) {
@@ -515,7 +524,6 @@ public:
             }
         }
         else {
-            auth( db );
             go( db , root / db );
         }
 
@@ -535,7 +543,8 @@ public:
     BSONObj _query;
 };
 
-int main( int argc , char ** argv ) {
+int main( int argc , char ** argv, char ** envp ) {
+    mongo::runGlobalInitializersOrDie(argc, argv, envp);
     Dump d;
     return d.main( argc , argv );
 }

@@ -21,14 +21,17 @@
 #include <boost/filesystem/convenience.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/program_options.hpp>
+#include <boost/scoped_ptr.hpp>
+#include <boost/lexical_cast.hpp>
 #include <fcntl.h>
 #include <fstream>
 #include <set>
 
+#include "mongo/base/initializer.h"
 #include "mongo/db/namespacestring.h"
 #include "mongo/tools/tool.h"
 #include "mongo/util/mmap.h"
-#include "mongo/util/version.h"
+#include "mongo/util/stringutils.h"
 #include "mongo/db/json.h"
 #include "mongo/client/dbclientcursor.h"
 
@@ -52,16 +55,22 @@ public:
     string _curdb;
     string _curcoll;
     set<string> _users; // For restoring users with --drop
-    auto_ptr<Matcher> _opmatcher; // For oplog replay
+    scoped_ptr<Matcher> _opmatcher; // For oplog replay
+    scoped_ptr<OpTime> _oplogLimitTS; // for oplog replay (limit)
+    int _oplogEntrySkips; // oplog entries skipped
+    int _oplogEntryApplies; // oplog entries applied
     Restore() : BSONTool( "restore" ) , _drop(false) {
+        // Default values set here will show up in help text, but will supercede any default value
+        // used when calling getParam below.
         add_options()
         ("drop" , "drop each collection before import" )
         ("oplogReplay", "replay oplog for point-in-time restore")
-        ("oplogLimit", po::value<string>(), "exclude oplog entries newer than provided timestamp (epoch[:ordinal])")
+        ("oplogLimit", po::value<string>(), "include oplog entries before the provided Timestamp "
+                "(seconds[:ordinal]) during the oplog replay; the ordinal value is optional")
         ("keepIndexVersion" , "don't upgrade indexes to newest version")
         ("noOptionsRestore" , "don't restore collection options")
         ("noIndexRestore" , "don't restore indexes")
-        ("w" , po::value<int>()->default_value(1) , "minimum number of replicas per write" )
+        ("w" , po::value<int>()->default_value(0) , "minimum number of replicas per write" )
         ;
         add_hidden_options()
         ("dir", po::value<string>()->default_value("dump"), "directory to restore from")
@@ -76,11 +85,6 @@ public:
     }
 
     virtual int doRun() {
-
-        // authenticate
-        enum Auth::Level authLevel = Auth::NONE;
-        auth("", &authLevel);
-        uassert(15935, "user does not have write access", authLevel == Auth::WRITE);
 
         boost::filesystem::path root = getParam("dir");
 
@@ -98,7 +102,8 @@ public:
         _keepIndexVersion = hasParam("keepIndexVersion");
         _restoreOptions = !hasParam("noOptionsRestore");
         _restoreIndexes = !hasParam("noIndexRestore");
-        _w = getParam( "w" , 1 );
+        // Make sure default value set here stays in sync with the one set in the constructor above.
+        _w = getParam( "w" , 0 );
 
         bool doOplog = hasParam( "oplogReplay" );
 
@@ -140,9 +145,50 @@ public:
 
                     oplogLimit = oplogLimit.substr(0, i);
                 }
-                
-                if ( ! oplogLimit.empty() ) {
-                    _opmatcher.reset( new Matcher( fromjson( string("{ \"ts\": { \"$lt\": { \"$timestamp\": { \"t\": ") + oplogLimit + string(", \"i\": ") + oplogInc + string(" } } } }") ) ) );
+
+                try {
+                    _oplogLimitTS.reset(new OpTime(
+                        boost::lexical_cast<unsigned long>(oplogLimit.c_str()),
+                        boost::lexical_cast<unsigned long>(oplogInc.c_str())));
+                } catch( const boost::bad_lexical_cast& error) {
+                    log() << "Could not parse oplogLimit into Timestamp from values ( "
+                          << oplogLimit << " , " << oplogInc << " )"
+                          << endl;
+                    return -1;
+                }
+
+                if (!oplogLimit.empty()) {
+                    // Only for a replica set as master will have no-op entries so we would need to
+                    // skip them all to find the real op
+                    scoped_ptr<DBClientCursor> cursor(
+                            conn().query("local.oplog.rs", Query().sort(BSON("$natural" << -1)),
+                                         1 /*return first*/));
+                    OpTime tsOptime;
+                    // get newest oplog entry and make sure it is older than the limit to apply.
+                    if (cursor->more()) {
+                        tsOptime = cursor->next().getField("ts")._opTime();
+                        if (tsOptime > *_oplogLimitTS.get()) {
+                            log() << "The oplogLimit is not newer than"
+                                  << " the last oplog entry on the server."
+                                  << endl;
+                            return -1;
+                        }
+                    }
+
+                    BSONObjBuilder tsRestrictBldr;
+                    if (!tsOptime.isNull())
+                        tsRestrictBldr << "$gt" << tsOptime;
+                    tsRestrictBldr << "$lt" << *_oplogLimitTS.get();
+
+                    BSONObj query = BSON("ts" << tsRestrictBldr.obj());
+
+                    if (!tsOptime.isNull()) {
+                        log() << "Latest oplog entry on the server is " << tsOptime.getSecs()
+                                << ":" << tsOptime.getInc() << endl;
+                        log() << "Only applying oplog entries matching this criteria: "
+                                << query.jsonString() << endl;
+                    }
+                    _opmatcher.reset(new Matcher(query));
                 }
             }
         }
@@ -156,25 +202,36 @@ public:
          * given either a root directory that contains only a single
          * .bson file, or a single .bson file itself (a collection).
          */
-        drillDown(root, _db != "", _coll != "", true);
+        drillDown(root, _db != "", _coll != "", !(_oplogLimitTS.get() == NULL), true);
 
         // should this happen for oplog replay as well?
-        conn().getLastError(_db == "" ? "admin" : _db);
+        string err = conn().getLastError(_db == "" ? "admin" : _db);
+        if (!err.empty()) {
+            error() << err;
+        }
 
         if (doOplog) {
             log() << "\t Replaying oplog" << endl;
             _curns = OPLOG_SENTINEL;
             processFile( root / "oplog.bson" );
+            log() << "Applied " << _oplogEntryApplies << " oplog entries out of "
+                  << _oplogEntryApplies + _oplogEntrySkips << " (" << _oplogEntrySkips
+                  << " skipped)." << endl;
         }
 
         return EXIT_CLEAN;
     }
 
-    void drillDown( boost::filesystem::path root, bool use_db, bool use_coll, bool top_level=false ) {
-        log(2) << "drillDown: " << root.string() << endl;
+    void drillDown( boost::filesystem::path root,
+                    bool use_db,
+                    bool use_coll,
+                    bool oplogReplayLimit,
+                    bool top_level=false) {
+        bool json_metadata = false;
+        LOG(2) << "drillDown: " << root.string() << endl;
 
         // skip hidden files and directories
-        if (root.leaf()[0] == '.' && root.leaf() != ".")
+        if (root.leaf().string()[0] == '.' && root.leaf().string() != ".")
             return;
 
         if ( is_directory( root ) ) {
@@ -203,6 +260,11 @@ public:
                     }
                 }
 
+                // Ignore system.indexes.bson if we have *.metadata.json files
+                if ( endsWith( p.string().c_str() , ".metadata.json" ) ) {
+                    json_metadata = true;
+                }
+
                 // don't insert oplog
                 if (top_level && !use_db && p.leaf() == "oplog.bson")
                     continue;
@@ -210,12 +272,13 @@ public:
                 if ( p.leaf() == "system.indexes.bson" ) {
                     indexes = p;
                 } else {
-                    drillDown(p, use_db, use_coll);
+                    drillDown(p, use_db, use_coll, oplogReplayLimit);
                 }
             }
 
-            if (!indexes.empty())
-                drillDown(indexes, use_db, use_coll);
+            if (!indexes.empty() && !json_metadata) {
+                drillDown(indexes, use_db, use_coll, oplogReplayLimit);
+            }
 
             return;
         }
@@ -243,25 +306,27 @@ public:
             ns += _db;
         }
         else {
-            string dir = root.branch_path().string();
-            if ( dir.find( "/" ) == string::npos )
-                ns += dir;
-            else
-                ns += dir.substr( dir.find_last_of( "/" ) + 1 );
-
-            if ( ns.size() == 0 )
+            ns = root.parent_path().filename().string();
+            if (ns.empty())
                 ns = "test";
         }
 
         verify( ns.size() );
 
-        string oldCollName = root.leaf(); // Name of the collection that was dumped from
+        string oldCollName = root.leaf().string(); // Name of the collection that was dumped from
         oldCollName = oldCollName.substr( 0 , oldCollName.find_last_of( "." ) );
         if (use_coll) {
             ns += "." + _coll;
         }
         else {
             ns += "." + oldCollName;
+        }
+
+        if (oplogReplayLimit) {
+            error() << "The oplogLimit option cannot be used if "
+                    << "normal databases/collections exist in the dump directory."
+                    << endl;
+            exit(EXIT_FAILURE);
         }
 
         log() << "\tgoing into namespace [" << ns << "]" << endl;
@@ -287,7 +352,7 @@ public:
             if (!boost::filesystem::exists(metadataFile.string())) {
                 // This is fine because dumps from before 2.1 won't have a metadata file, just print a warning.
                 // System collections shouldn't have metadata so don't warn if that file is missing.
-                if (!startsWith(metadataFile.leaf(), "system.")) {
+                if (!startsWith(metadataFile.leaf().string(), "system.")) {
                     log() << metadataFile.string() << " not found. Skipping." << endl;
                 }
             } else {
@@ -341,6 +406,7 @@ public:
             
             // exclude operations that don't meet (timestamp) criteria
             if ( _opmatcher.get() && ! _opmatcher->matches ( obj ) ) {
+                _oplogEntrySkips++;
                 return;
             }
 
@@ -350,13 +416,17 @@ public:
             BSONObj cmd = BSON( "applyOps" << BSON_ARRAY( obj ) );
             BSONObj out;
             conn().runCommand(db, cmd, out);
+            _oplogEntryApplies++;
 
             // wait for ops to propagate to "w" nodes (doesn't warn if w used without replset)
-            if ( _w > 1 ) {
-                conn().getLastError(db, false, false, _w);
+            if ( _w > 0 ) {
+                string err = conn().getLastError(db, false, false, _w);
+                if (!err.empty()) {
+                    error() << "Error while replaying oplog: " << err;
+                }
             }
         }
-        else if ( endsWith( _curns.c_str() , ".system.indexes" )) {
+        else if (NamespaceString(_curns).coll == "system.indexes") {
             createIndex(obj, true);
         }
         else if (_drop && endsWith(_curns.c_str(), ".system.users") && _users.count(obj["user"].String())) {
@@ -369,8 +439,11 @@ public:
             conn().insert( _curns , obj );
 
             // wait for insert to propagate to "w" nodes (doesn't warn if w used without replset)
-            if ( _w > 1 ) {
-                conn().getLastErrorDetailed(_curdb, false, false, _w);
+            if ( _w > 0 ) {
+                string err = conn().getLastError(_curdb, false, false, _w);
+                if (!err.empty()) {
+                    error() << err;
+                }
             }
         }
     }
@@ -474,7 +547,7 @@ private:
             }
         }
         BSONObj o = bo.obj();
-        log(0) << "\tCreating index: " << o << endl;
+        LOG(0) << "\tCreating index: " << o << endl;
         conn().insert( _curdb + ".system.indexes" ,  o );
 
         // We're stricter about errors for indexes than for regular data
@@ -503,7 +576,8 @@ private:
     }
 };
 
-int main( int argc , char ** argv ) {
+int main( int argc , char ** argv, char ** envp ) {
+    mongo::runGlobalInitializersOrDie(argc, argv, envp);
     Restore restore;
     return restore.main( argc , argv );
 }
