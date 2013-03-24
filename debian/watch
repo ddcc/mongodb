@@ -1,7 +1,4 @@
-# Compulsory line, this is a version 3 file
 version=3
-
-# examination of the downloads page content as the directory listing is not allowed anymore
-# Forced regexp to match only to the current stable release
-http://www.mongodb.org/display/DOCS/Downloads \
-  http://.*mongodb\.org/src/mongodb-src-r(1\.6[\d\.]+)\.tar\.gz
+opts=uversionmangle=s/(\d)[_\.\-\+]?((RC|rc|pre|dev|BETA|beta|alpha|b|a)[\-\.]?\d*)$/$1~$2/ \
+http://www.mongodb.org/downloads .*/mongodb-src-r(\d.*)\.(?:tgz|tar\.(?:gz|bz2|xz))
+# Bart Martens <bartm@debian.org>  Sun, 10 Feb 2013 07:18:34 +0000
