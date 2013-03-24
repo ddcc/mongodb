@@ -1,3 +1,10 @@
+mongodb (1:2.4.1-2) unstable; urgency=low
+
+  * set version of mongodb-server in mongodb metapackage
+    (Closes:#703580)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Sun, 24 Mar 2013 19:13:21 +0100
+
 mongodb (1:2.4.1-1) unstable; urgency=low
 
   * New upstream release 2.4.1

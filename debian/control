@@ -11,7 +11,7 @@ Homepage: http://www.mongodb.org
 
 Package: mongodb
 Architecture: i386 amd64
-Depends: mongodb-server, mongodb-dev, ${shlibs:Depends}, ${misc:Depends}
+Depends: mongodb-server (>= 1:2.4.1-2), mongodb-dev, ${shlibs:Depends}, ${misc:Depends}
 Description: object/document-oriented database (metapackage)
  MongoDB is a high-performance, open source, schema-free
  document-oriented  data store that's easy to deploy, manage
