@@ -2,6 +2,8 @@ mongodb (1:2.4.1-2) unstable; urgency=low
 
   * set version of mongodb-server in mongodb metapackage
     (Closes:#703580)
+  * [d041ec8] fixes parsing of parallel option, (Closes:#702797)
+  * [348ff81] update watch file, thanks Bart, (Closes:#688781)
 
  -- Antonin Kral <A.Kral@sh.cvut.cz>  Sun, 24 Mar 2013 19:13:21 +0100
 
