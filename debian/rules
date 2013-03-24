@@ -14,7 +14,7 @@ ifneq (,$(findstring nostrip,$(DEB_BUILD_OPTIONS)))
 	DEB_SCONS_OPTIONS := --d=DEBUGBUILD
 endif
 ifneq (,$(findstring parallel,$(DEB_BUILD_OPTIONS)))
-       PROCS=$(subst parallel=,,$(DEB_BUILD_OPTIONS))
+       PROCS=$(patsubst parallel=%,%,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
        DEB_SCONS_OPTIONS += -j$(PROCS)
 endif
 
