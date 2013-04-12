@@ -14,6 +14,7 @@ Build-Depends:
  libboost-program-options-dev,
  libboost-thread-dev,
  libgoogle-perftools-dev,
+ libpcap-dev,
  libpcre3,
  libpcre3-dev,
  libreadline-dev,
