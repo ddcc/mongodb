@@ -13,9 +13,13 @@ Build-Depends:
  libboost-filesystem-dev,
  libboost-program-options-dev,
  libboost-thread-dev,
+ libgoogle-perftools-dev,
  libpcre3,
  libpcre3-dev,
  libreadline-dev,
+ libsnappy-dev,
+ libstemmer-dev,
+ libv8-dev,
  python-pymongo,
  scons
 Standards-Version: 3.9.3
