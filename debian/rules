@@ -19,8 +19,9 @@ ifneq (,$(findstring parallel,$(DEB_BUILD_OPTIONS)))
 endif
 
 DEB_SCONS_BUILD_TARGET = all
-DEB_SCONS_INSTALL_OPTIONS += --prefix=$(CURDIR)/debian/tmp/usr --full
-DEB_SCONS_CHECK_TARGET = --smokedbprefix=$(CURDIR)/debian/tmp-test smoke
+DEB_SCONS_BUILD_OPTIONS = --use-system-all
+DEB_SCONS_INSTALL_OPTIONS += --prefix=$(CURDIR)/debian/tmp/usr --full --use-system-all
+DEB_SCONS_CHECK_TARGET = --smokedbprefix=$(CURDIR)/debian/tmp-test smoke --use-system-all
 
 clean::
 	find . -name "*.pyc" -delete
