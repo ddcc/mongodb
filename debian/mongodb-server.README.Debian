@@ -1,0 +1,26 @@
+MongoDB for Debian
+------------------
+
+Database at different location from upstream
+
+  To be consistent with the Debian Policy, the mongodb-server package puts
+  the databases under the /var/lib/mongodb directory instead of what
+  upstream uses in its documentation (namely, /data/db).
+
+  You can change this on your installation by editing the configuration file
+  /etc/mongodb.conf in the dbpath directive.
+
+Binds only to localhost
+  
+  As mongo needs some tuning to become secure, it binds to localhost by
+  default. You can change this behavior in /etc/mongodb.conf by
+  editing/removing/commenting out bind_ip line.
+
+Why only for x86 and amd64?
+
+  The mongodb server depends on both little-endianness and unaligned memory
+  access, which I believe means it can only work on i386 and amd64. We believe
+  that the mongodb will be useful even it is not available for all Debian
+  supported platforms.
+
+ -- Rogério Brito <rbrito@ime.usp.br>, Fri, 12 Apr 2013 22:10:41 -0300
