@@ -16,10 +16,12 @@
 
 #include "mongo/db/commands/authentication_commands.h"
 
+#include <boost/scoped_ptr.hpp>
 #include <string>
 #include <vector>
 
 #include "mongo/base/status.h"
+#include "mongo/client/sasl_client_authenticate.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
@@ -29,6 +31,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/platform/random.h"
+#include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/md5.hpp"
 
 namespace mongo {
@@ -53,8 +56,10 @@ namespace mongo {
 
     class CmdGetNonce : public Command {
     public:
-        CmdGetNonce() : Command("getnonce") {
-            _random = SecureRandom::create();
+        CmdGetNonce() :
+            Command("getnonce"),
+            _randMutex("getnonce"),
+            _random(SecureRandom::create()) {
         }
 
         virtual bool requiresAuth() { return false; }
@@ -68,7 +73,7 @@ namespace mongo {
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {} // No auth required
         bool run(const string&, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            nonce64 n = _random->nextInt64();
+            nonce64 n = getNextNonce();
             stringstream ss;
             ss << hex << n;
             result.append("nonce", ss.str() );
@@ -77,7 +82,14 @@ namespace mongo {
             return true;
         }
 
-        SecureRandom* _random;
+    private:
+        nonce64 getNextNonce() {
+            SimpleMutex::scoped_lock lk(_randMutex);
+            return _random->nextInt64();
+        }
+
+        SimpleMutex _randMutex;  // Synchronizes accesses to _random.
+        boost::scoped_ptr<SecureRandom> _random;
     } cmdGetNonce;
 
     bool CmdAuthenticate::run(const string& dbname , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
@@ -92,6 +104,7 @@ namespace mongo {
             if (dbname != StringData("local", StringData::LiteralTag()) ||
                 user != internalSecurity.user) {
                 errmsg = _nonceAuthenticateCommandsDisabledMessage;
+                result.append(saslCommandCodeFieldName, ErrorCodes::AuthenticationFailed);
                 return false;
             }
         }
@@ -105,6 +118,7 @@ namespace mongo {
                   << endl;
             errmsg = "auth fails";
             sleepmillis(10);
+            result.append(saslCommandCodeFieldName, ErrorCodes::AuthenticationFailed);
             return false;
         }
 
@@ -132,6 +146,7 @@ namespace mongo {
                 log() << "auth: bad nonce received or getnonce not called. could be a driver bug or a security attack. db:" << dbname << endl;
                 errmsg = "auth fails";
                 sleepmillis(30);
+                result.append(saslCommandCodeFieldName, ErrorCodes::AuthenticationFailed);
                 return false;
             }
         }
@@ -143,6 +158,7 @@ namespace mongo {
         if (!status.isOK()) {
             log() << status.reason() << std::endl;
             errmsg = "auth fails";
+            result.append(saslCommandCodeFieldName, ErrorCodes::AuthenticationFailed);
             return false;
         }
         pwd = userObj["pwd"].String();
@@ -163,6 +179,7 @@ namespace mongo {
         if ( key != computed ) {
             log() << "auth: key mismatch " << user << ", ns:" << dbname << endl;
             errmsg = "auth fails";
+            result.append(saslCommandCodeFieldName, ErrorCodes::AuthenticationFailed);
             return false;
         }
 

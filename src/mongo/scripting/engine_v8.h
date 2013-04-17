@@ -63,17 +63,18 @@ namespace mongo {
          */
         void track(v8::Persistent<v8::Value> instanceHandle, _ObjType* instance) {
             TrackedPtr* collectionHandle = new TrackedPtr(instance, this);
+            _container.insert(collectionHandle);
             instanceHandle.MakeWeak(collectionHandle, deleteOnCollect);
         }
         /**
-         * Free any remaining objects which are being tracked.  Invoked when
-         * the V8Scope is destructed.
+         * Free any remaining objects and their TrackedPtrs.  Invoked when the
+         * V8Scope is destructed.
          */
         ~ObjTracker() {
             if (!_container.empty())
                 LOG(1) << "freeing " << _container.size() << " uncollected "
                        << typeid(_ObjType).name() << " objects" << endl;
-            typename set<_ObjType*>::iterator it = _container.begin();
+            typename set<TrackedPtr*>::iterator it = _container.begin();
             while (it != _container.end()) {
                 delete *it;
                 _container.erase(it++);
@@ -90,7 +91,7 @@ namespace mongo {
             TrackedPtr(_ObjType* instance, ObjTracker<_ObjType>* tracker) :
                 _objPtr(instance),
                 _tracker(tracker) { }
-            _ObjType* _objPtr;
+            scoped_ptr<_ObjType> _objPtr;
             ObjTracker<_ObjType>* _tracker;
         };
 
@@ -102,14 +103,13 @@ namespace mongo {
          */
         static void deleteOnCollect(v8::Persistent<v8::Value> instanceHandle, void* rawData) {
             TrackedPtr* trackedPtr = static_cast<TrackedPtr*>(rawData);
-            trackedPtr->_tracker->_container.erase(trackedPtr->_objPtr);
-            delete trackedPtr->_objPtr;
+            trackedPtr->_tracker->_container.erase(trackedPtr);
             delete trackedPtr;
             instanceHandle.Dispose();
         }
 
-        // container for all instances of the tracked _ObjType
-        set<_ObjType*> _container;
+        // container for all TrackedPtrs created by this ObjTracker instance
+        set<TrackedPtr*> _container;
     };
 
     /**
@@ -213,8 +213,6 @@ namespace mongo {
         /**
          * Convert BSON types to v8 Javascript types
          */
-        v8::Local<v8::Object> mongoToV8(const mongo::BSONObj& m, bool array = 0,
-                                        bool readOnly = false);
         v8::Persistent<v8::Object> mongoToLZV8(const mongo::BSONObj& m, bool readOnly = false);
         v8::Handle<v8::Value> mongoToV8Element(const BSONElement& f, bool readOnly = false);
 
@@ -447,7 +445,7 @@ namespace mongo {
         V8Scope* _scope;
         BSONObj _obj;
         bool _modified;
-        list<string> _extra;
+        bool _readOnly;
         set<string> _removed;
     };
 
