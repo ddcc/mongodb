@@ -1,3 +1,4 @@
+debian/tmp/usr/bin/bsondump
 debian/tmp/usr/bin/mongo
 debian/tmp/usr/bin/mongodump
 debian/tmp/usr/bin/mongoexport
