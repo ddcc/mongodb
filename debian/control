@@ -51,7 +51,8 @@ Description: object/document-oriented database (metapackage)
  High performance, scalability, and reasonable depth of
  functionality are the goals for the project.
  .
- This is a metapackage that depends on all the mongodb parts.
+ This is a convenience metapackage that depends on all the mongodb parts:
+ the server, the clients and the development files (headers and library).
 
 Package: mongodb-server
 Architecture: amd64 i386
@@ -132,4 +133,4 @@ Description: object/document-oriented database (development)
  High performance, scalability, and reasonable depth of
  functionality are the goals for the project.
  .
- Development headers and libraries.
+ This package contains the development headers and libraries.
