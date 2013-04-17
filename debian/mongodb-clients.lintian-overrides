@@ -1,0 +1,4 @@
+# There is a bug in grotty when table spans across page border
+
+mongodb-clients: manpage-has-errors-from-man usr/share/man/man1/mongo.1.gz <standard input> (<standard input>):4509: character above first line discarded
+mongodb-clients: manpage-has-errors-from-man usr/share/man/man1/mongostat.1.gz <standard input> (<standard input>):3658: character above first line discarded
