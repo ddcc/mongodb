@@ -435,7 +435,7 @@ DB.prototype.repairDatabase = function() {
 
 DB.prototype.help = function() {
     print("DB methods:");
-    print("\tdb.addUser(username, password[, readOnly=false])");
+    print("\tdb.addUser(userDocument)");
     print("\tdb.adminCommand(nameOrDocument) - switches to 'admin' db, and runs command [ just calls db.runCommand(...) ]");
     print("\tdb.auth(username, password)");
     print("\tdb.cloneDatabase(fromhost)");
@@ -761,7 +761,7 @@ DB.prototype.killOP = DB.prototype.killOp;
 
 DB.tsToSeconds = function(x){
     if ( x.t && x.i )
-        return x.t / 1000;
+        return x.t;
     return x / 4294967296; // low 32 bits are ordinal #s within a second
 }
 
