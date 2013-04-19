@@ -13,7 +13,7 @@ Build-Depends:
  libboost-filesystem-dev,
  libboost-program-options-dev,
  libboost-thread-dev,
- libgoogle-perftools-dev,
+ libgoogle-perftools-dev [linux-any],
  libpcap-dev,
  libpcre3,
  libpcre3-dev,
