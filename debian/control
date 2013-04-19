@@ -55,7 +55,7 @@ Description: object/document-oriented database (metapackage)
  the server, the clients and the development files (headers and library).
 
 Package: mongodb-server
-Architecture: amd64 i386
+Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386
 Depends:
  adduser,
  mongodb-clients,
@@ -82,7 +82,7 @@ Description: object/document-oriented database (server package)
  This package contains the server itself.
 
 Package: mongodb-clients
-Architecture: amd64 i386
+Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386
 Depends:
  ${misc:Depends},
  ${shlibs:Depends}
@@ -108,7 +108,7 @@ Description: object/document-oriented database (client apps)
 
 Package: mongodb-dev
 Section: libdevel
-Architecture: amd64 i386
+Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386
 Depends:
  libboost-dev,
  ${misc:Depends},
