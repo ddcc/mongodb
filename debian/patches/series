@@ -1,5 +1,5 @@
 0001-Use-libstemmer-when-using-system-libraries.patch
-0001-Treate-kfreebsd-like-linux-in-most-respects.patch
-0002-kfreebsd-has-dev-urandom.patch
-0003-All-platforms-but-Windows-find-hash-in-std-tr1.patch
-0004-kfreebsd-does-not-have-sys-prctl.h.patch
+0002-Treate-kfreebsd-like-linux-in-most-respects.patch
+0003-kfreebsd-has-dev-urandom.patch
+0004-All-platforms-but-Windows-find-hash-in-std-tr1.patch
+0005-kfreebsd-does-not-have-sys-prctl.h.patch

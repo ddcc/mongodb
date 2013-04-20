@@ -1,12 +1,13 @@
-From 63d6800e630c3c528076db31d5e7b42e6fa316f2 Mon Sep 17 00:00:00 2001
 From: Jeff Epler <jepler@unpythonic.net>
 Date: Fri, 19 Apr 2013 08:16:31 -0500
-Subject: [PATCH 3/6] All platforms but Windows find hash in std::tr1
+Subject: All platforms but Windows find hash in std::tr1
 
 ---
  src/third_party/s2/hash.h |    4 ++--
  1 file changed, 2 insertions(+), 2 deletions(-)
 
+diff --git a/src/third_party/s2/hash.h b/src/third_party/s2/hash.h
+index a255f2c..d399bb8 100644
 --- a/src/third_party/s2/hash.h
 +++ b/src/third_party/s2/hash.h
 @@ -7,10 +7,10 @@

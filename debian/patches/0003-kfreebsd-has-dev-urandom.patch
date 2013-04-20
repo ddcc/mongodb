@@ -1,15 +1,16 @@
-From 774020a83b892307d066edd1d7f1f286c247b182 Mon Sep 17 00:00:00 2001
 From: Jeff Epler <jepler@unpythonic.net>
 Date: Fri, 19 Apr 2013 08:16:19 -0500
-Subject: [PATCH 2/6] kfreebsd has /dev/urandom
+Subject: kfreebsd has /dev/urandom
 
 ---
  src/mongo/platform/random.cpp |    2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)
 
+diff --git a/src/mongo/platform/random.cpp b/src/mongo/platform/random.cpp
+index d1a620d..04f2826 100644
 --- a/src/mongo/platform/random.cpp
 +++ b/src/mongo/platform/random.cpp
-@@ -105,7 +105,7 @@
+@@ -105,7 +105,7 @@ namespace mongo {
          return new WinSecureRandom();
      }
  
