@@ -1,0 +1,27 @@
+From d24210674ea68032343db19027c6aa6e5cba3429 Mon Sep 17 00:00:00 2001
+From: Jeff Epler <jepler@unpythonic.net>
+Date: Fri, 19 Apr 2013 08:16:47 -0500
+Subject: [PATCH 4/6] kfreebsd does not have <sys/prctl.h>
+
+This change was reviewed by Pino Toscano in:
+
+    https://github.com/rbrito/mongo-debian/pull/2/files#r3884772
+
+and edited by Rogério Theodoro de Brito accordingly.
+
+---
+ src/third_party/v8/src/platform-linux.cc |    2 ++
+ 1 file changed, 2 insertions(+)
+
+--- a/src/third_party/v8/src/platform-linux.cc
++++ b/src/third_party/v8/src/platform-linux.cc
+@@ -31,7 +31,9 @@
+ #include <pthread.h>
+ #include <semaphore.h>
+ #include <signal.h>
++#ifdef __linux__
+ #include <sys/prctl.h>
++#endif
+ #include <sys/time.h>
+ #include <sys/resource.h>
+ #include <sys/syscall.h>

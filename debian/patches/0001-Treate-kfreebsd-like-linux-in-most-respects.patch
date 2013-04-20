@@ -1,0 +1,29 @@
+From be5026fb86bdfb7502904ddf7a20f2f2351dbb5a Mon Sep 17 00:00:00 2001
+From: Jeff Epler <jepler@unpythonic.net>
+Date: Fri, 19 Apr 2013 08:15:18 -0500
+Subject: [PATCH 1/6] Treate kfreebsd like linux in most respects
+
+---
+ SConstruct |    4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+--- a/SConstruct
++++ b/SConstruct
+@@ -326,6 +326,8 @@
+ 
+ if env['PYSYSPLATFORM'] == 'linux3':
+     env['PYSYSPLATFORM'] = 'linux2'
++if 'gnukfreebsd' in env['PYSYSPLATFORM']:
++    env['PYSYSPLATFORM'] = 'linux2'
+ if 'freebsd' in env['PYSYSPLATFORM']:
+     env['PYSYSPLATFORM'] = 'freebsd'
+ 
+@@ -506,7 +508,7 @@
+        env.Append( EXTRACPPPATH=filterExists(["/sw/include" , "/opt/local/include"]) )
+        env.Append( EXTRALIBPATH=filterExists(["/sw/lib/", "/opt/local/lib"]) )
+ 
+-elif os.sys.platform.startswith("linux"):
++elif os.sys.platform.startswith("linux") or os.sys.platform.startswith("gnukfreebsd"):
+     linux = True
+     platform = "linux"
+ 
