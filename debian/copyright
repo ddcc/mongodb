@@ -31,11 +31,19 @@ License:
     AGPL 3.0
     http://www.fsf.org/licensing/licenses/agpl-3.0.html
 
-The Debian packaging is Copyright (c) 2009, 2010, Kristina Chodorow <kristina@10gen.com>, Antonin Kral <A.Kral@bobek.cz> and Roberto C. Sanchez <roberto@connexer.com>. It is licensed under the AGPL, but will be relicensed under Apache License 2.0.
+The Debian packaging is Copyright (c) 2009, 2010, Kristina Chodorow
+<kristina@10gen.com>, Antonin Kral <A.Kral@bobek.cz> and Roberto C. Sanchez
+<roberto@connexer.com>. It is licensed under the AGPL, but will be
+relicensed under Apache License 2.0.
 
-Some parts of MongoDB are licensed under the AGPL, others are Apache 2.0.  Please see individual source files for details.
+Some parts of MongoDB are licensed under the AGPL, others are Apache 2.0.
+Please see individual source files for details.
 
-MongoDB uses third-party libraries or other resources that may be distributed under licenses different than the MongoDB software. Feel free to open a bug report if you find component which has different license and is not covered here. Your use of the source code for the these components is subject to the terms and conditions of the following licenses.
+MongoDB uses third-party libraries or other resources that may be
+distributed under licenses different than the MongoDB software. Feel free to
+open a bug report if you find component which has different license and is
+not covered here. Your use of the source code for the these components is
+subject to the terms and conditions of the following licenses.
 
 License Notice for SCONS
 ------------------------
