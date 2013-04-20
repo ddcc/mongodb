@@ -15,7 +15,6 @@ Build-Depends:
  libboost-thread-dev,
  libgoogle-perftools-dev [linux-any],
  libpcap-dev,
- libpcre3,
  libpcre3-dev,
  libreadline-dev,
  libsnappy-dev,
