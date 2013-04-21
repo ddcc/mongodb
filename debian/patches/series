@@ -3,3 +3,6 @@
 0003-kfreebsd-has-dev-urandom.patch
 0004-All-platforms-but-Windows-find-hash-in-std-tr1.patch
 0005-kfreebsd-does-not-have-sys-prctl.h.patch
+0006-Update-SConscript.client-to-use-installAs-instead-of.patch
+0007-ARM-support-for-ASM-operations-in-MongoDB.patch
+0008-Fix-ARM-alignment-problems.patch
