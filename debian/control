@@ -28,7 +28,7 @@ Vcs-Browser: https://github.com/bobek/mongo-debian
 Homepage: http://www.mongodb.org
 
 Package: mongodb
-Architecture: all
+Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386
 Depends:
  mongodb-dev,
  mongodb-server (>= 1:2.4.1-2),
