@@ -1,6 +1,6 @@
 Source: mongodb
 Section: database
-Priority: optional
+Priority: extra
 Maintainer: Antonin Kral <A.Kral@sh.cvut.cz>
 Uploaders:
  Roberto C. Sanchez <roberto@connexer.com>,
