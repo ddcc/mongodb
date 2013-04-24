@@ -80,7 +80,7 @@ namespace mongo {
 
             string key = toSTLString(name);
             BSONHolder* holder = unwrapHolder(info.Holder());
-            if (holder->_removed.count(key))
+            if (!holder || holder->_removed.count(key))
                 return handle_scope.Close(v8::Handle<v8::Value>());
 
             BSONObj obj = holder->_obj;
@@ -100,7 +100,7 @@ namespace mongo {
             if (elmt.type() == mongo::Object || elmt.type() == mongo::Array) {
               // if accessing a subobject, it may get modified and base obj would not know
               // have to set base as modified, which means some optim is lost
-              unwrapHolder(info.Holder())->_modified = true;
+              holder->_modified = true;
             }
         }
         catch (const DBException &dbEx) {
@@ -143,6 +143,7 @@ namespace mongo {
                                           const v8::AccessorInfo& info) {
         string key = toSTLString(name);
         BSONHolder* holder = unwrapHolder(info.Holder());
+        if (!holder) return v8::Handle<v8::Value>();
         holder->_removed.erase(key);
         holder->_modified = true;
 
@@ -154,6 +155,7 @@ namespace mongo {
     static v8::Handle<v8::Array> namedEnumerator(const v8::AccessorInfo &info) {
         v8::HandleScope handle_scope;
         BSONHolder* holder = unwrapHolder(info.Holder());
+        if (!holder) return v8::Handle<v8::Array>();
         BSONObj obj = holder->_obj;
         v8::Handle<v8::Array> out = v8::Array::New();
         int outIndex = 0;
@@ -191,6 +193,7 @@ namespace mongo {
         v8::HandleScope handle_scope;
         string key = toSTLString(name);
         BSONHolder* holder = unwrapHolder(info.Holder());
+        if (!holder) return v8::Handle<v8::Boolean>();
         holder->_removed.insert(key);
         holder->_modified = true;
 
@@ -213,6 +216,7 @@ namespace mongo {
             V8Scope* scope = (V8Scope*)(scp->Value());
 
             BSONHolder* holder = unwrapHolder(info.Holder());
+            if (!holder) return v8::Handle<v8::Value>();
             if (holder->_removed.count(key))
                 return handle_scope.Close(v8::Handle<v8::Value>());
 
@@ -226,7 +230,7 @@ namespace mongo {
             if (elmt.type() == mongo::Object || elmt.type() == mongo::Array) {
                 // if accessing a subobject, it may get modified and base obj would not know
                 // have to set base as modified, which means some optim is lost
-                unwrapHolder(info.Holder())->_modified = true;
+                holder->_modified = true;
             }
         }
         catch (const DBException &dbEx) {
@@ -242,6 +246,7 @@ namespace mongo {
     v8::Handle<v8::Boolean> indexedDelete(uint32_t index, const v8::AccessorInfo& info) {
         string key = str::stream() << index;
         BSONHolder* holder = unwrapHolder(info.Holder());
+        if (!holder) return v8::Handle<v8::Boolean>();
         holder->_removed.insert(key);
         holder->_modified = true;
 
@@ -285,6 +290,7 @@ namespace mongo {
                                             const v8::AccessorInfo& info) {
         string key = str::stream() << index;
         BSONHolder* holder = unwrapHolder(info.Holder());
+        if (!holder) return v8::Handle<v8::Value>();
         holder->_removed.erase(key);
         holder->_modified = true;
 
@@ -1648,15 +1654,18 @@ namespace mongo {
         if (o->Has(v8::String::New("_bson"))) {
             originalBSON = unwrapBSONObj(o);
             BSONHolder* holder = unwrapHolder(o);
-            if (!holder->_modified) {
+            if (holder && !holder->_modified) {
                 // object was not modified, use bson as is
                 return originalBSON;
             }
         }
 
         BSONObjBuilder b;
+
+        // We special case the _id field in top-level objects and move it to the front.
+        // This matches other drivers behavior and makes finding the _id field quicker in BSON.
         if (depth == 0) {
-            if (o->HasRealNamedProperty(v8::String::New("_id"))) {
+            if (o->HasOwnProperty(v8::String::New("_id"))) {
                 v8ToMongoElement(b, "_id", o->Get(v8::String::New("_id")), 0, &originalBSON);
             }
         }
@@ -1667,7 +1676,7 @@ namespace mongo {
             v8::Local<v8::Value> value = o->Get(name);
             const string sname = toSTLString(name);
             if (depth == 0 && sname == "_id")
-                continue;
+                continue; // already handled above
 
             v8ToMongoElement(b, sname, value, depth + 1, &originalBSON);
         }

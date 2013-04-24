@@ -163,6 +163,33 @@ namespace mongo {
         ::_exit(EXIT_ABRUPT);
     }
 
+#ifndef _WIN32
+    sigset_t asyncSignals;
+
+    void signalProcessingThread() {
+        while (true) {
+            int actualSignal = 0;
+            int status = sigwait( &asyncSignals, &actualSignal );
+            fassert(16779, status == 0);
+            switch (actualSignal) {
+            case SIGUSR1:
+                // log rotate signal
+                fassert(16780, rotateLogs());
+                break;
+            default:
+                // no one else should be here
+                fassertFailed(16778);
+                break;
+            }
+        }
+    }
+
+    void startSignalProcessingThread() {
+        verify( pthread_sigmask( SIG_SETMASK, &asyncSignals, 0 ) == 0 );
+        boost::thread it( signalProcessingThread );
+    }
+#endif  // not _WIN32
+
     void setupSignalHandlers() {
         setupSIGTRAPforGDB();
         setupCoreSignals();
@@ -181,6 +208,12 @@ namespace mongo {
 #endif
 #if defined(SIGPIPE)
         signal( SIGPIPE , SIG_IGN );
+#endif
+
+#ifndef _WIN32
+        sigemptyset( &asyncSignals );
+        sigaddset( &asyncSignals, SIGUSR1 );
+        startSignalProcessingThread();
 #endif
 
         setWindowsUnhandledExceptionFilter();
