@@ -1,3 +1,31 @@
+mongodb (1:2.4.3-1) unstable; urgency=low
+
+  [ Jeff Epler ]
+  * [2a15682] kfreebsd does not have tcmalloc
+  * [b66002a] enable building packages on kfreebsd
+
+  [ Rogério Brito ]
+  * [44bbe5b] debian/control: Make mongodb arch all, instead of
+    arch-specific.
+  * [50e5786] debian/patches: Add preparation for kFreeBSD.
+  * [164ec3b] debian/patches: Regenerate the patches from patch queue.
+    Thanks to Pino Toscano and Jeff Epler (Closes: #703061)
+  * [b960dca] debian/control: Remove libpcre3 from build-depends.
+  * [8e53a7e] debian/copyright: Wrap long lines.
+  * [f33d197] debian/control: Make the mongodb metapackage arch-dependent.
+  * [1771ce7] debian/control: Set priority of packages to extra.
+  * [198f7bb] debian/control: Mark libgoogle-perftools-dev as
+    linux-amd64 linux-i386.
+  * [02826cb] debian/patches: Take some patches for ARM from Ubuntu.
+  * [bfa912d] debian/patches: Remove patch that substituted install with
+    installs.
+
+  [ Antonin Kral ]
+  * [a618d03] new upstream release
+    https://jira.mongodb.org/browse/SERVER/fixforversion/12426
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Wed, 24 Apr 2013 21:10:53 +0200
+
 mongodb (1:2.4.2-1) unstable; urgency=low
 
   * new upstream release
