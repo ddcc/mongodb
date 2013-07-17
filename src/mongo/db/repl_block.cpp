@@ -100,6 +100,7 @@ namespace mongo {
                 
                 _currentlyUpdatingCache = true;
                 for ( list< pair<BSONObj,BSONObj> >::iterator i=todo.begin(); i!=todo.end(); i++ ) {
+                    Client::GodScope gs;
                     db.update( NS , i->first , i->second , true );
                 }
                 _currentlyUpdatingCache = false;
@@ -168,7 +169,9 @@ namespace mongo {
         }
 
         bool replicatedToNum(OpTime& op, int w) {
-            if ( w <= 1 || ! _isMaster() )
+            massert( 16805, "replicatedToNum called but not master anymore", _isMaster() );
+
+            if ( w <= 1 )
                 return true;
 
             w--; // now this is the # of slaves i need
@@ -177,7 +180,11 @@ namespace mongo {
         }
 
         bool waitForReplication(OpTime& op, int w, int maxSecondsToWait) {
-            if ( w <= 1 || ! _isMaster() )
+            static const int noLongerMasterAssertCode = 16806;
+            massert(noLongerMasterAssertCode, 
+                    "waitForReplication called but not master anymore", _isMaster() );
+
+            if ( w <= 1 )
                 return true;
 
             w--; // now this is the # of slaves i need
@@ -188,8 +195,13 @@ namespace mongo {
             
             scoped_lock mylk(_mutex);
             while ( ! _replicatedToNum_slaves_locked( op, w ) ) {
-                if ( ! _threadsWaitingForReplication.timed_wait( mylk.boost() , xt ) )
+                if ( ! _threadsWaitingForReplication.timed_wait( mylk.boost() , xt ) ) {
+                    massert(noLongerMasterAssertCode,
+                            "waitForReplication called but not master anymore", _isMaster());
                     return false;
+                }
+                massert(noLongerMasterAssertCode, 
+                        "waitForReplication called but not master anymore", _isMaster());
             }
             return true;
         }

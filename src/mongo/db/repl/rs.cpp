@@ -244,7 +244,16 @@ namespace mongo {
     void ReplSetImpl::msgUpdateHBInfo(HeartbeatInfo h) {
         for( Member *m = _members.head(); m; m=m->next() ) {
             if( m->id() == h.id() ) {
-                m->_hbinfo = h;
+                m->_hbinfo.updateFromLastPoll(h);
+                return;
+            }
+        }
+    }
+
+    void ReplSetImpl::msgUpdateHBRecv(unsigned id, time_t newTime) {
+        for (Member *m = _members.head(); m; m = m->next()) {
+            if (m->id() == id) {
+                m->_hbinfo.lastHeartbeatRecv = newTime;
                 return;
             }
         }
@@ -584,7 +593,6 @@ namespace mongo {
         verify( _name.empty() || _name == config()._id );
         _name = config()._id;
         verify( !_name.empty() );
-
         // this is a shortcut for simple changes
         if( additive ) {
             log() << "replSet info : additive change to configuration" << rsLog;
@@ -613,6 +621,10 @@ namespace mongo {
         _members.orphanAll();
 
         endOldHealthTasks();
+        
+        // Clear out our memory of who might have been syncing from us.
+        // Any incoming handshake connections after this point will be newly registered.
+        ghost->clearCache();
 
         int oldPrimaryId = -1;
         {
@@ -905,6 +917,13 @@ namespace mongo {
             return mv["ts"]._opTime();
         }
         return OpTime();
+    }
+
+    void ReplSetImpl::registerSlave(const BSONObj& rid, const int memberId) {
+        // To prevent race conditions with clearing the cache at reconfig time,
+        // we lock the replset mutex here.
+        lock lk(this);
+        ghost->associateSlave(rid, memberId);
     }
 
     class ReplIndexPrefetch : public ServerParameter {
