@@ -98,6 +98,7 @@ namespace mongo {
 
         size_t find( char c , size_t fromPos = 0 ) const;
         size_t find( const StringData& needle ) const;
+        size_t rfind( char c, size_t fromPos = string::npos ) const;
 
         /**
          * Returns true if 'prefix' is a substring of this instance, anchored at position 0.
@@ -124,6 +125,15 @@ namespace mongo {
         bool empty() const { return size() == 0; }
         string toString() const { return string(_data, size()); }
         char operator[] ( unsigned pos ) const { return _data[pos]; }
+
+        /**
+         * Functor compatible with std::hash for std::unordered_{map,set}
+         * Warning: The hash function is subject to change. Do not use in cases where hashes need
+         *          to be consistent across versions.
+         */
+        struct Hasher {
+            size_t operator() (const StringData& str) const;
+        };
 
     private:
         const char* _data;        // is not guaranted to be null terminated (see "notes" above)
