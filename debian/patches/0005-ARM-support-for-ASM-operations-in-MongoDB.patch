@@ -10,8 +10,8 @@ Original-Author: Jon Masters <jcm@redhat.com>
 Origin: http://lists.fedoraproject.org/pipermail/arm/2013-February/005388.html
 Last-Update: 2013-03-15
 ---
- src/mongo/platform/atomic_intrinsics_gcc.h |   69 +++++++++++++++++++++++++++-
- src/mongo/platform/bits.h                  |    2 +-
+ src/mongo/platform/atomic_intrinsics_gcc.h | 69 +++++++++++++++++++++++++++++-
+ src/mongo/platform/bits.h                  |  2 +-
  2 files changed, 68 insertions(+), 3 deletions(-)
 
 diff --git a/src/mongo/platform/atomic_intrinsics_gcc.h b/src/mongo/platform/atomic_intrinsics_gcc.h

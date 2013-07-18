@@ -1,7 +1,8 @@
-0001-Use-libstemmer-when-using-system-libraries.patch
-0002-Treate-kfreebsd-like-linux-in-most-respects.patch
-0003-kfreebsd-has-dev-urandom.patch
-0004-All-platforms-but-Windows-find-hash-in-std-tr1.patch
-0005-kfreebsd-does-not-have-sys-prctl.h.patch
-0006-ARM-support-for-ASM-operations-in-MongoDB.patch
-0007-Fix-ARM-alignment-problems.patch
+0001-Create-kfreebsd-like-linux-in-most-respects.patch
+0002-kfreebsd-has-dev-urandom.patch
+0003-All-platforms-but-Windows-find-hash-in-std-tr1.patch
+0004-kfreebsd-does-not-have-sys-prctl.h.patch
+0005-ARM-support-for-ASM-operations-in-MongoDB.patch
+0006-Fix-ARM-alignment-problems.patch
+0007-Use-TIME_UTC_-macro.patch
+0008-Use-system-libstemmer.patch

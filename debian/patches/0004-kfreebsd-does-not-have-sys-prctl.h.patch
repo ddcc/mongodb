@@ -11,7 +11,7 @@ This change was reviewed by Pino Toscano in:
 
 and edited by Rogério Theodoro de Brito accordingly.
 ---
- src/third_party/v8/src/platform-linux.cc |    2 ++
+ src/third_party/v8/src/platform-linux.cc | 2 ++
  1 file changed, 2 insertions(+)
 
 diff --git a/src/third_party/v8/src/platform-linux.cc b/src/third_party/v8/src/platform-linux.cc

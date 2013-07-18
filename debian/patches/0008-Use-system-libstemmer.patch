@@ -1,0 +1,20 @@
+From: Antonin Kral <a.kral@bobek.cz>
+Date: Wed, 17 Jul 2013 19:35:02 +0200
+Subject: Use system libstemmer
+
+---
+ SConstruct | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/SConstruct b/SConstruct
+index f3ac3f9..2c888f3 100644
+--- a/SConstruct
++++ b/SConstruct
+@@ -802,7 +802,6 @@ if not use_system_version_of_library("boost"):
+                 CPPDEFINES=['BOOST_ALL_NO_LIB'])
+ 
+ env.Prepend(CPPPATH=['$BUILD_DIR/third_party/s2'])
+-env.Prepend(CPPPATH=['$BUILD_DIR/third_party/libstemmer_c/include'])
+ 
+ env.Append( CPPPATH=['$EXTRACPPPATH'],
+             LIBPATH=['$EXTRALIBPATH'] )

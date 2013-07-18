@@ -7,12 +7,12 @@ memcpy to make sure that all doubles are aligned before accessing them.
 
 Last-Update: 2013-03-15
 ---
- src/mongo/bson/bsonelement.h |   16 +++++++++++++++-
- src/mongo/db/key.cpp         |    2 +-
+ src/mongo/bson/bsonelement.h | 16 +++++++++++++++-
+ src/mongo/db/key.cpp         |  2 +-
  2 files changed, 16 insertions(+), 2 deletions(-)
 
 diff --git a/src/mongo/bson/bsonelement.h b/src/mongo/bson/bsonelement.h
-index a4e51b7..8e38ee4 100644
+index f094ab9..1ecb47f 100644
 --- a/src/mongo/bson/bsonelement.h
 +++ b/src/mongo/bson/bsonelement.h
 @@ -17,7 +17,7 @@
@@ -24,7 +24,7 @@ index a4e51b7..8e38ee4 100644
  #include <string>
  #include <vector>
  
-@@ -528,13 +528,27 @@ namespace mongo {
+@@ -529,13 +529,27 @@ namespace mongo {
      }
  
      inline double BSONElement::numberDouble() const {

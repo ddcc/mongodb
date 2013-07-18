@@ -3,7 +3,7 @@ Date: Fri, 19 Apr 2013 08:16:31 -0500
 Subject: All platforms but Windows find hash in std::tr1
 
 ---
- src/third_party/s2/hash.h |    4 ++--
+ src/third_party/s2/hash.h | 4 ++--
  1 file changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/src/third_party/s2/hash.h b/src/third_party/s2/hash.h

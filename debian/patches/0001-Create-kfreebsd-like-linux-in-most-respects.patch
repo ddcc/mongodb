@@ -1,16 +1,16 @@
 From: Jeff Epler <jepler@unpythonic.net>
 Date: Fri, 19 Apr 2013 08:15:18 -0500
-Subject: Treate kfreebsd like linux in most respects
+Subject: Create kfreebsd like linux in most respects
 
 ---
- SConstruct |    4 +++-
+ SConstruct | 4 +++-
  1 file changed, 3 insertions(+), 1 deletion(-)
 
 diff --git a/SConstruct b/SConstruct
-index bdc9876..7d83ea2 100644
+index 5fb0e83..f3ac3f9 100644
 --- a/SConstruct
 +++ b/SConstruct
-@@ -326,6 +326,8 @@ libdeps.setup_environment( env )
+@@ -344,6 +344,8 @@ libdeps.setup_environment( env )
  
  if env['PYSYSPLATFORM'] == 'linux3':
      env['PYSYSPLATFORM'] = 'linux2'
@@ -19,7 +19,7 @@ index bdc9876..7d83ea2 100644
  if 'freebsd' in env['PYSYSPLATFORM']:
      env['PYSYSPLATFORM'] = 'freebsd'
  
-@@ -506,7 +508,7 @@ if "darwin" == os.sys.platform:
+@@ -524,7 +526,7 @@ if "darwin" == os.sys.platform:
         env.Append( EXTRACPPPATH=filterExists(["/sw/include" , "/opt/local/include"]) )
         env.Append( EXTRALIBPATH=filterExists(["/sw/lib/", "/opt/local/lib"]) )
  

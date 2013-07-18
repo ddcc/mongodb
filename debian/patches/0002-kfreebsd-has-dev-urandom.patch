@@ -3,7 +3,7 @@ Date: Fri, 19 Apr 2013 08:16:19 -0500
 Subject: kfreebsd has /dev/urandom
 
 ---
- src/mongo/platform/random.cpp |    2 +-
+ src/mongo/platform/random.cpp | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/src/mongo/platform/random.cpp b/src/mongo/platform/random.cpp
