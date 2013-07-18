@@ -1,3 +1,18 @@
+mongodb (1:2.4.5-1) unstable; urgency=critical
+
+  * new upstream release
+    https://jira.mongodb.org/browse/SERVER/fixforversion/12519
+  * CVE-2013-4650 - fix allows remote authenticated users to obtain
+    internal system privileges (Closes: #715007).
+  * CVE-2013-2132 and CVE-2013-4142 - Remotely triggered segmentation
+    fault in Javascript engine (Closes: #717173).
+  * Force use of TIME_UTC_ boost macro (Closes: #710639).
+  * Use gcc and g++ 4.7 to avoid #701324 which is still pending.
+  * Remove build directory (Closes: #715015).
+  * Currently uses embedded V8 as the one in Debian is too old.
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Wed, 17 Jul 2013 16:23:43 +0200
+
 mongodb (1:2.4.3-1) unstable; urgency=low
 
   [ Jeff Epler ]

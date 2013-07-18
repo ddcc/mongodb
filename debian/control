@@ -21,7 +21,8 @@ Build-Depends:
  libstemmer-dev,
  libv8-dev,
  python-pymongo,
- scons
+ scons,
+ g++-4.7
 Standards-Version: 3.9.3
 Vcs-Git: git://github.com/bobek/mongo-debian.git
 Vcs-Browser: https://github.com/bobek/mongo-debian
