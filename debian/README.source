@@ -1,13 +1,26 @@
-gbp
-===
+git-buildpackage
+================
 
-Use of git-import-orig is highly encouraged.
+Use of the command `git-import-orig` from the git-buildpackage suite of
+scripts is highly encouraged, as it makes for an easier maintenance of the
+packaging.
+
+When importing new upstream versions, it is recommended to run:
+
+    git-buildpackage --pristine-tar --uscan
+
+so that most of the tasks are automated.
 
 
 debian/gbp.conf
 ===============
 
-debian/* files from upstream tarball are filtered out because the merge is really
-difficult to maintain.
-It is up to the maintainer to check manually for upstream changes in debian dir,
-especially man pages.
+The `debian/*` files from the upstream tarball are filtered out (read:
+"mostly ignored") because of divergences that create conflicts that are
+difficult to merge.
+
+That being said, it is a good thing to manually check what upstream changed
+in their `debian` dir and adapt those changes to the Debian packaging, as
+they may have changed build dependencies or other assumptions.
+
+ -- Rogério Brito <rbrito@ime.usp.br>, Fri, 12 Apr 2013 22:26:07 -0300

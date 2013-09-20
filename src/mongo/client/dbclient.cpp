@@ -17,16 +17,19 @@
 
 #include "pch.h"
 
+#include "mongo/bson/util/bson_extract.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/constants.h"
 #include "mongo/client/dbclient_rs.h"
 #include "mongo/client/dbclientcursor.h"
+#include "mongo/client/sasl_client_authenticate.h"
 #include "mongo/client/syncclusterconnection.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
 #include "mongo/db/namespace-inl.h"
 #include "mongo/db/namespacestring.h"
-#include "mongo/s/util.h"
+#include "mongo/s/stale_exception.h"  // for RecvStaleConfigException
+#include "mongo/util/assert_util.h"
 #include "mongo/util/md5.hpp"
 
 #ifdef MONGO_SSL
@@ -96,12 +99,12 @@ namespace mongo {
         case MASTER: {
             DBClientConnection * c = new DBClientConnection(true);
             c->setSoTimeout( socketTimeout );
-            log(1) << "creating new connection to:" << _servers[0] << endl;
+            LOG(1) << "creating new connection to:" << _servers[0] << endl;
             if ( ! c->connect( _servers[0] , errmsg ) ) {
                 delete c;
                 return 0;
             }
-            log(1) << "connected connection!" << endl;
+            LOG(1) << "connected connection!" << endl;
             return c;
         }
 
@@ -110,7 +113,7 @@ namespace mongo {
             DBClientReplicaSet * set = new DBClientReplicaSet( _setName , _servers , socketTimeout );
             if( ! set->connect() ) {
                 delete set;
-                errmsg = "connect failed to set ";
+                errmsg = "connect failed to replica set ";
                 errmsg += toString();
                 return 0;
             }
@@ -152,6 +155,45 @@ namespace mongo {
 
         verify( 0 );
         return 0;
+    }
+
+    bool ConnectionString::sameLogicalEndpoint( const ConnectionString& other ) const {
+        if ( _type != other._type )
+            return false;
+
+        switch ( _type ) {
+        case INVALID:
+            return true;
+        case MASTER:
+            return _servers[0] == other._servers[0];
+        case PAIR:
+            if ( _servers[0] == other._servers[0] )
+                return _servers[1] == other._servers[1];
+            return
+                ( _servers[0] == other._servers[1] ) &&
+                ( _servers[1] == other._servers[0] );
+        case SET:
+            return _setName == other._setName;
+        case SYNC:
+            // The servers all have to be the same in each, but not in the same order.
+            if ( _servers.size() != other._servers.size() )
+                return false;
+            for ( unsigned i = 0; i < _servers.size(); i++ ) {
+                bool found = false;
+                for ( unsigned j = 0; j < other._servers.size(); j++ ) {
+                    if ( _servers[i] == other._servers[j] ) {
+                        found = true;
+                        break;
+                    }
+                }
+                if ( ! found )
+                    return false;
+            }
+            return true;
+        case CUSTOM:
+            return _string == other._string;
+        }
+        verify( false );
     }
 
     ConnectionString ConnectionString::parse( const string& host , string& errmsg ) {
@@ -196,6 +238,9 @@ namespace mongo {
         return "";
     }
 
+    const BSONField<BSONObj> Query::ReadPrefField("$readPreference");
+    const BSONField<string> Query::ReadPrefModeField("mode");
+    const BSONField<BSONArray> Query::ReadPrefTagsField("tags");
 
     Query::Query( const string &json ) : obj( fromjson( json ) ) {}
 
@@ -251,20 +296,66 @@ namespace mongo {
         return *this;
     }
 
-    bool Query::isComplex( bool * hasDollar ) const {
-        if ( obj.hasElement( "query" ) ) {
-            if ( hasDollar )
-                hasDollar[0] = false;
+    bool Query::isComplex(const BSONObj& obj, bool* hasDollar) {
+        if (obj.hasElement("query")) {
+            if (hasDollar) *hasDollar = false;
             return true;
         }
 
-        if ( obj.hasElement( "$query" ) ) {
-            if ( hasDollar )
-                hasDollar[0] = true;
+        if (obj.hasElement("$query")) {
+            if (hasDollar) *hasDollar = true;
             return true;
         }
 
         return false;
+    }
+
+    Query& Query::readPref(ReadPreference pref, const BSONArray& tags) {
+        string mode;
+
+        switch (pref) {
+        case ReadPreference_PrimaryOnly:
+            mode = "primary";
+            break;
+
+        case ReadPreference_PrimaryPreferred:
+            mode = "primaryPreferred";
+            break;
+
+        case ReadPreference_SecondaryOnly:
+            mode = "secondary";
+            break;
+
+        case ReadPreference_SecondaryPreferred:
+            mode = "secondaryPreferred";
+            break;
+
+        case ReadPreference_Nearest:
+            mode = "nearest";
+            break;
+        }
+
+        BSONObjBuilder readPrefDocBuilder;
+        readPrefDocBuilder << ReadPrefModeField(mode);
+
+        if (!tags.isEmpty()) {
+            readPrefDocBuilder << ReadPrefTagsField(tags);
+        }
+
+        appendComplex(ReadPrefField.name().c_str(), readPrefDocBuilder.done());
+        return *this;
+    }
+
+    bool Query::isComplex( bool * hasDollar ) const {
+        return isComplex(obj, hasDollar);
+    }
+
+    bool Query::hasReadPreference(const BSONObj& queryObj) {
+        const bool hasReadPrefOption = queryObj["$queryOptions"].isABSONObj() &&
+                        queryObj["$queryOptions"].Obj().hasField(ReadPrefField.name());
+        return (Query::isComplex(queryObj) &&
+                    queryObj.hasField(ReadPrefField.name())) ||
+                hasReadPrefOption;
     }
 
     BSONObj Query::getFilter() const {
@@ -322,38 +413,12 @@ namespace mongo {
         return QueryOptions(0);
     }
 
-    void DBClientWithCommands::setAuthenticationTable( const AuthenticationTable& auth ) {
-        _authTable = auth;
-        _hasAuthentication = true;
-    }
-
-    void DBClientWithCommands::clearAuthenticationTable() {
-        _authTable.clearAuth(); // This probably isn't necessary, but better to be safe.
-        _hasAuthentication = false;
-    }
-
-    bool DBClientWithCommands::hasAuthenticationTable() {
-        return _hasAuthentication;
-    }
-
-    AuthenticationTable& DBClientWithCommands::getAuthenticationTable() {
-        return _authTable;
-    }
-
     inline bool DBClientWithCommands::runCommand(const string &dbname,
                                                  const BSONObj& cmd,
                                                  BSONObj &info,
-                                                 int options,
-                                                 const AuthenticationTable* auth) {
+                                                 int options) {
         string ns = dbname + ".$cmd";
-        BSONObj actualCmd = cmd;
-        if ( _hasAuthentication || auth ) {
-            const AuthenticationTable* authTable = (auth ? auth : &_authTable);
-            LOG(4) << "Sending command " << cmd << " to " << getServerAddress() <<
-                    " with $auth: " << authTable->toBSON() << endl;
-            actualCmd = authTable->copyCommandObjAddingAuth( cmd );
-        }
-        info = findOne(ns, actualCmd, 0 , options);
+        info = findOne(ns, cmd, 0 , options);
         return isOk(info);
     }
 
@@ -435,11 +500,19 @@ namespace mongo {
         return getLastErrorString( info );
     }
 
-    string DBClientWithCommands::getLastErrorString( const BSONObj& info ) {
-        BSONElement e = info["err"];
-        if( e.eoo() ) return "";
-        if( e.type() == Object ) return e.toString();
-        return e.str();
+    string DBClientWithCommands::getLastErrorString(const BSONObj& info) {
+        if (info["ok"].trueValue()) {
+            BSONElement e = info["err"];
+            if (e.eoo()) return "";
+            if (e.type() == Object) return e.toString();
+            return e.str();
+        } else {
+            // command failure
+            BSONElement e = info["errmsg"];
+            if (e.eoo()) return "";
+            if (e.type() == Object) return "getLastError command failed: " + e.toString();
+            return "getLastError command failed: " + e.str();
+        }
     }
 
     const BSONObj getpreverrorcmdobj = fromjson("{getpreverror:1}");
@@ -465,18 +538,82 @@ namespace mongo {
         return digestToString( d );
     }
 
-    bool DBClientWithCommands::auth(const string &dbname, const string &username, const string &password_text, string& errmsg, bool digestPassword, Auth::Level * level) {
+    void DBClientWithCommands::_auth(const BSONObj& params) {
+        std::string mechanism;
+        uassertStatusOK(bsonExtractStringField(params,
+                                               saslCommandMechanismFieldName,
+                                               &mechanism));
+
+        if (mechanism == StringData("MONGODB-CR", StringData::LiteralTag())) {
+            std::string userSource;
+            uassertStatusOK(bsonExtractStringField(params,
+                                                   saslCommandPrincipalSourceFieldName,
+                                                   &userSource));
+            std::string user;
+            uassertStatusOK(bsonExtractStringField(params,
+                                                   saslCommandPrincipalFieldName,
+                                                   &user));
+            std::string password;
+            uassertStatusOK(bsonExtractStringField(params,
+                                                   saslCommandPasswordFieldName,
+                                                   &password));
+            bool digestPassword;
+            uassertStatusOK(bsonExtractBooleanFieldWithDefault(params,
+                                                               saslCommandDigestPasswordFieldName,
+                                                               true,
+                                                               &digestPassword));
+            std::string errmsg;
+            uassert(ErrorCodes::AuthenticationFailed,
+                    errmsg,
+                    _authMongoCR(userSource, user, password, errmsg, digestPassword));
+        }
+        else if (saslClientAuthenticate != NULL) {
+            uassertStatusOK(saslClientAuthenticate(this, params));
+        }
+        else {
+            uasserted(ErrorCodes::BadValue,
+                      "SASL authentication support not compiled into client library.");
+        }
+    };
+
+    void DBClientWithCommands::auth(const BSONObj& params) {
+        _auth(params);
+    }
+
+    bool DBClientWithCommands::auth(const string &dbname,
+                                    const string &username,
+                                    const string &password_text,
+                                    string& errmsg,
+                                    bool digestPassword) {
+        try {
+            _auth(BSON(saslCommandMechanismFieldName << "MONGODB-CR" <<
+                       saslCommandPrincipalSourceFieldName << dbname <<
+                       saslCommandPrincipalFieldName << username <<
+                       saslCommandPasswordFieldName << password_text <<
+                       saslCommandDigestPasswordFieldName << digestPassword));
+            return true;
+        } catch(const UserException& ex) {
+            if (ex.getCode() != ErrorCodes::AuthenticationFailed)
+                throw;
+            errmsg = ex.what();
+            return false;
+        }
+    }
+
+    bool DBClientWithCommands::_authMongoCR(const string &dbname,
+                                            const string &username,
+                                            const string &password_text,
+                                            string& errmsg,
+                                            bool digestPassword) {
+
         string password = password_text;
         if( digestPassword )
             password = createPasswordDigest( username , password_text );
 
-        if ( level != NULL )
-                *level = Auth::NONE;
-
         BSONObj info;
         string nonce;
         if( !runCommand(dbname, getnoncecmdobj, info) ) {
-            errmsg = "getnonce fails - connection problem?";
+            errmsg = "getnonce failed: " + info.toString();
             return false;
         }
         {
@@ -504,12 +641,6 @@ namespace mongo {
         }
 
         if( runCommand(dbname, authCmd, info) ) {
-            if ( level != NULL ) {
-                if ( info.getField("readOnly").trueValue() )
-                    *level = Auth::READ;
-                else
-                    *level = Auth::WRITE;
-            }
             return true;
         }
 
@@ -537,7 +668,7 @@ namespace mongo {
         BSONObj o;
         if ( info == 0 )    info = &o;
         BSONObjBuilder b;
-        string db = nsToDatabase(ns.c_str());
+        string db = nsToDatabase(ns);
         b.append("create", ns.c_str() + db.length() + 1);
         if ( size ) b.append("size", size);
         if ( capped ) b.append("capped", true);
@@ -656,20 +787,16 @@ namespace mongo {
 
     /* --- dbclientconnection --- */
 
-    bool DBClientConnection::auth(const string &dbname, const string &username, const string &password_text, string& errmsg, bool digestPassword, Auth::Level* level) {
-        string password = password_text;
-        if( digestPassword )
-            password = createPasswordDigest( username , password_text );
+    void DBClientConnection::_auth(const BSONObj& params) {
 
         if( autoReconnect ) {
             /* note we remember the auth info before we attempt to auth -- if the connection is broken, we will
                then have it for the next autoreconnect attempt.
             */
-            pair<string,string> p = pair<string,string>(username, password);
-            authCache[dbname] = p;
+            authCache[params[saslCommandPrincipalSourceFieldName].str()] = params.getOwned();
         }
 
-        return DBClientBase::auth(dbname, username, password.c_str(), errmsg, false, level);
+        DBClientBase::_auth(params);
     }
 
     /** query N objects from the database into an array.  makes sense mostly when you want a small number of results.  if a huge number, use 
@@ -746,9 +873,8 @@ namespace mongo {
     inline bool DBClientConnection::runCommand(const string &dbname,
                                                const BSONObj& cmd,
                                                BSONObj &info,
-                                               int options,
-                                               const AuthenticationTable* auth) {
-        if ( DBClientWithCommands::runCommand( dbname , cmd , info , options , auth ) )
+                                               int options) {
+        if (DBClientWithCommands::runCommand(dbname, cmd, info, options))
             return true;
         
         if ( clientSet && isNotMasterErrorString( info["errmsg"] ) ) {
@@ -771,24 +897,48 @@ namespace mongo {
             throw SocketException( SocketException::FAILED_STATE , toString() );
 
         lastReconnectTry = time(0);
-        log(_logLevel) << "trying reconnect to " << _serverString << endl;
+        LOG(_logLevel) << "trying reconnect to " << _serverString << endl;
         string errmsg;
         _failed = false;
         if ( ! _connect(errmsg) ) {
             _failed = true;
-            log(_logLevel) << "reconnect " << _serverString << " failed " << errmsg << endl;
+            LOG(_logLevel) << "reconnect " << _serverString << " failed " << errmsg << endl;
             throw SocketException( SocketException::CONNECT_ERROR , toString() );
         }
 
-        log(_logLevel) << "reconnect " << _serverString << " ok" << endl;
-        for( map< string, pair<string,string> >::iterator i = authCache.begin(); i != authCache.end(); i++ ) {
-            const char *dbname = i->first.c_str();
-            const char *username = i->second.first.c_str();
-            const char *password = i->second.second.c_str();
-            if( !DBClientBase::auth(dbname, username, password, errmsg, false) )
-                log(_logLevel) << "reconnect: auth failed db:" << dbname << " user:" << username << ' ' << errmsg << '\n';
+        LOG(_logLevel) << "reconnect " << _serverString << " ok" << endl;
+        for( map<string, BSONObj>::const_iterator i = authCache.begin(); i != authCache.end(); i++ ) {
+            try {
+                DBClientConnection::_auth(i->second);
+            } catch (UserException& ex) {
+                if (ex.getCode() != ErrorCodes::AuthenticationFailed)
+                    throw;
+                LOG(_logLevel) << "reconnect: auth failed db:" <<
+                    i->second[saslCommandPrincipalSourceFieldName] <<
+                    " user:" << i->second[saslCommandPrincipalFieldName] << ' ' <<
+                    ex.what() << std::endl;
+            }
         }
     }
+
+    void DBClientConnection::setSoTimeout(double timeout) {
+        _so_timeout = timeout;
+        if (p) {
+            p->setSocketTimeout(timeout);
+        }
+    }
+
+    uint64_t DBClientConnection::getSockCreationMicroSec() const {
+        if (p) {
+            return p->getSockCreationMicroSec();
+        }
+        else {
+            return INVALID_SOCK_CREATION_TIME;
+        }
+    }
+
+    const uint64_t DBClientBase::INVALID_SOCK_CREATION_TIME =
+            static_cast<uint64_t>(0xFFFFFFFFFFFFFFFFULL);
 
     auto_ptr<DBClientCursor> DBClientBase::query(const string &ns, Query query, int nToReturn,
             int nToSkip, const BSONObj *fieldsToReturn, int queryOptions , int batchSize ) {
@@ -844,6 +994,10 @@ namespace mongo {
             n += i.n();
         }
         return n;
+    }
+
+    void DBClientConnection::setReplSetClientCallback(DBClientReplicaSet* rsClient) {
+        clientSet = rsClient;
     }
 
     unsigned long long DBClientConnection::query(
@@ -1007,10 +1161,10 @@ namespace mongo {
 
     void DBClientWithCommands::dropIndex( const string& ns , const string& indexName ) {
         BSONObj info;
-        if ( ! runCommand( nsToDatabase( ns.c_str() ) ,
+        if ( ! runCommand( nsToDatabase( ns ) ,
                            BSON( "deleteIndexes" << NamespaceString( ns ).coll << "index" << indexName ) ,
                            info ) ) {
-            log(_logLevel) << "dropIndex failed: " << info << endl;
+            LOG(_logLevel) << "dropIndex failed: " << info << endl;
             uassert( 10007 ,  "dropIndex failed" , 0 );
         }
         resetIndexCache();
@@ -1018,7 +1172,7 @@ namespace mongo {
 
     void DBClientWithCommands::dropIndexes( const string& ns ) {
         BSONObj info;
-        uassert( 10008 ,  "dropIndexes failed" , runCommand( nsToDatabase( ns.c_str() ) ,
+        uassert( 10008 ,  "dropIndexes failed" , runCommand( nsToDatabase( ns ) ,
                  BSON( "deleteIndexes" << NamespaceString( ns ).coll << "index" << "*") ,
                  info ) );
         resetIndexCache();
@@ -1062,7 +1216,14 @@ namespace mongo {
         return ss.str();
     }
 
-    bool DBClientWithCommands::ensureIndex( const string &ns , BSONObj keys , bool unique, const string & name , bool cache, bool background, int version ) {
+    bool DBClientWithCommands::ensureIndex( const string &ns,
+                                            BSONObj keys,
+                                            bool unique,
+                                            const string & name,
+                                            bool cache,
+                                            bool background,
+                                            int version,
+                                            int ttl ) {
         BSONObjBuilder toSave;
         toSave.append( "ns" , ns );
         toSave.append( "key" , keys );
@@ -1094,6 +1255,9 @@ namespace mongo {
 
         if ( cache )
             _seenIndexes.insert( cacheKey );
+
+        if ( ttl > 0 )
+            toSave.append( "expireAfterSeconds", ttl );
 
         insert( Namespace( ns.c_str() ).getSisterNS( "system.indexes"  ).c_str() , toSave.obj() );
         return 1;
@@ -1142,7 +1306,12 @@ namespace mongo {
     }
 
     bool DBClientConnection::recv( Message &m ) {
-        return port().recv(m);
+        if (port().recv(m)) {
+            return true;
+        }
+
+        _failed = true;
+        return false;
     }
 
     bool DBClientConnection::call( Message &toSend, Message &response, bool assertOk , string * actualServer ) {
@@ -1222,16 +1391,24 @@ namespace mongo {
     }
 
 #ifdef MONGO_SSL
-    SSLManager* DBClientConnection::sslManager() {
-        if ( _sslManager )
-            return _sslManager;
-        
-        SSLManager* s = new SSLManager(true);
-        _sslManager = s;
-        return s;
-    }
+    static SimpleMutex s_mtx("SSLManager");
+    static SSLManager* s_sslMgr(NULL);
 
-    SSLManager* DBClientConnection::_sslManager = 0;
+    SSLManager* DBClientConnection::sslManager() {
+        SimpleMutex::scoped_lock lk(s_mtx);
+        if (s_sslMgr) 
+            return s_sslMgr;
+        const SSLParams params(cmdLine.sslPEMKeyFile, 
+                               cmdLine.sslPEMKeyPassword,
+                               cmdLine.sslCAFile,
+                               cmdLine.sslCRLFile,
+                               cmdLine.sslWeakCertificateValidation,
+                               cmdLine.sslFIPSMode);
+        s_sslMgr = new SSLManager(params);
+        
+
+        return s_sslMgr;
+    }
 #endif
 
     AtomicUInt DBClientConnection::_numConnections;

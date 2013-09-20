@@ -34,7 +34,18 @@ namespace mongo {
     class QueryOptimizerCursor;
     class QueryPlanSummary;
     
-    QueryResult* processGetMore(const char *ns, int ntoreturn, long long cursorid , CurOp& op, int pass, bool& exhaust);
+    /**
+     * Return a batch of results from a client OP_GET_MORE request.
+     * 'cursorid' - The id of the cursor producing results.
+     * 'isCursorAuthorized' - Set to true after a cursor with id 'cursorid' is authorized for use.
+     */
+    QueryResult* processGetMore(const char* ns,
+                                int ntoreturn,
+                                long long cursorid,
+                                CurOp& op,
+                                int pass,
+                                bool& exhaust,
+                                bool* isCursorAuthorized);
 
     string runQuery(Message& m, QueryMessage& q, CurOp& curop, Message &result);
 
@@ -47,6 +58,16 @@ namespace mongo {
         }
     };
 
+    /** Metadata about matching and loading a single candidate result document from a Cursor. */
+    struct ResultDetails {
+        ResultDetails();
+        MatchDetails matchDetails; // Details on how the Matcher matched the query.
+        bool match;                // Matched the query, was not a dup, was not skipped etc.
+        bool orderedMatch;         // _match and belonged to an ordered query plan.
+        bool loadedRecord;         // Record was loaded (to match or return the document).
+        bool chunkSkip;            // Did not belong to an owned chunk range.
+    };
+
     /** Interface for recording events that contribute to explain results. */
     class ExplainRecordingStrategy {
     public:
@@ -55,8 +76,7 @@ namespace mongo {
         /** Note information about a single query plan. */
         virtual void notePlan( bool scanAndOrder, bool indexOnly ) {}
         /** Note an iteration of the query. */
-        virtual void noteIterate( bool match, bool orderedMatch, bool loadedRecord,
-                                 bool chunkSkip ) {}
+        virtual void noteIterate( const ResultDetails& resultDetails ) {}
         /** Note that the query yielded. */
         virtual void noteYield() {}
         /** @return number of ordered matches noted. */
@@ -83,11 +103,9 @@ namespace mongo {
     public:
         MatchCountingExplainStrategy( const ExplainQueryInfo::AncillaryInfo &ancillaryInfo );
     protected:
-        virtual void _noteIterate( bool match, bool orderedMatch, bool loadedRecord,
-                                  bool chunkSkip ) = 0;
+        virtual void _noteIterate( const ResultDetails& resultDetails ) = 0;
     private:
-        virtual void noteIterate( bool match, bool orderedMatch, bool loadedRecord,
-                                 bool chunkSkip );
+        virtual void noteIterate( const ResultDetails& resultDetails );
         virtual long long orderedMatches() const { return _orderedMatches; }
         long long _orderedMatches;
     };
@@ -99,8 +117,7 @@ namespace mongo {
                                     const shared_ptr<Cursor> &cursor );
     private:
         virtual void notePlan( bool scanAndOrder, bool indexOnly );
-        virtual void _noteIterate( bool match, bool orderedMatch, bool loadedRecord,
-                                  bool chunkSkip );
+        virtual void _noteIterate( const ResultDetails& resultDetails );
         virtual void noteYield();
         virtual shared_ptr<ExplainQueryInfo> _doneQueryInfo();
         shared_ptr<Cursor> _cursor;
@@ -116,8 +133,7 @@ namespace mongo {
         QueryOptimizerCursorExplainStrategy( const ExplainQueryInfo::AncillaryInfo &ancillaryInfo,
                                             const shared_ptr<QueryOptimizerCursor> &cursor );
     private:
-        virtual void _noteIterate( bool match, bool orderedMatch, bool loadedRecord,
-                                  bool chunkSkip );
+        virtual void _noteIterate( const ResultDetails& resultDetails );
         virtual void noteYield();
         virtual shared_ptr<ExplainQueryInfo> _doneQueryInfo();
         shared_ptr<QueryOptimizerCursor> _cursor;
@@ -136,9 +152,9 @@ namespace mongo {
         /**
          * Handle the current iterate of the supplied cursor as a (possibly duplicate) match.
          * @return true if a match is found.
-         * @param orderedMatch set if it is an ordered match.
+         * @param resultDetails details of how the result is matched and loaded.
          */
-        virtual bool handleMatch( bool& orderedMatch, MatchDetails& details ) = 0;
+        virtual bool handleMatch( ResultDetails* resultDetails ) = 0;
 
         /**
          * Write all matches into the buffer, overwriting existing data.
@@ -157,9 +173,10 @@ namespace mongo {
     protected:
         /**
          * Return the document for the current iterate.  Implements the $returnKey option.
-         * @param allowCovered - enable covered index support.
+         * @param allowCovered enable covered index support.
+         * @param resultDetails details of how the result is loaded.
          */
-        BSONObj current( bool allowCovered ) const;
+        BSONObj current( bool allowCovered, ResultDetails* resultDetails ) const;
         const ParsedQuery &_parsedQuery;
         shared_ptr<Cursor> _cursor;
         shared_ptr<QueryOptimizerCursor> _queryOptimizerCursor;
@@ -171,7 +188,7 @@ namespace mongo {
     public:
         OrderedBuildStrategy( const ParsedQuery &parsedQuery, const shared_ptr<Cursor> &cursor,
                              BufBuilder &buf );
-        virtual bool handleMatch( bool& orderedMatch, MatchDetails& details );
+        virtual bool handleMatch( ResultDetails* resultDetails );
         virtual int bufferedMatches() const { return _bufferedMatches; }
     private:
         int _skip;
@@ -187,9 +204,9 @@ namespace mongo {
                                            const shared_ptr<Cursor>& cursor,
                                            BufBuilder& buf,
                                            const QueryPlanSummary& queryPlan );
-        virtual bool handleMatch( bool &orderedMatch, MatchDetails& details );
+        virtual bool handleMatch( ResultDetails* resultDetails );
         /** Handle a match without performing deduping. */
-        void _handleMatchNoDedup();
+        void _handleMatchNoDedup( ResultDetails* resultDetails );
         virtual int rewriteMatches();
         virtual int bufferedMatches() const { return _bufferedMatches; }
     private:
@@ -228,11 +245,11 @@ namespace mongo {
                             const shared_ptr<QueryOptimizerCursor> &cursor,
                             BufBuilder &buf );
         void init();
-        virtual bool handleMatch( bool &orderedMatch, MatchDetails &details );
+        virtual bool handleMatch( ResultDetails* resultDetails );
         virtual int rewriteMatches();
         virtual int bufferedMatches() const;
         virtual void finishedFirstBatch();
-        bool handleReorderMatch();
+        bool handleReorderMatch( ResultDetails* resultDetails );
         DiskLocDupSet _scanAndOrderDups;
         OrderedBuildStrategy _orderedBuild;
         scoped_ptr<ReorderBuildStrategy> _reorderBuild;
@@ -283,8 +300,16 @@ namespace mongo {
         ( const QueryPlanSummary &queryPlan, const BSONObj &oldPlan ) const;
         shared_ptr<ResponseBuildStrategy> newResponseBuildStrategy
         ( const QueryPlanSummary &queryPlan );
-        bool currentMatches( MatchDetails& details );
-        bool chunkMatches();
+        /**
+         * @return true if the cursor's document matches the query.
+         * @param resultDetails describes how the document was matched and loaded.
+         */
+        bool currentMatches( ResultDetails* resultDetails );
+        /**
+         * @return true if the cursor's document is in a valid chunk range.
+         * @param resultDetails describes how the document was matched and loaded.
+         */
+        bool chunkMatches( ResultDetails* resultDetails );
         const ParsedQuery &_parsedQuery;
         shared_ptr<Cursor> _cursor;
         shared_ptr<QueryOptimizerCursor> _queryOptimizerCursor;

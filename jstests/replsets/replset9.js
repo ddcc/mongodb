@@ -1,11 +1,11 @@
 
 
-var rt = new ReplSetTest( { name : "replset9tests" , nodes: 1, oplogSize: 400 } );
+var rt = new ReplSetTest( { name : "replset9tests" , nodes: 1, oplogSize: 255 } );
 
 var nodes = rt.startSet();
 rt.initiate();
 var master = rt.getMaster();
-var bigstring = "a";
+var bigstring = Array(5000).toString();
 var md = master.getDB( 'd' );
 var mdc = md[ 'c' ];
 
@@ -20,7 +20,6 @@ mdc.insert( { _id:-1, x:"dummy" } );
 print ("inserting bigstrings");
 for( i = 0; i < doccount; ++i ) {
     mdc.insert( { _id:i, x:bigstring } );
-    bigstring += "a";
 }
 md.getLastError();
 
@@ -33,20 +32,37 @@ md.getLastError();
 
 // add a secondary; start cloning
 var slave = rt.add();
-rt.reInitiate();
+(function reinitiate() {
+    var master  = rt.nodes[0];
+    var c = master.getDB("local")['system.replset'].findOne();
+    var config  = rt.getReplSetConfig();
+    config.version = c.version + 1;
+    var admin  = master.getDB("admin");
+    var cmd     = {};
+    var cmdKey  = 'replSetReconfig';
+    var timeout = timeout || 30000;
+    cmd[cmdKey] = config;
+    printjson(cmd);
+
+    jsTest.attempt({context:rt, timeout: timeout, desc: "reinitiate replica set"}, function() {
+        var result = admin.runCommand(cmd);
+        printjson(result);
+        return result['ok'] == 1;
+    });
+})();
+
+
 print ("initiation complete!");
 var sc = slave.getDB( 'd' )[ 'c' ];
 slave.setSlaveOk();
 
 print ("updating and deleting documents");
-for (i = doccount*2; i > doccount; --i) {
+for (i = doccount*4; i > doccount; --i) {
     mdc.update( { _id:i }, { $inc: { x : 1 } } );
-    md.getLastError();
     mdc.remove( { _id:i } );
-    md.getLastError();
     mdc.insert( { bs:bigstring } );
-    md.getLastError();
 }
+md.getLastError();
 print ("finished");
 // Wait for replication to catch up.
 rt.awaitReplication(640000);

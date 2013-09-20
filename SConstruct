@@ -14,7 +14,6 @@
 # several, subordinate SConscript files, which describe specific build rules.
 
 import buildscripts
-import buildscripts.bb
 import datetime
 import imp
 import os
@@ -39,17 +38,6 @@ SConsignFile( scons_data_dir + "/sconsign" )
 
 DEFAULT_INSTALL_DIR = "/usr/local"
 
-def _rpartition(string, sep):
-    """A replacement for str.rpartition which is missing in Python < 2.5
-    """
-    idx = string.rfind(sep)
-    if idx == -1:
-        return '', '', string
-    return string[:idx], sep, string[idx + 1:]
-
-
-
-buildscripts.bb.checkOk()
 
 def findSettingsSetup():
     sys.path.append( "." )
@@ -129,7 +117,7 @@ def get_variant_dir():
             a.append( name )
         else:
             x = get_option( name )
-            x = re.sub( "[,\\\\/]" , "_" , x )
+            x = re.sub( "[:,\\\\/]" , "_" , x )
             a.append( name + "_" + x )
             
     s = "#build/${PYSYSPLATFORM}/"
@@ -155,7 +143,8 @@ add_option( "full", "include client and headers when doing scons install", 0 , F
 
 # linking options
 add_option( "release" , "release build" , 0 , True )
-add_option( "static" , "fully static build" , 0 , True )
+add_option( "static" , "fully static build" , 0 , False )
+add_option( "static-libstdc++" , "statically link libstdc++" , 0 , False )
 
 # base compile flags
 add_option( "64" , "whether to force 64 bit" , 0 , True , "force64" )
@@ -163,6 +152,7 @@ add_option( "32" , "whether to force 32 bit" , 0 , True , "force32" )
 
 add_option( "cxx", "compiler to use" , 1 , True )
 add_option( "cc", "compiler to use for c" , 1 , True )
+add_option( "ld", "linker to use" , 1 , True )
 
 add_option( "cpppath", "Include path if you have headers in a nonstandard directory" , 1 , True )
 add_option( "libpath", "Library path if you have libraries in a nonstandard directory" , 1 , True )
@@ -201,16 +191,22 @@ add_option( "distcc" , "use distcc for distributing builds" , 0 , False )
 add_option( "clang" , "use clang++ rather than g++ (experimental)" , 0 , True )
 
 # debugging/profiling help
-
+if os.sys.platform.startswith("linux") and (os.uname()[-1] == 'x86_64'):
+    defaultAllocator = 'tcmalloc'
+elif (os.sys.platform == "darwin") and (os.uname()[-1] == 'x86_64'):
+    defaultAllocator = 'tcmalloc'
+else:
+    defaultAllocator = 'system'
 add_option( "allocator" , "allocator to use (tcmalloc or system)" , 1 , True,
-            default=((sys.platform.startswith('linux') and (os.uname()[-1] == 'x86_64')) and
-                     'tcmalloc' or 'system') )
+            default=defaultAllocator )
 add_option( "gdbserver" , "build in gdb server support" , 0 , True )
 add_option( "heapcheck", "link to heap-checking malloc-lib and look for memory leaks during tests" , 0 , False )
 add_option( "gcov" , "compile with flags for gcov" , 0 , True )
 
 add_option("smokedbprefix", "prefix to dbpath et al. for smoke tests", 1 , False )
 add_option("smokeauth", "run smoke tests with --auth", 0 , False )
+
+add_option("use-sasl-client", "Support SASL authentication in the client library", 0, False)
 
 add_option( "use-system-tcmalloc", "use system version of tcmalloc library", 0, True )
 
@@ -221,12 +217,13 @@ add_option( "use-system-boost", "use system version of boost libraries", 0, True
 add_option( "use-system-snappy", "use system version of snappy library", 0, True )
 
 add_option( "use-system-sm", "use system version of spidermonkey library", 0, True )
+add_option( "use-system-v8", "use system version of v8 library", 0, True )
 
 add_option( "use-system-all" , "use all system libraries", 0 , True )
 
 add_option( "use-cpu-profiler",
             "Link against the google-perftools profiler library",
-            0, True )
+            0, False )
 
 add_option("mongod-concurrency-level", "Concurrency level, \"global\" or \"db\"", 1, True,
            type="choice", choices=["global", "db"])
@@ -294,6 +291,11 @@ env = Environment( BUILD_DIR=variantDir,
                    CLIENT_SCONSTRUCT='#distsrc/client/SConstruct',
                    DIST_ARCHIVE_SUFFIX='.tgz',
                    EXTRAPATH=get_option("extrapath"),
+                   MODULE_BANNERS=[],
+                   MODULE_LIBDEPS_MONGOD=[],
+                   MODULE_LIBDEPS_MONGOS=[],
+                   MODULE_LIBDEPS_MONGOSHELL=[],
+                   MODULETEST_ALIAS='moduletests',
                    MODULETEST_LIST='#build/moduletests.txt',
                    MSVS_ARCH=msarch ,
                    PYTHON=utils.find_python(),
@@ -309,12 +311,30 @@ env = Environment( BUILD_DIR=variantDir,
                    CONFIGURELOG = '#' + scons_data_dir + '/config.log'
                    )
 
+# This could be 'if solaris', but unfortuantely that variable hasn't been set yet.
+if "sunos5" == os.sys.platform:
+    # SERVER-9890: On Solaris, SCons preferentially loads the sun linker tool 'sunlink' when
+    # using the 'default' tools as we do above. The sunlink tool sets -G as the flag for
+    # creating a shared library. But we don't want that, since we always drive our link step
+    # through CC or CXX. Instead, we want to let the compiler map GCC's '-shared' flag to the
+    # appropriate linker specs that it has compiled in. We could (and should in the future)
+    # select an empty set of tools above and then enable them as appropriate on a per platform
+    # basis. Until then the simplest solution, as discussed on the scons-users mailing list,
+    # appears to be to simply explicitly run the 'gnulink' tool to overwrite the Environment
+    # changes made by 'sunlink'. See the following thread for more detail:
+    #  http://four.pairlist.net/pipermail/scons-users/2013-June/001486.html
+    env.Tool('gnulink')
+
+
 env['_LIBDEPS'] = '$_LIBDEPS_OBJS'
 
 if has_option('mute'):
     env.Append( CCCOMSTR = "Compiling $TARGET" )
     env.Append( CXXCOMSTR = env["CCCOMSTR"] )
+    env.Append( SHCCCOMSTR = "Compiling $TARGET" )
+    env.Append( SHCXXCOMSTR = env["SHCCCOMSTR"] )
     env.Append( LINKCOMSTR = "Linking $TARGET" )
+    env.Append( SHLINKCOMSTR = env["LINKCOMSTR"] )
     env.Append( ARCOMSTR = "Generating library $TARGET" )
 
 if has_option('mongod-concurrency-level'):
@@ -341,6 +361,9 @@ elif has_option("clang"):
 
 if has_option( "cc" ):
     env["CC"] = get_option( "cc" )
+
+if has_option( "ld" ):
+    env["LINK"] = get_option( "ld" )
 
 if env['PYSYSPLATFORM'] in ('linux2', 'freebsd'):
     env['LINK_LIBGROUP_START'] = '-Wl,--start-group'
@@ -401,8 +424,8 @@ else:
     boostVersion = "-" + boostVersion
 
 if ( not ( usesm or usev8 or justClientLib) ):
-    usesm = True
-    options_topass["usesm"] = True
+    usev8 = True
+    options_topass["usev8"] = True
 
 extraLibPlaces = []
 
@@ -487,7 +510,6 @@ if "darwin" == os.sys.platform:
     platform = "osx" # prettier than darwin
 
     if env["CXX"] is None:
-        print( "YO" )
         if os.path.exists( "/usr/bin/g++-4.2" ):
             env["CXX"] = "g++-4.2"
 
@@ -518,11 +540,14 @@ elif os.sys.platform.startswith("linux"):
 
     if force32:
         env.Append( EXTRALIBPATH=["/usr/lib32"] )
+        env.Append( CCFLAGS=["-mmmx"] )
 
     nix = True
 
     if static:
         env.Append( LINKFLAGS=" -static " )
+    if has_option( "static-libstdc++" ):
+        env.Append( LINKFLAGS=" -static-libstdc++ " )
 
 elif "sunos5" == os.sys.platform:
      nix = True
@@ -555,12 +580,12 @@ elif "win32" == os.sys.platform:
         env.Append( CPPDEFINES=[ "MONGO_USE_SRW_ON_WINDOWS" ] )
 
     for pathdir in env['ENV']['PATH'].split(os.pathsep):
-	if os.path.exists(os.path.join(pathdir, 'cl.exe')):
+        if os.path.exists(os.path.join(pathdir, 'cl.exe')):
             print( "found visual studio at " + pathdir )
-	    break
+            break
     else:
-	#use current environment
-	env['ENV'] = dict(os.environ)
+        #use current environment
+        env['ENV'] = dict(os.environ)
 
     env.Append( CPPDEFINES=[ "_UNICODE" ] )
     env.Append( CPPDEFINES=[ "UNICODE" ] )
@@ -701,9 +726,6 @@ if nix:
         except KeyError:
             pass
 
-    if linux and has_option( "sharedclient" ):
-        env.Append( LINKFLAGS=" -Wl,--as-needed -Wl,-zdefs " )
-
     if linux and has_option( "gcov" ):
         env.Append( CXXFLAGS=" -fprofile-arcs -ftest-coverage " )
         env.Append( LINKFLAGS=" -fprofile-arcs -ftest-coverage " )
@@ -743,10 +765,6 @@ if nix:
         print( "removing precompiled headers" )
         os.unlink( env.File("$BUILD_DIR/mongo/pch.h.$GCHSUFFIX").abspath ) # gcc uses the file if it exists
 
-if usev8:
-    env.Prepend( EXTRACPPPATH=["#/../v8/include/"] )
-    env.Prepend( EXTRALIBPATH=["#/../v8/"] )
-
 if usesm:
     env.Append( CPPDEFINES=["JS_C_STRINGS_ARE_UTF8"] )
 
@@ -757,8 +775,12 @@ if "uname" in dir(os):
 
 if has_option( "ssl" ):
     env.Append( CPPDEFINES=["MONGO_SSL"] )
-    env.Append( LIBS=["ssl"] )
-    env.Append( LIBS=["crypto"] )
+    if windows:
+        env.Append( LIBS=["libeay32"] )
+        env.Append( LIBS=["ssleay32"] )
+    else:
+        env.Append( LIBS=["ssl"] )
+        env.Append( LIBS=["crypto"] )
 
 try:
     umask = os.umask(022)
@@ -777,10 +799,18 @@ if not use_system_version_of_library("boost"):
     env.Prepend(CPPPATH=['$BUILD_DIR/third_party/boost'],
                 CPPDEFINES=['BOOST_ALL_NO_LIB'])
 
+env.Prepend(CPPPATH=['$BUILD_DIR/third_party/s2'])
+env.Prepend(CPPPATH=['$BUILD_DIR/third_party/libstemmer_c/include'])
+
 env.Append( CPPPATH=['$EXTRACPPPATH'],
             LIBPATH=['$EXTRALIBPATH'] )
 
+# discover modules, and load the (python) module for each module's build.py
+mongo_modules = moduleconfig.discover_modules('src/mongo/db/modules')
+env['MONGO_MODULES'] = [m.name for m in mongo_modules]
+
 # --- check system ---
+
 
 def doConfigure(myenv):
     conf = Configure(myenv)
@@ -818,13 +848,19 @@ def doConfigure(myenv):
     if solaris:
         conf.CheckLib( "nsl" )
 
-    if usev8:
+    if usev8 and use_system_version_of_library("v8"):
         if debugBuild:
             v8_lib_choices = ["v8_g", "v8"]
         else:
             v8_lib_choices = ["v8"]
         if not conf.CheckLib( v8_lib_choices ):
             Exit(1)
+
+    conf.env['MONGO_BUILD_SASL_CLIENT'] = bool(has_option("use-sasl-client"))
+    if conf.env['MONGO_BUILD_SASL_CLIENT'] and not conf.CheckLibWithHeader(
+        "sasl2", "sasl/sasl.h", "C", "sasl_version_info(0, 0, 0, 0, 0, 0);", autoadd=False):
+
+        Exit(1)
 
     # requires ports devel/libexecinfo to be installed
     if freebsd or openbsd:
@@ -859,13 +895,8 @@ def doConfigure(myenv):
         myenv.Append( CPPDEFINES=[ "HEAP_CHECKING" ] )
         myenv.Append( CCFLAGS=["-fno-omit-frame-pointer"] )
 
-    # discover modules (subdirectories of db/modules/), and
-    # load the (python) module for each module's build.py
-    modules = moduleconfig.discover_modules('src/mongo/')
-
-    # ask each module to configure itself, and return a
-    # dictionary of name => list_of_sources for each module.
-    env["MONGO_MODULES"] = moduleconfig.configure_modules(modules, conf, env)
+    # ask each module to configure itself and the build environment.
+    moduleconfig.configure_modules(mongo_modules, conf, env)
 
     return conf.Finish()
 
@@ -887,6 +918,8 @@ elif not onlyServer:
 
     if windows:
         shellEnv.Append( LIBS=["winmm.lib"] )
+
+enforce_glibc = linux and has_option("release") and not has_option("no-glibc-check")
 
 def checkErrorCodes():
     import buildscripts.errorcodes as x
@@ -926,6 +959,17 @@ def doStyling( env , target , source ):
 env.Alias( "style" , [] , [ doStyling ] )
 env.AlwaysBuild( "style" )
 
+# --- lint ----
+
+
+
+def doLint( env , target , source ):
+    import buildscripts.lint
+    if not buildscripts.lint.run_lint( [ "src/mongo/" ] ):
+        raise Exception( "lint errors" )
+
+env.Alias( "lint" , [] , [ doLint ] )
+env.AlwaysBuild( "lint" )
 
 
 #  ----  INSTALL -------
@@ -936,22 +980,21 @@ def getSystemInstallName():
         n += "-static"
     if has_option("nostrip"):
         n += "-debugsymbols"
-    if nix and os.uname()[2].startswith( "8." ):
+    if nix and os.uname()[2].startswith("8."):
         n += "-tiger"
 
-    if len(env.get("MONGO_MODULES", None)):
-            n += "-" + "-".join(env["MONGO_MODULES"].keys())
+    if len(mongo_modules):
+            n += "-" + "-".join(m.name for m in mongo_modules)
 
     try:
         findSettingsSetup()
         import settings
-        if "distmod" in dir( settings ):
-            n = n + "-" + str( settings.distmod )
+        if "distmod" in dir(settings):
+            n = n + "-" + str(settings.distmod)
     except:
         pass
 
-
-    dn = GetOption( "distmod" )
+    dn = GetOption("distmod")
     if dn and len(dn) > 0:
         n = n + "-" + dn
 
@@ -1016,14 +1059,13 @@ env.AlwaysBuild( "push" )
 
 # ---- deploying ---
 
-def s3push( localName , remoteName=None , remotePrefix=None , fixName=True , platformDir=True ):
+def s3push(localName, remoteName=None, platformDir=True):
     localName = str( localName )
 
-    if remotePrefix is None:
-        if isBuildingLatest:
-            remotePrefix = utils.getGitBranchString( "-" ) + "-latest"
-        else:
-            remotePrefix = "-" + distName
+    if isBuildingLatest:
+        remotePrefix = utils.getGitBranchString("-") + "-latest"
+    else:
+        remotePrefix = "-" + distName
 
     findSettingsSetup()
 
@@ -1035,15 +1077,11 @@ def s3push( localName , remoteName=None , remotePrefix=None , fixName=True , pla
     if remoteName is None:
         remoteName = localName
 
-    if fixName:
-        (root,dot,suffix) = _rpartition( localName, "." )
-        name = remoteName + "-" + getSystemInstallName()
-        name += remotePrefix
-        if dot == "." :
-            name += "." + suffix
-        name = name.lower()
-    else:
-        name = remoteName
+    name = '%s-%s%s' % (remoteName , getSystemInstallName(), remotePrefix)
+    lastDotIndex = localName.rfind('.')
+    if lastDotIndex != -1:
+        name += localName[lastDotIndex:]
+    name = name.lower()
 
     if platformDir:
         name = platform + "/" + name
@@ -1081,12 +1119,7 @@ if len(COMMAND_LINE_TARGETS) > 0 and 'uninstall' in COMMAND_LINE_TARGETS:
     BUILD_TARGETS.remove("uninstall")
     BUILD_TARGETS.append("install")
 
-clientEnv = env.Clone()
-clientEnv['CPPDEFINES'].remove('MONGO_EXPOSE_MACROS')
-
-if not use_system_version_of_library("boost"):
-    clientEnv.Append(LIBS=['boost_thread', 'boost_filesystem', 'boost_system'])
-    clientEnv.Prepend(LIBPATH=['$BUILD_DIR/third_party/boost/'])
+module_sconscripts = moduleconfig.get_module_sconscripts(mongo_modules)
 
 # The following symbols are exported for use in subordinate SConscript files.
 # Ideally, the SConscript files would be purely declarative.  They would only
@@ -1097,17 +1130,19 @@ if not use_system_version_of_library("boost"):
 # conditional decision making that hasn't been moved up to this SConstruct file,
 # and they are exported here, as well.
 Export("env")
-Export("clientEnv")
 Export("shellEnv")
 Export("testEnv")
 Export("has_option use_system_version_of_library")
 Export("installSetup")
 Export("usesm usev8")
-Export("darwin windows solaris linux nix")
+Export("darwin windows solaris linux freebsd nix")
+Export('module_sconscripts')
+Export("debugBuild")
+Export("enforce_glibc")
 
-env.SConscript( 'src/SConscript', variant_dir='$BUILD_DIR', duplicate=False )
-env.SConscript( 'src/SConscript.client', variant_dir='$BUILD_DIR/client_build', duplicate=False )
-env.SConscript( ['SConscript.buildinfo', 'SConscript.smoke'] )
+env.SConscript('src/SConscript', variant_dir='$BUILD_DIR', duplicate=False)
+env.SConscript('src/SConscript.client', variant_dir='$BUILD_DIR/client_build', duplicate=False)
+env.SConscript(['SConscript.buildinfo', 'SConscript.smoke'])
 
 def clean_old_dist_builds(env, target, source):
     prefix = "mongodb-%s-%s" % (platform, processor)
@@ -1124,4 +1159,4 @@ def clean_old_dist_builds(env, target, source):
 env.Alias("dist_clean", [], [clean_old_dist_builds])
 env.AlwaysBuild("dist_clean")
 
-env.Alias('all', ['core', 'tools', 'clientTests', 'test', 'unittests'])
+env.Alias('all', ['core', 'tools', 'clientTests', 'test', 'unittests', 'moduletests'])

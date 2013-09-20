@@ -18,23 +18,22 @@
 
 #include "pch.h"
 
-#include "../db/ops/query.h"
-#include "../db/scanandorder.h"
+#include "mongo/db/ops/query.h"
 
-#include "../db/dbhelpers.h"
-#include "../db/clientcursor.h"
 #include "mongo/client/dbclientcursor.h"
-
-#include "../db/instance.h"
-#include "../db/json.h"
-#include "../db/lasterror.h"
-
-#include "../util/timer.h"
+#include "mongo/db/clientcursor.h"
+#include "mongo/db/dbhelpers.h"
+#include "mongo/db/instance.h"
+#include "mongo/db/json.h"
+#include "mongo/db/kill_current_op.h"
+#include "mongo/db/lasterror.h"
+#include "mongo/db/oplog.h"
+#include "mongo/db/scanandorder.h"
+#include "mongo/util/timer.h"
 
 #include "dbtests.h"
 
 namespace mongo {
-    extern int __findingStartInitialTimeout;
     void assembleRequest( const string &ns, BSONObj query, int nToReturn, int nToSkip,
                          const BSONObj *fieldsToReturn, int queryOptions, Message &toSend );
 }
@@ -130,9 +129,6 @@ namespace QueryTests {
     class FindOneEmptyObj : public Base {
     public:
         void run() {
-            // todo: this is BAD.
-            cc().getAuthenticationInfo()->setIsALocalHostConnectionWithSpecialAuthPowers();
-
             // We don't normally allow empty objects in the database, but test that we can find
             // an empty object (one might be allowed inside a reserved namespace at some point).
             Lock::GlobalWrite lk;
@@ -222,6 +218,105 @@ namespace QueryTests {
         }
     };
 
+    /**
+     * An exception triggered during a get more request destroys the ClientCursor used by the get
+     * more, preventing further iteration of the cursor in subsequent get mores.
+     */
+    class GetMoreKillOp : public ClientBase {
+    public:
+        ~GetMoreKillOp() {
+            killCurrentOp.reset();
+            client().dropCollection( "unittests.querytests.GetMoreKillOp" );
+        }
+        void run() {
+            
+            // Create a collection with some data.
+            const char* ns = "unittests.querytests.GetMoreKillOp";
+            for( int i = 0; i < 1000; ++i ) {
+                insert( ns, BSON( "a" << i ) );
+            }
+
+            // Create a cursor on the collection, with a batch size of 200.
+            auto_ptr<DBClientCursor> cursor = client().query( ns, "", 0, 0, 0, 0, 200 );
+            CursorId cursorId = cursor->getCursorId();
+            
+            // Count 500 results, spanning a few batches of documents.
+            for( int i = 0; i < 500; ++i ) {
+                ASSERT( cursor->more() );
+                cursor->next();
+            }
+            
+            // Set the killop kill all flag, forcing the next get more to fail with a kill op
+            // exception.
+            killCurrentOp.killAll();
+            while( cursor->more() ) {
+                cursor->next();
+            }
+            
+            // Revert the killop kill all flag.
+            killCurrentOp.reset();
+
+            // Check that the cursor has been removed.
+            set<CursorId> ids;
+            ClientCursor::find( ns, ids );
+            ASSERT_EQUALS( 0U, ids.count( cursorId ) );
+
+            // Check that a subsequent get more fails with the cursor removed.
+            ASSERT_THROWS( client().getMore( ns, cursorId ), UserException );
+        }
+    };
+
+    /**
+     * A get more exception caused by an invalid or unauthorized get more request does not cause
+     * the get more's ClientCursor to be destroyed.  This prevents an unauthorized user from
+     * improperly killing a cursor by issuing an invalid get more request.
+     */
+    class GetMoreInvalidRequest : public ClientBase {
+    public:
+        ~GetMoreInvalidRequest() {
+            killCurrentOp.reset();
+            client().dropCollection( "unittests.querytests.GetMoreInvalidRequest" );
+        }
+        void run() {
+
+            // Create a collection with some data.
+            const char* ns = "unittests.querytests.GetMoreInvalidRequest";
+            for( int i = 0; i < 1000; ++i ) {
+                insert( ns, BSON( "a" << i ) );
+            }
+            
+            // Create a cursor on the collection, with a batch size of 200.
+            auto_ptr<DBClientCursor> cursor = client().query( ns, "", 0, 0, 0, 0, 200 );
+            CursorId cursorId = cursor->getCursorId();
+
+            // Count 500 results, spanning a few batches of documents.
+            int count = 0;
+            for( int i = 0; i < 500; ++i ) {
+                ASSERT( cursor->more() );
+                cursor->next();
+                ++count;
+            }
+
+            // Send a get more with a namespace that is incorrect ('spoofed') for this cursor id.
+            // This is the invalaid get more request described in the comment preceding this class.
+            client().getMore
+                    ( "unittests.querytests.GetMoreInvalidRequest_WRONG_NAMESPACE_FOR_CURSOR",
+                      cursor->getCursorId() );
+
+            // Check that the cursor still exists
+            set<CursorId> ids;
+            ClientCursor::find( ns, ids );
+            ASSERT_EQUALS( 1U, ids.count( cursorId ) );
+            
+            // Check that the cursor can be iterated until all documents are returned.
+            while( cursor->more() ) {
+                cursor->next();
+                ++count;
+            }
+            ASSERT_EQUALS( 1000, count );
+        }
+    };
+    
     class PositiveLimit : public ClientBase {
     public:
         const char* ns;
@@ -1123,13 +1218,22 @@ namespace QueryTests {
         }
     };
 
+    class ZeroFindingStartTimeout {
+    public:
+        ZeroFindingStartTimeout() :
+            _old( FindingStartCursor::getInitialTimeout() ) {
+            FindingStartCursor::setInitialTimeout( 0 );
+        }
+        ~ZeroFindingStartTimeout() {
+            FindingStartCursor::setInitialTimeout( _old );
+        }
+    private:
+        int _old;
+    };
+
     class FindingStart : public CollectionBase {
     public:
-        FindingStart() : CollectionBase( "findingstart" ), _old( __findingStartInitialTimeout ) {
-            __findingStartInitialTimeout = 0;
-        }
-        ~FindingStart() {
-            __findingStartInitialTimeout = _old;
+        FindingStart() : CollectionBase( "findingstart" ) {
         }
 
         void run() {
@@ -1156,16 +1260,12 @@ namespace QueryTests {
         }
 
     private:
-        int _old;
+        ZeroFindingStartTimeout _zeroTimeout;
     };
 
     class FindingStartPartiallyFull : public CollectionBase {
     public:
-        FindingStartPartiallyFull() : CollectionBase( "findingstart" ), _old( __findingStartInitialTimeout ) {
-            __findingStartInitialTimeout = 0;
-        }
-        ~FindingStartPartiallyFull() {
-            __findingStartInitialTimeout = _old;
+        FindingStartPartiallyFull() : CollectionBase( "findingstart" ) {
         }
 
         void run() {
@@ -1193,7 +1293,7 @@ namespace QueryTests {
         }
 
     private:
-        int _old;
+        ZeroFindingStartTimeout _zeroTimeout;
     };
     
     /**
@@ -1569,6 +1669,8 @@ namespace QueryTests {
             add< FindOneEmptyObj >();
             add< BoundedKey >();
             add< GetMore >();
+            add< GetMoreKillOp >();
+            add< GetMoreInvalidRequest >();
             add< PositiveLimit >();
             add< ReturnOneOfManyAndTail >();
             add< TailNotAtEnd >();

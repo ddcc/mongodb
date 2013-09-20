@@ -36,7 +36,6 @@ namespace mongo {
         // Protects _groups.
         static mongo::mutex groupMx;
     public:
-        ReplSetConfig();
         /**
          * This contacts the given host and tries to get a config from them.
          *
@@ -48,9 +47,15 @@ namespace mongo {
          * reasons.) If something is misconfigured, throws an exception. If the
          * host couldn't be queried or is just blank, ok() will be false.
          */
-        ReplSetConfig(const HostAndPort& h);
+        static ReplSetConfig* make(const HostAndPort& h);
 
-        ReplSetConfig(BSONObj cfg, bool force=false);
+        static ReplSetConfig* make(BSONObj cfg, bool force=false);
+
+        /**
+         * This uses DBDirectClient to check itself for a config.  This way we don't need to connect
+         * to ourselves over the network to fetch our own config.
+         */
+        static ReplSetConfig* makeDirect();
 
         bool ok() const { return _ok; }
 
@@ -156,12 +161,24 @@ namespace mongo {
         bool _constructed;
 
         /**
+         * Get the timeout to use for heartbeats.
+         */
+        int getHeartbeatTimeout() const;
+
+        /**
+         * Default timeout: 10 seconds
+         */
+        static const int DEFAULT_HB_TIMEOUT;
+
+        /**
          * Returns if replication chaining is allowed.
          */
         bool chainingAllowed() const;
 
     private:
-        bool _ok;
+        ReplSetConfig();
+        void init(const HostAndPort& h);
+        void init(BSONObj cfg, bool force);
 
         /**
          * If replication can be chained. If chaining is disallowed, it can still be explicitly
@@ -169,11 +186,17 @@ namespace mongo {
          */
         bool _chainingAllowed;
         int _majority;
+        bool _ok;
 
         void from(BSONObj);
         void clear();
 
         struct TagClause;
+
+        /**
+         * The timeout to use for heartbeats
+         */
+        int _heartbeatTimeout;
 
         /**
          * This is a logical grouping of servers.  It is pointed to by a set of
@@ -187,7 +210,7 @@ namespace mongo {
          */
         struct TagSubgroup : boost::noncopyable {
             ~TagSubgroup(); // never called; not defined
-            TagSubgroup(string nm) : name(nm) { }
+            TagSubgroup(const std::string& nm) : name(nm) { }
             const string name;
             OpTime last;
             vector<TagClause*> clauses;

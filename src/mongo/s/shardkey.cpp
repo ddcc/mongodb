@@ -26,7 +26,7 @@
 namespace mongo {
 
     ShardKeyPattern::ShardKeyPattern( BSONObj p ) : pattern( p.getOwned() ) {
-        pattern.getFieldNames(patternfields);
+        pattern.toBSON().getFieldNames( patternfields );
 
         BSONObjBuilder min;
         BSONObjBuilder max;
@@ -42,16 +42,6 @@ namespace mongo {
         gMax = max.obj();
     }
 
-    int ShardKeyPattern::compare( const BSONObj& lObject , const BSONObj& rObject ) const {
-        BSONObj L = extractKey(lObject);
-        uassert( 10198 , str::stream() << "left object ("  << lObject << ") doesn't have full shard key (" << pattern << ')',
-                L.nFields() == (int)patternfields.size());
-        BSONObj R = extractKey(rObject);
-        uassert( 10199 , str::stream() << "right object (" << rObject << ") doesn't have full shard key (" << pattern << ')',
-                R.nFields() == (int)patternfields.size());
-        return L.woCompare(R);
-    }
-
     bool ShardKeyPattern::hasShardKey( const BSONObj& obj ) const {
         /* this is written s.t. if obj has lots of fields, if the shard key fields are early,
            it is fast.  so a bit more work to try to be semi-fast.
@@ -59,16 +49,26 @@ namespace mongo {
 
         for(set<string>::const_iterator it = patternfields.begin(); it != patternfields.end(); ++it) {
             BSONElement e = obj.getFieldDotted(it->c_str());
-            if(e.eoo() || e.type() == Array || (e.type() == Object && e.embeddedObject().firstElementFieldName()[0] == '$')) {
-                // cant use getGtLtOp here as it returns Equality for unknown $ops and we want to reject them
+            if(     e.eoo() ||
+                    e.type() == Array ||
+                    (e.type() == Object && !e.embeddedObject().okForStorage())) {
+                // Don't allow anything for a shard key we can't store -- like $gt/$lt ops
                 return false;
             }
         }
         return true;
     }
 
-    bool ShardKeyPattern::isPrefixOf( const BSONObj& otherPattern ) const {
+    bool ShardKeyPattern::isPrefixOf( const KeyPattern& otherPattern ) const {
         return pattern.isPrefixOf( otherPattern );
+    }
+
+    bool ShardKeyPattern::isUniqueIndexCompatible( const KeyPattern& uniqueIndexPattern ) const {
+        if ( ! uniqueIndexPattern.toBSON().isEmpty() &&
+             str::equals( uniqueIndexPattern.toBSON().firstElementFieldName(), "_id" ) ){
+            return true;
+        }
+        return pattern.toBSON().isFieldNamePrefixOf( uniqueIndexPattern.toBSON() );
     }
 
     string ShardKeyPattern::toString() const {
@@ -78,7 +78,7 @@ namespace mongo {
     BSONObj ShardKeyPattern::moveToFront(const BSONObj& obj) const {
         vector<const char*> keysToMove;
         keysToMove.push_back("_id");
-        BSONForEach(e, pattern) {
+        BSONForEach(e, pattern.toBSON()) {
             if (strchr(e.fieldName(), '.') == NULL && strcmp(e.fieldName(), "_id") != 0)
                 keysToMove.push_back(e.fieldName());
         }
@@ -145,16 +145,26 @@ namespace mongo {
     public:
 
         void hasshardkeytest() {
-            BSONObj x = fromjson("{ zid : \"abcdefg\", num: 1.0, name: \"eliot\" }");
             ShardKeyPattern k( BSON( "num" << 1 ) );
+
+            BSONObj x = fromjson("{ zid : \"abcdefg\", num: 1.0, name: \"eliot\" }");
             verify( k.hasShardKey(x) );
             verify( !k.hasShardKey( fromjson("{foo:'a'}") ) );
             verify( !k.hasShardKey( fromjson("{x: {$gt: 1}}") ) );
+            verify( !k.hasShardKey( fromjson("{num: {$gt: 1}}") ) );
+            BSONObj obj = BSON( "num" << BSON( "$ref" << "coll" << "$id" << 1));
+            verify( k.hasShardKey(obj));
 
             // try compound key
             {
                 ShardKeyPattern k( fromjson("{a:1,b:-1,c:1}") );
                 verify( k.hasShardKey( fromjson("{foo:'a',a:'b',c:'z',b:9,k:99}") ) );
+                BSONObj obj = BSON( "foo" << "a" <<
+                                    "a" << BSON("$ref" << "coll" << "$id" << 1) <<
+                                    "c" << 1 << "b" << 9 << "k" << 99 );
+                verify( k.hasShardKey(  obj ) );
+                verify( !k.hasShardKey( fromjson("{foo:'a',a:[1,2],c:'z',b:9,k:99}") ) );
+                verify( !k.hasShardKey( fromjson("{foo:'a',a:{$gt:1},c:'z',b:9,k:99}") ) );
                 verify( !k.hasShardKey( fromjson("{foo:'a',a:'b',c:'z',bb:9,k:99}") ) );
                 verify( !k.hasShardKey( fromjson("{k:99}") ) );
             }
@@ -164,7 +174,16 @@ namespace mongo {
                 ShardKeyPattern k( fromjson("{'a.b':1}") );
                 verify( k.hasShardKey( fromjson("{a:{b:1,c:1},d:1}") ) );
                 verify( k.hasShardKey( fromjson("{'a.b':1}") ) );
+                BSONObj obj = BSON( "c" << "a" <<
+                                    "a" << BSON("$ref" << "coll" << "$id" << 1) );
+                verify( !k.hasShardKey(  obj ) );
+                obj = BSON( "c" << "a" <<
+                            "a" << BSON( "b" << BSON("$ref" << "coll" << "$id" << 1) <<
+                                         "c" << 1));
+                verify( k.hasShardKey(  obj ) );
                 verify( !k.hasShardKey( fromjson("{'a.c':1}") ) );
+                verify( !k.hasShardKey( fromjson("{'a':[{b:1}, {c:1}]}") ) );
+                verify( !k.hasShardKey( fromjson("{a:{b:[1,2]},d:1}") ) );
                 verify( !k.hasShardKey( fromjson("{a:{c:1},d:1}") ) );
                 verify( !k.hasShardKey( fromjson("{a:1}") ) );
                 verify( !k.hasShardKey( fromjson("{b:1}") ) );
@@ -179,6 +198,21 @@ namespace mongo {
             verify( k.extractKey( fromjson("{a:1,sub:{b:2,c:3}}") ).binaryEqual(x) );
             verify( k.extractKey( fromjson("{sub:{b:2,c:3},a:1}") ).binaryEqual(x) );
         }
+
+        void isSpecialTest() {
+            ShardKeyPattern k1( BSON( "a" << 1) );
+            verify( ! k1.isSpecial() );
+
+            ShardKeyPattern k2( BSON( "a" << -1 << "b" << 1 ) );
+            verify( ! k2.isSpecial() );
+
+            ShardKeyPattern k3( BSON( "a" << "hashed") );
+            verify( k3.isSpecial() );
+
+            ShardKeyPattern k4( BSON( "a" << 1 << "b" << "hashed") );
+            verify( k4.isSpecial() );
+        }
+
         void moveToFrontTest() {
             ShardKeyPattern sk (BSON("a" << 1 << "b" << 1));
 
@@ -193,6 +227,18 @@ namespace mongo {
             ret = sk.moveToFront(BSON("z" << 1 << "y" << 1 << "a" << 1 << "b" << 1 << "Z" << 1 << "Y" << 1));
             verify(ret.binaryEqual(BSON("a" << 1 << "b" << 1 << "z" << 1 << "y" << 1 << "Z" << 1 << "Y" << 1)));
 
+        }
+
+        void uniqueIndexCompatibleTest() {
+            ShardKeyPattern k1( BSON( "a" << 1 ) );
+            verify( k1.isUniqueIndexCompatible( BSON( "_id" << 1 ) ) );
+            verify( k1.isUniqueIndexCompatible( BSON( "a" << 1 << "b" << 1 ) ) );
+            verify( k1.isUniqueIndexCompatible( BSON( "a" << -1 ) ) );
+            verify( ! k1.isUniqueIndexCompatible( BSON( "b" << 1 ) ) );
+
+            ShardKeyPattern k2( BSON( "a" <<  "hashed") );
+            verify( k2.isUniqueIndexCompatible( BSON( "a" << 1 ) ) );
+            verify( ! k2.isUniqueIndexCompatible( BSON( "b" << 1 ) ) );
         }
 
         void moveToFrontBenchmark(int numFields) {
@@ -229,10 +275,9 @@ namespace mongo {
 
             BSONObj k1 = BSON( "key" << 5 );
 
-            verify( k.compare( min , max ) < 0 );
-            verify( k.compare( min , k1 ) < 0 );
-            verify( k.compare( max , min ) > 0 );
-            verify( k.compare( min , min ) == 0 );
+            verify( min < max );
+            verify( min < k.extractKey( k1 ) );
+            verify( max > min );
 
             hasshardkeytest();
             verify( k.hasShardKey( k1 ) );
@@ -241,11 +286,15 @@ namespace mongo {
             BSONObj a = k1;
             BSONObj b = BSON( "key" << 999 );
 
-            verify( k.compare(a,b) < 0 );
+            verify( k.extractKey( a ) <  k.extractKey( b ) );
+
+            isSpecialTest();
 
             // add middle multitype tests
 
             moveToFrontTest();
+
+            uniqueIndexCompatibleTest();
 
             if (0) { // toggle to run benchmark
                 moveToFrontBenchmark(0);

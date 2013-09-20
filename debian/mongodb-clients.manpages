@@ -1,8 +1,12 @@
+debian/manpages/bsondump.1
 debian/manpages/mongo.1
 debian/manpages/mongodump.1
 debian/manpages/mongoexport.1
 debian/manpages/mongofiles.1
 debian/manpages/mongoimport.1
+debian/manpages/mongooplog.1
+debian/manpages/mongoperf.1
 debian/manpages/mongorestore.1
 debian/manpages/mongosniff.1
 debian/manpages/mongostat.1
+debian/manpages/mongotop.1

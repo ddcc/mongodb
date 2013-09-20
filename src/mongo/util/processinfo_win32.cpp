@@ -49,8 +49,10 @@ namespace mongo {
             }
             supported = false;
         }
-    } psapiGlobal;
-                
+    };
+
+    static PsApiInit* psapiGlobal = NULL;
+
     int _wconvertmtos( SIZE_T s ) {
         return (int)( s / ( 1024 * 1024 ) );
     }
@@ -106,7 +108,8 @@ namespace mongo {
         GetNativeSystemInfo( &ntsysinfo );
         addrSize = (ntsysinfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 ? 64 : 32);
         numCores = ntsysinfo.dwNumberOfProcessors;
-        bExtra.append( "pageSize", static_cast< int >(ntsysinfo.dwPageSize) );
+        pageSize = static_cast<unsigned long long>(ntsysinfo.dwPageSize);
+        bExtra.append("pageSize", static_cast<long long>(pageSize));
 
         // get memory info
         mse.dwLength = sizeof( mse );
@@ -188,6 +191,9 @@ namespace mongo {
         osVersion = verstr.str();
         hasNuma = checkNumaEnabled();
         _extraStats = bExtra.obj();
+        if (psapiGlobal == NULL) {
+            psapiGlobal = new PsApiInit();
+        }
 
     }
 
@@ -196,10 +202,10 @@ namespace mongo {
     }
 
     bool ProcessInfo::blockCheckSupported() {
-        return psapiGlobal.supported;
+        return psapiGlobal->supported;
     }
 
-    bool ProcessInfo::blockInMemory( char * start ) {
+    bool ProcessInfo::blockInMemory(const void* start) {
 #if 0
         // code for printing out page fault addresses and pc's --
         // this could be useful for targetting heavy pagefault locations in the code
@@ -215,12 +221,34 @@ namespace mongo {
         }
 #endif
         PSAPI_WORKING_SET_EX_INFORMATION wsinfo;
-        wsinfo.VirtualAddress = start;
-        BOOL result = psapiGlobal.QueryWSEx( GetCurrentProcess(), &wsinfo, sizeof(wsinfo) );
+        wsinfo.VirtualAddress = const_cast<void*>(start);
+        BOOL result = psapiGlobal->QueryWSEx( GetCurrentProcess(), &wsinfo, sizeof(wsinfo) );
         if ( result )
             if ( wsinfo.VirtualAttributes.Valid )
                 return true;
         return false;
+    }
+
+    bool ProcessInfo::pagesInMemory(const void* start, size_t numPages, vector<char>* out) {
+        out->resize(numPages);
+        scoped_array<PSAPI_WORKING_SET_EX_INFORMATION> wsinfo(
+                new PSAPI_WORKING_SET_EX_INFORMATION[numPages]);
+
+        const void* startOfFirstPage = alignToStartOfPage(start);
+        for (size_t i = 0; i < numPages; i++) {
+            wsinfo[i].VirtualAddress = reinterpret_cast<void*>(
+                    reinterpret_cast<unsigned long long>(startOfFirstPage) + i * getPageSize());
+        }
+
+        BOOL result = psapiGlobal->QueryWSEx(GetCurrentProcess(),
+                                            wsinfo.get(),
+                                            sizeof(PSAPI_WORKING_SET_EX_INFORMATION) * numPages);
+
+        if (!result) return false;
+        for (size_t i = 0; i < numPages; ++i) {
+            (*out)[i] = wsinfo[i].VirtualAttributes.Valid ? 1 : 0;
+        }
+        return true;
     }
 
 }

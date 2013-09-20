@@ -10,14 +10,14 @@ function writeToConfigTest(){
     var gleObj = confDB.runCommand({ getLastError: 1, w: 'majority' });
 
     assert( gleObj.ok );
+    assert.eq("norepl", gleObj.err);
 
-    printjson( gleObj );
-    assert( gleObj.hasOwnProperty( 'shardRawGLE' ),
-        'missing shardRawGLE from get last error fields!' );
-    
-    var shardGLE = gleObj.shardRawGLE[ st.config0.host ];
-    assert( shardGLE.ok );
-    assert.neq( null, shardGLE.err );
+    // w:1 should still work
+    confDB.settings.update({ _id: 'balancer' }, { $set: { stopped: true }});
+    var gleObj = confDB.runCommand({ getLastError: 1, w: 1 });
+
+    assert(gleObj.ok);
+    assert.eq(null, gleObj.err);
 
     st.stop();
 }

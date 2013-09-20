@@ -46,7 +46,7 @@ namespace mongo {
     }
 
     void ReplSetImpl::syncDoInitialSync() {
-        const static int maxFailedAttempts = 10;
+        static const int maxFailedAttempts = 10;
         createOplog();
         int failedAttempts = 0;
         while ( failedAttempts < maxFailedAttempts ) {
@@ -66,28 +66,9 @@ namespace mongo {
         fassert( 16233, failedAttempts < maxFailedAttempts);
     }
 
-    /* todo : progress metering to sethbmsg. */
-    static bool clone(const char *master, string db, bool dataPass ) {
-        CloneOptions options;
+    bool ReplSetImpl::_syncDoInitialSync_clone(Cloner& cloner, const char *master,
+                                               const list<string>& dbs, bool dataPass) {
 
-        options.fromDB = db;
-
-        options.logForRepl = false;
-        options.slaveOk = true;
-        options.useReplAuth = true;
-        options.snapshot = false;
-        options.mayYield = true;
-        options.mayBeInterrupted = false;
-        
-        options.syncData = dataPass;
-        options.syncIndexes = ! dataPass;
-
-        string err;
-        return cloneFrom(master, options , err );
-    }
-
-
-    bool ReplSetImpl::_syncDoInitialSync_clone( const char *master, const list<string>& dbs , bool dataPass ) {
         for( list<string>::const_iterator i = dbs.begin(); i != dbs.end(); i++ ) {
             string db = *i;
             if( db == "local" ) 
@@ -99,10 +80,25 @@ namespace mongo {
                 sethbmsg( str::stream() << "initial sync cloning indexes for : " << db , 0);
 
             Client::WriteContext ctx(db);
-            if ( ! clone( master, db, dataPass ) ) {
-                sethbmsg( str::stream() 
-                              << "initial sync error clone of " << db 
-                              << " dataPass: " << dataPass << " failed sleeping 5 minutes" ,0);
+
+            string err;
+            int errCode;
+            CloneOptions options;
+            options.fromDB = db;
+            options.logForRepl = false;
+            options.slaveOk = true;
+            options.useReplAuth = true;
+            options.snapshot = false;
+            options.mayYield = true;
+            options.mayBeInterrupted = false;
+            options.syncData = dataPass;
+            options.syncIndexes = ! dataPass;
+
+            if (!cloner.go(master, options, err, &errCode)) {
+                sethbmsg(str::stream() << "initial sync: error while "
+                                       << (dataPass ? "cloning " : "indexing ") << db
+                                       << ".  " << (err.empty() ? "" : err + ".  ")
+                                       << "sleeping 5 minutes" ,0);
                 return false;
             }
         }
@@ -124,10 +120,13 @@ namespace mongo {
         d->emptyCappedCollection(rsoplog);
     }
 
-    Member* ReplSetImpl::getMemberToSyncTo() {
-        lock lk(this);
+    bool Member::syncable() const {
+        bool buildIndexes = theReplSet ? theReplSet->buildIndexes() : true;
+        return hbinfo().up() && (config().buildIndexes || !buildIndexes) && state().readable();
+    }
 
-        bool buildIndexes = true;
+    const Member* ReplSetImpl::getMemberToSyncTo() {
+        lock lk(this);
 
         // if we have a target we've requested to sync from, use it
 
@@ -138,7 +137,7 @@ namespace mongo {
             return target;
         }
 
-        Member* primary = const_cast<Member*>(box.getPrimary());
+        const Member* primary = box.getPrimary();
 
         // wait for 2N pings before choosing a sync target
         if (_cfg) {
@@ -148,8 +147,6 @@ namespace mongo {
                 OCCASIONALLY log() << "waiting for " << needMorePings << " pings from other members before syncing" << endl;
                 return NULL;
             }
-
-            buildIndexes = myConfig().buildIndexes;
 
             // If we are only allowed to sync from the primary, return that
             if (!_cfg->chainingAllowed()) {
@@ -161,22 +158,21 @@ namespace mongo {
         // find the member with the lowest ping time that has more data than me
 
         // Find primary's oplog time. Reject sync candidates that are more than
-        // MAX_SLACK_TIME seconds behind.
+        // maxSyncSourceLagSecs seconds behind.
         OpTime primaryOpTime;
-        static const unsigned maxSlackDurationSeconds = 10 * 60; // 10 minutes
         if (primary)
             primaryOpTime = primary->hbinfo().opTime;
         else
             // choose a time that will exclude no candidates, since we don't see a primary
-            primaryOpTime = OpTime(maxSlackDurationSeconds, 0);
+            primaryOpTime = OpTime(maxSyncSourceLagSecs, 0);
 
-        if ( primaryOpTime.getSecs() < maxSlackDurationSeconds ) {
+        if (primaryOpTime.getSecs() < static_cast<unsigned int>(maxSyncSourceLagSecs)) {
             // erh - I think this means there was just a new election
             // and we don't yet know the new primary's optime
-            primaryOpTime = OpTime(maxSlackDurationSeconds, 0);
+            primaryOpTime = OpTime(maxSyncSourceLagSecs, 0);
         }
 
-        OpTime oldestSyncOpTime(primaryOpTime.getSecs() - maxSlackDurationSeconds, 0);
+        OpTime oldestSyncOpTime(primaryOpTime.getSecs() - maxSyncSourceLagSecs, 0);
 
         Member *closest = 0;
         time_t now = 0;
@@ -187,13 +183,7 @@ namespace mongo {
         // This loop attempts to set 'closest'.
         for (int attempts = 0; attempts < 2; ++attempts) {
             for (Member *m = _members.head(); m; m = m->next()) {
-                if (!m->hbinfo().up())
-                    continue;
-                // make sure members with buildIndexes sync from other members w/indexes
-                if (buildIndexes && !m->config().buildIndexes)
-                    continue;
-
-                if (!m->state().readable())
+                if (!m->syncable())
                     continue;
 
                 if (m->state() == MemberState::RS_SECONDARY) {
@@ -201,13 +191,13 @@ namespace mongo {
                     if (m->hbinfo().opTime <= lastOpTimeWritten)
                         continue;
                     // omit secondaries that are excessively behind, on the first attempt at least.
-                    if (attempts == 0 && 
+                    if (attempts == 0 &&
                         m->hbinfo().opTime < oldestSyncOpTime)
                         continue;
                 }
 
                 // omit nodes that are more latent than anything we've already considered
-                if (closest && 
+                if (closest &&
                     (m->hbinfo().ping > closest->hbinfo().ping))
                     continue;
 
@@ -332,6 +322,8 @@ namespace mongo {
     /**
      * Do the initial sync for this member.  There are several steps to this process:
      *
+     *     0. Add _initialSyncFlag to minValid to tell us to restart initial sync if we
+     *        crash in the middle of this procedure
      *     1. Record start time.
      *     2. Clone.
      *     3. Set minValid1 to sync target's latest op time.
@@ -341,6 +333,7 @@ namespace mongo {
      *     7. Build indexes.
      *     8. Set minValid3 to sync target's latest op time.
      *     9. Apply ops from minValid2 to minValid3.
+          10. Clean up minValid and remove _initialSyncFlag field
      *
      * At that point, initial sync is finished.  Note that the oplog from the sync target is applied
      * three times: step 4, 6, and 8.  4 may involve refetching, 6 should not.  By the end of 6,
@@ -392,6 +385,9 @@ namespace mongo {
             return;
         }
         else {
+            // Add field to minvalid document to tell us to restart initial sync if we crash
+            theReplSet->setInitialSyncFlag();
+
             sethbmsg("initial sync drop all databases", 0);
             dropAllDatabasesExceptLocal();
 
@@ -399,7 +395,8 @@ namespace mongo {
 
             list<string> dbs = r.conn()->getDatabaseNames();
 
-            if ( ! _syncDoInitialSync_clone( sourceHostname.c_str(), dbs, true ) ) {
+            Cloner cloner;
+            if (!_syncDoInitialSync_clone(cloner, sourceHostname.c_str(), dbs, true)) {
                 veto(source->fullName(), 600);
                 sleepsecs(300);
                 return;
@@ -426,7 +423,7 @@ namespace mongo {
             lastOp = minValid;
 
             sethbmsg("initial sync building indexes",0);
-            if ( ! _syncDoInitialSync_clone( sourceHostname.c_str(), dbs, false ) ) {
+            if (!_syncDoInitialSync_clone(cloner, sourceHostname.c_str(), dbs, false)) {
                 veto(source->fullName(), 600);
                 sleepsecs(300);
                 return;
@@ -440,7 +437,6 @@ namespace mongo {
         
         // ---------
 
-
         sethbmsg("initial sync finishing up",0);
 
         verify( !box.getState().primary() ); // wouldn't make sense if we were.
@@ -453,10 +449,19 @@ namespace mongo {
             }
             catch(...) { }
 
+            // Initial sync is now complete.  Flag this by setting minValid to the last thing
+            // we synced.
             theReplSet->setMinValid(minValid);
+
+            // Clear the initial sync flag.
+            theReplSet->clearInitialSyncFlag();
 
             cx.ctx().db()->flushFiles(true);
         }
+
+        // If we just cloned & there were no ops applied, we still want the primary to know where
+        // we're up to
+        replset::BackgroundSync::notify();
 
         changeState(MemberState::RS_RECOVERING);
         sethbmsg("initial sync done",0);

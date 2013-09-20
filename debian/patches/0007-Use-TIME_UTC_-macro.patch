@@ -1,0 +1,23 @@
+From: Antonin Kral <a.kral@bobek.cz>
+Date: Wed, 17 Jul 2013 17:07:36 +0200
+Subject: Use TIME_UTC_ macro
+
+---
+ src/mongo/util/time_support.h | 4 ----
+ 1 file changed, 4 deletions(-)
+
+diff --git a/src/mongo/util/time_support.h b/src/mongo/util/time_support.h
+index 47c7d87..9df70e1 100644
+--- a/src/mongo/util/time_support.h
++++ b/src/mongo/util/time_support.h
+@@ -96,10 +96,6 @@ namespace mongo {
+     struct tm *gmtime(const time_t *timep);
+     struct tm *localtime(const time_t *timep);
+ 
+-#if defined(MONGO_BOOST_TIME_UTC_HACK) || (BOOST_VERSION >= 105000)
+ #define MONGO_BOOST_TIME_UTC boost::TIME_UTC_
+-#else
+-#define MONGO_BOOST_TIME_UTC boost::TIME_UTC
+-#endif
+ 
+ }  // namespace mongo

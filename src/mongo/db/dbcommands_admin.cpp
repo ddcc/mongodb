@@ -1,6 +1,7 @@
 // dbcommands_admin.cpp
 
 /**
+ *    Copyright (C) 2012 10gen Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -22,23 +23,32 @@
 */
 
 
-#include "pch.h"
-#include "jsobj.h"
-#include "pdfile.h"
-#include "namespace-inl.h"
-#include "commands.h"
-#include "cmdline.h"
-#include "btree.h"
-#include "curop-inl.h"
-#include "../util/background.h"
-#include "../util/logfile.h"
-#include "../util/alignedbuilder.h"
-#include "../util/paths.h"
-#include "../scripting/engine.h"
-#include "../util/timer.h"
+#include "mongo/pch.h"
 
 #include <boost/filesystem/convenience.hpp>
 #include <boost/filesystem/operations.hpp>
+#include <string>
+#include <vector>
+
+#include "mongo/base/init.h"
+#include "mongo/base/status.h"
+#include "mongo/db/auth/action_set.h"
+#include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/privilege.h"
+#include "mongo/db/cmdline.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/curop-inl.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/db/kill_current_op.h"
+#include "mongo/db/namespace-inl.h"
+#include "mongo/db/pdfile.h"
+#include "mongo/scripting/engine.h"
+#include "mongo/util/alignedbuilder.h"
+#include "mongo/util/background.h"
+#include "mongo/util/logfile.h"
+#include "mongo/util/paths.h"
+#include "mongo/util/timer.h"
 
 namespace mongo {
 
@@ -50,14 +60,20 @@ namespace mongo {
         virtual LockType locktype() const { return WRITE; }
 
         virtual void help(stringstream& h) const { h << "internal"; }
-
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+            ActionSet actions;
+            actions.addAction(ActionType::clean);
+            out->push_back(Privilege(parseNs(dbname, cmdObj), actions));
+        }
         bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
             string dropns = dbname + "." + cmdObj.firstElement().valuestrsafe();
 
             if ( !cmdLine.quiet )
                 tlog() << "CMD: clean " << dropns << endl;
 
-            NamespaceDetails *d = nsdetails(dropns.c_str());
+            NamespaceDetails *d = nsdetails(dropns);
 
             if ( ! d ) {
                 errmsg = "ns not found";
@@ -76,7 +92,8 @@ namespace mongo {
     namespace dur {
         boost::filesystem::path getJournalDir();
     }
- 
+
+    // Testing-only, enabled via command line
     class JournalLatencyTestCmd : public Command {
     public:
         JournalLatencyTestCmd() : Command( "journalLatencyTest" ) {}
@@ -85,7 +102,11 @@ namespace mongo {
         virtual LockType locktype() const { return NONE; }
         virtual bool adminOnly() const { return true; }
         virtual void help(stringstream& h) const { h << "test how long to write and fsync to a test file in the journal/ directory"; }
-
+        // No auth needed because it only works when enabled via command line.
+        virtual bool requiresAuth() { return false; }
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {}
         bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
             boost::filesystem::path p = dur::getJournalDir();
             p /= "journalLatencyTest";
@@ -145,7 +166,14 @@ namespace mongo {
 
             return 1;
         }
-    } journalLatencyTestCmd;
+    };
+    MONGO_INITIALIZER(RegisterJournalLatencyTestCmd)(InitializerContext* context) {
+        if (Command::testCommandsEnabled) {
+            // Leaked intentionally: a Command registers itself when constructed.
+            new JournalLatencyTestCmd();
+        }
+        return Status::OK();
+    }
 
     class ValidateCmd : public Command {
     public:
@@ -159,11 +187,18 @@ namespace mongo {
                                                         "Add full:true option to do a more thorough check"; }
 
         virtual LockType locktype() const { return READ; }
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+            ActionSet actions;
+            actions.addAction(ActionType::validate);
+            out->push_back(Privilege(parseNs(dbname, cmdObj), actions));
+        }
         //{ validate: "collectionnamewithoutthedbpart" [, scandata: <bool>] [, full: <bool> } */
 
         bool run(const string& dbname , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
             string ns = dbname + "." + cmdObj.firstElement().valuestrsafe();
-            NamespaceDetails * d = nsdetails( ns.c_str() );
+            NamespaceDetails * d = nsdetails( ns );
             if ( !cmdLine.quiet )
                 tlog() << "CMD: validate " << ns << endl;
 
@@ -390,13 +425,13 @@ namespace mongo {
                                     break;
                                 }
 
-                                if ( loc.a() <= 0 || strstr(ns, "hudsonSmall") == 0 ) {
-                                    string err (str::stream() << "bad deleted loc: " << loc.toString() << " bucket:" << i << " k:" << k);
-                                    errors << err;
-
-                                    valid = false;
-                                    break;
-                                }
+                                string err( str::stream() << "bad pointer in deleted record list: "
+                                                          << loc.toString()
+                                                          << " bucket: " << i
+                                                          << " k: " << k );
+                                errors << err;
+                                valid = false;
+                                break;
                             }
 
                             DeletedRecord *d = loc.drec();

@@ -16,27 +16,38 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "pch.h"
-#include "oplog.h"
-#include "repl_block.h"
-#include "repl.h"
-#include "commands.h"
-#include "repl/rs.h"
-#include "stats/counters.h"
-#include "../util/file.h"
-#include "../util/startup_test.h"
-#include "queryoptimizer.h"
-#include "ops/update.h"
-#include "ops/delete.h"
+#include "mongo/pch.h"
+
+#include "mongo/db/oplog.h"
+
+#include <vector>
+
+#include "mongo/db/auth/action_set.h"
+#include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/privilege.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/index_update.h"
 #include "mongo/db/instance.h"
+#include "mongo/db/namespacestring.h"
+#include "mongo/db/ops/update.h"
+#include "mongo/db/ops/delete.h"
+#include "mongo/db/queryoptimizer.h"
+#include "mongo/db/repl.h"
+#include "mongo/db/repl_block.h"
 #include "mongo/db/repl/bgsync.h"
+#include "mongo/db/repl/rs.h"
+#include "mongo/db/stats/counters.h"
+#include "mongo/util/elapsed_tracker.h"
+#include "mongo/util/file.h"
+#include "mongo/util/startup_test.h"
 
 namespace mongo {
 
     // from d_migrate.cpp
     void logOpForSharding( const char * opstr , const char * ns , const BSONObj& obj , BSONObj * patt );
 
-    int __findingStartInitialTimeout = 5; // configurable for testing
+    // Configurable for testing.
+    int FindingStartCursor::_initialTimeout = 5;
 
     // cached copies of these...so don't rename them, drop them, etc.!!!
     static NamespaceDetails *localOplogMainDetails = 0;
@@ -66,13 +77,13 @@ namespace mongo {
         {
             const char *logns = rsoplog;
             if ( rsOplogDetails == 0 ) {
-                Client::Context ctx( logns , dbpath, false);
+                Client::Context ctx(logns , dbpath);
                 localDB = ctx.db();
                 verify( localDB );
                 rsOplogDetails = nsdetails(logns);
                 massert(13389, "local.oplog.rs missing. did you drop it? if so restart server", rsOplogDetails);
             }
-            Client::Context ctx( logns , localDB, false );
+            Client::Context ctx(logns , localDB);
             {
                 int len = op.objsize();
                 Record *r = theDataFileMgr.fast_oplog_insert(rsOplogDetails, logns, len);
@@ -88,10 +99,10 @@ namespace mongo {
                 theReplSet->lastOpTimeWritten = ts;
                 theReplSet->lastH = h;
                 ctx.getClient()->setLastOp( ts );
-
-                replset::BackgroundSync::notify();
             }
         }
+
+        OpTime::setLast( ts );
     }
 
     /** given a BSON object, create a new one at dst which is the existing (partial) object
@@ -147,7 +158,7 @@ namespace mongo {
     // the compiler would use if inside the function.  the reason this is static is to avoid a malloc/free for this
     // on every logop call.
     static BufBuilder logopbufbuilder(8*1024);
-    const static int OPLOG_VERSION = 2;
+    static const int OPLOG_VERSION = 2;
     static void _logOpRS(const char *opstr, const char *ns, const char *logNS, const BSONObj& obj, BSONObj *o2, bool *bb, bool fromMigrate ) {
         Lock::DBWrite lk1("local");
 
@@ -197,13 +208,13 @@ namespace mongo {
         {
             const char *logns = rsoplog;
             if ( rsOplogDetails == 0 ) {
-                Client::Context ctx( logns , dbpath, false);
+                Client::Context ctx(logns , dbpath);
                 localDB = ctx.db();
                 verify( localDB );
                 rsOplogDetails = nsdetails(logns);
                 massert(13347, "local.oplog.rs missing. did you drop it? if so restart server", rsOplogDetails);
             }
-            Client::Context ctx( logns , localDB, false );
+            Client::Context ctx(logns , localDB);
             r = theDataFileMgr.fast_oplog_insert(rsOplogDetails, logns, len);
             /* todo: now() has code to handle clock skew.  but if the skew server to server is large it will get unhappy.
                      this code (or code in now() maybe) should be improved.
@@ -222,7 +233,7 @@ namespace mongo {
         append_O_Obj(r->data(), partial, obj);
 
         if ( logLevel >= 6 ) {
-            log( 6 ) << "logOp:" << BSONObj::make(r) << endl;
+            LOG( 6 ) << "logOp:" << BSONObj::make(r) << endl;
         }
     }
 
@@ -240,7 +251,7 @@ namespace mongo {
         mutex::scoped_lock lk2(OpTime::m);
 
         const OpTime ts = OpTime::now(lk2);
-        Client::Context context("",0,false);
+        Client::Context context("", 0);
 
         /* we jump through a bunch of hoops here to avoid copying the obj buffer twice --
            instead we do a single copy to the destination position in the memory mapped file.
@@ -266,17 +277,17 @@ namespace mongo {
         if( logNS == 0 ) {
             logNS = "local.oplog.$main";
             if ( localOplogMainDetails == 0 ) {
-                Client::Context ctx( logNS , dbpath, false);
+                Client::Context ctx(logNS , dbpath);
                 localDB = ctx.db();
                 verify( localDB );
                 localOplogMainDetails = nsdetails(logNS);
                 verify( localOplogMainDetails );
             }
-            Client::Context ctx( logNS , localDB, false );
+            Client::Context ctx(logNS , localDB);
             r = theDataFileMgr.fast_oplog_insert(localOplogMainDetails, logNS, len);
         }
         else {
-            Client::Context ctx( logNS, dbpath, false );
+            Client::Context ctx(logNS, dbpath);
             verify( nsdetails( logNS ) );
             // first we allocate the space, then we fill it below.
             r = theDataFileMgr.fast_oplog_insert( nsdetails( logNS ), logNS, len);
@@ -368,13 +379,13 @@ namespace mongo {
             sz = (double)cmdLine.oplogSize;
         else {
             /* not specified. pick a default size */
-            sz = 50.0 * 1000 * 1000;
+            sz = 50.0 * 1024 * 1024;
             if ( sizeof(int *) >= 8 ) {
 #if defined(__APPLE__)
                 // typically these are desktops (dev machines), so keep it smallish
-                sz = (256-64) * 1000 * 1000;
+                sz = (256-64) * 1024 * 1024;
 #else
-                sz = 990.0 * 1000 * 1000;
+                sz = 990.0 * 1024 * 1024;
                 boost::intmax_t free = File::freeSpace(dbpath); //-1 if call not supported.
                 double fivePct = free * 0.05;
                 if ( fivePct > sz )
@@ -433,7 +444,7 @@ namespace mongo {
                 }
                 _findingStartCursor->advance();
                 RARELY {
-                    if ( _findingStartTimer.seconds() >= __findingStartInitialTimeout ) {
+                    if ( _findingStartTimer.seconds() >= _initialTimeout ) {
                         // If we've scanned enough, switch to find extent mode.
                         createClientCursor( extentFirstLoc( _findingStartCursor->currLoc() ) );
                         _findingStartMode = FindExtent;
@@ -487,33 +498,40 @@ namespace mongo {
         return _qp.nsd()->capFirstNewRecord;
     }
     
-    void wassertExtentNonempty( const Extent *e ) {
-        // TODO ensure this requirement is clearly enforced, or fix.
-        wassert( !e->firstRecord.isNull() );
-    }
-    
-    DiskLoc FindingStartCursor::prevExtentFirstLoc( const DiskLoc &rec ) {
+    DiskLoc FindingStartCursor::prevExtentFirstLoc( const DiskLoc& rec ) const {
         Extent *e = rec.rec()->myExtent( rec );
         if ( _qp.nsd()->capLooped() ) {
-            if ( e->xprev.isNull() ) {
-                e = _qp.nsd()->lastExtent.ext();
-            }
-            else {
-                e = e->xprev.ext();
-            }
-            if ( e->myLoc != _qp.nsd()->capExtent ) {
-                wassertExtentNonempty( e );
-                return e->firstRecord;
+            while( true ) {
+                // Advance e to preceding extent (looping to lastExtent if necessary).
+                if ( e->xprev.isNull() ) {
+                    e = _qp.nsd()->lastExtent.ext();
+                }
+                else {
+                    e = e->xprev.ext();
+                }
+                if ( e->myLoc == _qp.nsd()->capExtent ) {
+                    // Reached the extent containing the oldest data in the collection.
+                    return DiskLoc();
+                }
+                if ( !e->firstRecord.isNull() ) {
+                    // Return the first record of the first non empty extent encountered.
+                    return e->firstRecord;
+                }
             }
         }
         else {
-            if ( !e->xprev.isNull() ) {
+            while( true ) {
+                if ( e->xprev.isNull() ) {
+                    // Reached the beginning of the collection.
+                    return DiskLoc();
+                }
                 e = e->xprev.ext();
-                wassertExtentNonempty( e );
-                return e->firstRecord;
+                if ( !e->firstRecord.isNull() ) {
+                    // Return the first record of the first non empty extent encountered.
+                    return e->firstRecord;
+                }
             }
         }
-        return DiskLoc(); // reached beginning of collection
     }
     
     void FindingStartCursor::createClientCursor( const DiskLoc &startLoc ) {
@@ -677,19 +695,51 @@ namespace mongo {
             return BSONObj();
         }
 
-        uassert(15916, str::stream() << "Can no longer connect to initial sync source: " << hn, missingObjReader.connect(hn));
+        const int retryMax = 3;
+        for (int retryCount = 1; retryCount <= retryMax; ++retryCount) {
+            if (retryCount != 1) {
+                // if we are retrying, sleep a bit to let the network possibly recover
+                sleepsecs(retryCount * retryCount);
+            }
+            try {
+                bool ok = missingObjReader.connect(hn);
+                if (!ok) {
+                    warning() << "network problem detected while connecting to the "
+                              << "sync source, attempt " << retryCount << " of "
+                              << retryMax << endl;
+                        continue;  // try again
+                }
+            } 
+            catch (const SocketException& exc) {
+                warning() << "network problem detected while connecting to the "
+                          << "sync source, attempt " << retryCount << " of "
+                          << retryMax << endl;
+                continue; // try again
+            }
 
-        // might be more than just _id in the update criteria
-        BSONObj query = BSONObjBuilder().append(o.getObjectField("o2")["_id"]).obj();
-        BSONObj missingObj;
-        try {
-            missingObj = missingObjReader.findOne(ns, query);
-        } catch(DBException& e) {
-            log() << "replication assertion fetching missing object: " << e.what() << endl;
-            throw;
+            // might be more than just _id in the update criteria
+            BSONObj query = BSONObjBuilder().append(o.getObjectField("o2")["_id"]).obj();
+            BSONObj missingObj;
+            try {
+                missingObj = missingObjReader.findOne(ns, query);
+            } 
+            catch (const SocketException& exc) {
+                warning() << "network problem detected while fetching a missing document from the "
+                          << "sync source, attempt " << retryCount << " of "
+                          << retryMax << endl;
+                continue; // try again
+            } 
+            catch (DBException& e) {
+                log() << "replication assertion fetching missing object: " << e.what() << endl;
+                throw;
+            }
+
+            // success!
+            return missingObj;
         }
-
-        return missingObj;
+        // retry count exceeded
+        msgasserted(15916, 
+                    str::stream() << "Can no longer connect to initial sync source: " << hn);
     }
 
     bool Sync::shouldRetry(const BSONObj& o) {
@@ -722,7 +772,7 @@ namespace mongo {
         @return true if was and update should have happened and the document DNE.  see replset initial sync code.
      */
     bool applyOperation_inlock(const BSONObj& op, bool fromRepl, bool convertUpdateToUpsert) {
-        LOG(6) << "applying op: " << op << endl;
+        LOG(3) << "applying op: " << op << endl;
         bool failedUpdate = false;
 
         OpCounters * opCounters = fromRepl ? &replOpCounters : &globalOpCounters;
@@ -747,8 +797,7 @@ namespace mongo {
         if ( *opType == 'i' ) {
             opCounters->gotInsert();
 
-            const char *p = strchr(ns, '.');
-            if ( p && strcmp(p, ".system.indexes") == 0 ) {
+            if (NamespaceString(ns).coll == "system.indexes") {
                 // updates aren't allowed for indexes -- so we will do a regular insert. if index already
                 // exists, that is ok.
                 theDataFileMgr.insert(ns, (void*) o.objdata(), o.objsize());
@@ -769,7 +818,7 @@ namespace mongo {
                 else {
                     // probably don't need this since all replicated colls have _id indexes now
                     // but keep it just in case
-                    RARELY if ( nsd && !nsd->isCapped() ) { ensureHaveIdIndex(ns); }
+                    RARELY if ( nsd && !nsd->isCapped() ) { ensureHaveIdIndex(ns, false); }
 
                     /* todo : it may be better to do an insert here, and then catch the dup key exception and do update
                               then.  very few upserts will not be inserts...
@@ -786,7 +835,7 @@ namespace mongo {
 
             // probably don't need this since all replicated colls have _id indexes now
             // but keep it just in case
-            RARELY if ( nsd && !nsd->isCapped() ) { ensureHaveIdIndex(ns); }
+            RARELY if ( nsd && !nsd->isCapped() ) { ensureHaveIdIndex(ns, false); }
 
             OpDebug debug;
             BSONObj updateCriteria = op.getObjectField("o2");
@@ -869,6 +918,13 @@ namespace mongo {
         virtual void help( stringstream &help ) const {
             help << "internal (sharding)\n{ applyOps : [ ] , preCondition : [ { ns : ... , q : ... , res : ... } ] }";
         }
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+            // applyOps can do pretty much anything, so require all privileges.
+            out->push_back(Privilege(PrivilegeSet::WILDCARD_RESOURCE,
+                                     AuthorizationManager::getAllUserActions()));
+        }
         virtual bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
 
             if ( cmdObj.firstElement().type() != Array ) {
@@ -914,13 +970,15 @@ namespace mongo {
             
             BSONObjIterator i( ops );
             BSONArrayBuilder ab;
+            const bool alwaysUpsert = cmdObj.hasField("alwaysUpsert") ?
+                    cmdObj["alwaysUpsert"].trueValue() : true;
             
             while ( i.more() ) {
                 BSONElement e = i.next();
                 const BSONObj& temp = e.Obj();
                 
-                Client::Context ctx( temp["ns"].String() ); // this handles security
-                bool failed = applyOperation_inlock( temp , false );
+                Client::Context ctx(temp["ns"].String());
+                bool failed = applyOperation_inlock(temp, false, alwaysUpsert);
                 ab.append(!failed);
                 if ( failed )
                     errors++;
@@ -937,7 +995,19 @@ namespace mongo {
 
                 string tempNS = str::stream() << dbname << ".$cmd";
 
-                logOp( "c" , tempNS.c_str() , cmdObj.firstElement().wrap() );
+                // TODO: possibly use mutable BSON to remove preCondition field
+                // once it is available
+                BSONObjIterator iter(cmdObj);
+                BSONObjBuilder cmdBuilder;
+
+                while (iter.more()) {
+                    BSONElement elem(iter.next());
+                    if (strcmp(elem.fieldName(), "preCondition") != 0) {
+                        cmdBuilder.append(elem);
+                    }
+                }
+
+                logOp("c", tempNS.c_str(), cmdBuilder.done());
             }
 
             return errors == 0;

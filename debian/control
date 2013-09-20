@@ -1,54 +1,79 @@
 Source: mongodb
 Section: database
-Priority: optional
+Priority: extra
 Maintainer: Antonin Kral <A.Kral@sh.cvut.cz>
-Uploaders: Roberto C. Sanchez <roberto@connexer.com>, Jérémy Lal <kapouer@melix.org>
-Build-Depends: debhelper (>= 9), cdbs (>= 0.4.73~), libpcre3, libpcre3-dev, scons, libreadline-dev, libboost-dev, libboost-thread-dev, libboost-filesystem-dev, libboost-program-options-dev, libboost-date-time-dev, python-pymongo
+Uploaders:
+ Roberto C. Sanchez <roberto@connexer.com>,
+ Jérémy Lal <kapouer@melix.org>
+Build-Depends:
+ cdbs (>= 0.4.73~),
+ debhelper (>= 9),
+ libboost-date-time-dev,
+ libboost-dev,
+ libboost-filesystem-dev,
+ libboost-program-options-dev,
+ libboost-thread-dev,
+ libgoogle-perftools-dev [linux-amd64 linux-i386],
+ libpcap-dev,
+ libpcre3-dev,
+ libreadline-dev,
+ libsnappy-dev,
+ libstemmer-dev,
+ libv8-dev,
+ python-pymongo,
+ scons,
+ g++-4.7
 Standards-Version: 3.9.3
 Vcs-Git: git://github.com/bobek/mongo-debian.git
 Vcs-Browser: https://github.com/bobek/mongo-debian
 Homepage: http://www.mongodb.org
 
 Package: mongodb
-Architecture: i386 amd64
-Depends: mongodb-server, mongodb-dev, ${shlibs:Depends}, ${misc:Depends}
+Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386
+Depends:
+ mongodb-dev,
+ mongodb-server (>= 1:2.4.1-2),
+ ${misc:Depends},
+ ${shlibs:Depends}
 Description: object/document-oriented database (metapackage)
  MongoDB is a high-performance, open source, schema-free
- document-oriented  data store that's easy to deploy, manage
+ document-oriented data store that's easy to deploy, manage
  and use. It's network accessible, written in C++ and offers
- the following features :
+ the following features:
  .
-    * Collection oriented storage - easy storage of object-
-      style data
+    * Collection oriented storage - easy storage of object-style data
     * Full index support, including on inner objects
     * Query profiling
     * Replication and fail-over support
-    * Efficient storage of binary data including large
-      objects (e.g. videos)
+    * Efficient storage of binary data including large objects (e.g. videos)
     * Auto-sharding for cloud-level scalability
  .
  High performance, scalability, and reasonable depth of
  functionality are the goals for the project.
  .
- This is a metapackage that depends on all the mongodb parts.
+ This is a convenience metapackage that depends on all the mongodb parts:
+ the server, the clients and the development files (headers and library).
 
 Package: mongodb-server
-Architecture: i386 amd64
-Depends: mongodb-clients, ${shlibs:Depends}, ${misc:Depends}, adduser
-Replaces: mongodb (<= 1:1.4.2-2)
+Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386
+Depends:
+ adduser,
+ mongodb-clients,
+ ${misc:Depends},
+ ${shlibs:Depends}
+Replaces:
+ mongodb (<= 1:1.4.2-2)
 Description: object/document-oriented database (server package)
  MongoDB is a high-performance, open source, schema-free
- document-oriented  data store that's easy to deploy, manage
+ document-oriented data store that's easy to deploy, manage
  and use. It's network accessible, written in C++ and offers
- the following features :
+ the following features:
  .
-    * Collection oriented storage - easy storage of object-
-      style data
+    * Collection oriented storage - easy storage of object-style data
     * Full index support, including on inner objects
     * Query profiling
     * Replication and fail-over support
-    * Efficient storage of binary data including large
-      objects (e.g. videos)
+    * Efficient storage of binary data including large objects (e.g. videos)
     * Auto-sharding for cloud-level scalability
  .
  High performance, scalability, and reasonable depth of
@@ -57,22 +82,23 @@ Description: object/document-oriented database (server package)
  This package contains the server itself.
 
 Package: mongodb-clients
-Architecture: i386 amd64
-Depends: ${shlibs:Depends}, ${misc:Depends}
-Replaces: mongodb (<= 1:1.4.2-2)
+Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends}
+Replaces:
+ mongodb (<= 1:1.4.2-2)
 Description: object/document-oriented database (client apps)
  MongoDB is a high-performance, open source, schema-free
- document-oriented  data store that's easy to deploy, manage
+ document-oriented data store that's easy to deploy, manage
  and use. It's network accessible, written in C++ and offers
- the following features :
+ the following features:
  .
-    * Collection oriented storage - easy storage of object-
-      style data
+    * Collection oriented storage - easy storage of object-style data
     * Full index support, including on inner objects
     * Query profiling
     * Replication and fail-over support
-    * Efficient storage of binary data including large
-      objects (e.g. videos)
+    * Efficient storage of binary data including large objects (e.g. videos)
     * Auto-sharding for cloud-level scalability
  .
  High performance, scalability, and reasonable depth of
@@ -82,27 +108,29 @@ Description: object/document-oriented database (client apps)
 
 Package: mongodb-dev
 Section: libdevel
-Architecture: i386 amd64
-Depends: libboost-dev, ${shlibs:Depends}, ${misc:Depends}
-Suggests: mongodb-server
-Replaces: mongodb (<= 1:1.4.2-2)
+Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386
+Depends:
+ libboost-dev,
+ ${misc:Depends},
+ ${shlibs:Depends}
+Suggests:
+ mongodb-server
+Replaces:
+ mongodb (<= 1:1.4.2-2)
 Description: object/document-oriented database (development)
  MongoDB is a high-performance, open source, schema-free
- document-oriented  data store that's easy to deploy, manage
+ document-oriented data store that's easy to deploy, manage
  and use. It's network accessible, written in C++ and offers
- the following features :
+ the following features:
  .
-    * Collection oriented storage - easy storage of object-
-      style data
+    * Collection oriented storage - easy storage of object-style data
     * Full index support, including on inner objects
     * Query profiling
     * Replication and fail-over support
-    * Efficient storage of binary data including large
-      objects (e.g. videos)
+    * Efficient storage of binary data including large objects (e.g. videos)
     * Auto-sharding for cloud-level scalability
  .
  High performance, scalability, and reasonable depth of
  functionality are the goals for the project.
  .
- Development headers and libraries.
-
+ This package contains the development headers and libraries.

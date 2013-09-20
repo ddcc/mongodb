@@ -28,7 +28,6 @@
 
 #include "db/instance.h"
 #include "db/matcher.h"
-#include "db/security.h"
 
 using std::string;
 
@@ -82,6 +81,8 @@ namespace mongo {
             return _db + "." + _coll;
         }
 
+        string getAuthenticationDatabase();
+
         void useStandardOutput( bool mode ) {
             _usesstdout = mode;
         }
@@ -103,7 +104,6 @@ namespace mongo {
     protected:
 
         mongo::DBClientBase &conn( bool slaveIfPaired = false );
-        void auth( string db = "",  Auth::Level * level = NULL);
 
         string _name;
 
@@ -113,6 +113,8 @@ namespace mongo {
 
         string _username;
         string _password;
+        string _authenticationDatabase;
+        string _authenticationMechanism;
 
         bool _usesstdout;
         bool _noconnection;
@@ -139,6 +141,8 @@ namespace mongo {
 
         boost::program_options::variables_map _params;
 
+    private:
+        void auth();
     };
 
     class BSONTool : public Tool {
@@ -146,7 +150,7 @@ namespace mongo {
         auto_ptr<Matcher> _matcher;
 
     public:
-        BSONTool( const char * name , DBAccess access=ALL, bool objcheck = false );
+        BSONTool( const char * name , DBAccess access=ALL, bool objcheck = true );
 
         virtual int doRun() = 0;
         virtual void gotObject( const BSONObj& obj ) = 0;

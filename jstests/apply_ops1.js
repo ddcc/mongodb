@@ -62,4 +62,5 @@ res = db.runCommand( { applyOps :
                      }  );
 
 assert.eq( true, res.results[0], "B5" );
-assert.eq( false, res.results[1], "B6" );
+assert.eq( true, res.results[1], "B6" );
+

@@ -1,3 +1,95 @@
+mongodb (1:2.4.5-1) unstable; urgency=critical
+
+  * new upstream release
+    https://jira.mongodb.org/browse/SERVER/fixforversion/12519
+  * CVE-2013-4650 - fix allows remote authenticated users to obtain
+    internal system privileges (Closes: #715007).
+  * CVE-2013-2132 and CVE-2013-4142 - Remotely triggered segmentation
+    fault in Javascript engine (Closes: #717173).
+  * Force use of TIME_UTC_ boost macro (Closes: #710639).
+  * Use gcc and g++ 4.7 to avoid #701324 which is still pending.
+  * Remove build directory (Closes: #715015).
+  * Currently uses embedded V8 as the one in Debian is too old.
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Wed, 17 Jul 2013 16:23:43 +0200
+
+mongodb (1:2.4.3-1) unstable; urgency=low
+
+  [ Jeff Epler ]
+  * [2a15682] kfreebsd does not have tcmalloc
+  * [b66002a] enable building packages on kfreebsd
+
+  [ Rogério Brito ]
+  * [44bbe5b] debian/control: Make mongodb arch all, instead of
+    arch-specific.
+  * [50e5786] debian/patches: Add preparation for kFreeBSD.
+  * [164ec3b] debian/patches: Regenerate the patches from patch queue.
+    Thanks to Pino Toscano and Jeff Epler (Closes: #703061)
+  * [b960dca] debian/control: Remove libpcre3 from build-depends.
+  * [8e53a7e] debian/copyright: Wrap long lines.
+  * [f33d197] debian/control: Make the mongodb metapackage arch-dependent.
+  * [1771ce7] debian/control: Set priority of packages to extra.
+  * [198f7bb] debian/control: Mark libgoogle-perftools-dev as
+    linux-amd64 linux-i386.
+  * [02826cb] debian/patches: Take some patches for ARM from Ubuntu.
+  * [bfa912d] debian/patches: Remove patch that substituted install with
+    installs.
+
+  [ Antonin Kral ]
+  * [a618d03] new upstream release
+    https://jira.mongodb.org/browse/SERVER/fixforversion/12426
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Wed, 24 Apr 2013 21:10:53 +0200
+
+mongodb (1:2.4.2-1) unstable; urgency=low
+
+  * new upstream release
+    https://jira.mongodb.org/browse/SERVER/fixforversion/12405
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Wed, 17 Apr 2013 21:52:17 +0200
+
+mongodb (1:2.4.1-3) unstable; urgency=low
+
+  [ Rogério Brito ]
+  * [ab6f6c3] debian/control: Retouch the package descriptions.
+  * [d44e3d4] d/{control,copyright}: Normalize fields with wrap-and-sort.
+  * [8287fd7] d/control: Add more build-deps to avoid use of embedded
+              libraries.
+  * [17fcb2c] d/control: Add more build-deps for compliant packages.
+  * [e239a9f] debian/rules: Use as many system libraries as possible.
+  * [3326d9e] Add a small note to README.Debian to document differences
+              from upstream.
+  * [df784a3] debian/README.source: Be more descriptive on the workflow.
+  * [d85c075] debian/patches: Add patch to use the system libstemmer library.
+  * [3f4c7e7] gitignore: Ignore quilt's state directory.
+  * [12d4a68] Add README.Debian file to mongodb-server. (Closes: #705054)
+  * [99320d3] debian/control: Augment descriptions of packages.
+  * [5d10dbf] Add bsondump to the clients package. (Closes: #679018)
+  * [434c5da] Add newer/more clients to the mongodb-clients package.
+  * [68bd0b9] Remove unused lintian overrides. (Closes: #705060)
+
+  [ Antonin Kral ]
+  * [04a8783] SERVER-5307 New man pages generated from docs by samk@10gen
+  * [2237007] lintian override for grotty bug
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Wed, 17 Apr 2013 11:58:03 +0200
+
+mongodb (1:2.4.1-2) unstable; urgency=low
+
+  * set version of mongodb-server in mongodb metapackage
+    (Closes:#703580)
+  * [d041ec8] fixes parsing of parallel option, (Closes:#702797)
+  * [348ff81] update watch file, thanks Bart, (Closes:#688781)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Sun, 24 Mar 2013 19:13:21 +0100
+
+mongodb (1:2.4.1-1) unstable; urgency=low
+
+  * New upstream release 2.4.1
+    https://jira.mongodb.org/browse/SERVER/fixforversion/12402
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Sat, 23 Mar 2013 13:41:03 +0100
+
 mongodb (1:2.2.2-1) unstable; urgency=low
 
   * New upstream release 2.2.2

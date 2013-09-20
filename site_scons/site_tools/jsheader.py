@@ -6,14 +6,14 @@ def jsToH(target, source, env):
 
     outFile = str( target[0] )
 
-    h =  ['#include "bson/stringdata.h"'
+    h =  ['#include "mongo/base/string_data.h"'
         ,'namespace mongo {'
         ,'struct JSFile{ const char* name; const StringData& source; };'
         ,'namespace JSFiles{'
          ]
 
     def cppEscape(s):
-        s = s.strip()
+        s = s.rstrip()
         s = s.replace( '\\', '\\\\' )
         s = s.replace( '"', r'\"' )
         return s

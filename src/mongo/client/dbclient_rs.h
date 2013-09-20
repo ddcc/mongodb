@@ -31,6 +31,7 @@ namespace mongo {
 
     class ReplicaSetMonitor;
     class TagSet;
+    struct ReadPreferenceSetting;
     typedef shared_ptr<ReplicaSetMonitor> ReplicaSetMonitorPtr;
     typedef pair<set<string>,set<int> > NodeDiff;
 
@@ -38,12 +39,11 @@ namespace mongo {
      * manages state about a replica set for client
      * keeps tabs on whose master and what slaves are up
      * can hand a slave to someone for SLAVE_OK
-     * one instace per process per replica set
+     * one instance per process per replica set
      * TODO: we might be able to use a regular Node * to avoid _lock
      */
     class ReplicaSetMonitor {
     public:
-
         typedef boost::function1<void,const ReplicaSetMonitor*> ConfigChangeHook;
 
         /**
@@ -133,6 +133,8 @@ namespace mongo {
 
         };
 
+        static const double SOCKET_TIMEOUT_SECS;
+
         /**
          * Selects the right node given the nodes to pick from and the preference.
          *
@@ -190,6 +192,10 @@ namespace mongo {
          */
         static ReplicaSetMonitorPtr get( const string& name, const bool createFromSeed = false );
 
+        /**
+         * Populates activeSets with all the currently tracked replica set names.
+         */
+        static void getAllTrackedSets(set<string>* activeSets);
 
         /**
          * checks all sets for current master and new secondaries
@@ -426,10 +432,6 @@ namespace mongo {
          */
         bool connect();
 
-        /** Authorize.  Authorizes all nodes as needed
-        */
-        virtual bool auth(const string &dbname, const string &username, const string &pwd, string& errmsg, bool digestPassword = true, Auth::Level * level = NULL);
-
         /**
          * Logs out the connection for the given database.
          *
@@ -469,6 +471,14 @@ namespace mongo {
          * @return the reference to the address that points to the master connection.
          */
         DBClientConnection& masterConn();
+
+        /**
+         * WARNING: this method is very dangerous - this object can decide to free the
+         *     returned master connection any time. This can also unpin the cached
+         *     slaveOk/read preference connection.
+         *
+         * @return the reference to the address that points to a secondary connection.
+         */
         DBClientConnection& slaveConn();
 
         // ---- callback pieces -------
@@ -507,6 +517,10 @@ namespace mongo {
 
 
     protected:
+        /** Authorize.  Authorizes all nodes as needed
+        */
+        virtual void _auth(const BSONObj& params);
+
         virtual void sayPiggyBack( Message &toSend ) { checkMaster()->say( toSend ); }
 
     private:
@@ -525,8 +539,7 @@ namespace mongo {
          * Helper method for selecting a node based on the read preference. Will advance
          * the tag tags object if it cannot find a node that matches the current tag.
          *
-         * @param preference the preference to use for selecting a node
-         * @param tags pointer to the list of tags.
+         * @param readPref the preference to use for selecting a node.
          *
          * @return a pointer to the new connection object if it can find a good connection.
          *     Otherwise it returns NULL.
@@ -534,14 +547,13 @@ namespace mongo {
          * @throws DBException when an error occurred either when trying to connect to
          *     a node that was thought to be ok or when an assertion happened.
          */
-        DBClientConnection* selectNodeUsingTags(ReadPreference preference,
-                                                TagSet* tags);
+        DBClientConnection* selectNodeUsingTags(shared_ptr<ReadPreferenceSetting> readPref);
 
         /**
          * @return true if the last host used in the last slaveOk query is still in the
          * set and can be used for the given read preference.
          */
-        bool checkLastHost( ReadPreference preference, const TagSet* tags );
+        bool checkLastHost(const ReadPreferenceSetting* readPref);
 
         /**
          * Destroys all cached information about the last slaveOk operation.
@@ -574,29 +586,15 @@ namespace mongo {
         HostAndPort _lastSlaveOkHost;
         // Last used connection in a slaveOk query (can be a primary)
         boost::shared_ptr<DBClientConnection> _lastSlaveOkConn;
+        boost::shared_ptr<ReadPreferenceSetting> _lastReadPref;
         
         double _so_timeout;
-
-        /**
-         * for storing authentication info
-         * fields are exactly for DBClientConnection::auth
-         */
-        struct AuthInfo {
-            // Default constructor provided only to make it compatible with std::map::operator[]
-            AuthInfo(): digestPassword(false) { }
-            AuthInfo( string d , string u , string p , bool di )
-                : dbname( d ) , username( u ) , pwd( p ) , digestPassword( di ) {}
-            string dbname;
-            string username;
-            string pwd;
-            bool digestPassword;
-        };
 
         // we need to store so that when we connect to a new node on failure
         // we can re-auth
         // this could be a security issue, as the password is stored in memory
         // not sure if/how we should handle
-        std::map<string, AuthInfo> _auths; // dbName -> AuthInfo
+        std::map<string, BSONObj> _auths; // dbName -> auth parameters
 
     protected:
 
@@ -619,12 +617,18 @@ namespace mongo {
      * A simple object for representing the list of tags. The initial state will
      * have a valid current tag as long as the list is not empty.
      */
-    class TagSet : public boost::noncopyable { // because of BSONArrayIteratorSorted
+    class TagSet {
     public:
         /**
          * Creates an empty tag list that is initially exhausted.
          */
         TagSet();
+
+        /**
+         * Creates a copy of the given TagSet. The new copy will have the
+         * iterator pointing at the initial position.
+         */
+        explicit TagSet(const TagSet& other);
 
         /**
          * Creates a tag set object that lazily iterates over the tag list.
@@ -662,12 +666,44 @@ namespace mongo {
          */
         BSONObjIterator* getIterator() const;
 
+        /**
+         * @returns true if the other TagSet has the same tag set specification with
+         *     this tag set, disregarding where the current iterator is pointing to.
+         */
+        bool equals(const TagSet& other) const;
+
     private:
+        /**
+         * This is purposely undefined as the semantics for assignment can be
+         * confusing. This is because BSONArrayIteratorSorted shouldn't be
+         * copied (because of how it manages internal buffer).
+         */
+        TagSet& operator=(const TagSet& other);
         BSONObj _currentTag;
         bool _isExhausted;
 
         // Important: do not re-order _tags & _tagIterator
         BSONArray _tags;
         BSONArrayIteratorSorted _tagIterator;
+    };
+
+    struct ReadPreferenceSetting {
+        /**
+         * @parm pref the read preference mode.
+         * @param tag the tag set. Note that this object will have the
+         *     tag set will have this in a reset state (meaning, this
+         *     object's copy of tag will have the iterator in the initial
+         *     position).
+         */
+        ReadPreferenceSetting(ReadPreference pref, const TagSet& tag):
+            pref(pref), tags(tag) {
+        }
+
+        inline bool equals(const ReadPreferenceSetting& other) const {
+            return pref == other.pref && tags.equals(other.tags);
+        }
+
+        const ReadPreference pref;
+        TagSet tags;
     };
 }

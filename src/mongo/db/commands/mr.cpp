@@ -1,6 +1,7 @@
 // mr.cpp
 
 /**
+ *    Copyright (C) 2012 10gen Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -16,20 +17,24 @@
  */
 
 #include "pch.h"
-#include "../db.h"
-#include "../instance.h"
-#include "../commands.h"
-#include "../../scripting/engine.h"
-#include "../../client/connpool.h"
-#include "../../client/parallel.h"
-#include "../matcher.h"
-#include "../clientcursor.h"
-#include "../replutil.h"
-#include "../../s/d_chunk_manager.h"
-#include "../../s/d_logic.h"
-#include "../../s/grid.h"
 
 #include "mr.h"
+
+#include "mongo/client/connpool.h"
+#include "mongo/client/parallel.h"
+#include "mongo/db/clientcursor.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/db.h"
+#include "mongo/db/instance.h"
+#include "mongo/db/kill_current_op.h"
+#include "mongo/db/matcher.h"
+#include "mongo/db/replutil.h"
+#include "mongo/scripting/engine.h"
+#include "mongo/s/d_chunk_manager.h"
+#include "mongo/s/d_logic.h"
+#include "mongo/s/grid.h"
+#include "mongo/s/stale_exception.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 
@@ -37,7 +42,7 @@ namespace mongo {
 
         AtomicUInt Config::JOB_NUMBER;
 
-        JSFunction::JSFunction( string type , const BSONElement& e ) {
+        JSFunction::JSFunction( const std::string& type , const BSONElement& e ) {
             _type = type;
             _code = e._asCode();
 
@@ -68,8 +73,8 @@ namespace mongo {
         void JSMapper::map( const BSONObj& o ) {
             Scope * s = _func.scope();
             verify( s );
-            if ( s->invoke( _func.func() , &_params, &o , 0 , true, false, true ) )
-                throw UserException( 9014, str::stream() << "map invoke failed: " + s->getError() );
+            if (s->invoke(_func.func(), &_params, &o, 0, true))
+                uasserted(9014, str::stream() << "map invoke failed: " << s->getError());
         }
 
         /**
@@ -87,7 +92,7 @@ namespace mongo {
             // is converting many fields to 1
             BSONObjBuilder b;
             b.append( o.firstElement() );
-            s->append( b , "value" , "return" );
+            s->append( b , "value" , "__returnValue" );
             return b.obj();
         }
 
@@ -107,7 +112,7 @@ namespace mongo {
 
             BSONObjBuilder b(endSizeEstimate);
             b.appendAs( key.firstElement() , "0" );
-            _func.scope()->append( b , "1" , "return" );
+            _func.scope()->append( b , "1" , "__returnValue" );
             return b.obj();
         }
 
@@ -135,7 +140,7 @@ namespace mongo {
                 _reduce( tuples , key , endSizeEstimate );
                 BSONObjBuilder b(endSizeEstimate);
                 b.appendAs( key.firstElement() , "_id" );
-                _func.scope()->append( b , "value" , "return" );
+                _func.scope()->append( b , "value" , "__returnValue" );
                 res = b.obj();
             }
 
@@ -188,10 +193,10 @@ namespace mongo {
 
             Scope * s = _func.scope();
 
-            s->invokeSafe( _func.func() , &args, 0, 0, false, true, true );
+            s->invokeSafe(_func.func(), &args, 0);
             ++numReduces;
 
-            if ( s->type( "return" ) == Array ) {
+            if ( s->type( "__returnValue" ) == Array ) {
                 uasserted( 10075 , "reduce -> multiple not supported yet");
                 return;
             }
@@ -209,15 +214,13 @@ namespace mongo {
             }
             BSONObjBuilder temp( endSizeEstimate );
             temp.append( key.firstElement() );
-            s->append( temp , "1" , "return" );
+            s->append( temp , "1" , "__returnValue" );
             x.push_back( temp.obj() );
             _reduce( x , key , endSizeEstimate );
         }
 
-        Config::Config( const string& _dbname , const BSONObj& cmdObj ) :
-            outNonAtomic(false)
+        Config::Config( const string& _dbname , const BSONObj& cmdObj )
         {
-
             dbname = _dbname;
             ns = dbname + "." + cmdObj.firstElement().valuestr();
 
@@ -233,61 +236,24 @@ namespace mongo {
 
             uassert( 13602 , "outType is no longer a valid option" , cmdObj["outType"].eoo() );
 
-            if ( cmdObj["out"].type() == String ) {
-                finalShort = cmdObj["out"].String();
-                outType = REPLACE;
-            }
-            else if ( cmdObj["out"].type() == Object ) {
-                BSONObj o = cmdObj["out"].embeddedObject();
-
-                BSONElement e = o.firstElement();
-                string t = e.fieldName();
-
-                if ( t == "normal" || t == "replace" ) {
-                    outType = REPLACE;
-                    finalShort = e.String();
-                }
-                else if ( t == "merge" ) {
-                    outType = MERGE;
-                    finalShort = e.String();
-                }
-                else if ( t == "reduce" ) {
-                    outType = REDUCE;
-                    finalShort = e.String();
-                }
-                else if ( t == "inline" ) {
-                    outType = INMEMORY;
-                }
-                else {
-                    uasserted( 13522 , str::stream() << "unknown out specifier [" << t << "]" );
-                }
-
-                if (o.hasElement("db")) {
-                    outDB = o["db"].String();
-                }
-
-                if (o.hasElement("nonAtomic")) {
-                    outNonAtomic = o["nonAtomic"].Bool();
-                    if (outNonAtomic)
-                        uassert( 15895 , "nonAtomic option cannot be used with this output type", (outType == REDUCE || outType == MERGE) );
-                }
-            }
-            else {
-                uasserted( 13606 , "'out' has to be a string or an object" );
-            }
+            outputOptions = parseOutputOptions(dbname, cmdObj);
 
             shardedFirstPass = false;
             if (cmdObj.hasField("shardedFirstPass") && cmdObj["shardedFirstPass"].trueValue()){
-                massert(16054, "shardedFirstPass should only use replace outType", outType == REPLACE);
+                massert(16054,
+                        "shardedFirstPass should only use replace outType",
+                        outputOptions.outType == REPLACE);
                 shardedFirstPass = true;
             }
 
-            if ( outType != INMEMORY ) { // setup names
-                tempLong = str::stream() << (outDB.empty() ? dbname : outDB) << ".tmp.mr." << cmdObj.firstElement().String() << "_" << JOB_NUMBER++;
-
-                incLong = tempLong + "_inc";
-
-                finalLong = str::stream() << (outDB.empty() ? dbname : outDB) << "." << finalShort;
+            if ( outputOptions.outType != INMEMORY ) { // setup temp collection name
+                tempNamespace = str::stream()
+                        << (outputOptions.outDB.empty() ? dbname : outputOptions.outDB)
+                        << ".tmp.mr."
+                        << cmdObj.firstElement().String()
+                        << "_"
+                        << JOB_NUMBER++;
+                incLong = tempNamespace + "_inc";
             }
 
             {
@@ -330,15 +296,24 @@ namespace mongo {
         }
 
         /**
+         * Clean up the temporary and incremental collections
+         */
+        void State::dropTempCollections() {
+            _db.dropCollection(_config.tempNamespace);
+            if (_useIncremental)
+                _db.dropCollection(_config.incLong);
+        }
+
+        /**
          * Create temporary collection, set up indexes
          */
         void State::prepTempCollection() {
             if ( ! _onDisk )
                 return;
 
-            if (_config.incLong != _config.tempLong) {
+            dropTempCollections();
+            if (_useIncremental) {
                 // create the inc collection and make sure we have index on "0" key
-                _db.dropCollection( _config.incLong );
                 {
                     Client::WriteContext ctx( _config.incLong );
                     string err;
@@ -352,23 +327,23 @@ namespace mongo {
             }
 
             // create temp collection
-            _db.dropCollection( _config.tempLong );
             {
-                Client::WriteContext ctx( _config.tempLong.c_str() );
+                Client::WriteContext ctx( _config.tempNamespace.c_str() );
                 string errmsg;
-                if ( ! userCreateNS( _config.tempLong.c_str() , BSON("temp" << true) , errmsg , true ) ) {
-                    uasserted( 13630 , str::stream() << "userCreateNS failed for mr tempLong ns: " << _config.tempLong << " err: " << errmsg );
+                if ( ! userCreateNS( _config.tempNamespace.c_str() , BSON("temp" << true) , errmsg , true ) ) {
+                    uasserted(13630, str::stream() << "userCreateNS failed for mr tempLong ns: "
+                              << _config.tempNamespace << " err: " << errmsg );
                 }
             }
 
             {
                 // copy indexes
-                auto_ptr<DBClientCursor> idx = _db.getIndexes( _config.finalLong );
+                auto_ptr<DBClientCursor> idx = _db.getIndexes(_config.outputOptions.finalNamespace);
                 while ( idx->more() ) {
                     BSONObj i = idx->next();
 
                     BSONObjBuilder b( i.objsize() + 16 );
-                    b.append( "ns" , _config.tempLong );
+                    b.append( "ns" , _config.tempNamespace );
                     BSONObjIterator j( i );
                     while ( j.more() ) {
                         BSONElement e = j.next();
@@ -380,7 +355,8 @@ namespace mongo {
                     }
 
                     BSONObj indexToInsert = b.obj();
-                    insert( Namespace( _config.tempLong.c_str() ).getSisterNS( "system.indexes" ).c_str() , indexToInsert );
+                    Namespace tempNamespace(_config.tempNamespace.c_str());
+                    insert(tempNamespace.getSisterNS("system.indexes").c_str(), indexToInsert);
                 }
 
             }
@@ -393,24 +369,28 @@ namespace mongo {
          */
         void State::appendResults( BSONObjBuilder& final ) {
             if ( _onDisk ) {
-                if (!_config.outDB.empty()) {
+                if (!_config.outputOptions.outDB.empty()) {
                     BSONObjBuilder loc;
-                    if ( !_config.outDB.empty())
-                        loc.append( "db" , _config.outDB );
-                    if ( !_config.finalShort.empty() )
-                        loc.append( "collection" , _config.finalShort );
+                    if ( !_config.outputOptions.outDB.empty())
+                        loc.append( "db" , _config.outputOptions.outDB );
+                    if ( !_config.outputOptions.collectionName.empty() )
+                        loc.append( "collection" , _config.outputOptions.collectionName );
                     final.append("result", loc.obj());
                 }
                 else {
-                    if ( !_config.finalShort.empty() )
-                        final.append( "result" , _config.finalShort );
+                    if ( !_config.outputOptions.collectionName.empty() )
+                        final.append( "result" , _config.outputOptions.collectionName );
                 }
 
                 if ( _config.splitInfo > 0 ) {
                     // add split points, used for shard
                     BSONObj res;
                     BSONObj idKey = BSON( "_id" << 1 );
-                    if ( ! _db.runCommand( "admin" , BSON( "splitVector" << _config.finalLong << "keyPattern" << idKey << "maxChunkSizeBytes" << _config.splitInfo ) , res ) ) {
+                    if (!_db.runCommand("admin",
+                                        BSON("splitVector" << _config.outputOptions.finalNamespace
+                                             << "keyPattern" << idKey
+                                             << "maxChunkSizeBytes" << _config.splitInfo),
+                                        res)) {
                         uasserted( 15921 ,  str::stream() << "splitVector failed: " << res );
                     }
                     if ( res.hasField( "splitKeys" ) )
@@ -420,9 +400,15 @@ namespace mongo {
             }
 
             if (_jsMode) {
-                ScriptingFunction getResult = _scope->createFunction("var map = _mrMap; var result = []; for (key in map) { result.push({_id: key, value: map[key]}) } return result;");
+                ScriptingFunction getResult = _scope->createFunction(
+                            "var map = _mrMap;"
+                            "var result = [];"
+                            "for (key in map) {"
+                            "  result.push({_id: key, value: map[key]});"
+                            "}"
+                            "return result;");
                 _scope->invoke(getResult, 0, 0, 0, false);
-                BSONObj obj = _scope->getObject("return");
+                BSONObj obj = _scope->getObject("__returnValue");
                 final.append("results", BSONArray(obj));
                 return;
             }
@@ -455,10 +441,10 @@ namespace mongo {
          * This may involve replacing, merging or reducing.
          */
         long long State::postProcessCollection(CurOp* op, ProgressMeterHolder& pm) {
-            if ( _onDisk == false || _config.outType == Config::INMEMORY )
+            if ( _onDisk == false || _config.outputOptions.outType == Config::INMEMORY )
                 return numInMemKeys();
 
-            if (_config.outNonAtomic)
+            if (_config.outputOptions.outNonAtomic)
                 return postProcessCollectionNonAtomic(op, pm);
             Lock::GlobalWrite lock; // TODO(erh): this is how it was, but seems it doesn't need to be global
             return postProcessCollectionNonAtomic(op, pm);
@@ -491,45 +477,50 @@ namespace mongo {
 
         long long State::postProcessCollectionNonAtomic(CurOp* op, ProgressMeterHolder& pm) {
 
-            if ( _config.finalLong == _config.tempLong )
-                return _safeCount( _db, _config.finalLong );
+            if ( _config.outputOptions.finalNamespace == _config.tempNamespace )
+                return _safeCount( _db, _config.outputOptions.finalNamespace );
 
-            if ( _config.outType == Config::REPLACE || _safeCount( _db, _config.finalLong ) == 0 ) {
+            if (_config.outputOptions.outType == Config::REPLACE ||
+                    _safeCount(_db, _config.outputOptions.finalNamespace) == 0) {
                 Lock::GlobalWrite lock; // TODO(erh): why global???
                 // replace: just rename from temp to final collection name, dropping previous collection
-                _db.dropCollection( _config.finalLong );
+                _db.dropCollection( _config.outputOptions.finalNamespace );
                 BSONObj info;
 
                 if ( ! _db.runCommand( "admin"
-                                      , BSON( "renameCollection" << _config.tempLong <<
-                                              "to" << _config.finalLong <<
+                                      , BSON( "renameCollection" << _config.tempNamespace <<
+                                              "to" << _config.outputOptions.finalNamespace <<
                                               "stayTemp" << _config.shardedFirstPass )
                                       , info ) ) {
                     uasserted( 10076 ,  str::stream() << "rename failed: " << info );
                 }
                          
-                _db.dropCollection( _config.tempLong );
+                _db.dropCollection( _config.tempNamespace );
             }
-            else if ( _config.outType == Config::MERGE ) {
+            else if ( _config.outputOptions.outType == Config::MERGE ) {
                 // merge: upsert new docs into old collection
-                op->setMessage( "m/r: merge post processing" , _safeCount( _db, _config.tempLong, BSONObj() ) );
-                auto_ptr<DBClientCursor> cursor = _db.query( _config.tempLong , BSONObj() );
+                op->setMessage("m/r: merge post processing",
+                               "M/R Merge Post Processing Progress",
+                               _safeCount(_db, _config.tempNamespace, BSONObj()));
+                auto_ptr<DBClientCursor> cursor = _db.query( _config.tempNamespace , BSONObj() );
                 while ( cursor->more() ) {
-                    Lock::DBWrite lock( _config.finalLong );
+                    Lock::DBWrite lock( _config.outputOptions.finalNamespace );
                     BSONObj o = cursor->next();
-                    Helpers::upsert( _config.finalLong , o );
+                    Helpers::upsert( _config.outputOptions.finalNamespace , o );
                     getDur().commitIfNeeded();
                     pm.hit();
                 }
-                _db.dropCollection( _config.tempLong );
+                _db.dropCollection( _config.tempNamespace );
                 pm.finished();
             }
-            else if ( _config.outType == Config::REDUCE ) {
+            else if ( _config.outputOptions.outType == Config::REDUCE ) {
                 // reduce: apply reduce op on new result and existing one
                 BSONList values;
 
-                op->setMessage( "m/r: reduce post processing" , _safeCount( _db, _config.tempLong, BSONObj() ) );
-                auto_ptr<DBClientCursor> cursor = _db.query( _config.tempLong , BSONObj() );
+                op->setMessage("m/r: reduce post processing",
+                               "M/R Reduce Post Processing Progress",
+                               _safeCount(_db, _config.tempNamespace, BSONObj()));
+                auto_ptr<DBClientCursor> cursor = _db.query( _config.tempNamespace , BSONObj() );
                 while ( cursor->more() ) {
                     Lock::GlobalWrite lock; // TODO(erh) why global?
                     BSONObj temp = cursor->next();
@@ -537,8 +528,11 @@ namespace mongo {
 
                     bool found;
                     {
-                        Client::Context tx( _config.finalLong );
-                        found = Helpers::findOne( _config.finalLong.c_str() , temp["_id"].wrap() , old , true );
+                        Client::Context tx( _config.outputOptions.finalNamespace );
+                        found = Helpers::findOne(_config.outputOptions.finalNamespace.c_str(),
+                                                 temp["_id"].wrap(),
+                                                 old,
+                                                 true);
                     }
 
                     if ( found ) {
@@ -546,19 +540,20 @@ namespace mongo {
                         values.clear();
                         values.push_back( temp );
                         values.push_back( old );
-                        Helpers::upsert( _config.finalLong , _config.reducer->finalReduce( values , _config.finalizer.get() ) );
+                        Helpers::upsert(_config.outputOptions.finalNamespace,
+                                        _config.reducer->finalReduce(values,
+                                                                     _config.finalizer.get()));
                     }
                     else {
-                        Helpers::upsert( _config.finalLong , temp );
+                        Helpers::upsert( _config.outputOptions.finalNamespace , temp );
                     }
                     getDur().commitIfNeeded();
                     pm.hit();
                 }
-                _db.dropCollection( _config.tempLong );
                 pm.finished();
             }
 
-            return _safeCount( _db, _config.finalLong );
+            return _safeCount( _db, _config.outputOptions.finalNamespace );
         }
 
         /**
@@ -577,13 +572,18 @@ namespace mongo {
          */
         void State::_insertToInc( BSONObj& o ) {
             verify( _onDisk );
-            theDataFileMgr.insertWithObjMod( _config.incLong.c_str() , o , true );
+            theDataFileMgr.insertWithObjMod( _config.incLong.c_str(), o, false, true );
             getDur().commitIfNeeded();
         }
 
-        State::State( const Config& c ) : _config( c ), _size(0), _dupCount(0), _numEmits(0) {
+        State::State(const Config& c) :
+                _config(c),
+                _useIncremental(true),
+                _size(0),
+                _dupCount(0),
+                _numEmits(0) {
             _temp.reset( new InMemory() );
-            _onDisk = _config.outType != Config::INMEMORY;
+            _onDisk = _config.outputOptions.outType != Config::INMEMORY;
         }
 
         bool State::sourceExists() {
@@ -597,18 +597,23 @@ namespace mongo {
         State::~State() {
             if ( _onDisk ) {
                 try {
-                    _db.dropCollection( _config.tempLong );
-                    _db.dropCollection( _config.incLong );
+                    dropTempCollections();
                 }
                 catch ( std::exception& e ) {
                     error() << "couldn't cleanup after map reduce: " << e.what() << endl;
                 }
             }
-
-            if (_scope) {
+            if (_scope && !_scope->isKillPending() && _scope->getError().empty()) {
                 // cleanup js objects
-                ScriptingFunction cleanup = _scope->createFunction("delete _emitCt; delete _keyCt; delete _mrMap;");
-                _scope->invoke(cleanup, 0, 0, 0, true);
+                try {
+                    ScriptingFunction cleanup =
+                            _scope->createFunction("delete _emitCt; delete _keyCt; delete _mrMap;");
+                    _scope->invoke(cleanup, 0, 0, 0, true);
+                }
+                catch (const DBException &) {
+                    // not important because properties will be reset if scope is reused
+                    LOG(1) << "MapReduce terminated during state destruction" << endl;
+                }
             }
         }
 
@@ -617,8 +622,7 @@ namespace mongo {
          */
         void State::init() {
             // setup js
-            _scope.reset(globalScriptEngine->getPooledScope( _config.dbname ).release() );
-            _scope->localConnect( _config.dbname.c_str() );
+            _scope.reset(globalScriptEngine->getPooledScope( _config.dbname, "mapreduce" ).release() );
 
             if ( ! _config.scopeSetup.isEmpty() )
                 _scope->init( &_config.scopeSetup );
@@ -629,32 +633,118 @@ namespace mongo {
                 _config.finalizer->init( this );
             _scope->setBoolean("_doFinal", _config.finalizer.get() != 0);
 
-            // by default start in JS mode, will be faster for small jobs
-            _jsMode = _config.jsMode;
-//            _jsMode = true;
-            switchMode(_jsMode);
+            switchMode(_config.jsMode); // set up js-mode based on Config
 
             // global JS map/reduce hashmap
             // we use a standard JS object which means keys are only simple types
-            // we could also add a real hashmap from a library, still we need to add object comparison methods
-//            _scope->setObject("_mrMap", BSONObj(), false);
-            ScriptingFunction init = _scope->createFunction("_emitCt = 0; _keyCt = 0; _dupCt = 0; _redCt = 0; if (typeof(_mrMap) === 'undefined') { _mrMap = {}; }");
+            // we could also add a real hashmap from a library and object comparison methods
+            // for increased performance, we may want to look at v8 Harmony Map support
+            // _scope->setObject("_mrMap", BSONObj(), false);
+            ScriptingFunction init = _scope->createFunction(
+                        "_emitCt = 0;"
+                        "_keyCt = 0;"
+                        "_dupCt = 0;"
+                        "_redCt = 0;"
+                        "if (typeof(_mrMap) === 'undefined') {"
+                        "  _mrMap = {};"
+                        "}");
             _scope->invoke(init, 0, 0, 0, true);
 
             // js function to run reduce on all keys
-//            redfunc = _scope->createFunction("for (var key in hashmap) {  print('Key is ' + key); list = hashmap[key]; ret = reduce(key, list); print('Value is ' + ret); };");
-            _reduceAll = _scope->createFunction("var map = _mrMap; var list, ret; for (var key in map) { list = map[key]; if (list.length != 1) { ret = _reduce(key, list); map[key] = [ret]; ++_redCt; } } _dupCt = 0;");
-            _reduceAndEmit = _scope->createFunction("var map = _mrMap; var list, ret; for (var key in map) { list = map[key]; if (list.length == 1) { ret = list[0]; } else { ret = _reduce(key, list); ++_redCt; } emit(key, ret); }; delete _mrMap;");
-            _reduceAndFinalize = _scope->createFunction("var map = _mrMap; var list, ret; for (var key in map) { list = map[key]; if (list.length == 1) { if (!_doFinal) {continue;} ret = list[0]; } else { ret = _reduce(key, list); ++_redCt; }; if (_doFinal){ ret = _finalize(key, ret); } map[key] = ret; }");
-            _reduceAndFinalizeAndInsert = _scope->createFunction("var map = _mrMap; var list, ret; for (var key in map) { list = map[key]; if (list.length == 1) { ret = list[0]; } else { ret = _reduce(key, list); ++_redCt; }; if (_doFinal){ ret = _finalize(key, ret); } _nativeToTemp({_id: key, value: ret}); }");
+            // redfunc = _scope->createFunction("for (var key in hashmap) {  print('Key is ' + key); list = hashmap[key]; ret = reduce(key, list); print('Value is ' + ret); };");
+            _reduceAll = _scope->createFunction(
+                        "var map = _mrMap;"
+                        "var list, ret;"
+                        "for (var key in map) {"
+                        "  list = map[key];"
+                        "  if (list.length != 1) {"
+                        "    ret = _reduce(key, list);"
+                        "    map[key] = [ret];"
+                        "    ++_redCt;"
+                        "  }"
+                        "}"
+                        "_dupCt = 0;");
+            massert(16717, "error initializing JavaScript reduceAll function",
+                    _reduceAll != 0);
 
+            _reduceAndEmit = _scope->createFunction(
+                        "var map = _mrMap;"
+                        "var list, ret;"
+                        "for (var key in map) {"
+                        "  list = map[key];"
+                        "  if (list.length == 1)"
+                        "    ret = list[0];"
+                        "  else {"
+                        "    ret = _reduce(key, list);"
+                        "    ++_redCt;"
+                        "  }"
+                        "  emit(key, ret);"
+                        "}"
+                        "delete _mrMap;");
+            massert(16718, "error initializing JavaScript reduce/emit function",
+                    _reduceAndEmit != 0);
+
+            _reduceAndFinalize = _scope->createFunction(
+                        "var map = _mrMap;"
+                        "var list, ret;"
+                        "for (var key in map) {"
+                        "  list = map[key];"
+                        "  if (list.length == 1) {"
+                        "    if (!_doFinal) { continue; }"
+                        "    ret = list[0];"
+                        "  }"
+                        "  else {"
+                        "    ret = _reduce(key, list);"
+                        "    ++_redCt;"
+                        "  }"
+                        "  if (_doFinal)"
+                        "    ret = _finalize(key, ret);"
+                        "  map[key] = ret;"
+                        "}");
+            massert(16719, "error creating JavaScript reduce/finalize function",
+                    _reduceAndFinalize != 0);
+
+            _reduceAndFinalizeAndInsert = _scope->createFunction(
+                        "var map = _mrMap;"
+                        "var list, ret;"
+                        "for (var key in map) {"
+                        "  list = map[key];"
+                        "  if (list.length == 1)"
+                        "    ret = list[0];"
+                        "  else {"
+                        "    ret = _reduce(key, list);"
+                        "    ++_redCt;"
+                        "  }"
+                        "  if (_doFinal)"
+                        "    ret = _finalize(key, ret);"
+                        "  _nativeToTemp({_id: key, value: ret});"
+                        "}");
+            massert(16720, "error initializing JavaScript functions",
+                    _reduceAndFinalizeAndInsert != 0);
         }
 
         void State::switchMode(bool jsMode) {
             _jsMode = jsMode;
             if (jsMode) {
                 // emit function that stays in JS
-                _scope->setFunction("emit", "function(key, value) { if (typeof(key) === 'object') { _bailFromJS(key, value); return; }; ++_emitCt; var map = _mrMap; var list = map[key]; if (!list) { ++_keyCt; list = []; map[key] = list; } else { ++_dupCt; } list.push(value); }");
+                _scope->setFunction("emit",
+                                    "function(key, value) {"
+                                    "  if (typeof(key) === 'object') {"
+                                    "    _bailFromJS(key, value);"
+                                    "    return;"
+                                    "  }"
+                                    "  ++_emitCt;"
+                                    "  var map = _mrMap;"
+                                    "  var list = map[key];"
+                                    "  if (!list) {"
+                                    "    ++_keyCt;"
+                                    "    list = [];"
+                                    "    map[key] = list;"
+                                    "  }"
+                                    "  else"
+                                    "    ++_dupCt;"
+                                    "  list.push(value);"
+                                    "}");
                 _scope->injectNative("_bailFromJS", _bailFromJS, this);
             }
             else {
@@ -664,7 +754,7 @@ namespace mongo {
         }
 
         void State::bailFromJS() {
-            log(1) << "M/R: Switching from JS mode to mixed mode" << endl;
+            LOG(1) << "M/R: Switching from JS mode to mixed mode" << endl;
 
             // reduce and reemit into c++
             switchMode(false);
@@ -683,13 +773,13 @@ namespace mongo {
                 return;
 
             BSONObj res = _config.reducer->finalReduce( values , _config.finalizer.get() );
-            insert( _config.tempLong , res );
+            insert( _config.tempNamespace , res );
         }
 
         BSONObj _nativeToTemp( const BSONObj& args, void* data ) {
             State* state = (State*) data;
             BSONObjIterator it(args);
-            state->insert(state->_config.tempLong, it.next().Obj());
+            state->insert(state->_config.tempNamespace, it.next().Obj());
             return BSONObj();
         }
 
@@ -765,13 +855,17 @@ namespace mongo {
             BSONObj prev;
             BSONList all;
 
-            verify( pm == op->setMessage( "m/r: (3/3) final reduce to collection" , _safeCount( _db, _config.incLong, BSONObj(), QueryOption_SlaveOk ) ) );
+            verify(pm == op->setMessage("m/r: (3/3) final reduce to collection",
+                                        "M/R: (3/3) Final Reduce Progress",
+                                        _db.count(_config.incLong, BSONObj(), QueryOption_SlaveOk)));
 
             shared_ptr<Cursor> temp =
-            NamespaceDetailsTransient::bestGuessCursor( _config.incLong.c_str() , BSONObj() ,
-                                                       sortKey );
-            auto_ptr<ClientCursor> cursor( new ClientCursor( QueryOption_NoCursorTimeout , temp , _config.incLong.c_str() ) );
-
+            NamespaceDetailsTransient::bestGuessCursor(_config.incLong.c_str(),
+                                                       BSONObj(),
+                                                       sortKey);
+            ClientCursor::Holder cursor(new ClientCursor(QueryOption_NoCursorTimeout,
+                                                         temp,
+                                                         _config.incLong.c_str()));
             // iterate over all sorted objects
             while ( cursor->ok() ) {
                 BSONObj o = cursor->current().getOwned();
@@ -784,7 +878,6 @@ namespace mongo {
                     all.push_back( o );
                     if ( pm->hits() % 100 == 0 ) {
                         if ( ! cursor->yield() ) {
-                            cursor.release();
                             break;
                         }
                         killCurrentOp.checkForInterrupt();
@@ -800,7 +893,6 @@ namespace mongo {
                 }
                 catch (...) {
                     yield.relock();
-                    cursor.release();
                     throw;
                 }
 
@@ -809,20 +901,16 @@ namespace mongo {
                 all.push_back( o );
 
                 if ( ! yield.stillOk() ) {
-                    cursor.release();
                     break;
                 }
 
                 killCurrentOp.checkForInterrupt();
             }
-            
-            // we need to release here since we temp release below
-            cursor.release();
 
             {
                 dbtempreleasecond tl;
                 if ( ! tl.unlocked() )
-                    log( LL_WARNING ) << "map/reduce can't temp release" << endl;
+                    LOG( LL_WARNING ) << "map/reduce can't temp release" << endl;
                 // reduce and finalize last array
                 finalReduce( all );
             }
@@ -932,7 +1020,7 @@ namespace mongo {
                     // reduce now to lower mem usage
                     Timer t;
                     _scope->invoke(_reduceAll, 0, 0, 0, true);
-                    log(1) << "  MR - did reduceAll: keys=" << keyCt << " dups=" << dupCt << " newKeys=" << _scope->getNumberInt("_keyCt") << " time=" << t.millis() << "ms" << endl;
+                    LOG(1) << "  MR - did reduceAll: keys=" << keyCt << " dups=" << dupCt << " newKeys=" << _scope->getNumberInt("_keyCt") << " time=" << t.millis() << "ms" << endl;
                     return;
                 }
             }
@@ -945,12 +1033,12 @@ namespace mongo {
                 long oldSize = _size;
                 Timer t;
                 reduceInMemory();
-                log(1) << "  MR - did reduceInMemory: size=" << oldSize << " dups=" << _dupCount << " newSize=" << _size << " time=" << t.millis() << "ms" << endl;
+                LOG(1) << "  MR - did reduceInMemory: size=" << oldSize << " dups=" << _dupCount << " newSize=" << _size << " time=" << t.millis() << "ms" << endl;
 
                 // if size is still high, or values are not reducing well, dump
                 if ( _onDisk && (_size > _config.maxInMemSize || _size > oldSize / 2) ) {
                     dumpToInc();
-                    log(1) << "  MR - dumping to db" << endl;
+                    LOG(1) << "  MR - dumping to db" << endl;
                 }
             }
         }
@@ -1013,6 +1101,12 @@ namespace mongo {
 
             virtual LockType locktype() const { return NONE; }
 
+            virtual void addRequiredPrivileges(const std::string& dbname,
+                                               const BSONObj& cmdObj,
+                                               std::vector<Privilege>* out) {
+                addPrivilegesRequiredForMapReduce(dbname, cmdObj, out);
+            }
+
             bool run(const string& dbname , BSONObj& cmd, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
                 Timer t;
                 Client& client = cc();
@@ -1020,7 +1114,7 @@ namespace mongo {
 
                 Config config( dbname , cmd );
 
-                log(1) << "mr ns: " << config.ns << endl;
+                LOG(1) << "mr ns: " << config.ns << endl;
 
                 uassert( 16149 , "cannot run map reduce without the js engine", globalScriptEngine );
 
@@ -1067,15 +1161,13 @@ namespace mongo {
                     }
                 }
 
-                if (state.isOnDisk() && !client.getAuthenticationInfo()->isAuthorized(dbname)) {
-                    errmsg = "read-only user cannot output mapReduce to collection, use inline instead";
-                    return false;
-                }
-
                 try {
                     state.init();
                     state.prepTempCollection();
-                    ProgressMeterHolder pm( op->setMessage( "m/r: (1/3) emit phase" , state.incomingDocuments() ) );
+                    ON_BLOCK_EXIT_OBJ(state, &State::dropTempCollections);
+                    ProgressMeterHolder pm(op->setMessage("m/r: (1/3) emit phase",
+                                                          "M/R: (1/3) Emit Progress",
+                                                          state.incomingDocuments()));
 
                     wassert( config.limit < 0x4000000 ); // see case on next line to 32 bit unsigned
                     long long mapTime = 0;
@@ -1086,17 +1178,24 @@ namespace mongo {
                         Lock::DBRead lock( config.ns );
                         // This context does no version check, safe b/c we checked earlier and have an
                         // open cursor
-                        Client::Context ctx( config.ns, dbpath, true, false );
+                        Client::Context ctx(config.ns, dbpath, false);
 
                         // obtain full cursor on data to apply mr to
                         shared_ptr<Cursor> temp = NamespaceDetailsTransient::getCursor( config.ns.c_str(), config.filter, config.sort );
                         uassert( 16052, str::stream() << "could not create cursor over " << config.ns << " for query : " << config.filter << " sort : " << config.sort, temp.get() );
-                        auto_ptr<ClientCursor> cursor( new ClientCursor( QueryOption_NoCursorTimeout , temp , config.ns.c_str() ) );
+                        ClientCursor::Holder cursor(new ClientCursor(QueryOption_NoCursorTimeout,
+                                                                     temp,
+                                                                     config.ns.c_str()));
                         uassert( 16053, str::stream() << "could not create client cursor over " << config.ns << " for query : " << config.filter << " sort : " << config.sort, cursor.get() );
 
                         Timer mt;
                         // go through each doc
                         while ( cursor->ok() ) {
+                            if ( ! cursor->yieldSometimes( ClientCursor::WillNeed ) ) {
+                                cursor.release();
+                                break;
+                            }
+
                             if ( ! cursor->currentMatches() ) {
                                 cursor->advance();
                                 continue;
@@ -1108,7 +1207,7 @@ namespace mongo {
                                 cursor->advance();
                                 continue;
                             }
-                                                        
+
                             BSONObj o = cursor->current();
                             cursor->advance();
 
@@ -1132,7 +1231,6 @@ namespace mongo {
                                 inReduce += t.micros();
 
                                 if ( ! yield.stillOk() ) {
-                                    cursor.release();
                                     break;
                                 }
 
@@ -1156,7 +1254,8 @@ namespace mongo {
                     timingBuilder.appendNumber( "mapTime" , mapTime / 1000 );
                     timingBuilder.append( "emitLoop" , t.millis() );
 
-                    op->setMessage( "m/r: (2/3) final reduce in memory" );
+                    op->setMessage("m/r: (2/3) final reduce in memory",
+                                   "M/R: (2/3) Final In-Memory Reduce Progress");
                     Timer rt;
                     // do reduce in memory
                     // this will be the last reduce needed for inline mode
@@ -1217,8 +1316,14 @@ namespace mongo {
             MapReduceFinishCommand() : Command( "mapreduce.shardedfinish" ) {}
             virtual bool slaveOk() const { return !replSet; }
             virtual bool slaveOverrideOk() const { return true; }
-
             virtual LockType locktype() const { return NONE; }
+            virtual void addRequiredPrivileges(const std::string& dbname,
+                                               const BSONObj& cmdObj,
+                                               std::vector<Privilege>* out) {
+                ActionSet actions;
+                actions.addAction(ActionType::mapReduceShardedFinish);
+                out->push_back(Privilege(dbname, actions));
+            }
             bool run(const string& dbname , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
                 ShardedConnectionInfo::addHook();
                 // legacy name
@@ -1240,12 +1345,14 @@ namespace mongo {
                 state.init();
 
                 // no need for incremental collection because records are already sorted
-                config.incLong = config.tempLong;
+                state._useIncremental = false;
+                config.incLong = config.tempNamespace;
 
                 BSONObj shardCounts = cmdObj["shardCounts"].embeddedObjectUserCheck();
                 BSONObj counts = cmdObj["counts"].embeddedObjectUserCheck();
 
-                ProgressMeterHolder pm( op->setMessage( "m/r: merge sort and reduce" ) );
+                ProgressMeterHolder pm(op->setMessage("m/r: merge sort and reduce",
+                                                      "M/R Merge Sort and Reduce Progress"));
                 set<ServerAndQuery> servers;
                 vector< auto_ptr<DBClientCursor> > shardCursors;
 
@@ -1261,19 +1368,20 @@ namespace mongo {
                 }
 
                 state.prepTempCollection();
+                ON_BLOCK_EXIT_OBJ(state, &State::dropTempCollections);
 
                 BSONList values;
-                if (!config.outDB.empty()) {
+                if (!config.outputOptions.outDB.empty()) {
                     BSONObjBuilder loc;
-                    if ( !config.outDB.empty())
-                        loc.append( "db" , config.outDB );
-                    if ( !config.finalShort.empty() )
-                        loc.append( "collection" , config.finalShort );
+                    if ( !config.outputOptions.outDB.empty())
+                        loc.append( "db" , config.outputOptions.outDB );
+                    if ( !config.outputOptions.collectionName.empty() )
+                        loc.append( "collection" , config.outputOptions.collectionName );
                     result.append("result", loc.obj());
                 }
                 else {
-                    if ( !config.finalShort.empty() )
-                        result.append( "result" , config.finalShort );
+                    if ( !config.outputOptions.collectionName.empty() )
+                        result.append( "result" , config.outputOptions.collectionName );
                 }
 
                 // fetch result from other shards 1 chunk at a time
@@ -1281,8 +1389,9 @@ namespace mongo {
                 string shardName = shardingState.getShardName();
                 DBConfigPtr confOut = grid.getDBConfig( dbname , false );
                 vector<ChunkPtr> chunks;
-                if ( confOut->isSharded(config.finalLong) ) {
-                    ChunkManagerPtr cm = confOut->getChunkManager( config.finalLong );
+                if ( confOut->isSharded(config.outputOptions.finalNamespace) ) {
+                    ChunkManagerPtr cm = confOut->getChunkManager(
+                            config.outputOptions.finalNamespace);
                     const ChunkMap& chunkMap = cm->getChunkMap();
                     for ( ChunkMap::const_iterator it = chunkMap.begin(); it != chunkMap.end(); ++it ) {
                         ChunkPtr chunk = it->second;
@@ -1307,7 +1416,8 @@ namespace mongo {
 
                     // reduce from each shard for a chunk
                     BSONObj sortKey = BSON( "_id" << 1 );
-                    ParallelSortClusteredCursor cursor( servers , inputNS , Query( query ).sort( sortKey ) );
+                    ParallelSortClusteredCursor cursor(servers, inputNS,
+                            Query(query).sort(sortKey), QueryOption_NoCursorTimeout);
                     cursor.init();
                     int chunkSize = 0;
 
@@ -1331,7 +1441,7 @@ namespace mongo {
                         BSONObj res = config.reducer->finalReduce( values , config.finalizer.get());
                         chunkSize += res.objsize();
                         if (state.isOnDisk())
-                            state.insert( config.tempLong , res );
+                            state.insert( config.tempNamespace , res );
                         else
                             state.emit(res);
                         values.clear();

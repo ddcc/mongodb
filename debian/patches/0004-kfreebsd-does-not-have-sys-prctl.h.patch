@@ -1,0 +1,30 @@
+From: Jeff Epler <jepler@unpythonic.net>
+Date: Fri, 19 Apr 2013 08:16:47 -0500
+Subject: kfreebsd does not have <sys/prctl.h>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This change was reviewed by Pino Toscano in:
+
+    https://github.com/rbrito/mongo-debian/pull/2/files#r3884772
+
+and edited by Rogério Theodoro de Brito accordingly.
+---
+ src/third_party/v8/src/platform-linux.cc | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/third_party/v8/src/platform-linux.cc b/src/third_party/v8/src/platform-linux.cc
+index 5da9000..61ed5de 100644
+--- a/src/third_party/v8/src/platform-linux.cc
++++ b/src/third_party/v8/src/platform-linux.cc
+@@ -31,7 +31,9 @@
+ #include <pthread.h>
+ #include <semaphore.h>
+ #include <signal.h>
++#ifdef __linux__
+ #include <sys/prctl.h>
++#endif
+ #include <sys/time.h>
+ #include <sys/resource.h>
+ #include <sys/syscall.h>
