@@ -1,6 +1,6 @@
 Source: mongodb
 Section: database
-Priority: extra
+Priority: optional
 Maintainer: Antonin Kral <A.Kral@sh.cvut.cz>
 Uploaders: Jérémy Lal <kapouer@melix.org>
 Build-Depends:
