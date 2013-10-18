@@ -6,7 +6,7 @@ Uploaders: Jérémy Lal <kapouer@melix.org>
 Build-Depends:
  debhelper (>= 9),
  libboost-date-time-dev,
- libboost-dev,
+ libboost-dev (>> 1.50),
  libboost-filesystem-dev,
  libboost-program-options-dev,
  libboost-thread-dev,
@@ -16,7 +16,7 @@ Build-Depends:
  libreadline-dev,
  libsnappy-dev,
  libstemmer-dev,
- libv8-dev,
+ libv8-dev (>= 3.12),
  python-pymongo,
  scons
 Standards-Version: 3.9.4
