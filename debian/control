@@ -4,7 +4,6 @@ Priority: optional
 Maintainer: Antonin Kral <A.Kral@sh.cvut.cz>
 Uploaders: Jérémy Lal <kapouer@melix.org>
 Build-Depends:
- cdbs (>= 0.4.73~),
  debhelper (>= 9),
  libboost-date-time-dev,
  libboost-dev,
@@ -19,8 +18,7 @@ Build-Depends:
  libstemmer-dev,
  libv8-dev,
  python-pymongo,
- scons,
- g++-4.7
+ scons
 Standards-Version: 3.9.4
 Vcs-Git: git://github.com/bobek/mongo-debian.git
 Vcs-Browser: https://github.com/bobek/mongo-debian

@@ -1,10 +1,8 @@
 #!/usr/bin/make -f
+# -*- makefile -*-
 
-include /usr/share/cdbs/1/rules/utils.mk
-include /usr/share/cdbs/1/class/scons.mk
-include /usr/share/cdbs/1/rules/debhelper.mk
-
-DEB_DH_INSTALLINIT_ARGS = --name=mongodb
+# Uncomment this to turn on verbose mode.
+#export DH_VERBOSE=1
 
 DEB_SCONS_OPTIONS :=
 ifneq (,$(findstring debug,$(DEB_BUILD_OPTIONS)))
@@ -18,22 +16,42 @@ ifneq (,$(findstring parallel,$(DEB_BUILD_OPTIONS)))
        DEB_SCONS_OPTIONS += -j$(PROCS)
 endif
 
+HARDENING_OPTIONS = CC="$(CC)" CFLAGS="$(CFLAGS)" \
+  CXX="$(CXX)" CXXFLAGS="$(CXXFLAGS)"
+COMMON_OPTIONS = --use-system-snappy --use-system-tcmalloc --use-system-pcre \
+  --use-system-boost --use-system-v8 $(DEB_SCONS_OPTIONS)
 
-CC=gcc-4.7
-CXX=g++-4.7
+DEB_SCONS_CLEAN = --directory="." $(HARDENING_OPTIONS) . --keep-going --clean \
+  $(COMMON_OPTIONS)
+DEB_SCONS_BUILD = --directory="." $(HARDENING_OPTIONS) all $(COMMON_OPTIONS)
+DEB_SCONS_CHECK = --smokedbprefix=$(CURDIR)/debian/tmp-test smoke \
+  $(COMMON_OPTIONS)
+DEB_SCONS_INSTALL = --directory="." $(HARDENING_OPTIONS) \
+  --prefix=$(CURDIR)/debian/tmp/usr install --full $(COMMON_OPTIONS)
 
-#COMMON_OPTIONS = --use-system-all --cc=gcc-4.7 --cxx=g++-4.7
-COMMON_OPTIONS = --use-system-snappy --use-system-tcmalloc --use-system-pcre --use-system-boost --cc=gcc-4.7 --cxx=g++-4.7
+override_dh_clean:
+	scons $(DEB_SCONS_CLEAN)
+	find $(CURDIR)/ -name "*.pyc" -delete
+	rm -rf $(CURDIR)/debian/tmp-test/
+	rm -rf $(CURDIR)/.scons/
+	rm -rf $(CURDIR)/build/
+	rm -f $(CURDIR)/failfile.smoke $(CURDIR)/smoke-last.json
+	dh_clean
 
-DEB_SCONS_BUILD_TARGET = all
-DEB_SCONS_BUILD_OPTIONS = $(COMMON_OPTIONS)
-DEB_SCONS_INSTALL_OPTIONS += --prefix=$(CURDIR)/debian/tmp/usr --full $(COMMON_OPTIONS)
-DEB_SCONS_CHECK_TARGET = --smokedbprefix=$(CURDIR)/debian/tmp-test smoke $(COMMON_OPTIONS)
+override_dh_auto_build:
+	scons $(DEB_SCONS_BUILD)
 
-clean::
-	find . -name "*.pyc" -delete
-	rm -f buildinfo.cpp
-	rm -rf debian/tmp-test
-	rm -rf .scons
-	rm -rf build
+override_dh_auto_test:
+	scons $(DEB_SCONS_CHECK)
 
+override_dh_auto_install:
+	scons $(DEB_SCONS_INSTALL)
+
+override_dh_installinit:
+	dh_installinit -pmongodb-server --name=mongodb
+
+%:
+	dh $@ --parallel
+
+.PHONY: override_dh_clean override_dh_auto_build override_dh_auto_test \
+	override_dh_auto_install override_dh_installinit
