@@ -10,6 +10,7 @@ mongodb (1:2.4.6-1) UNRELEASED; urgency=low
   * Rework packaging with short debhelper format instead of cdbs.
   * Compile with system V8 library.
   * Move packaging to Debian servers.
+  * New maintainer (closes: #725854).
 
  -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Tue, 24 Sep 2013 12:31:11 +0000
 

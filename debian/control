@@ -1,7 +1,7 @@
 Source: mongodb
 Section: database
 Priority: optional
-Maintainer: Antonin Kral <A.Kral@sh.cvut.cz>
+Maintainer: Laszlo Boszormenyi (GCS) <gcs@debian.org>
 Uploaders: Jérémy Lal <kapouer@melix.org>
 Build-Depends:
  debhelper (>= 9),
