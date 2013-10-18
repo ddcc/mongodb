@@ -7,3 +7,4 @@
 0007-Use-TIME_UTC_-macro.patch
 0008-Use-system-libstemmer.patch
 0009-ignore-unused-local-typedefs.patch
+0010-fix-integer-signs.patch
