@@ -20,8 +20,8 @@ Build-Depends:
  python-pymongo,
  scons
 Standards-Version: 3.9.4
-Vcs-Git: git://github.com/bobek/mongo-debian.git
-Vcs-Browser: https://github.com/bobek/mongo-debian
+Vcs-Git: git://anonscm.debian.org/collab-maint/mongodb.git
+Vcs-Browser: http://anonscm.debian.org/git/collab-maint/mongodb.git
 Homepage: http://www.mongodb.org
 
 Package: mongodb
