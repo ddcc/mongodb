@@ -63,7 +63,8 @@ namespace replset {
     BackgroundSyncInterface::~BackgroundSyncInterface() {}
 
     size_t getSize(const BSONObj& o) {
-        return o.objsize();
+        // SERVER-9808 Avoid Fortify complaint about implicit signed->unsigned conversion
+        return static_cast<size_t>(o.objsize());
     }
 
     BackgroundSync::BackgroundSync() : _buffer(bufferMaxSizeGauge, &getSize),
@@ -240,11 +241,10 @@ namespace replset {
             try {
                 _producerThread();
             }
-            catch (DBException& e) {
-                sethbmsg(str::stream() << "db exception in producer: " << e.toString());
-                sleepsecs(10);
+            catch (const DBException& e) {
+                sethbmsg(str::stream() << "sync source problem: " << e.toString());
             }
-            catch (std::exception& e2) {
+            catch (const std::exception& e2) {
                 sethbmsg(str::stream() << "exception in producer: " << e2.what());
                 sleepsecs(60);
             }
@@ -288,7 +288,7 @@ namespace replset {
         // this oplog reader does not do a handshake because we don't want the server it's syncing
         // from to track how far it has synced
         OplogReader r(false /* doHandshake */);
-
+        OpTime lastOpTimeFetched;
         // find a target to sync from the last op time written
         getOplogReader(r);
 
@@ -302,9 +302,10 @@ namespace replset {
                 // if there is no one to sync from
                 return;
             }
-
-            r.tailingQueryGTE(rsoplog, _lastOpTimeFetched);
+            lastOpTimeFetched = _lastOpTimeFetched;
         }
+
+        r.tailingQueryGTE(rsoplog, lastOpTimeFetched);
 
         // if target cut connections between connecting and querying (for
         // example, because it stepped down) we might not have a cursor
@@ -320,72 +321,82 @@ namespace replset {
         }
 
         while (!inShutdown()) {
-            while (!inShutdown()) {
+
+            if (!r.moreInCurrentBatch()) {
+                // Check some things periodically
+                // (whenever we run out of items in the
+                // current cursor batch)
+
+                if (theReplSet->gotForceSync()) {
+                    return;
+                }
+                // If we are transitioning to primary state, we need to leave
+                // this loop in order to go into bgsync-pause mode.
+                if (isAssumingPrimary() || theReplSet->isPrimary()) {
+                    return;
+                }
+
+                // re-evaluate quality of sync target
+                if (shouldChangeSyncTarget()) {
+                    return;
+                }
+
+
+                {
+                    //record time for each getmore
+                    TimerHolder batchTimer(&getmoreReplStats);
+                    
+                    // This calls receiveMore() on the oplogreader cursor.
+                    // It can wait up to five seconds for more data.
+                    r.more();
+                }
+                networkByteStats.increment(r.currentBatchMessageSize());
 
                 if (!r.moreInCurrentBatch()) {
-                    if (theReplSet->gotForceSync()) {
-                        return;
-                    }
-
-                    if (isAssumingPrimary() || theReplSet->isPrimary()) {
-                        return;
-                    }
-
-                    // re-evaluate quality of sync target
-                    if (shouldChangeSyncTarget()) {
-                        return;
-                    }
-                    //record time for each getmore
+                    // If there is still no data from upstream, check a few more things
+                    // and then loop back for another pass at getting more data
                     {
-                        TimerHolder batchTimer(&getmoreReplStats);
-                        r.more();
+                        boost::unique_lock<boost::mutex> lock(_mutex);
+                        if (_pause || 
+                            !_currentSyncTarget || 
+                            !_currentSyncTarget->hbinfo().hbstate.readable()) {
+                            return;
+                        }
                     }
-                    //increment
-                    networkByteStats.increment(r.currentBatchMessageSize());
 
+                    r.tailCheck();
+                    if( !r.haveCursor() ) {
+                        LOG(1) << "replSet end syncTail pass" << rsLog;
+                        return;
+                    }
+
+                    continue;
                 }
+            }
 
-                if (!r.more())
-                    break;
-
-                BSONObj o = r.nextSafe().getOwned();
-                opsReadStats.increment();
-
-                {
-                    boost::unique_lock<boost::mutex> lock(_mutex);
-                    _appliedBuffer = false;
-                }
-
-                OCCASIONALLY {
-                    LOG(2) << "bgsync buffer has " << _buffer.size() << " bytes" << rsLog;
-                }
-                // the blocking queue will wait (forever) until there's room for us to push
-                _buffer.push(o);
-                bufferCountGauge.increment();
-                bufferSizeGauge.increment(getSize(o));
-
-                {
-                    boost::unique_lock<boost::mutex> lock(_mutex);
-                    _lastH = o["h"].numberLong();
-                    _lastOpTimeFetched = o["ts"]._opTime();
-                }
-            } // end while
+            // At this point, we are guaranteed to have at least one thing to read out
+            // of the oplogreader cursor.
+            BSONObj o = r.nextSafe().getOwned();
+            opsReadStats.increment();
 
             {
                 boost::unique_lock<boost::mutex> lock(_mutex);
-                if (_pause || !_currentSyncTarget || !_currentSyncTarget->hbinfo().hbstate.readable()) {
-                    return;
-                }
+                _appliedBuffer = false;
             }
 
-
-            r.tailCheck();
-            if( !r.haveCursor() ) {
-                LOG(1) << "replSet end syncTail pass" << rsLog;
-                return;
+            OCCASIONALLY {
+                LOG(2) << "bgsync buffer has " << _buffer.size() << " bytes" << rsLog;
             }
+            // the blocking queue will wait (forever) until there's room for us to push
+            _buffer.push(o);
+            bufferCountGauge.increment();
+            bufferSizeGauge.increment(getSize(o));
 
-            // looping back is ok because this is a tailable cursor
+            {
+                boost::unique_lock<boost::mutex> lock(_mutex);
+                _lastH = o["h"].numberLong();
+                _lastOpTimeFetched = o["ts"]._opTime();
+            }
         }
     }
 

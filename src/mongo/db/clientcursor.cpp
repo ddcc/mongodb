@@ -554,6 +554,16 @@ namespace mongo {
         return true;
     }
 
+    void yieldOrSleepFor1Microsecond() {
+#ifdef _WIN32
+        SwitchToThread();
+#elif defined(__linux__)
+        pthread_yield();
+#else
+        sleepmicros(1);
+#endif
+    }
+
     void ClientCursor::staticYield( int micros , const StringData& ns , Record * rec ) {
         bool haveReadLock = Lock::isReadLocked();
 
@@ -564,7 +574,7 @@ namespace mongo {
                 // need to lock this else rec->touch won't be safe file could disappear
                 lk.reset( new LockMongoFilesShared() );
             }
-            
+
             dbtempreleasecond unlock;
             if ( unlock.unlocked() ) {
                 if ( haveReadLock ) {
@@ -574,16 +584,26 @@ namespace mongo {
 #ifdef _WIN32
                     SwitchToThread();
 #else
-                    sleepmicros(1);
+                    if ( micros == 0 ) {
+                        yieldOrSleepFor1Microsecond();
+                    }
+                    else {
+                        sleepmicros(1);
+                    }
 #endif
                 }
                 else {
-                    if ( micros == -1 )
+                    if ( micros == -1 ) {
                         micros = Client::recommendedYieldMicros();
-                    if ( micros > 0 )
+                    }
+                    else if ( micros == 0 ) {
+                        yieldOrSleepFor1Microsecond();
+                    }
+                    else if ( micros > 0 ) {
                         sleepmicros( micros );
+                    }
                 }
-                
+
             }
             else if ( Listener::getTimeTracker() == 0 ) {
                 // we aren't running a server, so likely a repair, so don't complain

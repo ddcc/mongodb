@@ -68,7 +68,11 @@ namespace mongo {
 
     class rsfatal : public std::exception {
     public:
-        virtual const char* what() const throw() { return "replica set fatal exception"; }
+        rsfatal(std::string m = "replica set fatal exception") : msg(m) {}
+        virtual ~rsfatal() throw() {};
+        virtual const char* what() const throw() { return msg.c_str(); }
+    private:
+        std::string msg;
     };
 
     struct DocID {
@@ -193,19 +197,13 @@ namespace mongo {
     int getRBID(DBClientConnection*);
 
     static void syncRollbackFindCommonPoint(DBClientConnection *them, HowToFixUp& h) {
-        static time_t last;
-        if( time(0)-last < 60 ) {
-            throw "findcommonpoint waiting a while before trying again";
-        }
-        last = time(0);
-
         verify( Lock::isLocked() );
         Client::Context c(rsoplog);
         NamespaceDetails *nsd = nsdetails(rsoplog);
         verify(nsd);
         ReverseCappedCursor u(nsd);
         if( !u.ok() )
-            throw "our oplog empty or unreadable";
+            throw rsfatal("our oplog empty or unreadable");
 
         const Query q = Query().sort(reverseNaturalObj);
         const bo fields = BSON( "ts" << 1 << "h" << 1 );
@@ -215,7 +213,7 @@ namespace mongo {
         h.rbid = getRBID(them);
         auto_ptr<DBClientCursor> t = them->query(rsoplog, q, 0, 0, &fields, 0, 0);
 
-        if( t.get() == 0 || !t->more() ) throw "remote oplog empty or unreadable";
+        if( t.get() == 0 || !t->more() ) throw rsfatal("remote oplog empty or unreadable");
 
         BSONObj ourObj = u.current();
         OpTime ourTime = ourObj["ts"]._opTime();
@@ -230,7 +228,8 @@ namespace mongo {
             log() << "replSet info rollback diff in end of log times: " << diff << " seconds" << rsLog;
             if( diff > 1800 ) {
                 log() << "replSet rollback too long a time period for a rollback." << rsLog;
-                throw "error not willing to roll back more than 30 minutes of data";
+                throw rsfatal(str::stream() << "rollback error: not willing to roll back "
+                                            << "more than 30 minutes of data");
             }
         }
 
@@ -256,7 +255,7 @@ namespace mongo {
                     log() << "replSet   them:      " << them->toString() << " scanned: " << scanned << rsLog;
                     log() << "replSet   theirTime: " << theirTime.toStringLong() << rsLog;
                     log() << "replSet   ourTime:   " << ourTime.toStringLong() << rsLog;
-                    throw "RS100 reached beginning of remote oplog [2]";
+                    throw rsfatal("RS100 reached beginning of remote oplog [2]");
                 }
                 theirObj = t->nextSafe();
                 theirTime = theirObj["ts"]._opTime();
@@ -267,7 +266,7 @@ namespace mongo {
                     log() << "replSet   them:      " << them->toString() << " scanned: " << scanned << rsLog;
                     log() << "replSet   theirTime: " << theirTime.toStringLong() << rsLog;
                     log() << "replSet   ourTime:   " << ourTime.toStringLong() << rsLog;
-                    throw "RS101 reached beginning of local oplog [1]";
+                    throw rsfatal("RS101 reached beginning of local oplog [1]");
                 }
                 ourObj = u.current();
                 ourTime = ourObj["ts"]._opTime();
@@ -278,7 +277,7 @@ namespace mongo {
                     log() << "replSet   them:      " << them->toString() << " scanned: " << scanned << rsLog;
                     log() << "replSet   theirTime: " << theirTime.toStringLong() << rsLog;
                     log() << "replSet   ourTime:   " << ourTime.toStringLong() << rsLog;
-                    throw "RS100 reached beginning of remote oplog [1]";
+                    throw rsfatal("RS100 reached beginning of remote oplog [1]");
                 }
                 theirObj = t->nextSafe();
                 theirTime = theirObj["ts"]._opTime();
@@ -292,7 +291,7 @@ namespace mongo {
                     log() << "replSet   them:      " << them->toString() << " scanned: " << scanned << rsLog;
                     log() << "replSet   theirTime: " << theirTime.toStringLong() << rsLog;
                     log() << "replSet   ourTime:   " << ourTime.toStringLong() << rsLog;
-                    throw "RS101 reached beginning of local oplog [2]";
+                    throw rsfatal("RS101 reached beginning of local oplog [2]");
                 }
                 ourObj = u.current();
                 ourTime = ourObj["ts"]._opTime();
@@ -637,11 +636,8 @@ namespace mongo {
             try {
                 syncRollbackFindCommonPoint(r.conn(), how);
             }
-            catch( const char *p ) {
-                sethbmsg(string("rollback 2 error ") + p);
-                return 10;
-            }
-            catch( rsfatal& ) {
+            catch( rsfatal& e ) {
+                sethbmsg(string(e.what()));
                 _fatal();
                 return 2;
             }

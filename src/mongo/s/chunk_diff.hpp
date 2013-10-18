@@ -173,8 +173,11 @@ namespace mongo {
             if( isTracked( diffChunkDoc ) ) newTracked.push_back( diffChunkDoc.getOwned() );
         }
 
-        LOG(3) << "found " << _validDiffs << " new chunks for collection " << _ns
-               << " (tracking " << newTracked.size() << "), new version is " << _maxVersion << endl;
+        LOG(3) << "found " << _validDiffs
+               << " new chunks for collection " << _ns
+               << " (tracking " << newTracked.size()
+               << "), new version is " << *_maxVersion
+               << endl;
 
         for( vector<BSONObj>::iterator it = newTracked.begin(); it != newTracked.end(); it++ ){
 
@@ -279,9 +282,6 @@ namespace mongo {
 
         BSONObj query = queryB.obj();
 
-        LOG(2) << "major version query from " << *_maxVersion << " and over "
-               << _maxShardVersions->size() << " shards is " << query << endl;
-
         //
         // NOTE: IT IS IMPORTANT FOR CONSISTENCY THAT WE SORT BY ASC VERSION, TO HANDLE
         // CURSOR YIELDING BETWEEN CHUNKS BEING MIGRATED.
@@ -293,7 +293,10 @@ namespace mongo {
         Query queryObj(query);
         queryObj.sort(BSON( "lastmod" << 1 ));
 
-        return Query( query );
+        LOG(2) << "major version query from " << *_maxVersion << " and over "
+               << _maxShardVersions->size() << " shards is " << queryObj << endl;
+
+        return queryObj;
     }
 
 } // namespace mongo
