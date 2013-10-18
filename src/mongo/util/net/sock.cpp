@@ -377,7 +377,7 @@ namespace mongo {
 
     string SocketException::toString() const {
         stringstream ss;
-        ss << _ei.code << " socket exception [" << _type << "] ";
+        ss << _ei.code << " socket exception [" << _getStringType(_type) << "] ";
         
         if ( _server.size() )
             ss << "server [" << _server << "] ";
@@ -425,6 +425,12 @@ namespace mongo {
 
     void Socket::close() {
         if ( _fd >= 0 ) {
+            // Stop any blocking reads/writes, and prevent new reads/writes
+#if defined(_WIN32)
+            shutdown( _fd, SD_BOTH );
+#else
+            shutdown( _fd, SHUT_RDWR );
+#endif
             closesocket( _fd );
             _fd = -1;
         }

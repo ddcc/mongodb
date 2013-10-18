@@ -589,10 +589,11 @@ namespace mongo {
                         }
                         
                         BSONObj o = dl.obj();
-                        
+
                         // use the builder size instead of accumulating 'o's size so that we take into consideration
-                        // the overhead of BSONArray indices
-                        if ( a.len() + o.objsize() + 1024 > BSONObjMaxUserSize ) {
+                        // the overhead of BSONArray indices, and *always* append one doc
+                        if ( a.arrSize() != 0 &&
+                             a.len() + o.objsize() + 1024 > BSONObjMaxUserSize ) {
                             filledBuffer = true; // break out of outer while loop
                             break;
                         }
@@ -636,6 +637,11 @@ namespace mongo {
             scoped_spinlock lk( _trackerLocks ); 
 
             _cloneLocs.erase( dl );
+        }
+
+        std::size_t cloneLocsRemaining() {
+            scoped_spinlock lk( _trackerLocks );
+            return _cloneLocs.size();
         }
 
         long long mbUsed() const { return _memoryUsed / ( 1024 * 1024 ); }
@@ -1161,15 +1167,20 @@ namespace mongo {
             timing.done( 3 );
 
             // 4.
+
+            // Track last result from TO shard for sanity check
+            BSONObj res;
             for ( int i=0; i<86400; i++ ) { // don't want a single chunk move to take more than a day
                 verify( !Lock::isLocked() );
                 // Exponential sleep backoff, up to 1024ms. Don't sleep much on the first few
                 // iterations, since we want empty chunk migrations to be fast.
                 sleepmillis( 1 << std::min( i , 10 ) );
+
                 scoped_ptr<ScopedDbConnection> conn(
                         ScopedDbConnection::getScopedDbConnection( toShard.getConnString() ) );
-                BSONObj res;
+
                 bool ok;
+                res = BSONObj();
                 try {
                     ok = conn->get()->runCommand( "admin" , BSON( "_recvChunkStatus" << 1 ) , res );
                     res = res.getOwned();
@@ -1217,9 +1228,26 @@ namespace mongo {
             // 5.
 
             // Before we get into the critical section of the migration, let's double check
-            // that the config servers are reachable and the lock is in place.
-            log() << "About to check if it is safe to enter critical section";
+            // that the docs have been cloned, the config servers are reachable,
+            // and the lock is in place.
+            log() << "About to check if it is safe to enter critical section" << endl;
 
+            // Ensure all cloned docs have actually been transferred
+            std::size_t locsRemaining = migrateFromStatus.cloneLocsRemaining();
+            if ( locsRemaining != 0 ) {
+
+                errmsg =
+                    str::stream() << "moveChunk cannot enter critical section before all data is"
+                                  << " cloned, " << locsRemaining << " locs were not transferred"
+                                  << " but to-shard reported " << res;
+
+                // Should never happen, but safe to abort before critical section
+                error() << errmsg << migrateLog;
+                dassert( false );
+                return false;
+            }
+
+            // Ensure distributed lock still held
             string lockHeldMsg;
             bool lockHeld = dlk.isLockHeld( 30.0 /* timeout */, &lockHeldMsg );
             if ( !lockHeld ) {
@@ -1252,48 +1280,47 @@ namespace mongo {
                 // 5.b
                 // we're under the collection lock here, too, so we can undo the chunk donation because no other state change
                 // could be ongoing
-                {
-                    BSONObj res;
+
+                BSONObj res;
+                bool ok;
+
+                try {
                     scoped_ptr<ScopedDbConnection> connTo(
                             ScopedDbConnection::getScopedDbConnection( toShard.getConnString(),
                                                                        35.0 ) );
-
-                    bool ok;
-
-                    try{
-                        ok = connTo->get()->runCommand( "admin" ,
-                                                        BSON( "_recvChunkCommit" << 1 ) ,
-                                                        res );
-                    }
-                    catch( DBException& e ){
-                        errmsg = str::stream() << "moveChunk could not contact to: shard " << toShard.getConnString() << " to commit transfer" << causedBy( e );
-                        warning() << errmsg << endl;
-                        ok = false;
-                    }
-
+                    ok = connTo->get()->runCommand( "admin", BSON( "_recvChunkCommit" << 1 ), res );
                     connTo->done();
-
-                    if ( ! ok ) {
-                        log() << "moveChunk migrate commit not accepted by TO-shard: " << res
-                              << " resetting shard version to: " << startingVersion << migrateLog;
-                        {
-                            Lock::GlobalWrite lk;
-                            log() << "moveChunk global lock acquired to reset shard version from "
-                                    "failed migration" << endl;
-
-                            // revert the chunk manager back to the state before "forgetting" about the chunk
-                            shardingState.undoDonateChunk( ns , min , max , startingVersion );
-                        }
-                        log() << "Shard version successfully reset to clean up failed migration"
-                                << endl;
-
-                        errmsg = "_recvChunkCommit failed!";
-                        result.append( "cause" , res );
-                        return false;
-                    }
-
-                    log() << "moveChunk migrate commit accepted by TO-shard: " << res << migrateLog;
                 }
+                catch ( DBException& e ) {
+                    errmsg = str::stream() << "moveChunk could not contact to: shard "
+                                           << toShard.getConnString() << " to commit transfer"
+                                           << causedBy( e );
+                    warning() << errmsg << endl;
+                    ok = false;
+                }
+
+                if ( !ok ) {
+                    log() << "moveChunk migrate commit not accepted by TO-shard: " << res
+                          << " resetting shard version to: " << startingVersion << migrateLog;
+                    {
+                        Lock::GlobalWrite lk;
+                        log() << "moveChunk global lock acquired to reset shard version from "
+                              "failed migration"
+                              << endl;
+
+                        // revert the chunk manager back to the state before "forgetting" about the
+                        // chunk
+                        shardingState.undoDonateChunk( ns, min, max, startingVersion );
+                    }
+                    log() << "Shard version successfully reset to clean up failed migration"
+                          << endl;
+
+                    errmsg = "_recvChunkCommit failed!";
+                    result.append( "cause", res );
+                    return false;
+                }
+
+                log() << "moveChunk migrate commit accepted by TO-shard: " << res << migrateLog;
 
                 // 5.c
 
@@ -1404,7 +1431,7 @@ namespace mongo {
                 LOG(7) << "moveChunk update: " << cmd << migrateLog;
 
                 int exceptionCode = OkCode;
-                bool ok = false;
+                ok = false;
                 BSONObj cmdResult;
                 try {
                     scoped_ptr<ScopedDbConnection> conn(

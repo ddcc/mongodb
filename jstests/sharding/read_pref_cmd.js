@@ -1,3 +1,4 @@
+if (0) { // SERVER-10429, SERVER-7533
 load("jstests/replsets/rslib.js");
 
 var NODE_COUNT = 2;
@@ -265,7 +266,8 @@ var testAllModes = function(conn, hostList, isMongos) {
     });
 };
 
-var st = new ShardingTest({ shards: { rs0: { nodes: NODE_COUNT }}});
+var st = new ShardingTest({shards : {rs0 : {nodes : NODE_COUNT, verbose : 1}},
+                           other : {mongosOptions : {verbose : 3}}});
 st.stopBalancer();
 
 ReplSetTest.awaitRSClientHosts(st.s, st.rs0.nodes);
@@ -342,3 +344,4 @@ testAllModes(st.s, st.rs0.nodes, true);
 
 st.stop();
 
+}

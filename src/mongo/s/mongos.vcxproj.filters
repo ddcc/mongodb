@@ -1632,6 +1632,18 @@
     <ClCompile Include="..\client\sasl_client_authenticate.cpp">
       <Filter>client</Filter>
     </ClCompile>
+    <ClCompile Include="..\platform\strcasestr.cpp">
+      <Filter>platform</Filter>
+    </ClCompile>
+    <ClCompile Include="..\platform\backtrace.cpp">
+      <Filter>platform</Filter>
+    </ClCompile>
+    <ClCompile Include="..\platform\posix_fadvise.cpp">
+      <Filter>platform</Filter>
+    </ClCompile>
+    <ClCompile Include="config_server_checker_service.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\pch.h" />
@@ -3209,6 +3221,18 @@
     </ClInclude>
     <ClInclude Include="..\client\sasl_client_authenticate.h">
       <Filter>client</Filter>
+    </ClInclude>
+    <ClInclude Include="..\platform\strcasestr.h">
+      <Filter>platform</Filter>
+    </ClInclude>
+    <ClInclude Include="..\platform\backtrace.h">
+      <Filter>platform</Filter>
+    </ClInclude>
+    <ClInclude Include="..\platform\posix_fadvise.h">
+      <Filter>platform</Filter>
+    </ClInclude>
+    <ClInclude Include="config_server_checker_service.h">
+      <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

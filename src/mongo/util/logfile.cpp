@@ -16,12 +16,16 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "pch.h"
-#include "logfile.h"
-#include "text.h"
-#include "mongoutils/str.h"
-#include "mongo/util/startup_test.h"
+#include "mongo/pch.h"
+
+#include "mongo/util/logfile.h"
+
+#include "mongo/platform/posix_fadvise.h"
 #include "mongo/util/mmap.h"
+#include "mongo/util/mongoutils/str.h"
+#include "mongo/util/startup_test.h"
+#include "mongo/util/text.h"
+
 
 using namespace mongoutils;
 
@@ -64,7 +68,7 @@ namespace mongo {
                   FILE_SHARE_READ,
                   NULL,
                   OPEN_ALWAYS,
-                  FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
+                  FILE_FLAG_NO_BUFFERING,
                   NULL);
         if( _fd == INVALID_HANDLE_VALUE ) {
             DWORD e = GetLastError();
