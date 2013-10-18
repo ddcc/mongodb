@@ -3,6 +3,8 @@ mongodb (1:2.4.6-1) UNRELEASED; urgency=low
   * New upstream release.
   * Change package priority to optional.
   * Update Standards-Version to 3.9.4 .
+  * Fix typedefs FTBFS with 0009-ignore-unused-local-typedefs.patch
+    (closes: #701324), thanks to James Page <james.page@ubuntu.com>
 
  -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Tue, 24 Sep 2013 12:31:11 +0000
 

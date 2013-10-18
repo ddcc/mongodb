@@ -6,3 +6,4 @@
 0006-Fix-ARM-alignment-problems.patch
 0007-Use-TIME_UTC_-macro.patch
 0008-Use-system-libstemmer.patch
+0009-ignore-unused-local-typedefs.patch
