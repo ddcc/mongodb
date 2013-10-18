@@ -107,8 +107,7 @@ Section: libdevel
 Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386
 Depends:
  libboost-dev,
- ${misc:Depends},
- ${shlibs:Depends}
+ ${misc:Depends}
 Suggests:
  mongodb-server
 Replaces:
