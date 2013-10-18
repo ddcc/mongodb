@@ -2,6 +2,7 @@ mongodb (1:2.4.6-1) UNRELEASED; urgency=low
 
   * New upstream release.
   * Change package priority to optional.
+  * Update Standards-Version to 3.9.4 .
 
  -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Tue, 24 Sep 2013 12:31:11 +0000
 

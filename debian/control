@@ -21,7 +21,7 @@ Build-Depends:
  python-pymongo,
  scons,
  g++-4.7
-Standards-Version: 3.9.3
+Standards-Version: 3.9.4
 Vcs-Git: git://github.com/bobek/mongo-debian.git
 Vcs-Browser: https://github.com/bobek/mongo-debian
 Homepage: http://www.mongodb.org
