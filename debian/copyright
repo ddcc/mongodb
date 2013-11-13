@@ -236,3 +236,27 @@ License for md5 implementation
 
     L. Peter Deutsch
     ghost@aladdin.com
+
+
+License exception for linking MongoDB with OpenSSL
+--------------------------------------------------
+
+MongoDB have granted the following license exception for the AGPL licensed
+components of MongoDB to support use with OpenSSL; AGPL and OpenSSL are not
+compatible licenses without this exception.
+
+  As a special exception, the copyright holders give permission to link the
+  code of portions of this program with the OpenSSL library under certain
+  conditions as described in each individual source file and distribute
+  linked combinations including the program with the OpenSSL library. You
+  must comply with the GNU Affero General Public License in all respects
+  for all of the code used other than as permitted herein. If you modify
+  file(s) with this exception, you may extend this exception to your
+  version of the file(s), but you are not obligated to do so. If you do not
+  wish to do so, delete this exception statement from your version. If you
+  delete this exception statement from all source files in the program,
+  then also delete it here.
+
+See the following upstream commit for full details:
+
+  https://github.com/mongodb/mongo/commit/5a282cc42c381c6103b1c903c745c64ea6af9f5b

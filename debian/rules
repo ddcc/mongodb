@@ -19,7 +19,7 @@ endif
 HARDENING_OPTIONS = CC="$(CC)" CFLAGS="$(CFLAGS)" \
   CXX="$(CXX)" CXXFLAGS="$(CXXFLAGS)"
 COMMON_OPTIONS = --use-system-snappy --use-system-tcmalloc --use-system-pcre \
-  --use-system-boost --use-system-v8 $(DEB_SCONS_OPTIONS)
+  --use-system-boost --use-system-v8 --ssl $(DEB_SCONS_OPTIONS)
 
 DEB_SCONS_CLEAN = --directory="." $(HARDENING_OPTIONS) . --keep-going --clean \
   $(COMMON_OPTIONS)

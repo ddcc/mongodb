@@ -5,6 +5,7 @@ Maintainer: Laszlo Boszormenyi (GCS) <gcs@debian.org>
 Uploaders: Jérémy Lal <kapouer@melix.org>
 Build-Depends:
  debhelper (>= 9),
+ dh-systemd (>= 1.5),
  libboost-date-time-dev,
  libboost-dev (>> 1.50),
  libboost-filesystem-dev,
@@ -16,10 +17,11 @@ Build-Depends:
  libreadline-dev,
  libsnappy-dev,
  libstemmer-dev,
+ libssl-dev,
  libv8-dev (>= 3.12),
  python-pymongo,
  scons
-Standards-Version: 3.9.4
+Standards-Version: 3.9.5
 Vcs-Git: git://anonscm.debian.org/collab-maint/mongodb.git
 Vcs-Browser: http://anonscm.debian.org/git/collab-maint/mongodb.git
 Homepage: http://www.mongodb.org
@@ -78,7 +80,7 @@ Description: object/document-oriented database (server package)
  This package contains the server itself.
 
 Package: mongodb-clients
-Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386
+Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 armhf
 Depends:
  ${misc:Depends},
  ${shlibs:Depends}
@@ -104,7 +106,7 @@ Description: object/document-oriented database (client apps)
 
 Package: mongodb-dev
 Section: libdevel
-Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386
+Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 armhf
 Depends:
  libboost-dev,
  ${misc:Depends}

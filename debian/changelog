@@ -1,3 +1,22 @@
+mongodb (1:2.4.8-1) unstable; urgency=low
+
+  * New upstream release.
+  * Add armhf architecture to the supported build systems.
+  * Build with SSL enabled.
+  * Update Standards-Version to 3.9.5 .
+
+  [ Viktar Vauchkevich <victorenator@gmail.com> ]
+  * Add systemd support (closes: #717321).
+
+  [ James Page <james.page@ubuntu.com> ]
+  * d/copyright: Add details of MongoDB AGPL+OpenSSL license exception
+    to support continued use of MongoDB with SSL support enabled
+    (LP: #1175028).
+  * d/mongodb.conf: Add example SSL configuration options.
+  * d/mongodb-server.mongodb.upstart: Add upstart configuration.
+
+ -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Wed, 13 Nov 2013 07:55:06 +0000
+
 mongodb (1:2.4.6-1) unstable; urgency=low
 
   * New upstream release.
