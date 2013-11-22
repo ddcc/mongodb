@@ -1,3 +1,18 @@
+mongodb (1:2.4.8-2) unstable; urgency=low
+
+  * Sync with Ubuntu (closes: #730203).
+
+  [ James Page <james.page@ubuntu.com> ]
+  * d/control: Enable armhf across all binary packages.
+  * d/control,tests: Add DEP-8 tests.
+  * d/p/0011-Use-a-signed-char-to-store-BSONType-enumerations.patch: Fixup
+    build failure on ARM due to missing signed'ness of char cast.
+
+  [ Rogério Brito <rbrito@ime.usp.br> ]
+  * debian/control: Add more details to the long descriptions.
+
+ -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Fri, 22 Nov 2013 18:09:38 +0100
+
 mongodb (1:2.4.8-1) unstable; urgency=low
 
   * New upstream release.

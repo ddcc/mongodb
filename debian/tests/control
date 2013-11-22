@@ -1,0 +1,2 @@
+Tests: mongod mongo-client
+Depends: mongodb-server, mongodb-clients, nmap

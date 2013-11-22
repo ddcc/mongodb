@@ -25,9 +25,10 @@ Standards-Version: 3.9.5
 Vcs-Git: git://anonscm.debian.org/collab-maint/mongodb.git
 Vcs-Browser: http://anonscm.debian.org/git/collab-maint/mongodb.git
 Homepage: http://www.mongodb.org
+XS-Testsuite: autopkgtest
 
 Package: mongodb
-Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386
+Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 armhf
 Depends:
  mongodb-dev,
  mongodb-server (>= 1:2.4.1-2),
@@ -53,7 +54,7 @@ Description: object/document-oriented database (metapackage)
  the server, the clients and the development files (headers and library).
 
 Package: mongodb-server
-Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386
+Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 armhf
 Depends:
  adduser,
  mongodb-clients,
@@ -77,7 +78,8 @@ Description: object/document-oriented database (server package)
  High performance, scalability, and reasonable depth of
  functionality are the goals for the project.
  .
- This package contains the server itself.
+ This package contains the server itself  (mongod) and the sharding
+ server/load-balancer (mongos).
 
 Package: mongodb-clients
 Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 armhf
@@ -102,7 +104,8 @@ Description: object/document-oriented database (client apps)
  High performance, scalability, and reasonable depth of
  functionality are the goals for the project.
  .
- This package contains the various client applications.
+ This package contains the standard administrative shell (mongo) and other
+ utilities for administration or analysis of performance of the server.
 
 Package: mongodb-dev
 Section: libdevel

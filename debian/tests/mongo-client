@@ -1,0 +1,23 @@
+#!/bin/bash
+
+set -e
+
+TIMEOUT=120
+
+echo -n "Waiting for mongod to start: "
+count=0
+while (! nc -z 127.0.0.1 27017); do
+    echo -n "."
+    count=$((count+1))
+    if test $count -gt $TIMEOUT; then
+        echo "mongod failed to start?"
+        pgrep mongod
+        exit 1
+    fi
+    sleep 1
+done
+echo "mongod listening"
+
+echo "Performing basic test using mongo client: "
+mongo --verbose jstests/basic1.js 2>&1
+echo "OK"
