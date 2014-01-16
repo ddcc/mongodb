@@ -1,3 +1,9 @@
+mongodb (1:2.4.9-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Thu, 16 Jan 2014 12:44:01 +0000
+
 mongodb (1:2.4.8-2) unstable; urgency=low
 
   * Sync with Ubuntu (closes: #730203).
