@@ -1,3 +1,21 @@
+mongodb (1:2.4.10-1) unstable; urgency=low
+
+  * New upstream release.
+  * Sync with Ubuntu.
+
+  [ James Page <james.page@ubuntu.com> ]
+  * Enable ppc64el build (LP: #1288633):
+    - d/control: Add ppc64el to target architectures.
+    - d/control: Use google-perftools on ppc64el.
+    - d/p/0004-Support-ppc64el-builds.patch: Detect ppc64 as 64 bit platform.
+  * d/mongodb-server.mongodb.upstart: Bump nofile limit to 64000 (LP: #1283007).
+  * d/control: Use google-perftools on armhf.
+
+  [ Adam Conrad <adconrad@ubuntu.com> ]
+  * d/p/0099-Pagesize-hacks.patch: Apply some hacks for non-4k pages.
+
+ -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Tue, 15 Apr 2014 13:47:02 +0000
+
 mongodb (1:2.4.9-1) unstable; urgency=medium
 
   * New upstream release.

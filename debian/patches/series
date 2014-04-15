@@ -9,3 +9,5 @@
 0009-ignore-unused-local-typedefs.patch
 0010-fix-integer-signs.patch
 0011-Use-a-signed-char-to-store-BSONType-enumerations.patch
+0099-Pagesize-hacks.patch
+0004-Support-ppc64el-builds.patch

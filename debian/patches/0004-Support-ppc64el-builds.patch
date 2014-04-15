@@ -1,0 +1,15 @@
+Description: Add support for detection of powerpc64 platform
+Author: James Page <james.page@ubuntu.com>
+Forwarded: no
+
+--- a/src/mongo/platform/bits.h
++++ b/src/mongo/platform/bits.h
+@@ -19,7 +19,7 @@
+ 
+ // figure out if we're on a 64 or 32 bit system
+ 
+-#if defined(__x86_64__) || defined(__amd64__) || defined(_WIN64)
++#if defined(__x86_64__) || defined(__amd64__) || defined(_WIN64) || defined(__powerpc64__)
+ #define MONGO_PLATFORM_64
+ #elif defined(__i386__) || defined(_WIN32) || defined(__arm__)
+ #define MONGO_PLATFORM_32
