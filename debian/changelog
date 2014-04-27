@@ -1,4 +1,4 @@
-mongodb (1:2.4.6-1) UNRELEASED; urgency=low
+mongodb (1:2.4.6-1) unstable; urgency=low
 
   * New upstream release.
   * Change package priority to optional.
