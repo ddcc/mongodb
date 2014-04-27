@@ -26,6 +26,7 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/dbhash.h"
 #include "mongo/db/index_update.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/namespacestring.h"
@@ -334,6 +335,7 @@ namespace mongo {
         }
 
         logOpForSharding( opstr , ns , obj , patt );
+        logOpForDbHash( opstr , ns , obj , patt );
     }
 
     void createOplog() {
@@ -977,13 +979,17 @@ namespace mongo {
                 BSONElement e = i.next();
                 const BSONObj& temp = e.Obj();
                 
-                Client::Context ctx(temp["ns"].String());
+                string ns = temp["ns"].String();
+                Client::Context ctx(ns);
+
                 bool failed = applyOperation_inlock(temp, false, alwaysUpsert);
                 ab.append(!failed);
                 if ( failed )
                     errors++;
 
                 num++;
+
+                logOpForDbHash( "u", ns.c_str(), BSONObj(), NULL );
             }
 
             result.append( "applied" , num );
