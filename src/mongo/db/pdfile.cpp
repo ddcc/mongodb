@@ -1316,8 +1316,10 @@ namespace mongo {
 
     void DataFileMgr::insertAndLog( const char *ns, const BSONObj &o, bool god, bool fromMigrate ) {
         BSONObj tmp = o;
-        insertWithObjMod( ns, tmp, false, god );
-        logOp( "i", ns, tmp, 0, 0, fromMigrate );
+        DiskLoc loc = insertWithObjMod( ns, tmp, false, god );
+        if (!loc.isNull()) {
+            logOp( "i", ns, tmp, 0, 0, fromMigrate );
+        }
     }
 
     /** @param o the object to insert. can be modified to add _id and thus be an in/out param
@@ -1475,16 +1477,20 @@ namespace mongo {
         }
 
         try {
-            IndexDetails& idx = tableToIndex->getNextIndexDetails(tabletoidxns.c_str());
-            // It's important that this is outside the inner try/catch so that we never try to call
-            // kill_idx on a half-formed disk loc (if this asserts).
-            getDur().writingDiskLoc(idx.info) = loc;
+            {
+                IndexDetails& idx = tableToIndex->getNextIndexDetails(tabletoidxns.c_str());
+                // It's important that this is outside the inner try/catch so that we never try to call
+                // kill_idx on a half-formed disk loc (if this asserts).
+                getDur().writingDiskLoc(idx.info) = loc;
+            }
 
             try {
+                IndexDetails& idx = tableToIndex->getNextIndexDetails(tabletoidxns.c_str());
                 getDur().writingInt(tableToIndex->indexBuildsInProgress) += 1;
                 buildAnIndex(tabletoidxns, tableToIndex, idx, background, mayInterrupt);
             }
             catch (DBException& e) {
+                log() << "error building index: " << e << endl;
                 // save our error msg string as an exception or dropIndexes will overwrite our message
                 LastError *le = lastError.get();
                 int savecode = 0;
@@ -1499,7 +1505,10 @@ namespace mongo {
                 }
 
                 // Recalculate the index # so we can remove it from the list in the next catch
+
                 idxNo = IndexBuildsInProgress::get(tabletoidxns.c_str(), idxName);
+                IndexDetails& idx = tableToIndex->idx(idxNo);
+
                 // roll back this index
                 idx.kill_idx();
 
@@ -1519,6 +1528,7 @@ namespace mongo {
                       << tableToIndex->nIndexes << endl;
                 // We cannot use idx here, as it may point to a different index entry if it was
                 // flipped during building
+
                 IndexDetails temp = tableToIndex->idx(idxNo);
                 *getDur().writing(&tableToIndex->idx(idxNo)) =
                     tableToIndex->idx(tableToIndex->nIndexes);
@@ -1531,6 +1541,7 @@ namespace mongo {
                 tableToIndex->setIndexIsMultikey(tabletoidxns.c_str(), tableToIndex->nIndexes,
                                                  tempMultikey);
 
+
                 idxNo = tableToIndex->nIndexes;
             }
 
@@ -1542,10 +1553,10 @@ namespace mongo {
             tableToIndex->addIndex(tabletoidxns.c_str());
             getDur().writingInt(tableToIndex->indexBuildsInProgress) -= 1;
 
-            IndexType* indexType = idx.getSpec().getType();
+            IndexType* indexType = tableToIndex->idx(idxNo).getSpec().getType();
             const IndexPlugin *plugin = indexType ? indexType->getPlugin() : NULL;
             if (plugin) {
-                plugin->postBuildHook( idx.getSpec() );
+                plugin->postBuildHook( tableToIndex->idx(idxNo).getSpec() );
             }
 
         }
@@ -1589,7 +1600,8 @@ namespace mongo {
         Lock::assertWriteLocked(ns);
         NamespaceDetails* nsd = nsdetails(ns);
 
-        for (int i=offset; i<nsd->getTotalIndexCount(); i++) {
+        // offset is 0-based, so we subtract one from the index count
+        for (int i = offset; i < (nsd->getTotalIndexCount() - 1); i++) {
             if (i < NamespaceDetails::NIndexesMax-1) {
                 *getDur().writing(&nsd->idx(i)) = nsd->idx(i+1);
                 nsd->setIndexIsMultikey(ns, i, nsd->isMultikey(i+1));

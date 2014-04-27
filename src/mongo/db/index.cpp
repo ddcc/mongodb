@@ -324,6 +324,8 @@ namespace mongo {
         getDur().writingInt(dfh->versionMinor) = PDFILE_VERSION_MINOR_24_AND_NEWER;
     }
 
+    extern BSONObj id_obj; // { _id : 1 }
+
     bool prepareToBuildIndex(const BSONObj& io,
                              bool mayInterrupt,
                              bool god,
@@ -334,9 +336,11 @@ namespace mongo {
 
         // the collection for which we are building an index
         sourceNS = io.getStringField("ns");
+        NamespaceString nss(sourceNS);
         uassert(10096, "invalid ns to index", sourceNS.find( '.' ) != string::npos);
-        massert(10097, str::stream() << "bad table to index name on add index attempt current db: " << cc().database()->name << "  source: " << sourceNS ,
-                cc().database()->name == nsToDatabase(sourceNS));
+        uassert(17072, "cannot create indexes on the system.indexes collection",
+                !nss.isSystemDotIndexes());
+        massert(10097, str::stream() << "bad table to index name on add index attempt current db: " << cc().database()->name << "  source: " << sourceNS , cc().database()->name == nsToDatabase(sourceNS));
 
         // logical name of the index.  todo: get rid of the name, we don't need it!
         const char *name = io.getStringField("name");
@@ -393,10 +397,10 @@ namespace mongo {
            all be treated as the same pattern.
         */
         if ( IndexDetails::isIdIndexPattern(key) ) {
-            if( !god ) {
-                ensureHaveIdIndex( sourceNS.c_str(), mayInterrupt );
-                return false;
-            }
+            //if( !god ) {
+            //ensureHaveIdIndex( sourceNS.c_str(), mayInterrupt );
+            //return false;
+            //}
         }
         else {
             /* is buildIndexes:false set for this replica set member?
@@ -435,7 +439,14 @@ namespace mongo {
             }
             // idea is to put things we use a lot earlier
             b.append("v", v);
-            b.append(o["key"]);
+            if ( IndexDetails::isIdIndexPattern(o["key"].Obj()) ) {
+                b.append("name", "_id_");
+                b.append("key", id_obj);
+            }
+            else {
+                b.append( o["name"] );
+                b.append(o["key"]);
+            }
             if( o["unique"].trueValue() )
                 b.appendBool("unique", true); // normalize to bool true in case was int 1 or something...
             b.append(o["ns"]);
@@ -446,7 +457,7 @@ namespace mongo {
                 while ( i.more() ) {
                     BSONElement e = i.next();
                     string s = e.fieldName();
-                    if( s != "_id" && s != "v" && s != "ns" && s != "unique" && s != "key" )
+                    if( s != "_id" && s != "v" && s != "ns" && s != "unique" && s != "key" && s != "name" )
                         b.append(e);
                 }
             }
