@@ -22,6 +22,7 @@
 
 #include "mongo/client/connpool.h"
 #include "mongo/client/parallel.h"
+#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/db.h"
@@ -300,8 +301,13 @@ namespace mongo {
          */
         void State::dropTempCollections() {
             _db.dropCollection(_config.tempNamespace);
-            if (_useIncremental)
+            // Always forget about temporary namespaces, so we don't cache lots of them
+            ShardConnection::forgetNS( _config.tempNamespace );
+            if (_useIncremental) {
                 _db.dropCollection(_config.incLong);
+                ShardConnection::forgetNS( _config.incLong );
+            }
+
         }
 
         /**
@@ -622,7 +628,10 @@ namespace mongo {
          */
         void State::init() {
             // setup js
-            _scope.reset(globalScriptEngine->getPooledScope( _config.dbname, "mapreduce" ).release() );
+            const string userToken = ClientBasic::getCurrent()->getAuthorizationManager()
+                                                              ->getAuthenticatedPrincipalNamesToken();
+            _scope.reset(globalScriptEngine->getPooledScope(
+                            _config.dbname, "mapreduce" + userToken).release());
 
             if ( ! _config.scopeSetup.isEmpty() )
                 _scope->init( &_config.scopeSetup );
@@ -1165,9 +1174,23 @@ namespace mongo {
                     state.init();
                     state.prepTempCollection();
                     ON_BLOCK_EXIT_OBJ(state, &State::dropTempCollections);
-                    ProgressMeterHolder pm(op->setMessage("m/r: (1/3) emit phase",
-                                                          "M/R: (1/3) Emit Progress",
-                                                          state.incomingDocuments()));
+
+                    int progressTotal = 0;
+                    bool showTotal = true;
+                    if ( state.config().filter.isEmpty() ) {
+                        progressTotal = state.incomingDocuments();
+                    }
+                    else {
+                        showTotal = false;
+                        // Set an arbitrary total > 0 so the meter will be activated.
+                        progressTotal = 1;
+                    }
+
+                    ProgressMeter& progress( op->setMessage("m/r: (1/3) emit phase",
+                                             "M/R: (1/3) Emit Progress",
+                                             progressTotal ));
+                    progress.showTotal(showTotal);
+                    ProgressMeterHolder pm(progress);
 
                     wassert( config.limit < 0x4000000 ); // see case on next line to 32 bit unsigned
                     long long mapTime = 0;
@@ -1456,6 +1479,9 @@ namespace mongo {
                     if (++index >= chunks.size())
                         break;
                 }
+
+                // Forget temporary input collection, if output is sharded collection
+                ShardConnection::forgetNS( inputNS );
 
                 result.append( "chunkSizes" , chunkSizes.arr() );
 
