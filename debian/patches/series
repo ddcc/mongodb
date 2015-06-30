@@ -12,4 +12,5 @@
 0099-Pagesize-hacks.patch
 0004-Support-ppc64el-builds.patch
 0012-support-gnu.patch
+0013-pymongo.patch
 no-unused-function.patch

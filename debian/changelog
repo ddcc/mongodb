@@ -4,6 +4,9 @@ mongodb (1:2.4.14-1) unstable; urgency=low
   * Remove applied patches.
   * Specify home directory when adding mongodb user.
 
+  [ Svante Signell <svante.signell@gmail.com> ]
+  * Fix build with python-pymongo 3.0+ (closes: #786823).
+
  -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Sun, 31 May 2015 12:46:04 +0000
 
 mongodb (1:2.4.10-5) unstable; urgency=high

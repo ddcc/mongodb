@@ -1,0 +1,67 @@
+Index: mongodb-2.4.10/buildscripts/smoke.py
+===================================================================
+--- mongodb-2.4.10.orig/buildscripts/smoke.py
++++ mongodb-2.4.10/buildscripts/smoke.py
+@@ -49,7 +49,7 @@ from subprocess import (Popen,
+ import sys
+ import time
+ 
+-from pymongo import Connection
++from pymongo import MongoClient
+ from pymongo.errors import OperationFailure
+ 
+ import utils
+@@ -166,7 +166,7 @@ class mongod(object):
+ 
+     def setup_admin_user(self, port=mongod_port):
+         try:
+-            Connection( "localhost" , int(port) ).admin.add_user("admin","password")
++            MomgoClient( "localhost" , int(port) ).admin.add_user("admin","password")
+         except OperationFailure, e:
+             if e.message == 'need to login':
+                 pass # SERVER-4225
+@@ -230,7 +230,7 @@ class mongod(object):
+             self.setup_admin_user(self.port)
+ 
+         if self.slave:
+-            local = Connection(port=self.port, slave_okay=True).local
++            local = MongoClient(port=self.port, slave_okay=True).local
+             synced = False
+             while not synced:
+                 synced = True
+@@ -289,7 +289,7 @@ class mongod(object):
+         sys.stdout.flush()
+ 
+     def wait_for_repl(self):
+-        Connection(port=self.port).test.smokeWait.insert({}, w=2, wtimeout=5*60*1000)
++        MongoClient(port=self.port).test.smokeWait.insert({}, w=2, wtimeout=5*60*1000)
+ 
+ class Bug(Exception):
+     def __str__(self):
+@@ -325,7 +325,7 @@ def check_db_hashes(master, slave):
+ 
+     # FIXME: maybe make this run dbhash on all databases?
+     for mongod in [master, slave]:
+-        mongod.dbhash = Connection(port=mongod.port, slave_okay=True).test.command("dbhash")
++        mongod.dbhash = MongoClient(port=mongod.port, slave_okay=True).test.command("dbhash")
+         mongod.dict = mongod.dbhash["collections"]
+ 
+     global lost_in_slave, lost_in_master, screwy_in_slave, replicated_collections
+@@ -512,7 +512,7 @@ def runTest(test):
+     
+     if start_mongod:
+         try:
+-            c = Connection(host="127.0.0.1", port=int(mongod_port), ssl=use_ssl)
++            c = MongoClient(host="127.0.0.1", port=int(mongod_port), ssl=use_ssl)
+         except Exception,e:
+             print "Exception from pymongo: ", e
+             raise TestServerFailure(path)
+@@ -550,7 +550,7 @@ def run_tests(tests):
+                            auth=auth,
+                            authMechanism=authMechanism,
+                            use_ssl=use_ssl).__enter__()
+-            primary = Connection(port=master.port, slave_okay=True);
++            primary = MongoClient(port=master.port, slave_okay=True);
+ 
+             primary.admin.command({'replSetInitiate' : {'_id' : 'foo', 'members' : [
+                             {'_id': 0, 'host':'localhost:%s' % master.port},
