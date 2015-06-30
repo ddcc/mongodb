@@ -1,0 +1,25 @@
+From 8b9242837510e6410ddcf4f19969da4c7b01b2f7 Mon Sep 17 00:00:00 2001
+From: Dan Pasette <dan@10gen.com>
+Date: Mon, 27 Oct 2014 22:45:56 -0400
+Subject: [PATCH] SERVER-15673 Disable SSLv3 ciphers (CVE-2014-3566 "POODLE")
+
+(cherry picked from commit 035b5a90f56d653e930fcbe20c89f4dda7e48a30)
+---
+ src/mongo/util/net/ssl_manager.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/mongo/util/net/ssl_manager.cpp b/src/mongo/util/net/ssl_manager.cpp
+index dd8b3a2..0efdd7c 100644
+--- a/src/mongo/util/net/ssl_manager.cpp
++++ b/src/mongo/util/net/ssl_manager.cpp
+@@ -140,7 +140,9 @@ namespace mongo {
+                 _context);
+    
+         // Activate all bug workaround options, to support buggy client SSL's.
+-        SSL_CTX_set_options(_context, SSL_OP_ALL);
++        // SSL_OP_NO_SSLv2 - Disable SSL v2 support
++        // SSL_OP_NO_SSLv3 - Disable SSL v3 support
++        SSL_CTX_set_options(*context, SSL_OP_ALL|SSL_OP_NO_SSLv2|SSL_OP_NO_SSLv3);
+ 
+         // If renegotiation is needed, don't return from recv() or send() until it's successful.
+         // Note: this is for blocking sockets only.

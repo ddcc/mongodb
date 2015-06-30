@@ -1,6 +1,7 @@
 mongodb (1:2.4.10-4) unstable; urgency=high
 
   * Backport potential information leak security fix from 2.4.11 .
+  * Backport disable SSLv3 ciphers from pre-2.4.13 to fix CVE-2014-3566 .
 
  -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Mon, 10 Nov 2014 18:24:57 +0000
 
