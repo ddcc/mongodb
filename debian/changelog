@@ -1,6 +1,7 @@
 mongodb (1:2.4.14-1) unstable; urgency=low
 
   * New upstream release.
+  * Remove applied patches.
 
  -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Sun, 31 May 2015 12:46:04 +0000
 
