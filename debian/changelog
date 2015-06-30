@@ -1,6 +1,7 @@
 mongodb (1:2.4.10-3) unstable; urgency=medium
 
   * Enable systemd unit file (closes: #767211).
+  * Update Standards-Version to 3.9.6 .
 
  -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Wed, 29 Oct 2014 22:43:27 +0000
 

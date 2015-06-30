@@ -21,7 +21,7 @@ Build-Depends:
  libv8-dev (>= 3.12),
  python-pymongo,
  scons
-Standards-Version: 3.9.5
+Standards-Version: 3.9.6
 Vcs-Git: git://anonscm.debian.org/collab-maint/mongodb.git
 Vcs-Browser: http://anonscm.debian.org/git/collab-maint/mongodb.git
 Homepage: http://www.mongodb.org
