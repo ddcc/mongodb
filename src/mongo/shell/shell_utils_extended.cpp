@@ -26,6 +26,7 @@
 #include "mongo/util/file.h"
 #include "mongo/util/md5.hpp"
 #include "mongo/util/net/sock.h"
+#include "mongo/util/scopeguard.h"
 #include "mongo/util/text.h"
 
 namespace mongo {
@@ -144,6 +145,7 @@ namespace mongo {
             stringstream ss;
             FILE* f = fopen(e.valuestrsafe(), "rb");
             uassert(CANT_OPEN_FILE, "couldn't open file", f );
+            ON_BLOCK_EXIT(fclose, f);
 
             md5digest d;
             md5_state_t st;
@@ -181,22 +183,19 @@ namespace mongo {
         }
 
         /**
-         * @param args - [ name, byte index ]
-         * In this initial implementation, all bits in the specified byte are flipped.
+         * @param args - [ source, destination ]
+         * copies file 'source' to 'destination'. Errors if the 'destination' file already exists.
          */
-        BSONObj fuzzFile(const BSONObj& args, void* data) {
-            uassert( 13619, "fuzzFile takes 2 arguments", args.nFields() == 2 );
-            scoped_ptr< File > f( new File() );
-            f->open( args.getStringField( "0" ) );
-            uassert( 13620, "couldn't open file to fuzz", !f->bad() && f->is_open() );
+        BSONObj copyFile(const BSONObj& args, void* data) {
+            uassert(13619, "copyFile takes 2 arguments", args.nFields() == 2);
 
-            char c;
-            f->read( args.getIntField( "1" ), &c, 1 );
-            c = ~c;
-            f->write( args.getIntField( "1" ), &c, 1 );
+            BSONObjIterator it(args);
+            const std::string source = it.next().str();
+            const std::string destination = it.next().str();
+
+            boost::filesystem::copy_file(source, destination);
 
             return undefinedReturn;
-            // f close is implicit
         }
 
         BSONObj getHostName(const BSONObj& a, void* data) {
@@ -210,7 +209,7 @@ namespace mongo {
         void installShellUtilsExtended( Scope& scope ) {
             scope.injectNative( "getHostName" , getHostName );
             scope.injectNative( "removeFile" , removeFile );
-            scope.injectNative( "fuzzFile" , fuzzFile );
+            scope.injectNative( "copyFile" , copyFile );
             scope.injectNative( "listFiles" , listFiles );
             scope.injectNative( "ls" , ls );
             scope.injectNative( "pwd", pwd );

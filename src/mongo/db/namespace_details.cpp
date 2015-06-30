@@ -24,12 +24,14 @@
 #include <boost/filesystem/operations.hpp>
 
 #include "mongo/db/db.h"
+#include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/json.h"
 #include "mongo/db/mongommf.h"
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/ops/update.h"
 #include "mongo/db/pdfile.h"
 #include "mongo/scripting/engine.h"
+#include "mongo/util/file.h"
 #include "mongo/util/hashtab.h"
 
 namespace mongo {
@@ -122,6 +124,29 @@ namespace mongo {
     }
 #endif
 
+    void NamespaceDetails::onLoad(const Namespace& k) {
+
+        if( k.isExtra() ) {
+            /* overflow storage for indexes - so don't treat as a NamespaceDetails object. */
+            return;
+        }
+
+        if( indexBuildsInProgress ) {
+            verify( Lock::isW() ); // TODO(erh) should this be per db?
+            if( indexBuildsInProgress ) {
+                log() << "indexBuildsInProgress was " << indexBuildsInProgress << " for " << k
+                      << ", indicating an abnormal db shutdown" << endl;
+                getDur().writingInt( indexBuildsInProgress ) = 0;
+            }
+        }
+    }
+
+    static void namespaceOnLoadCallback(const Namespace& k, NamespaceDetails& v) {
+        v.onLoad(k);
+    }
+
+    bool checkNsFilesOnLoad = true;
+
     NOINLINE_DECL void NamespaceIndex::_init() {
         verify( !ht );
 
@@ -155,8 +180,38 @@ namespace mongo {
         else {
             // use lenForNewNsFiles, we are making a new database
             massert( 10343, "bad lenForNewNsFiles", lenForNewNsFiles >= 1024*1024 );
+
             maybeMkdir();
             unsigned long long l = lenForNewNsFiles;
+            log() << "allocating new ns file " << pathString << ", filling with zeroes..." << endl;
+
+            {
+                // Due to SERVER-15369 we need to explicitly write zero-bytes to the NS file.
+                const unsigned long long kBlockSize = 1024*1024;
+                verify(l % kBlockSize == 0); // ns files can only be multiples of 1MB
+                const std::vector<char> zeros(kBlockSize, 0);
+
+                File file;
+                file.open(pathString.c_str());
+                massert(18825, str::stream() << "couldn't create file " << pathString, file.is_open());
+                for (fileofs ofs = 0; ofs < l && !file.bad(); ofs += kBlockSize ) {
+                    file.write(ofs, &zeros[0], kBlockSize);
+                }
+                if (file.bad()) {
+                    try {
+                        boost::filesystem::remove(pathString);
+                    } catch (const std::exception& e) {
+                        StringBuilder ss;
+                        ss << "error removing file: " << e.what();
+                        massert(18909, ss.str(), 0);
+                    }
+                }
+                else {
+                    file.fsync();
+                }
+                massert(18826, str::stream() << "failure writing file " << pathString, !file.bad() );
+            }
+
             if( f.create(pathString, l, true) ) {
                 getDur().createdFile(pathString, l); // always a new file
                 len = l;
@@ -174,6 +229,9 @@ namespace mongo {
 
         verify( len <= 0x7fffffff );
         ht = new HashTable<Namespace,NamespaceDetails>(p, (int) len, "namespace index");
+        if( checkNsFilesOnLoad )
+            ht->iterAll(namespaceOnLoadCallback);
+
     }
 
     static void namespaceGetNamespacesCallback( const Namespace& k , NamespaceDetails& v , void * extra ) {
@@ -738,6 +796,17 @@ namespace mongo {
         get_cmap_inlock(ns).erase(ns);
     }
 
+    namespace {
+        bool indexIsText(const BSONObj& keyPattern) {
+            BSONObjIterator it( keyPattern );
+            while ( it.more() ) {
+                if ( str::equals( it.next().valuestrsafe(), "text" ) ) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
 
     void NamespaceDetailsTransient::computeIndexKeys() {
         _indexedPaths.clear();
@@ -746,13 +815,44 @@ namespace mongo {
         if ( ! d )
             return;
 
+        bool indexesAreLegacy = (cc().database()->getFile(0)->getHeader()->versionMinor
+                                 == PDFILE_VERSION_MINOR_22_AND_OLDER);
+
         NamespaceDetails::IndexIterator i = d->ii( true );
         while( i.more() ) {
-            BSONObj key = i.next().keyPattern();
-            BSONObjIterator j( key );
-            while ( j.more() ) {
-                BSONElement e = j.next();
-                _indexedPaths.addPath( e.fieldName() );
+            const IndexSpec& indexSpec = getIndexSpec( &(i.next()) );
+            BSONObj key = indexSpec.keyPattern;
+
+            if ( indexesAreLegacy || !indexIsText( key ) ) {
+                BSONObjIterator j( key );
+                while ( j.more() ) {
+                    BSONElement e = j.next();
+                    _indexedPaths.addPath( e.fieldName() );
+                }
+            }
+            else {
+                // This is a text index.  Get the paths for the indexed fields out of the FTSSpec.
+                fts::FTSSpec ftsSpec( indexSpec.info );
+                if ( ftsSpec.wildcard() ) {
+                    _indexedPaths.allPathsIndexed();
+                }
+                else {
+                    for ( size_t i = 0; i < ftsSpec.numExtraBefore(); ++i ) {
+                        _indexedPaths.addPath( ftsSpec.extraBefore(i) );
+                    }
+                    for ( fts::Weights::const_iterator it = ftsSpec.weights().begin();
+                          it != ftsSpec.weights().end();
+                          ++it ) {
+                        _indexedPaths.addPath( it->first );
+                    }
+                    for ( size_t i = 0; i < ftsSpec.numExtraAfter(); ++i ) {
+                        _indexedPaths.addPath( ftsSpec.extraAfter(i) );
+                    }
+                    // Note that 2.4.x supports {textIndexVersion: 1} only. {textIndexVersion: 1}
+                    // can only have one language per document, and the "language override" field
+                    // specifies the exact path to the language.
+                    _indexedPaths.addPath( ftsSpec.languageOverrideField() );
+                }
             }
         }
 
@@ -976,6 +1076,10 @@ namespace mongo {
 
     bool legalClientSystemNS( const string& ns , bool write ) {
         if( ns == "local.system.replset" ) return true;
+        if( ns == "admin.system.version" ) return true;
+        if( ns == "admin.system.roles" ) return true;
+        if( ns == "admin.system.new_users" ) return true;
+        if( ns == "admin.system.backup_users" ) return true;
 
         if ( ns.find( ".system.users" ) != string::npos )
             return true;

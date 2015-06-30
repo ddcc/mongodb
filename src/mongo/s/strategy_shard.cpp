@@ -192,15 +192,10 @@ namespace mongo {
                 string host = cursorCache.getRef( id );
 
                 if( host.size() == 0 ){
-
-                    //
-                    // Match legacy behavior here by throwing an exception when we can't find
-                    // the cursor, but make the exception more informative
-                    //
-
-                    uasserted( 16336,
-                               str::stream() << "could not find cursor in cache for id " << id
-                                             << " over collection " << ns );
+                    LOG(3) << "could not find cursor in cache for id " << id
+                           << " over collection " << ns << endl;
+                    replyToQuery( ResultFlag_CursorNotFound , r.p() , r.m() , 0 , 0 , 0 );
+                    return;
                 }
 
                 // we used ScopedDbConnection because we don't get about config versions
@@ -227,11 +222,9 @@ namespace mongo {
                 int ntoreturn = r.d().pullInt();
                 long long id = r.d().pullInt64();
 
-                LOG(6) << "want cursor : " << id << endl;
-
                 ShardedClientCursorPtr cursor = cursorCache.get( id );
                 if ( ! cursor ) {
-                    LOG(6) << "\t invalid cursor :(" << endl;
+                    LOG(3) << "Invalid cursor:" << id << endl;
                     replyToQuery( ResultFlag_CursorNotFound , r.p() , r.m() , 0 , 0 , 0 );
                     return;
                 }
@@ -1050,8 +1043,9 @@ namespace mongo {
                 // TODO: make this safer w/ shard add/remove
                 //
 
-                int* opts = (int*)( r.d().afterNS() );
-                opts[0] |= UpdateOption_Broadcast; // this means don't check shard version in mongod
+                int opts = r.d().getFlags();
+                opts |= UpdateOption_Broadcast; // this means don't check shard version in mongod
+                r.d().setFlags(opts);
                 broadcastWrite( dbUpdate, r );
                 return;
             }
@@ -1199,8 +1193,10 @@ namespace mongo {
 
             if( ! shard ){
 
-                int * x = (int*)(r.d().afterNS());
-                x[0] |= RemoveOption_Broadcast; // this means don't check shard version in mongod
+                int opts = r.d().getFlags();
+                opts |= RemoveOption_Broadcast; // this means don't check shard version in mongod
+                r.d().setFlags(opts);
+
                 broadcastWrite(dbDelete, r);
                 return;
             }

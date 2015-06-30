@@ -77,6 +77,7 @@ namespace mongo {
     extern int diagLogging;
     extern unsigned lenForNewNsFiles;
     extern int lockFile;
+    extern bool checkNsFilesOnLoad;
     extern string repairpath;
 
     static void setupSignalHandlers();
@@ -232,7 +233,6 @@ namespace mongo {
         virtual void disconnected( AbstractMessagingPort* p ) {
             Client * c = currentClient.get();
             if( c ) c->shutdown();
-            globalScriptEngine->threadDone();
         }
 
     };
@@ -322,6 +322,8 @@ namespace mongo {
         Client::GodScope gs;
         LOG(1) << "enter repairDatabases (to check pdfile version #)" << endl;
 
+        checkNsFilesOnLoad = false; // we are mainly just checking the header - don't scan the whole .ns file for every db here.
+
         Lock::GlobalWrite lk;
         vector< string > dbNames;
         getDatabaseNames( dbNames );
@@ -362,12 +364,12 @@ namespace mongo {
                 }
             }
             else {
-                if (h->versionMinor == PDFILE_VERSION_MINOR_22_AND_OLDER) {
-                    const string systemIndexes = cc().database()->name + ".system.indexes";
-                    shared_ptr<Cursor> cursor(theDataFileMgr.findAll(systemIndexes));
-                    for ( ; cursor && cursor->ok(); cursor->advance()) {
-                        const BSONObj index = cursor->current();
-                        const BSONObj key = index.getObjectField("key");
+                const string systemIndexes = cc().database()->name + ".system.indexes";
+                shared_ptr<Cursor> cursor(theDataFileMgr.findAll(systemIndexes));
+                for ( ; cursor && cursor->ok(); cursor->advance()) {
+                    const BSONObj index = cursor->current();
+                    const BSONObj key = index.getObjectField("key");
+                    if (h->versionMinor == PDFILE_VERSION_MINOR_22_AND_OLDER) {
                         const string plugin = IndexPlugin::findPluginName(key);
                         if (IndexPlugin::existedBefore24(plugin))
                             continue;
@@ -377,6 +379,21 @@ namespace mongo {
                               << "See the upgrade section: "
                               << "http://dochub.mongodb.org/core/upgrade-2.4"
                               << startupWarningsLog;
+                    }
+                    else {
+                        verify(h->versionMinor == PDFILE_VERSION_MINOR_24_AND_NEWER);
+                        try {
+                            IndexSpec(key, index, IndexSpec::RulesFor24);
+                        }
+                        catch (const DBException& e) {
+                            error() << "Encountered an unrecognized index spec: " << index << endl;
+                            error() << "Reason this index spec could not be loaded: \"" << e.what()
+                                    << "\"" << endl;
+                            error() << "The index cannot be used with this version of MongoDB; "
+                                    << "exiting..." << endl;
+                            cc().shutdown();
+                            dbexit(EXIT_UNCAUGHT);
+                        }
                     }
                 }
                 Database::closeDatabase( dbName.c_str(), dbpath );
@@ -390,6 +407,8 @@ namespace mongo {
             cc().shutdown();
             dbexit( EXIT_CLEAN );
         }
+
+        checkNsFilesOnLoad = true;
     }
 
     void clearTmpFiles() {
@@ -529,38 +548,46 @@ namespace mongo {
     /// warn if readahead > 256KB (gridfs chunk size)
     static void checkReadAhead(const string& dir) {
 #ifdef __linux__
-        const dev_t dev = getPartition(dir);
+        try { 
+            const dev_t dev = getPartition(dir);
 
-        // This path handles the case where the filesystem uses the whole device (including LVM)
-        string path = str::stream() <<
-            "/sys/dev/block/" << major(dev) << ':' << minor(dev) << "/queue/read_ahead_kb";
+            // This path handles the case where the filesystem uses the whole device (including LVM)
+            string path = str::stream() <<
+                "/sys/dev/block/" << major(dev) << ':' << minor(dev) << "/queue/read_ahead_kb";
 
-        if (!boost::filesystem::exists(path)){
-            // This path handles the case where the filesystem is on a partition.
-            path = str::stream()
-                << "/sys/dev/block/" << major(dev) << ':' << minor(dev) // this is a symlink
-                << "/.." // parent directory of a partition is for the whole device
-                << "/queue/read_ahead_kb";
-        }
+            if (!boost::filesystem::exists(path)){
+                // This path handles the case where the filesystem is on a partition.
+                path = str::stream()
+                    << "/sys/dev/block/" << major(dev) << ':' << minor(dev) // this is a symlink
+                    << "/.." // parent directory of a partition is for the whole device
+                    << "/queue/read_ahead_kb";
+            }
 
-        if (boost::filesystem::exists(path)) {
-            ifstream file (path.c_str());
-            if (file.is_open()) {
-                int kb;
-                file >> kb;
-                if (kb > 256) {
-                    log() << startupWarningsLog;
+            if (boost::filesystem::exists(path)) {
+                ifstream file (path.c_str());
+                if (file.is_open()) {
+                    int kb;
+                    file >> kb;
+                    if (kb > 256) {
+                        log() << startupWarningsLog;
 
-                    log() << "** WARNING: Readahead for " << dir << " is set to " << kb << "KB"
+                        log() << "** WARNING: Readahead for " << dir << " is set to " << kb << "KB"
                             << startupWarningsLog;
 
-                    log() << "**          We suggest setting it to 256KB (512 sectors) or less"
+                        log() << "**          We suggest setting it to 256KB (512 sectors) or less"
                             << startupWarningsLog;
 
-                    log() << "**          http://dochub.mongodb.org/core/readahead"
+                        log() << "**          http://dochub.mongodb.org/core/readahead"
                             << startupWarningsLog;
+                    }
                 }
             }
+        }
+        catch (const std::exception& e) {
+            log() << "unable to validate readahead settings due to error: " << e.what()
+                << startupWarningsLog;
+            log() << "for more information, see http://dochub.mongodb.org/core/readahead"
+                << startupWarningsLog;
         }
 #endif // __linux__
     }
@@ -1416,6 +1443,7 @@ namespace mongo {
         sigaddset( &asyncSignals, SIGINT );
         sigaddset( &asyncSignals, SIGTERM );
         sigaddset( &asyncSignals, SIGUSR1 );
+        sigaddset( &asyncSignals, SIGXCPU );
 
         set_terminate( myterminate );
         set_new_handler( my_new_handler );

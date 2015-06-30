@@ -26,6 +26,7 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/dbhash.h"
 #include "mongo/db/index_update.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/namespacestring.h"
@@ -94,7 +95,15 @@ namespace mongo {
                      */
             if( theReplSet ) {
                 if( !(theReplSet->lastOpTimeWritten<ts) ) {
-                    log() << "replSet error possible failover clock skew issue? " << theReplSet->lastOpTimeWritten.toString() << ' ' << endl;
+                    log() << "replication oplog stream went back in time. previous timestamp: "
+                        << theReplSet->lastOpTimeWritten << " newest timestamp: " << ts
+                        << ". attempting to sync directly from primary." << endl;
+                    std::string errmsg;
+                    BSONObjBuilder result;
+                    if (!theReplSet->forceSyncFrom(theReplSet->box.getPrimary()->fullName(),
+                                                   errmsg, result)) {
+                        log() << "Can't sync from primary: " << errmsg << endl;
+                    }
                 }
                 theReplSet->lastOpTimeWritten = ts;
                 theReplSet->lastH = h;
@@ -221,8 +230,15 @@ namespace mongo {
                      */
             if( theReplSet ) {
                 if( !(theReplSet->lastOpTimeWritten<ts) ) {
-                    log() << "replSet ERROR possible failover clock skew issue? " << theReplSet->lastOpTimeWritten << ' ' << ts << rsLog;
-                    log() << "replSet " << theReplSet->isPrimary() << rsLog;
+                    log() << "replication oplog stream went back in time. previous timestamp: "
+                        << theReplSet->lastOpTimeWritten << " newest timestamp: " << ts
+                        << ". attempting to sync directly from primary." << endl;
+                    std::string errmsg;
+                    BSONObjBuilder result;
+                    if (!theReplSet->forceSyncFrom(theReplSet->box.getPrimary()->fullName(),
+                                                   errmsg, result)) {
+                        log() << "Can't sync from primary: " << errmsg << endl;
+                    }
                 }
                 theReplSet->lastOpTimeWritten = ts;
                 theReplSet->lastH = hashNew;
@@ -334,6 +350,7 @@ namespace mongo {
         }
 
         logOpForSharding( opstr , ns , obj , patt );
+        logOpForDbHash( opstr , ns , obj , patt );
     }
 
     void createOplog() {
@@ -977,13 +994,17 @@ namespace mongo {
                 BSONElement e = i.next();
                 const BSONObj& temp = e.Obj();
                 
-                Client::Context ctx(temp["ns"].String());
+                string ns = temp["ns"].String();
+                Client::Context ctx(ns);
+
                 bool failed = applyOperation_inlock(temp, false, alwaysUpsert);
                 ab.append(!failed);
                 if ( failed )
                     errors++;
 
                 num++;
+
+                logOpForDbHash( "u", ns.c_str(), BSONObj(), NULL );
             }
 
             result.append( "applied" , num );

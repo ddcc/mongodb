@@ -61,7 +61,9 @@ namespace mongo {
                 return true;
             }
 
-            if (primary && primary->hbinfo().opTime >= hopeful->hbinfo().opTime) {
+            if (primary &&
+                    (hopeful->hbinfo().id() != primary->hbinfo().id()) &&
+                    (primary->hbinfo().opTime >= hopeful->hbinfo().opTime)) {
                 // other members might be aware of more up-to-date nodes
                 errmsg = str::stream() << hopeful->fullName() <<
                     " is trying to elect itself but " << primary->fullName() <<
@@ -251,7 +253,6 @@ namespace mongo {
             try {
                 vote = yea(whoid);
                 dassert( hopeful->id() == whoid );
-                rs.relinquish();
                 log() << "replSet info voting yea for " <<  hopeful->fullName() << " (" << whoid << ')' << rsLog;
             }
             catch(VoteException&) {

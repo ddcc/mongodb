@@ -339,10 +339,13 @@ namespace mongo {
         // before we lock...
         int op = m.operation();
         bool isCommand = false;
-        const char *ns = m.singleData()->_data + 4;
+
+        DbMessage dbmsg(m);
 
         if ( op == dbQuery ) {
-            if( strstr(ns, ".$cmd") ) {
+            const char *ns = dbmsg.getns();
+
+            if (strstr(ns, ".$cmd")) {
                 isCommand = true;
                 opwrite(m);
                 if( strstr(ns, ".$cmd.sys.") ) {
@@ -406,7 +409,8 @@ namespace mongo {
         }
         else if ( op == dbMsg ) {
             // deprecated - replaced by commands
-            char *p = m.singleData()->_data;
+            const char *p = dbmsg.getns();
+
             int len = strlen(p);
             if ( len > 400 )
                 out() << curTimeMillis64() % 10000 <<
@@ -423,8 +427,6 @@ namespace mongo {
         }
         else {
             try {
-                const NamespaceString nsString( ns );
-
                 // The following operations all require authorization.
                 // dbInsert, dbUpdate and dbDelete can be easily pre-authorized,
                 // here, but dbKillCursors cannot.
@@ -433,28 +435,36 @@ namespace mongo {
                     logThreshold = 10;
                     receivedKillCursors(m);
                 }
-                else if ( !nsString.isValid() ) {
-                    // Only killCursors doesn't care about namespaces
-                    uassert( 16257, str::stream() << "Invalid ns [" << ns << "]", false );
-                }
-                else if ( op == dbInsert ) {
-                    receivedInsert(m, currentOp);
-                }
-                else if ( op == dbUpdate ) {
-                    receivedUpdate(m, currentOp);
-                }
-                else if ( op == dbDelete ) {
-                    receivedDelete(m, currentOp);
-                }
-                else {
+                else if (op != dbInsert && op != dbUpdate && op != dbDelete) {
                     mongo::log() << "    operation isn't supported: " << op << endl;
                     currentOp.done();
                     shouldLog = true;
                 }
-            }
-            catch ( UserException& ue ) {
-                tlog(3) << " Caught Assertion in " << opToString(op) << ", continuing "
-                        << ue.toString() << endl;
+                else {
+                    const char* ns = dbmsg.getns();
+                    const NamespaceString nsString(ns);
+
+                    if (!nsString.isValid()) {
+                        uassert(16257, str::stream() << "Invalid ns [" << ns << "]", false);
+                    }
+                    else if (op == dbInsert) {
+                        receivedInsert(m, currentOp);
+                    }
+                    else if (op == dbUpdate) {
+                        receivedUpdate(m, currentOp);
+                    }
+                    else if (op == dbDelete) {
+                        receivedDelete(m, currentOp);
+                    }
+                    else {
+                        fassertFailed(18625);
+                    }
+                }
+             }
+            catch (const UserException& ue) {
+                setLastError(ue.getCode(), ue.getInfo().msg.c_str());
+                LOG(3) << " Caught Assertion in " << opToString(op) << ", continuing "
+                       << ue.toString() << endl;
                 debug.exceptionInfo = ue.getInfo();
             }
             catch ( AssertionException& e ) {
@@ -492,9 +502,8 @@ namespace mongo {
     } /* assembleResponse() */
 
     void receivedKillCursors(Message& m) {
-        int *x = (int *) m.singleData()->_data;
-        x++; // reserved
-        int n = *x++;
+        DbMessage dbmessage(m);
+        int n = dbmessage.pullInt();
 
         uassert( 13659 , "sent 0 cursors to kill" , n != 0 );
         massert( 13658 , str::stream() << "bad kill cursors size: " << m.dataSize() , m.dataSize() == 8 + ( 8 * n ) );
@@ -505,7 +514,9 @@ namespace mongo {
             verify( n < 30000 );
         }
 
-        int found = ClientCursor::eraseIfAuthorized(n, (long long *) x);
+        const long long* cursorArray = dbmessage.getArray(n);
+
+        int found = ClientCursor::eraseIfAuthorized(n, (long long *)cursorArray);
 
         if ( logLevel > 0 || found != n ) {
             LOG( found == n ? 1 : 0 ) << "killcursors: found " << found << " of " << n << endl;
@@ -784,24 +795,40 @@ namespace mongo {
                 // check no $ modifiers.  note we only check top level.  
                 // (scanning deep would be quite expensive)
                 uassert( 13511, "document to insert can't have $ fields", e.fieldName()[0] != '$' );
-                
-                // check no regexp for _id (SERVER-9502)
+
                 if (str::equals(e.fieldName(), "_id")) {
+                    // check no regexp for _id (SERVER-9502)
                     uassert(16824, "can't use a regex for _id", e.type() != RegEx);
+
+                    uassert(ErrorCodes::BadValue,
+                            "can't use an undefined for _id",
+                            e.type() != Undefined );
+
+                    uassert(ErrorCodes::BadValue,
+                            "can't use an array for _id",
+                            e.type() != Array);
+
+                    if ( e.type() == Object ) {
+                        BSONObj obj = e.Obj();
+                        uassert(ErrorCodes::BadValue, "illegal object for _id", obj.okForStorage());
+                    }
                 }
             }
         }
 
-        theDataFileMgr.insertWithObjMod(ns,
-                                        // May be modified in the call to add an _id field.
-                                        js,
-                                        // Only permit interrupting an (index build) insert if the
-                                        // insert comes from a socket client request rather than a
-                                        // parent operation using the client interface.  The parent
-                                        // operation might not support interrupts.
-                                        cc().curop()->parent() == NULL,
-                                        false);
-        logOp("i", ns, js);
+        DiskLoc dl = theDataFileMgr.
+            insertWithObjMod(ns,
+                             // May be modified in the call to add an _id field.
+                             js,
+                             // Only permit interrupting an (index build) insert if the
+                             // insert comes from a socket client request rather than a
+                             // parent operation using the client interface.  The parent
+                             // operation might not support interrupts.
+                             cc().curop()->parent() == NULL,
+                             false);
+        if (!dl.isNull()) {
+            logOp("i", ns, js);
+        }
     }
 
     NOINLINE_DECL void insertMulti(bool keepGoing, const char *ns, vector<BSONObj>& objs, CurOp& op) {

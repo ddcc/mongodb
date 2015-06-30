@@ -231,6 +231,8 @@ add_option("mongod-concurrency-level", "Concurrency level, \"global\" or \"db\""
 add_option('client-dist-basename', "Name of the client source archive.", 1, False,
            default='mongo-cxx-driver')
 
+add_option('disable-warnings-as-errors', "Don't add -Werror to compiler command line", 0, False)
+
 # don't run configure if user calls --help
 if GetOption('help'):
     Return()
@@ -306,7 +308,7 @@ env = Environment( BUILD_DIR=variantDir,
                    UNITTEST_LIST='#build/unittests.txt',
                    PYSYSPLATFORM=os.sys.platform,
 
-                   PCRE_VERSION='8.30',
+                   PCRE_VERSION='8.36',
                    CONFIGUREDIR = '#' + scons_data_dir + '/sconf_temp',
                    CONFIGURELOG = '#' + scons_data_dir + '/config.log'
                    )
@@ -397,6 +399,7 @@ if has_option( "cpppath" ):
 
 env.Prepend( CPPDEFINES=[ "_SCONS" , 
                           "MONGO_EXPOSE_MACROS" ,
+                          "PCRE_STATIC",  # for pcre on Windows
                           "SUPPORT_UTF8" ],  # for pcre
 
 
@@ -710,7 +713,9 @@ if nix:
                          "-Winvalid-pch"] )
     # env.Append( " -Wconversion" ) TODO: this doesn't really work yet
     if linux:
-        env.Append( CCFLAGS=["-Werror", "-pipe"] )
+        env.Append( CCFLAGS=["-pipe"] )
+        if not has_option("disable-warnings-as-errors"):
+            env.Append( CCFLAGS=["-Werror"] )
         if not has_option('clang'):
             env.Append( CCFLAGS=["-fno-builtin-memcmp"] ) # glibc's memcmp is faster than gcc's
 
