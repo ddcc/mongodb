@@ -1,0 +1,18 @@
+Description: Uses -Wno-unused-function to build
+ Uses -Wno-unused-function to avoid FTBFS with -Werror=unused-function
+ which is now the default in gcc-4.9.
+Author: Thomas Goirand <zigo@debian.org>
+Bug-Debian: http://bugs.debian.org/746887
+Forwarded: no
+Last-Update: 2014-06-16
+
+--- mongodb-2.4.10.orig/SConstruct
++++ mongodb-2.4.10/SConstruct
+@@ -708,6 +708,7 @@ if nix:
+                          "-pthread",
+                          "-Wall",
+                          "-Wsign-compare",
++                         "-Wno-unused-function",
+                          "-Wno-unknown-pragmas",
+                          "-Winvalid-pch"] )
+     # env.Append( " -Wconversion" ) TODO: this doesn't really work yet

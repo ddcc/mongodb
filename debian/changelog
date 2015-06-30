@@ -3,6 +3,10 @@ mongodb (1:2.4.10-2) unstable; urgency=low
   * Enable systemd service (closes: #745674).
   * Support NUMA configurations (closes: #714955).
 
+  [ Thomas Goirand <zigo@debian.org> ]
+  * Build with -Wno-unused-function, fixing FTBFS with gcc-4.9
+    (closes: #746887).
+
  -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Sat, 21 Jun 2014 18:34:48 +0000
 
 mongodb (1:2.4.10-1) unstable; urgency=low
