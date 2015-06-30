@@ -1,0 +1,53 @@
+From 3a7e85ea1f672f702660e5472566234b1d19038e Mon Sep 17 00:00:00 2001
+From: Eliot Horowitz <eliot@10gen.com>
+Date: Wed, 11 Feb 2015 22:12:37 -0500
+Subject: [PATCH] SERVER-17264: improve bson validation for utf-8 strings
+
+(cherry picked from commit 394a8569ff14a215c0691aa34440227b2e62a4de)
+
+Conflicts:
+	src/mongo/bson/bson_validate_test.cpp
+---
+ src/mongo/bson/bson_validate.cpp      |  5 +++++
+ src/mongo/bson/bson_validate_test.cpp | 14 ++++++++++++++
+ 2 files changed, 19 insertions(+)
+
+diff --git a/src/mongo/bson/bson_validate.cpp b/src/mongo/bson/bson_validate.cpp
+index 9ac0bcb..a7c95ad 100644
+--- a/src/mongo/bson/bson_validate.cpp
++++ b/src/mongo/bson/bson_validate.cpp
+@@ -62,6 +62,11 @@ namespace mongo {
+                 if ( !readNumber<int>( &sz ) )
+                     return Status( ErrorCodes::InvalidBSON, "invalid bson" );
+ 
++                if ( sz <= 0 ) {
++                    // must have NULL at the very least
++                    return Status( ErrorCodes::InvalidBSON, "invalid bson");
++                }
++
+                 if ( out ) {
+                     *out = StringData( _buffer + _position, sz );
+                 }
+diff --git a/src/mongo/bson/bson_validate_test.cpp b/src/mongo/bson/bson_validate_test.cpp
+index 61e67f3..a36dbc5 100644
+--- a/src/mongo/bson/bson_validate_test.cpp
++++ b/src/mongo/bson/bson_validate_test.cpp
+@@ -213,4 +213,18 @@ namespace {
+         ASSERT_NOT_OK(validateBSON(x.objdata(), x.objsize() / 2));
+     }
+ 
++    TEST(BSONValidateFast, StringHasSomething) {
++        BufBuilder bb;
++        BSONObjBuilder ob(bb);
++        bb.appendChar(String);
++        bb.appendStr("x", /*withNUL*/true);
++        bb.appendNum(0);
++        const BSONObj x = ob.done();
++        ASSERT_EQUALS(5 // overhead
++                      + 1 // type
++                      + 2 // name
++                      + 4 // size
++                      , x.objsize());
++        ASSERT_NOT_OK(validateBSON(x.objdata(), x.objsize()));
++    }
+ }

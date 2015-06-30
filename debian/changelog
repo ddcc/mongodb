@@ -1,3 +1,9 @@
+mongodb (1:2.4.10-5) unstable; urgency=high
+
+  * Use upstream backported fix for CVE-2015-1609 (closes: #780129).
+
+ -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Mon, 09 Mar 2015 21:21:24 +0000
+
 mongodb (1:2.4.10-4) unstable; urgency=high
 
   * Backport potential information leak security fix from 2.4.11 .
