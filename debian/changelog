@@ -1,3 +1,9 @@
+mongodb (1:2.4.14-1) unstable; urgency=low
+
+  * New upstream release.
+
+ -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Sun, 31 May 2015 12:46:04 +0000
+
 mongodb (1:2.4.10-5) unstable; urgency=high
 
   * Use upstream backported fix for CVE-2015-1609 (closes: #780129).
