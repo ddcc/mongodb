@@ -13,3 +13,5 @@
 0004-Support-ppc64el-builds.patch
 0012-support-gnu.patch
 no-unused-function.patch
+9105b69e1ded5b7d0d384d574103b0ee6bbb6122.patch
+cefb0ef38f050b73b2bf8211add55f3749753e0a.patch

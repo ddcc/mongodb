@@ -1,0 +1,28 @@
+From cefb0ef38f050b73b2bf8211add55f3749753e0a Mon Sep 17 00:00:00 2001
+From: Mark Benvenuto <mark.benvenuto@mongodb.com>
+Date: Thu, 14 Aug 2014 17:33:12 -0400
+Subject: [PATCH] SERVER-14268: Backport from 2.6 to 2.4 - disable test
+
+---
+ src/mongo/db/SConscript | 11 -----------
+ 1 file changed, 11 deletions(-)
+
+diff --git a/src/mongo/db/SConscript b/src/mongo/db/SConscript
+index 8ac7897..2d3a4f6 100644
+--- a/src/mongo/db/SConscript
++++ b/src/mongo/db/SConscript
+@@ -13,14 +13,3 @@ env.StaticLibrary('common', ['field_ref.cpp'],
+                            '$BUILD_DIR/mongo/foundation'])
+ 
+ env.CppUnitTest('field_ref_test', ['field_ref_test.cpp'], LIBDEPS=['common'])
+-
+-env.CppUnitTest(
+-    target="dbmessage_test",
+-    source=[
+-        "dbmessage_test.cpp"
+-    ],
+-    LIBDEPS=[
+-        "common",
+-        "$BUILD_DIR/mongo/clientdriver",
+-    ],
+-)
