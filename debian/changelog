@@ -1,6 +1,7 @@
 mongodb (1:2.4.14-2) unstable; urgency=low
 
   * Fix FTBFS with gcc 5.1 (closes: #778012).
+  * Update Vcs-Browser location (closes: #745341).
 
  -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Sat, 04 Jul 2015 07:10:47 +0000
 
