@@ -1,0 +1,19 @@
+Description: fix FTBFS with gcc 5.1
+ Need to pass -Wno-unused-variable to the compiler.
+Author: Laszlo Boszormenyi (GCS) <gcs@debian.org>
+Bug-Debian: https://bugs.debian.org/778012
+Forwarded: not-needed
+Last-Update: 2015-07-04
+
+---
+
+--- mongodb-2.4.14.orig/SConstruct
++++ mongodb-2.4.14/SConstruct
+@@ -714,6 +714,7 @@ if nix:
+                          "-Wall",
+                          "-Wsign-compare",
+                          "-Wno-unused-function",
++                         "-Wno-unused-variable",
+                          "-Wno-unknown-pragmas",
+                          "-Winvalid-pch"] )
+     # env.Append( " -Wconversion" ) TODO: this doesn't really work yet

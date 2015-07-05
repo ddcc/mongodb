@@ -14,3 +14,4 @@
 0012-support-gnu.patch
 0013-pymongo.patch
 no-unused-function.patch
+no-unused-variable.patch
