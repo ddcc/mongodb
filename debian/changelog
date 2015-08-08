@@ -1,3 +1,13 @@
+mongodb (1:2.4.14-3) unstable; urgency=low
+
+  * Fix FTBFS with newer g++ 5.2 versions (closes: #794931).
+  * Build depend on newer g++ 5.2 versions (closes: #793262).
+  * Build depend on GCC 5 transitioned snappy versions.
+  * Remove ppc64el from the packages, it doesn't have libv8-dev .
+  * Move adduser dependency to pre-depends.
+
+ -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Sat, 08 Aug 2015 18:57:06 +0200
+
 mongodb (1:2.4.14-2) unstable; urgency=low
 
   * Fix FTBFS with gcc 5.1 (closes: #778012).

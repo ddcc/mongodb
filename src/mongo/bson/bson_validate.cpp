@@ -16,6 +16,7 @@
  */
 
 #include <deque>
+#include <limits>
 
 #include "mongo/bson/bson_validate.h"
 #include "mongo/bson/oid.h"
@@ -61,6 +62,11 @@ namespace mongo {
                 int sz;
                 if ( !readNumber<int>( &sz ) )
                     return Status( ErrorCodes::InvalidBSON, "invalid bson" );
+
+                if ( sz <= 0 ) {
+                    // must have NULL at the very least
+                    return Status( ErrorCodes::InvalidBSON, "invalid bson");
+                }
 
                 if ( out ) {
                     *out = StringData( _buffer + _position, sz );
@@ -203,6 +209,8 @@ namespace mongo {
             case BinData: {
                 int sz;
                 if ( !buffer->readNumber<int>( &sz ) )
+                    return Status( ErrorCodes::InvalidBSON, "invalid bson" );
+                if ( sz < 0 || sz == std::numeric_limits<int>::max() )
                     return Status( ErrorCodes::InvalidBSON, "invalid bson" );
                 if ( !buffer->skip( 1 + sz ) )
                     return Status( ErrorCodes::InvalidBSON, "invalid bson" );

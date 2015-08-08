@@ -7,20 +7,21 @@ Build-Depends:
  debhelper (>= 9),
  dh-systemd (>= 1.5),
  libboost-date-time-dev,
- libboost-dev (>> 1.50),
+ libboost-dev (>> 1.58),
  libboost-filesystem-dev,
  libboost-program-options-dev,
  libboost-thread-dev,
- libgoogle-perftools-dev [linux-amd64 linux-i386 armhf ppc64el],
+ libgoogle-perftools-dev [linux-amd64 linux-i386 armhf],
  libpcap-dev,
  libpcre3-dev,
  libreadline-dev,
- libsnappy-dev,
+ libsnappy-dev (>= 1.1.3-2),
  libstemmer-dev,
  libssl-dev,
  libv8-dev (>= 3.12),
  python-pymongo,
- scons
+ scons,
+ g++ (>= 4:5.2.1-2)
 Standards-Version: 3.9.6
 Vcs-Git: git://anonscm.debian.org/collab-maint/mongodb.git
 Vcs-Browser: http://anonscm.debian.org/cgit/collab-maint/mongodb.git/
@@ -28,7 +29,7 @@ Homepage: http://www.mongodb.org
 XS-Testsuite: autopkgtest
 
 Package: mongodb
-Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 hurd-any armhf ppc64el
+Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 hurd-any armhf
 Depends:
  mongodb-dev,
  mongodb-server (>= 1:2.4.1-2),
@@ -54,9 +55,10 @@ Description: object/document-oriented database (metapackage)
  the server, the clients and the development files (headers and library).
 
 Package: mongodb-server
-Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 hurd-any armhf ppc64el
+Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 hurd-any armhf
+Pre-Depends:
+ adduser
 Depends:
- adduser,
  mongodb-clients,
  ${misc:Depends},
  ${shlibs:Depends}
@@ -82,7 +84,7 @@ Description: object/document-oriented database (server package)
  server/load-balancer (mongos).
 
 Package: mongodb-clients
-Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 hurd-any armhf ppc64el
+Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 hurd-any armhf
 Depends:
  ${misc:Depends},
  ${shlibs:Depends}
@@ -109,7 +111,7 @@ Description: object/document-oriented database (client apps)
 
 Package: mongodb-dev
 Section: libdevel
-Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 hurd-any armhf ppc64el
+Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 hurd-any armhf
 Depends:
  libboost-dev,
  ${misc:Depends}
