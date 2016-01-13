@@ -15,21 +15,38 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
-#include "pch.h"
-#include "../util/net/miniwebserver.h"
-#include "../util/mongoutils/html.h"
-#include "../util/md5.hpp"
-#include "instance.h"
-#include "dbwebserver.h"
-#include "dbhelpers.h"
-#include "repl.h"
-#include "replutil.h"
-#include "clientcursor.h"
-#include "background.h"
+#include "mongo/pch.h"
 
-#include "restapi.h"
+#include "mongo/db/restapi.h"
+
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/auth/user_name.h"
+#include "mongo/db/background.h"
+#include "mongo/db/clientcursor.h"
+#include "mongo/db/dbhelpers.h"
+#include "mongo/db/dbwebserver.h"
+#include "mongo/db/instance.h"
+#include "mongo/db/repl/master_slave.h"
+#include "mongo/db/repl/replication_server_status.h"
+#include "mongo/db/repl/rs.h"
+#include "mongo/util/md5.hpp"
+#include "mongo/util/mongoutils/html.h"
+#include "mongo/util/net/miniwebserver.h"
 
 namespace mongo {
 
@@ -133,7 +150,7 @@ namespace mongo {
             while ( i.more() ) {
                 BSONElement e = i.next();
                 string name = e.fieldName();
-                if ( ! name.find( "filter_" ) == 0 )
+                if ( name.find( "filter_" ) != 0 )
                     continue;
 
                 string field = name.substr(7);
@@ -243,37 +260,9 @@ namespace mongo {
 
     } restHandler;
 
-    void openAdminDb() { 
-        {
-            readlocktry rl(/*"admin.system.users", */10000);
-            uassert( 16172 , "couldn't get readlock to open admin db" , rl.got() );
-            if( dbHolder().get("admin.system.users",dbpath) )
-                return;
-        }
-
-        writelocktry wl(10000);
-        verify( wl.got() );
-        Client::Context cx("admin.system.users", dbpath);
-    }
-
     bool RestAdminAccess::haveAdminUsers() const {
-        openAdminDb();
-        readlocktry rl(/*"admin.system.users", */10000);
-        uassert( 16173 , "couldn't get read lock to get admin auth credentials" , rl.got() );
-        Client::Context cx("admin.system.users", dbpath);
-        return ! Helpers::isEmpty("admin.system.users");
-    }
-
-    BSONObj RestAdminAccess::getAdminUser( const string& username ) const {
-        openAdminDb();
-        Client::GodScope gs;
-        readlocktry rl(/*"admin.system.users", */10000);
-        uassert( 16174 , "couldn't get read lock to check admin user" , rl.got() );
-        Client::Context cx( "admin.system.users" );
-        BSONObj user;
-        if ( Helpers::findOne( "admin.system.users" , BSON( "user" << username ) , user ) )
-            return user.copy();
-        return BSONObj();
+        AuthorizationSession* authzSession = cc().getAuthorizationSession();
+        return authzSession->getAuthorizationManager().hasAnyPrivilegeDocuments();
     }
 
     class LowLevelMongodStatus : public WebStatusPlugin {
@@ -286,12 +275,12 @@ namespace mongo {
             ss << "<pre>\n";
             ss << "time to get readlock: " << millis << "ms\n";
             ss << "# databases: " << dbHolder().sizeInfo() << '\n';
-            ss << "# Cursors: " << ClientCursor::numCursors() << '\n';
+            ss << "# Cursors: " << ClientCursor::totalOpen() << '\n';
             ss << "replication: ";
             if( *replInfo )
                 ss << "\nreplInfo:  " << replInfo << "\n\n";
             if( replSet ) {
-                ss << a("", "see replSetGetStatus link top of page") << "--replSet </a>" << cmdLine._replSet;
+                ss << a("", "see replSetGetStatus link top of page") << "--replSet </a>" << replSettings.replSet;
             }
             if ( replAllDead )
                 ss << "\n<b>replication replAllDead=" << replAllDead << "</b>\n";

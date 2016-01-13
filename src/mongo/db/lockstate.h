@@ -14,6 +14,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 
@@ -111,16 +123,24 @@ namespace mongo {
         friend class AcquiringParallelWriter;
     };
 
-    class WrapperForRWLock : boost::noncopyable { 
-        SimpleRWLock r;
+    class WrapperForRWLock : boost::noncopyable {
+        SimpleRWLock rw;
+        SimpleMutex m;
+        bool sharedLatching;
     public:
-        string name() const { return r.name; }
+        string name() const { return rw.name; }
         LockStat stats;
-        WrapperForRWLock(const StringData& name) : r(name) { }
-        void lock()          { r.lock(); }
-        void lock_shared()   { r.lock_shared(); }
-        void unlock()        { r.unlock(); }
-        void unlock_shared() { r.unlock_shared(); }
+        WrapperForRWLock(const StringData& name)
+            : rw(name), m(name) {
+            // For the local datbase, all operations are short,
+            // either writing one entry, or doing a tail.
+            // In tests, use a SimpleMutex is much faster for the local db.
+            sharedLatching = name != "local";
+        }
+        void lock()          { if ( sharedLatching ) { rw.lock(); } else { m.lock(); } }
+        void lock_shared()   { if ( sharedLatching ) { rw.lock_shared(); } else { m.lock(); } }
+        void unlock()        { if ( sharedLatching ) { rw.unlock(); } else { m.unlock(); } }
+        void unlock_shared() { if ( sharedLatching ) { rw.unlock_shared(); } else { m.unlock(); } }
     };
 
     class ScopedLock;

@@ -1,5 +1,3 @@
-// bridge.cpp
-
 /**
  *    Copyright (C) 2008 10gen Inc.
  *
@@ -14,35 +12,63 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include <boost/thread.hpp>
 
 #include "mongo/base/initializer.h"
+#include "mongo/client/dbclientinterface.h"
 #include "mongo/db/dbmessage.h"
+#include "mongo/tools/mongobridge_options.h"
 #include "mongo/util/net/listen.h"
 #include "mongo/util/net/message.h"
 #include "mongo/util/stacktrace.h"
+#include "mongo/util/text.h"
+#include "mongo/util/timer.h"
 
 using namespace mongo;
 using namespace std;
 
-int port = 0;
-int delay = 0;
-string destUri;
 void cleanup( int sig );
 
 class Forwarder {
 public:
     Forwarder( MessagingPort &mp ) : mp_( mp ) {
     }
+
     void operator()() const {
         DBClientConnection dest;
         string errmsg;
-        while( !dest.connect( destUri, errmsg ) )
-            sleepmillis( 500 );
+
+        Timer connectTimer;
+        while (!dest.connect(mongoBridgeGlobalParams.destUri, errmsg)) {
+            // If we can't connect for the configured timeout, give up
+            //
+            if (connectTimer.seconds() >= mongoBridgeGlobalParams.connectTimeoutSec) {
+                cout << "Unable to establish connection from " << mp_.psock->remoteString() 
+                     << " to " << mongoBridgeGlobalParams.destUri 
+                     << " after " << connectTimer.seconds() << " seconds. Giving up." << endl;
+                mp_.shutdown();
+                return;
+            }
+
+            sleepmillis(500);
+        }
+
         Message m;
         while( 1 ) {
             try {
@@ -52,7 +78,7 @@ public:
                     mp_.shutdown();
                     break;
                 }
-                sleepmillis( delay );
+                sleepmillis(mongoBridgeGlobalParams.delay);
 
                 int oldId = m.header()->id;
                 if ( m.operation() == dbQuery || m.operation() == dbMsg || m.operation() == dbGetMore ) {
@@ -118,8 +144,7 @@ void cleanup( int sig ) {
 }
 #if !defined(_WIN32)
 void myterminate() {
-    rawOut( "bridge terminate() called, printing stack:" );
-    printStackTrace();
+    printStackTrace(severe().stream() << "bridge terminate() called, printing stack:\n");
     ::abort();
 }
 
@@ -137,47 +162,34 @@ void setupSignals() {
 inline void setupSignals() {}
 #endif
 
-void helpExit() {
-    cout << "usage mongobridge --port <port> --dest <destUri> [ --delay <ms> ]" << endl;
-    cout << "    port: port to listen for mongo messages" << endl;
-    cout << "    destUri: uri of remote mongod instance" << endl;
-    cout << "    ms: transfer delay in milliseconds (default = 0)" << endl;
-    ::_exit( -1 );
-}
-
-void check( bool b ) {
-    if ( !b )
-        helpExit();
-}
-
-int main( int argc, char **argv, char** envp ) {
+int toolMain( int argc, char **argv, char** envp ) {
     mongo::runGlobalInitializersOrDie(argc, argv, envp);
 
     static StaticObserver staticObserver;
 
     setupSignals();
 
-    check( argc == 5 || argc == 7 );
-
-    for( int i = 1; i < argc; ++i ) {
-        check( i % 2 != 0 );
-        if ( strcmp( argv[ i ], "--port" ) == 0 ) {
-            port = strtol( argv[ ++i ], 0, 10 );
-        }
-        else if ( strcmp( argv[ i ], "--dest" ) == 0 ) {
-            destUri = argv[ ++i ];
-        }
-        else if ( strcmp( argv[ i ], "--delay" ) == 0 ) {
-            delay = strtol( argv[ ++i ], 0, 10 );
-        }
-        else {
-            check( false );
-        }
-    }
-    check( port != 0 && !destUri.empty() );
-
-    listener.reset( new MyListener( port ) );
+    listener.reset(new MyListener(mongoBridgeGlobalParams.port));
+    listener->setupSockets();
     listener->initAndListen();
 
     return 0;
 }
+
+#if defined(_WIN32)
+// In Windows, wmain() is an alternate entry point for main(), and receives the same parameters
+// as main() but encoded in Windows Unicode (UTF-16); "wide" 16-bit wchar_t characters.  The
+// WindowsCommandLine object converts these wide character strings to a UTF-8 coded equivalent
+// and makes them available through the argv() and envp() members.  This enables toolMain()
+// to process UTF-8 encoded arguments and environment variables without regard to platform.
+int wmain(int argc, wchar_t* argvW[], wchar_t* envpW[]) {
+    WindowsCommandLine wcl(argc, argvW, envpW);
+    int exitCode = toolMain(argc, wcl.argv(), wcl.envp());
+    ::_exit(exitCode);
+}
+#else
+int main(int argc, char* argv[], char** envp) {
+    int exitCode = toolMain(argc, argv, envp);
+    ::_exit(exitCode);
+}
+#endif

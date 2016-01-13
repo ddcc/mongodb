@@ -14,9 +14,21 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include <map>
 #include <string>
@@ -24,20 +36,24 @@
 
 #include "mongo/client/connpool.h"
 #include "mongo/client/dbclientcursor.h"
-#include "mongo/client/distlock.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/btreecursor.h"
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/dbhelpers.h"
+#include "mongo/db/index_legacy.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/queryoptimizer.h"
+#include "mongo/db/query/internal_plans.h"
 #include "mongo/s/chunk.h" // for static genID only
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/config.h"
 #include "mongo/s/d_logic.h"
+#include "mongo/s/distlock.h"
+#include "mongo/s/shard_key_pattern.h"
 #include "mongo/s/type_chunk.h"
 #include "mongo/util/timer.h"
 
@@ -75,11 +91,16 @@ namespace mongo {
                                            std::vector<Privilege>* out) {
             ActionSet actions;
             actions.addAction(ActionType::find);
-            out->push_back(Privilege(parseNs(dbname, cmdObj), actions));
+            out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
         }
+
+        std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const {
+            return parseNsFullyQualified(dbname, cmdObj);
+        }
+
         bool run(const string& dbname, BSONObj& jsobj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
 
-            const char* ns = jsobj.getStringField( "checkShardingIndex" );
+            std::string ns = parseNs(dbname, jsobj);
             BSONObj keyPattern = jsobj.getObjectField( "keyPattern" );
 
             if ( keyPattern.isEmpty() ) {
@@ -100,14 +121,15 @@ namespace mongo {
             }
 
             Client::ReadContext ctx( ns );
-            NamespaceDetails *d = nsdetails( ns );
-            if ( ! d ) {
+            Collection* collection = ctx.ctx().db()->getCollection( ns );
+            if ( !collection ) {
                 errmsg = "ns not found";
                 return false;
             }
 
-            const IndexDetails *idx = d->findIndexByPrefix( keyPattern ,
-                                                            true );  /* require single key */
+            IndexDescriptor *idx =
+                collection->getIndexCatalog()->findIndexByPrefix( keyPattern,
+                                                                  true );  /* require single key */
             if ( idx == NULL ) {
                 errmsg = "couldn't find valid index for shard key";
                 return false;
@@ -123,28 +145,26 @@ namespace mongo {
                 max = Helpers::toKeyFormat( kp.extendRangeBound( max, false ) );
             }
 
-            BtreeCursor* bc = BtreeCursor::make( d, *idx, min, max, false, 1 );
-            shared_ptr<Cursor> c( bc );
-            auto_ptr<ClientCursor> cc( new ClientCursor( QueryOption_NoCursorTimeout , c , ns ) );
-            if ( ! cc->ok() ) {
-                // range is empty
-                return true;
-            }
+            auto_ptr<Runner> runner(InternalPlanner::indexScan(collection, idx, min, max,
+                                                               false, InternalPlanner::FORWARD));
+
+            runner->setYieldPolicy(Runner::YIELD_AUTO);
 
             // Find the 'missingField' value used to represent a missing document field in a key of
             // this index.
-            // NOTE A local copy of 'missingField' is made because IndexSpec objects may be
+            // NOTE A local copy of 'missingField' is made because indices may be
             // invalidated during a db lock yield.
-            BSONObj missingFieldObj = idx->getSpec().missingField().wrap();
+            BSONObj missingFieldObj = IndexLegacy::getMissingField(collection,idx->infoObj());
             BSONElement missingField = missingFieldObj.firstElement();
             
             // for now, the only check is that all shard keys are filled
             // a 'missingField' valued index key is ok if the field is present in the document,
             // TODO if $exist for nulls were picking the index, it could be used instead efficiently
             int keyPatternLength = keyPattern.nFields();
-            while ( cc->ok() ) {
-                BSONObj currKey = c->currKey();
-                
+
+            DiskLoc loc;
+            BSONObj currKey;
+            while (Runner::RUNNER_ADVANCED == runner->getNext(&currKey, &loc)) {
                 //check that current key contains non missing elements for all fields in keyPattern
                 BSONObjIterator i( currKey );
                 for( int k = 0; k < keyPatternLength ; k++ ) {
@@ -158,7 +178,9 @@ namespace mongo {
                     if ( !currKeyElt.eoo() && !currKeyElt.valuesEqual( missingField ) )
                         continue;
 
-                    BSONObj obj = c->current();
+                    // This is a fetch, but it's OK.  The underlying code won't throw a page fault
+                    // exception.
+                    BSONObj obj = loc.obj();
                     BSONObjIterator j( keyPattern );
                     BSONElement real;
                     for ( int x=0; x <= k; x++ )
@@ -170,24 +192,22 @@ namespace mongo {
                         continue;
                     
                     ostringstream os;
-                    os << "found missing value in key " << bc->prettyKey( currKey ) << " for doc: "
+                    os << "found missing value in key " << currKey << " for doc: "
                        << ( obj.hasField( "_id" ) ? obj.toString() : obj["_id"].toString() );
                     log() << "checkShardingIndex for '" << ns << "' failed: " << os.str() << endl;
                     
                     errmsg = os.str();
                     return false;
                 }
-                cc->advance();
-
-                if ( ! cc->yieldSometimes( ClientCursor::DontNeed ) ) {
-                    cc.release();
-                    break;
-                }
             }
 
             return true;
         }
     } cmdCheckShardingIndex;
+
+    BSONObj prettyKey(const BSONObj& keyPattern, const BSONObj& key) {
+        return key.replaceFieldNames(keyPattern).clientReadable();
+    }
 
     class SplitVector : public Command {
     public:
@@ -206,14 +226,19 @@ namespace mongo {
                  "  'force' will produce one split point even if data is small; defaults to false\n"
                  "NOTE: This command may take a while to run";
         }
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {
-            ActionSet actions;
-            actions.addAction(ActionType::splitVector);
-            out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+        virtual Status checkAuthForCommand(ClientBasic* client,
+                                           const std::string& dbname,
+                                           const BSONObj& cmdObj) {
+            if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
+                    ResourcePattern::forExactNamespace(NamespaceString(parseNs(dbname, cmdObj))),
+                    ActionType::splitVector)) {
+                return Status(ErrorCodes::Unauthorized, "Unauthorized");
+            }
+            return Status::OK();
         }
-
+        virtual std::string parseNs(const string& dbname, const BSONObj& cmdObj) const {
+            return parseNsFullyQualified(dbname, cmdObj);
+        }
         bool run(const string& dbname, BSONObj& jsobj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
 
             //
@@ -221,7 +246,7 @@ namespace mongo {
             //     a good approximation of the size of the chunk -- without needing to access the actual data.
             //
 
-            const char* ns = jsobj.getStringField( "splitVector" );
+            const std::string ns = parseNs(dbname, jsobj);
             BSONObj keyPattern = jsobj.getObjectField( "keyPattern" );
 
             if ( keyPattern.isEmpty() ) {
@@ -254,14 +279,20 @@ namespace mongo {
             {
                 // Get the size estimate for this namespace
                 Client::ReadContext ctx( ns );
-                NamespaceDetails *d = nsdetails( ns );
-                if ( ! d ) {
+                Collection* collection = ctx.ctx().db()->getCollection( ns );
+                if ( !collection ) {
                     errmsg = "ns not found";
                     return false;
                 }
-                
-                const IndexDetails *idx = d->findIndexByPrefix( keyPattern ,
-                                                                true ); /* require single key */
+
+                const NamespaceDetails* d = collection->details();
+
+                // Allow multiKey based on the invariant that shard keys must be single-valued.
+                // Therefore, any multi-key index prefixed by shard key cannot be multikey over
+                // the shard key fields.
+                IndexDescriptor *idx =
+                    collection->getIndexCatalog()->findIndexByPrefix( keyPattern,
+                                                                      false );
                 if ( idx == NULL ) {
                     errmsg = (string)"couldn't find index over splitting key " +
                              keyPattern.clientReadable().toString();
@@ -277,10 +308,10 @@ namespace mongo {
                     // otherwise make it (max,MinKey,MinKey...) so that bound is non-inclusive
                     max = Helpers::toKeyFormat( kp.extendRangeBound( max, false ) );
                 }
-                
-                const long long recCount = d->stats.nrecords;
-                const long long dataSize = d->stats.datasize;
-                
+
+                const long long recCount = d->numRecords();
+                const long long dataSize = d->dataSize();
+
                 //
                 // 1.b Now that we have the size estimate, go over the remaining parameters and apply any maximum size
                 //     restrictions specified there.
@@ -349,10 +380,12 @@ namespace mongo {
                 long long currCount = 0;
                 long long numChunks = 0;
                 
-                BtreeCursor * bc = BtreeCursor::make( d, *idx, min, max, false, 1 );
-                shared_ptr<Cursor> c( bc );
-                auto_ptr<ClientCursor> cc( new ClientCursor( QueryOption_NoCursorTimeout , c , ns ) );
-                if ( ! cc->ok() ) {
+                auto_ptr<Runner> runner(InternalPlanner::indexScan(collection, idx, min, max,
+                    false, InternalPlanner::FORWARD));
+
+                BSONObj currKey;
+                Runner::RunnerState state = runner->getNext(&currKey, NULL);
+                if (Runner::RUNNER_ADVANCED != state) {
                     errmsg = "can't open a cursor for splitting (desired range is possibly empty)";
                     return false;
                 }
@@ -361,31 +394,27 @@ namespace mongo {
                 // at the end. If a key appears more times than entries allowed on a chunk, we issue a warning and
                 // split on the following key.
                 set<BSONObj> tooFrequentKeys;
-                splitKeys.push_back( bc->prettyKey( c->currKey().getOwned() ).extractFields( keyPattern ) );
+                splitKeys.push_back(prettyKey(idx->keyPattern(), currKey.getOwned()).extractFields( keyPattern ) );
+
+                runner->setYieldPolicy(Runner::YIELD_AUTO);
                 while ( 1 ) {
-                    while ( cc->ok() ) {
+                    while (Runner::RUNNER_ADVANCED == state) {
                         currCount++;
                         
                         if ( currCount > keyCount && !forceMedianSplit ) {
-
-                            BSONObj currKey = bc->prettyKey( c->currKey() ).extractFields(keyPattern);
+                            currKey = prettyKey(idx->keyPattern(), currKey.getOwned()).extractFields(keyPattern);
                             // Do not use this split key if it is the same used in the previous split point.
                             if ( currKey.woCompare( splitKeys.back() ) == 0 ) {
                                 tooFrequentKeys.insert( currKey.getOwned() );
-                                
                             }
                             else {
                                 splitKeys.push_back( currKey.getOwned() );
                                 currCount = 0;
                                 numChunks++;
-                                
                                 LOG(4) << "picked a split key: " << currKey << endl;
                             }
-                            
                         }
-                        
-                        cc->advance();
-                        
+
                         // Stop if we have enough split points.
                         if ( maxSplitPoints && ( numChunks >= maxSplitPoints ) ) {
                             log() << "max number of requested split points reached (" << numChunks
@@ -393,16 +422,8 @@ namespace mongo {
                                   << endl;
                             break;
                         }
-                        
-                        if ( ! cc->yieldSometimes( ClientCursor::DontNeed ) ) {
-                            // we were near and and got pushed to the end
-                            // i think returning the splits we've already found is fine
-                            
-                            // don't use the btree cursor pointer to access keys beyond this point but ok
-                            // to use it for format the keys we've got already
-                            cc.release();
-                            break;
-                        }
+
+                        state = runner->getNext(&currKey, NULL);
                     }
                     
                     if ( ! forceMedianSplit )
@@ -417,12 +438,14 @@ namespace mongo {
                     keyCount = currCount / 2;
                     currCount = 0;
                     log() << "splitVector doing another cycle because of force, keyCount now: " << keyCount << endl;
-                    
-                    bc = BtreeCursor::make( d, *idx, min, max, false, 1 );
-                    c.reset( bc );
-                    cc.reset( new ClientCursor( QueryOption_NoCursorTimeout , c , ns ) );
+
+                    runner.reset(InternalPlanner::indexScan(collection, idx, min, max,
+                                                            false, InternalPlanner::FORWARD));
+
+                    runner->setYieldPolicy(Runner::YIELD_AUTO);
+                    state = runner->getNext(&currKey, NULL);
                 }
-                
+
                 //
                 // 3. Format the result and issue any warnings about the data we gathered while traversing the
                 //    index
@@ -431,14 +454,13 @@ namespace mongo {
                 // Warn for keys that are more numerous than maxChunkSize allows.
                 for ( set<BSONObj>::const_iterator it = tooFrequentKeys.begin(); it != tooFrequentKeys.end(); ++it ) {
                     warning() << "chunk is larger than " << maxChunkSize
-                              << " bytes because of key " << bc->prettyKey( *it ) << endl;
+                              << " bytes because of key " << prettyKey(idx->keyPattern(), *it ) << endl;
                 }
                 
                 // Remove the sentinel at the beginning before returning
                 splitKeys.erase( splitKeys.begin() );
-                verify( c.get() );
                 
-                if ( timer.millis() > cmdLine.slowMS ) {
+                if (timer.millis() > serverGlobalParams.slowMS) {
                     warning() << "Finding the split vector for " <<  ns << " over "<< keyPattern
                               << " keyCount: " << keyCount << " numSplits: " << splitKeys.size() 
                               << " lookedAt: " << currCount << " took " << timer.millis() << "ms"
@@ -457,36 +479,6 @@ namespace mongo {
         }
     } cmdSplitVector;
 
-    // ** temporary ** 2010-10-22
-    // chunkInfo is a helper to collect and log information about the chunks generated in splitChunk.
-    // It should hold the chunk state for this module only, while we don't have min/max key info per chunk on the
-    // mongod side. Do not build on this; it will go away.
-    struct ChunkInfo {
-        BSONObj min;
-        BSONObj max;
-        ChunkVersion lastmod;
-
-        ChunkInfo() { }
-        ChunkInfo( BSONObj aMin , BSONObj aMax , ChunkVersion aVersion ) : min(aMin) , max(aMax) , lastmod(aVersion) {}
-        void appendShortVersion( const char* name, BSONObjBuilder& b ) const;
-        string toString() const;
-    };
-
-    void ChunkInfo::appendShortVersion( const char * name , BSONObjBuilder& b ) const {
-        BSONObjBuilder bb( b.subobjStart( name ) );
-        bb.append(ChunkType::min(), min);
-        bb.append(ChunkType::max(), max);
-        lastmod.addToBSON(bb, ChunkType::DEPRECATED_lastmod());
-        bb.done();
-    }
-
-    string ChunkInfo::toString() const {
-        ostringstream os;
-        os << "lastmod: " << lastmod.toString() << " min: " << min << " max: " << max << endl;
-        return os.str();
-    }
-    // ** end temporary **
-
     class SplitChunkCommand : public Command {
     public:
         SplitChunkCommand() : Command( "splitChunk" ) {}
@@ -500,12 +492,18 @@ namespace mongo {
         virtual bool slaveOk() const { return false; }
         virtual bool adminOnly() const { return true; }
         virtual LockType locktype() const { return NONE; }
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {
-            ActionSet actions;
-            actions.addAction(ActionType::splitChunk);
-            out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+        virtual Status checkAuthForCommand(ClientBasic* client,
+                                           const std::string& dbname,
+                                           const BSONObj& cmdObj) {
+            if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
+                    ResourcePattern::forExactNamespace(NamespaceString(parseNs(dbname, cmdObj))),
+                    ActionType::splitChunk)) {
+                return Status(ErrorCodes::Unauthorized, "Unauthorized");
+            }
+            return Status::OK();
+        }
+        virtual std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const {
+            return parseNsFullyQualified(dbname, cmdObj);
         }
         bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
 
@@ -513,7 +511,7 @@ namespace mongo {
             // 1. check whether parameters passed to splitChunk are sound
             //
 
-            const string ns = cmdObj.firstElement().str();
+            const string ns = parseNs(dbname, cmdObj);
             if ( ns.empty() ) {
                 errmsg  = "need to specify namespace in command";
                 return false;
@@ -600,31 +598,27 @@ namespace mongo {
             // TODO This is a check migrate does to the letter. Factor it out and share. 2010-10-22
 
             ChunkVersion maxVersion;
-            string shard;
-            ChunkInfo origChunk;
+            ChunkType origChunk;
             {
-                scoped_ptr<ScopedDbConnection> conn(
-                        ScopedDbConnection::getInternalScopedDbConnection(
-                                shardingState.getConfigServer(), 30));
+                ScopedDbConnection conn(shardingState.getConfigServer(), 30);
 
-                BSONObj x = conn->get()->findOne(ChunkType::ConfigNS,
-                                                 Query(BSON(ChunkType::ns(ns)))
-                                                     .sort(BSON(ChunkType::DEPRECATED_lastmod() << -1)));
+                BSONObj x = conn->findOne(ChunkType::ConfigNS,
+                                          Query(BSON(ChunkType::ns(ns)))
+                                              .sort(BSON(ChunkType::DEPRECATED_lastmod() << -1)));
 
                 maxVersion = ChunkVersion::fromBSON(x, ChunkType::DEPRECATED_lastmod());
 
                 BSONObj currChunk =
-                    conn->get()->findOne(ChunkType::ConfigNS,
-                                         shardId.wrap(ChunkType::name().c_str())).getOwned();
+                    conn->findOne(ChunkType::ConfigNS,
+                                  shardId.wrap(ChunkType::name().c_str())).getOwned();
+                conn.done();
 
-                verify(currChunk[ChunkType::shard()].type());
-                verify(currChunk[ChunkType::min()].type());
-                verify(currChunk[ChunkType::max()].type());
-                shard = currChunk[ChunkType::shard()].String();
-                conn->done();
+                if (!origChunk.parseBSON(currChunk, &errmsg)) {
+                    return false;
+                }
 
-                BSONObj currMin = currChunk[ChunkType::min()].Obj();
-                BSONObj currMax = currChunk[ChunkType::max()].Obj();
+                const BSONObj currMin = origChunk.getMin();
+                const BSONObj currMax = origChunk.getMax();
                 if ( currMin.woCompare( min ) || currMax.woCompare( max ) ) {
                     errmsg = "chunk boundaries are outdated (likely a split occurred)";
                     result.append( "currMin" , currMin );
@@ -632,18 +626,19 @@ namespace mongo {
                     result.append( "requestedMin" , min );
                     result.append( "requestedMax" , max );
 
-                    LOG( LL_WARNING ) << "aborted split because " << errmsg << ": " << min << "->" << max
-                                      << " is now " << currMin << "->" << currMax << endl;
+                    warning() << "aborted split because " << errmsg << ": " << min << "->" << max
+                              << " is now " << currMin << "->" << currMax << endl;
                     return false;
                 }
 
-                if ( shard != myShard.getName() ) {
+                if (origChunk.getShard() != myShard.getName()) {
                     errmsg = "location is outdated (likely balance or migrate occurred)";
                     result.append( "from" , myShard.getName() );
-                    result.append( "official" , shard );
+                    result.append("official", origChunk.getShard());
 
-                    LOG( LL_WARNING ) << "aborted split because " << errmsg << ": chunk is at " << shard
-                                      << " and not at " << myShard.getName() << endl;
+                    warning() << "aborted split because " << errmsg
+                              << ": chunk is at " << origChunk.getShard()
+                              << " and not at " << myShard.getName() << endl;
                     return false;
                 }
 
@@ -652,19 +647,40 @@ namespace mongo {
                     maxVersion.addToBSON( result, "officialVersion" );
                     shardingState.getVersion( ns ).addToBSON( result, "myVersion" );
 
-                    LOG( LL_WARNING ) << "aborted split because " << errmsg << ": official " << maxVersion
-                                      << " mine: " << shardingState.getVersion(ns) << endl;
+                    warning() << "aborted split because " << errmsg << ": official " << maxVersion
+                              << " mine: " << shardingState.getVersion(ns) << endl;
                     return false;
                 }
 
-                origChunk.min = currMin.getOwned();
-                origChunk.max = currMax.getOwned();
-                origChunk.lastmod = ChunkVersion::fromBSON(currChunk[ChunkType::DEPRECATED_lastmod()]);
+                // since this could be the first call that enable sharding we also make sure to load
+                // the shard's metadata
+                shardingState.gotShardName(origChunk.getShard());
 
-                // since this could be the first call that enable sharding we also make sure to have the chunk manager up to date
-                shardingState.gotShardName( shard );
+                // Always check our version remotely.
+                // TODO: Make this less expensive by using the incoming request's shard version.
+                // TODO: The above checks should be removed, we should only have one refresh
+                // mechanism.
                 ChunkVersion shardVersion;
-                shardingState.trySetVersion( ns , shardVersion /* will return updated */ );
+                Status status = shardingState.refreshMetadataNow( ns, &shardVersion );
+
+                if (!status.isOK()) {
+                    errmsg = str::stream() << "splitChunk cannot split chunk "
+                                           << "[" << currMin << "," << currMax << ")"
+                                           << causedBy( status.reason() );
+
+                    warning() << errmsg << endl;
+                    return false;
+                }
+
+                if ( shardVersion.majorVersion() == 0 ) {
+                    // It makes no sense to split if our version is zero and we have no chunks
+                    errmsg = str::stream() << "splitChunk cannot split chunk "
+                                           << "[" << currMin << "," << currMax << ")"
+                                           << " with zero shard version";
+
+                    warning() << errmsg << endl;
+                    return false;
+                }
 
                 log() << "splitChunk accepted at version " << shardVersion << endl;
 
@@ -675,9 +691,9 @@ namespace mongo {
             //
 
             BSONObjBuilder logDetail;
-            origChunk.appendShortVersion( "before" , logDetail );
+            appendShortVersion(logDetail.subobjStart("before"), origChunk);
             LOG(1) << "before split on " << origChunk << endl;
-            vector<ChunkInfo> newChunks;
+            OwnedPointerVector<ChunkType> newChunks;
 
             ChunkVersion myVersion = maxVersion;
             BSONObj startKey = min;
@@ -688,6 +704,21 @@ namespace mongo {
 
             for ( vector<BSONObj>::const_iterator it = splitKeys.begin(); it != splitKeys.end(); ++it ) {
                 BSONObj endKey = *it;
+
+                if ( endKey.woCompare( startKey ) == 0) {
+                    errmsg = str::stream() << "split on the lower bound of chunk "
+                                           << "[" << min << ", " << max << ")"
+                                           << " is not allowed";
+
+                    warning() << errmsg << endl;
+                    return false;
+                }
+
+                CollectionMetadataPtr metadata(shardingState.getCollectionMetadata(ns));
+                if (!isShardDocSizeValid(metadata->getKeyPattern(), endKey, &errmsg)) {
+                    warning() << errmsg << endl;
+                    return false;
+                }
 
                 // splits only update the 'minor' portion of version
                 myVersion.incMinor();
@@ -706,7 +737,7 @@ namespace mongo {
                 n.append(ChunkType::ns(), ns);
                 n.append(ChunkType::min(), startKey);
                 n.append(ChunkType::max(), endKey);
-                n.append(ChunkType::shard(), shard);
+                n.append(ChunkType::shard(), origChunk.getShard());
                 n.done();
 
                 // add the chunk's _id as the query part of the update statement
@@ -717,7 +748,12 @@ namespace mongo {
                 updates.append( op.obj() );
 
                 // remember this chunk info for logging later
-                newChunks.push_back( ChunkInfo( startKey , endKey, myVersion ) );
+                auto_ptr<ChunkType> chunk(new ChunkType());
+                chunk->setMin(startKey);
+                chunk->setMax(endKey);
+                chunk->setVersion(myVersion);
+
+                newChunks.push_back(chunk.release());
 
                 startKey = endKey;
             }
@@ -741,7 +777,7 @@ namespace mongo {
             }
 
             //
-            // 4. apply the batch of updates to metadata and to the chunk manager
+            // 4. apply the batch of updates to remote and local metadata
             //
 
             BSONObj cmd = cmdBuilder.obj();
@@ -751,11 +787,9 @@ namespace mongo {
             bool ok;
             BSONObj cmdResult;
             {
-                scoped_ptr<ScopedDbConnection> conn(
-                        ScopedDbConnection::getInternalScopedDbConnection(
-                                shardingState.getConfigServer(), 30));
-                ok = conn->get()->runCommand( "config" , cmd , cmdResult );
-                conn->done();
+                ScopedDbConnection conn(shardingState.getConfigServer(), 30);
+                ok = conn->runCommand( "config" , cmd , cmdResult );
+                conn.done();
             }
 
             if ( ! ok ) {
@@ -765,10 +799,17 @@ namespace mongo {
                 msgasserted( 13593 , ss.str() );
             }
 
-            // install a chunk manager with knowledge about newly split chunks in this shard's state
+            //
+            // Install chunk metadata with knowledge about newly split chunks in this shard's state
+            //
+
             splitKeys.pop_back(); // 'max' was used as sentinel
             maxVersion.incMinor();
-            shardingState.splitChunk( ns , min , max , splitKeys , maxVersion );
+            
+            {
+                Lock::DBWrite writeLk( ns );
+                shardingState.splitChunk( ns , min , max , splitKeys , maxVersion );
+            }
 
             //
             // 5. logChanges
@@ -776,10 +817,9 @@ namespace mongo {
 
             // single splits are logged different than multisplits
             if ( newChunks.size() == 2 ) {
-                newChunks[0].appendShortVersion( "left" , logDetail );
-                newChunks[1].appendShortVersion( "right" , logDetail );
+                appendShortVersion(logDetail.subobjStart("left"), *newChunks[0]);
+                appendShortVersion(logDetail.subobjStart("right"), *newChunks[1]);
                 configServer.logChange( "split" , ns , logDetail.obj() );
-
             }
             else {
                 BSONObj beforeDetailObj = logDetail.obj();
@@ -791,7 +831,7 @@ namespace mongo {
                     chunkDetail.appendElements( beforeDetailObj );
                     chunkDetail.append( "number", i+1 );
                     chunkDetail.append( "of" , newChunksSize );
-                    newChunks[i].appendShortVersion( "chunk" , chunkDetail );
+                    appendShortVersion(chunkDetail.subobjStart("chunk"), *newChunks[i]);
                     configServer.logChange( "multi-split" , ns , chunkDetail.obj() );
                 }
             }
@@ -801,32 +841,32 @@ namespace mongo {
                 for (int i=1; i >= 0 ; i--){ // high chunk more likely to have only one obj
 
                     Client::ReadContext ctx( ns );
-                    NamespaceDetails *d = nsdetails( ns );
+                    Collection* collection = ctx.ctx().db()->getCollection( ns );
+                    verify( collection );
 
-                    const IndexDetails *idx = d->findIndexByPrefix( keyPattern ,
-                                                                    true ); /* exclude multikeys */
+                    // Allow multiKey based on the invariant that shard keys must be
+                    // single-valued. Therefore, any multi-key index prefixed by shard
+                    // key cannot be multikey over the shard key fields.
+                    IndexDescriptor *idx =
+                        collection->getIndexCatalog()->findIndexByPrefix( keyPattern ,
+                                                                          false );
                     if ( idx == NULL ) {
                         break;
                     }
 
-                    ChunkInfo chunk = newChunks[i];
-                    KeyPattern kp( idx->keyPattern() );
-                    BSONObj newmin = Helpers::toKeyFormat( kp.extendRangeBound( chunk.min, false) );
-                    BSONObj newmax = Helpers::toKeyFormat( kp.extendRangeBound( chunk.max, false) );
+                    const ChunkType* chunk = newChunks.vector().back();
+                    KeyPattern kp(idx->keyPattern());
+                    BSONObj newmin = Helpers::toKeyFormat(kp.extendRangeBound(chunk->getMin(), false));
+                    BSONObj newmax = Helpers::toKeyFormat(kp.extendRangeBound(chunk->getMax(), false));
 
-                    scoped_ptr<BtreeCursor> bc( BtreeCursor::make( d,
-                                                                   *idx,
-                                                                   newmin, /* lower */
-                                                                   newmax, /* upper */
-                                                                   false, /* upper noninclusive */
-                                                                   1 ) ); /* direction */
+                    auto_ptr<Runner> runner(InternalPlanner::indexScan(collection, idx,
+                                                                       newmin, newmax, false));
 
                     // check if exactly one document found
-                    if ( bc->ok() ) {
-                        bc->advance();
-                        if ( bc->eof() ) {
+                    if (Runner::RUNNER_ADVANCED == runner->getNext(NULL, NULL)) {
+                        if (Runner::RUNNER_EOF == runner->getNext(NULL, NULL)) {
                             result.append( "shouldMigrate",
-                                           BSON("min" << chunk.min << "max" << chunk.max) );
+                                           BSON("min" << chunk->getMin() << "max" << chunk->getMax()));
                             break;
                         }
                     }
@@ -835,6 +875,20 @@ namespace mongo {
 
             return true;
         }
+
+    private:
+
+        /**
+         * Append min, max and version information from chunk to the buffer.
+         */
+        static void appendShortVersion(BufBuilder& b, const ChunkType& chunk) {
+            BSONObjBuilder bb(b);
+            bb.append(ChunkType::min(), chunk.getMin());
+            bb.append(ChunkType::max(), chunk.getMax());
+            chunk.getVersion().addToBSON(bb, ChunkType::DEPRECATED_lastmod());
+            bb.done();
+        }
+
     } cmdSplitChunk;
 
 }  // namespace mongo

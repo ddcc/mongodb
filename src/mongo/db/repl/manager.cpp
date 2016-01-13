@@ -15,12 +15,25 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
-#include "pch.h"
-#include "rs.h"
-#include "connections.h"
-#include "../client.h"
+#include "mongo/pch.h"
+
+#include "mongo/db/repl/rs.h"
+#include "mongo/db/repl/connections.h"
+#include "mongo/db/client.h"
 
 namespace mongo {
 
@@ -80,12 +93,25 @@ namespace mongo {
         }
 
         if (rs->box.getState().primary()) {
-            // make sure exactly one primary steps down
-            if (rs->selfId() < m->id()) {
+            OpTime remoteElectionTime = m->hbinfo().electionTime;
+            LOG(1) << "another primary seen with election time " << remoteElectionTime; 
+            if (remoteElectionTime == OpTime()) {
+                // This primary didn't deliver an electionTime in its heartbeat;
+                // assume it's a pre-2.6 primary and always step down ourselves.
+                log() << "stepping down; another primary seen in replicaset";
+                rs->relinquish();
+            }
+            // 2.6 or greater primary.  Step down whoever has the older election time.
+            else if (remoteElectionTime > rs->getElectionTime()) {
+                log() << "stepping down; another primary was elected more recently";
+                rs->relinquish();
+            }
+            else {
+                // else, stick around
+                log() << "another PRIMARY detected but it should step down"
+                    " since it was elected earlier than me";
                 return;
             }
-
-            rs->relinquish();
         }
 
         rs->box.noteRemoteIsPrimary(m);
@@ -190,9 +216,9 @@ namespace mongo {
             checkAuth();
 
             const Member *p = rs->box.getPrimary();
-            if( p && p != rs->_self ) {
-                if( !p->hbinfo().up() ||
-                        !p->hbinfo().hbstate.primary() ) {
+
+            if (p && p->id() != rs->_self->id()) {
+                if (!p->hbinfo().up() || !p->hbinfo().hbstate.primary()) {
                     p = 0;
                     rs->box.setOtherPrimary(0);
                 }

@@ -12,80 +12,141 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
-
-#include "mongo/db/geo/geoparser.h"
-#include "mongo/util/mongoutils/str.h"
-#include "third_party/s2/s2.h"
-#include "third_party/s2/s2cap.h"
-#include "third_party/s2/s2regioncoverer.h"
-#include "third_party/s2/s2cell.h"
-#include "third_party/s2/s2polyline.h"
-#include "third_party/s2/s2polygon.h"
-#include "third_party/s2/s2regioncoverer.h"
 
 #pragma once
 
+#include "mongo/db/geo/geoparser.h"
+#include "mongo/db/geo/shapes.h"
+#include "mongo/util/mongoutils/str.h"
+#include "third_party/s2/s2regionunion.h"
+
 namespace mongo {
+
     class GeometryContainer {
     public:
         bool parseFrom(const BSONObj &obj);
 
-        // Does we intersect the provided data?  Sadly there is no common good
-        // way to check this, so we do different things for all pairs of
-        // geometry_of(query,data).
+        /**
+         * Is the geometry any of {Point, Line, Polygon}?
+         */
+        bool isSimpleContainer() const;
+
+        /**
+         * To check intersection, we iterate over the otherContainer's geometries, checking each
+         * geometry to see if we intersect it.  If we intersect one geometry, we intersect the
+         * entire other container.
+         */
         bool intersects(const GeometryContainer& otherContainer) const;
-        bool intersects(const S2Cell& otherPoint) const;
-        bool intersects(const S2Polyline& otherLine) const;
-        bool intersects(const S2Polygon& otherPolygon) const;
-        // And, within.
+
+        /**
+         * To check containment, we iterate over the otherContainer's geometries.  If we don't
+         * contain any sub-geometry of the otherContainer, the otherContainer is not contained
+         * within us.  If each sub-geometry of the otherContainer is contained within us, we contain
+         * the entire otherContainer.
+         */
         bool contains(const GeometryContainer& otherContainer) const;
 
-        bool supportsContains() const {
-            return NULL != _polygon.get()
-                   || NULL != _cap.get()
-                   || NULL != _oldPolygon.get()
-                   || NULL != _oldCircle.get();
-        }
+        /**
+         * Only polygons (and aggregate types thereof) support contains.
+         */
+        bool supportsContains() const;
 
-        bool hasS2Region() const {
-            return NULL != _cell
-                   || NULL != _line
-                   || NULL != _polygon
-                   || NULL != _cap;
-        }
+        bool hasS2Region() const;
+        bool hasFlatRegion() const;
 
         // Used by s2cursor only to generate a covering of the query object.
         // One region is not NULL and this returns it.
         const S2Region& getRegion() const;
-    private:
+    // XXX FIXME
+    // private:
+        // Does 'this' intersect with the provided type?
+        bool intersects(const S2Cell& otherPoint) const;
+        bool intersects(const S2Polyline& otherLine) const;
+        bool intersects(const S2Polygon& otherPolygon) const;
+        // These three just iterate over the geometries and call the 3 methods above.
+        bool intersects(const MultiPointWithCRS& otherMultiPoint) const;
+        bool intersects(const MultiLineWithCRS& otherMultiLine) const;
+        bool intersects(const MultiPolygonWithCRS& otherMultiPolygon) const;
+
+        // Used when 'this' has a polygon somewhere, either in _polygon or _multiPolygon or
+        // _geometryCollection.
+        bool contains(const S2Cell& otherCell, const S2Point& otherPoint) const;
+        bool contains(const S2Polyline& otherLine) const;
+        bool contains(const S2Polygon& otherPolygon) const;
+
         // Only one of these shared_ptrs should be non-NULL.  S2Region is a
         // superclass but it only supports testing against S2Cells.  We need
         // the most specific class we can get.
-        shared_ptr<S2Cell> _cell;
-        shared_ptr<S2Polyline> _line;
-        shared_ptr<S2Polygon> _polygon;
-        shared_ptr<S2Cap> _cap;
-        // Legacy shapes.
-        shared_ptr<Polygon> _oldPolygon;
-        shared_ptr<Box> _oldBox;
-        shared_ptr<Circle> _oldCircle;
-        shared_ptr<Point> _oldPoint;
+        shared_ptr<PointWithCRS> _point;
+        shared_ptr<LineWithCRS> _line;
+        shared_ptr<PolygonWithCRS> _polygon;
+        shared_ptr<CapWithCRS> _cap;
+        shared_ptr<MultiPointWithCRS> _multiPoint;
+        shared_ptr<MultiLineWithCRS> _multiLine;
+        shared_ptr<MultiPolygonWithCRS> _multiPolygon;
+        shared_ptr<GeometryCollection> _geometryCollection;
+        shared_ptr<BoxWithCRS> _box;
+
+        shared_ptr<S2RegionUnion> _region;
     };
 
+    // TODO: Make a struct, turn parse stuff into something like
+    // static Status parseNearQuery(const BSONObj& obj, NearQuery** out);
     class NearQuery {
     public:
-        NearQuery() : maxDistance(std::numeric_limits<double>::max()), fromRadians(false) {}
-        NearQuery(const string& f) : field(f), maxDistance(std::numeric_limits<double>::max()),
-                                     fromRadians(false) {}
-        bool parseFrom(const BSONObj &obj, double radius);
-        bool parseFromGeoNear(const BSONObj &obj, double radius);
+        NearQuery()
+            : minDistance(0),
+              maxDistance(std::numeric_limits<double>::max()),
+              isNearSphere(false) { }
+
+        NearQuery(const string& f)
+            : field(f),
+              minDistance(0),
+              maxDistance(std::numeric_limits<double>::max()),
+              isNearSphere(false) { }
+
+        Status parseFrom(const BSONObj &obj);
+
+        // The name of the field that contains the geometry.
         string field;
-        S2Point centroid;
-        // Distance IN METERS that we're willing to search.
+
+        // The starting point of the near search.
+        PointWithCRS centroid;
+
+        // Min and max distance from centroid that we're willing to search.
+        // Distance is in whatever units the centroid's CRS implies.
+        // If centroid.crs == FLAT these are radians.
+        // If centroid.crs == SPHERE these are meters.
+        double minDistance;
         double maxDistance;
-        // Did we convert to this distance from radians?  (If so, we output distances in radians.)
-        bool fromRadians;
+
+        // It's either $near or $nearSphere.
+        bool isNearSphere;
+
+        string toString() const {
+            stringstream ss;
+            ss << " field=" << field;
+            ss << " maxdist=" << maxDistance;
+            ss << " isNearSphere=" << isNearSphere;
+            return ss.str();
+        }
+
+    private:
+        bool parseLegacyQuery(const BSONObj &obj);
+        Status parseNewQuery(const BSONObj &obj);
     };
 
     // This represents either a $within or a $geoIntersects.
@@ -106,6 +167,10 @@ namespace mongo {
         bool hasS2Region() const;
         const S2Region& getRegion() const;
         string getField() const { return field; }
+
+        Predicate getPred() const { return predicate; }
+        const GeometryContainer& getGeometry() const { return geoContainer; }
+
     private:
         // Try to parse the provided object into the right place.
         bool parseLegacyQuery(const BSONObj &obj);

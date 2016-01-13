@@ -14,11 +14,23 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
 #include "mongo/util/stack_introspect.h"
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(MONGO_OPTIMIZED_BUILD)
 
 #include <cstdlib>
 #include <cxxabi.h>
@@ -29,6 +41,7 @@
 
 #include "mongo/platform/backtrace.h"
 #include "mongo/util/concurrency/mutex.h"
+#include "mongo/util/log.h"
 #include "mongo/util/text.h"
 
 using namespace std;
@@ -39,19 +52,25 @@ namespace mongo {
     
         int maxBackTraceFrames = 25;
 
-        bool isNameAConstructorOrDesctructor( string name ) {
+        enum IsCons {
+            YES,
+            NO,
+            EXEMPT
+        };
+
+        IsCons isNameAConstructorOrDestructor( string name ) {
             //cout << "XX : " << name << endl;
             
             size_t x = name.rfind( '(' );
             if ( name[name.size()-1] != ')' || x == string::npos )
-                return false;
+                return NO;
             
             name = name.substr( 0 , x );
             
             vector<string> pieces = StringSplitter::split( name , "::" );
             
             if ( pieces.size() < 2 )
-                return false;
+                return NO;
             
             string method = pieces[pieces.size()-1];
             string clazz = pieces[pieces.size()-2];
@@ -60,20 +79,43 @@ namespace mongo {
                 method = method.substr(1);
             
             if ( name.find( "Geo" ) != string::npos ) 
-                return false;
+                return EXEMPT;
             
             if ( name.find( "Tests" ) != string::npos )
-                return false;
+                return EXEMPT;
             
-            if ( name.find( "ScopedDistributedLock" ) != string::npos )
-                return false;
-
             if ( name.find( "PooledScope" ) != string::npos ) {
                 // SERVER-8090
-                return false;
+                return EXEMPT;
             }
 
-            return method == clazz;
+            if ( name.find( "Matcher2" ) != string::npos ) {
+                // SERVER-9778
+                return EXEMPT;
+            }
+
+            if ( name.find( "_debugCheck" ) != string::npos ) {
+                // use this for generic debugging paths
+                return EXEMPT;
+            }
+
+            if ( name.find( "_catalog" ) != string::npos ) {
+                // internal catalog methods are exempt
+                return EXEMPT;
+            }
+
+            // For sharding dbtests - page fault exceptions cause sporadic errors unrelated to tests
+            if ( name.find( "ScopedDistributedLock" ) != string::npos ) {
+                return EXEMPT;
+            }
+
+            if ( name.find( "CollectionInfo" ) != string::npos ) {
+                return EXEMPT;
+            }
+
+            // End sharding dbtest exemptions
+
+            return method == clazz ? YES : NO;
         }
         
         class Cache {
@@ -81,22 +123,22 @@ namespace mongo {
             
             Cache() : _mutex( "ObjectLifyCycleCache" ){}
             
-            bool inCache( void* name , bool& val ) const {
+            bool inCache( void* name , IsCons& val ) const {
                 SimpleMutex::scoped_lock lk( _mutex );
-                map<void*,bool>::const_iterator it = _map.find( name );
+                map<void*,IsCons>::const_iterator it = _map.find( name );
                 if ( it == _map.end() )
                     return false;
                 val = it->second;
                 return true;
             }
             
-            void set( void* name , bool val ) {
+            void set( void* name , IsCons val ) {
                 SimpleMutex::scoped_lock lk( _mutex );
                 _map[name] = val;
             }
             
         private:
-            map<void*,bool> _map;
+            map<void*,IsCons> _map;
             mutable SimpleMutex _mutex;
         };
         
@@ -112,11 +154,13 @@ namespace mongo {
         for ( int i = 0; i < size; i++ ) {
             
             {
-                bool temp = false;
-                if ( cache.inCache( b[i] , temp ) ) {
-                    if ( temp )
-                        return true;
-                    continue;
+                IsCons isCons = NO;
+                if ( cache.inCache( b[i] , isCons ) ) {
+                    if (isCons == NO)
+                        continue;
+
+                    if (strings) ::free(strings);
+                    return isCons == YES;
                 }
             }
 
@@ -139,23 +183,27 @@ namespace mongo {
                 continue;
             
             string myNiceCopy = nice;
-            
-            if ( isNameAConstructorOrDesctructor( nice ) ) {
-                if ( printOffending ) 
-                    std::cout << "found a constructor in the call tree: " << nice << "\n" << symbol << std::endl;
-                ::free( strings );
-                ::free( nice );
-                cache.set( b[i] , true );
-                return true;
-            }
-
             ::free( nice );
 
-            cache.set( b[i] , false );
+            IsCons isCons = isNameAConstructorOrDestructor(myNiceCopy);
+            cache.set(b[i], isCons);
 
+            if (isCons == EXEMPT) {
+                ::free( strings );
+                return false;
+            }
+
+            if (isCons == YES) {
+                if ( printOffending )
+                    log() << "found a constructor in the call tree: " << myNiceCopy << "\n"
+                          << symbol << std::endl;
+
+                ::free( strings );
+                return true;
+            }
         }
-        ::free( strings );
 
+        ::free( strings );
         return false;
     }
 
@@ -175,4 +223,4 @@ namespace mongo {
     bool inConstructorChainSupported() { return false; }
 }
 
-#endif  // #if !defined(_WIN32)
+#endif  // #if !defined(_WIN32) && !defined(MONGO_OPTIMIZED_BUILD)

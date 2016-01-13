@@ -22,6 +22,14 @@ namespace {
 
     using namespace mongo;
 
+    void appendInvalidStringElement(const char* fieldName, BufBuilder* bb) {
+        // like a BSONObj string, but without a NUL terminator.
+        bb->appendChar(String);
+        bb->appendStr(fieldName, /*withNUL*/true);
+        bb->appendNum(4);
+        bb->appendStr("asdf", /*withNUL*/false);
+    }
+
     TEST(BSONValidate, Basic) {
         BSONObj x;
         ASSERT_TRUE( x.valid() );
@@ -211,6 +219,74 @@ namespace {
         BSONObj x = BSON( "a" << 1 << "b" << BSON("c" << 2 << "d" << BSONArrayBuilder().obj() << "e" << BSON_ARRAY("1" << 2 << 3)));
         ASSERT_OK(validateBSON(x.objdata(), x.objsize()));
         ASSERT_NOT_OK(validateBSON(x.objdata(), x.objsize() / 2));
+    }
+
+    TEST(BSONValidateFast, ErrorWithId) {
+        BufBuilder bb;
+        BSONObjBuilder ob(bb);
+        ob.append("_id", 1);
+        appendInvalidStringElement("not_id", &bb);
+        const BSONObj x = ob.done();
+        const Status status = validateBSON(x.objdata(), x.objsize());
+        ASSERT_NOT_OK(status);
+        ASSERT_EQUALS(status.reason(), "not null terminated string in object with _id: 1");
+    }
+
+    TEST(BSONValidateFast, ErrorBeforeId) {
+        BufBuilder bb;
+        BSONObjBuilder ob(bb);
+        appendInvalidStringElement("not_id", &bb);
+        ob.append("_id", 1);
+        const BSONObj x = ob.done();
+        const Status status = validateBSON(x.objdata(), x.objsize());
+        ASSERT_NOT_OK(status);
+        ASSERT_EQUALS(status.reason(), "not null terminated string in object with unknown _id");
+    }
+
+    TEST(BSONValidateFast, ErrorNoId) {
+        BufBuilder bb;
+        BSONObjBuilder ob(bb);
+        appendInvalidStringElement("not_id", &bb);
+        const BSONObj x = ob.done();
+        const Status status = validateBSON(x.objdata(), x.objsize());
+        ASSERT_NOT_OK(status);
+        ASSERT_EQUALS(status.reason(), "not null terminated string in object with unknown _id");
+    }
+
+    TEST(BSONValidateFast, ErrorIsInId) {
+        BufBuilder bb;
+        BSONObjBuilder ob(bb);
+        appendInvalidStringElement("_id", &bb);
+        const BSONObj x = ob.done();
+        const Status status = validateBSON(x.objdata(), x.objsize());
+        ASSERT_NOT_OK(status);
+        ASSERT_EQUALS(status.reason(), "not null terminated string in object with unknown _id");
+    }
+
+    TEST(BSONValidateFast, NonTopLevelId) {
+        BufBuilder bb;
+        BSONObjBuilder ob(bb);
+        ob.append("not_id1", BSON("_id" << "not the real _id"));
+        appendInvalidStringElement("not_id2", &bb);
+        const BSONObj x = ob.done();
+        const Status status = validateBSON(x.objdata(), x.objsize());
+        ASSERT_NOT_OK(status);
+        ASSERT_EQUALS(status.reason(), "not null terminated string in object with unknown _id");
+    }
+
+    TEST(BSONValidateFast, StringHasSomething) {
+        BufBuilder bb;
+        BSONObjBuilder ob(bb);
+        bb.appendChar(String);
+        bb.appendStr("x", /*withNUL*/true);
+        bb.appendNum(0);
+        const BSONObj x = ob.done();
+        ASSERT_EQUALS(5 // overhead
+                      + 1 // type
+                      + 2 // name
+                      + 4 // size
+                      , x.objsize());
+        ASSERT_NOT_OK(validateBSON(x.objdata(), x.objsize()));
     }
 
 }

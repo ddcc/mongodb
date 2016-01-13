@@ -15,14 +15,13 @@
  *    limitations under the License.
  */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include "mongo/client/dbclientcursor.h"
 
 #include "mongo/client/connpool.h"
-#include "mongo/db/cmdline.h"
 #include "mongo/db/dbmessage.h"
-#include "mongo/db/namespacestring.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/s/shard.h"
 #include "mongo/s/stale_exception.h"  // for RecvStaleConfigException
 
@@ -31,7 +30,7 @@ namespace mongo {
     void assembleRequest( const string &ns, BSONObj query, int nToReturn, int nToSkip, const BSONObj *fieldsToReturn, int queryOptions, Message &toSend );
 
     void DBClientCursor::_finishConsInit() {
-        _originalHost = _client->toString();
+        _originalHost = _client->getServerAddress();
     }
 
     int DBClientCursor::nextBatchSize() {
@@ -79,6 +78,15 @@ namespace mongo {
     
     void DBClientCursor::initLazy( bool isRetry ) {
         massert( 15875 , "DBClientCursor::initLazy called on a client that doesn't support lazy" , _client->lazySupported() );
+        if (DBClientWithCommands::RunCommandHookFunc hook = _client->getRunCommandHook()) {
+            if (NamespaceString(ns).isCommand()) {
+                BSONObjBuilder bob;
+                bob.appendElements(query);
+                hook(&bob);
+                query = bob.obj();
+            }
+        }
+        
         Message toSend;
         _assembleInit( toSend );
         _client->say( toSend, isRetry, &_originalHost );
@@ -103,6 +111,14 @@ namespace mongo {
         }
 
         dataReceived( retry, _lazyHost );
+
+        if (DBClientWithCommands::PostRunCommandHookFunc hook = _client->getPostRunCommandHook()) {
+            if (NamespaceString(ns).isCommand()) {
+                BSONObj cmdResponse = peekFirst();
+                hook(cmdResponse, _lazyHost);
+            }
+        }
+
         return ! retry;
     }
 
@@ -140,14 +156,13 @@ namespace mongo {
         }
         else {
             verify( _scopedHost.size() );
-            scoped_ptr<ScopedDbConnection> conn(
-                    ScopedDbConnection::getScopedDbConnection( _scopedHost ) );
-            conn->get()->call( toSend , *response );
-            _client = conn->get();
+            ScopedDbConnection conn(_scopedHost);
+            conn->call( toSend , *response );
+            _client = conn.get();
             this->batch.m = response;
             dataReceived();
             _client = 0;
-            conn->done();
+            conn.done();
         }
     }
 
@@ -310,6 +325,10 @@ namespace mongo {
     }
 
     DBClientCursor::~DBClientCursor() {
+        kill();
+    }
+
+    void DBClientCursor::kill() {
         if (!this)
             return;
 
@@ -335,19 +354,21 @@ namespace mongo {
             }
             else {
                 verify( _scopedHost.size() );
-                scoped_ptr<ScopedDbConnection> conn(
-                        ScopedDbConnection::getScopedDbConnection( _scopedHost ) );
+                ScopedDbConnection conn(_scopedHost);
 
                 if( DBClientConnection::getLazyKillCursor() )
-                    conn->get()->sayPiggyBack( m );
+                    conn->sayPiggyBack( m );
                 else
-                    conn->get()->say( m );
+                    conn->say( m );
 
-                conn->done();
+                conn.done();
             }
         }
 
         );
+
+        // Mark this cursor as dead since we can't do any getMores.
+        cursorId = 0;
     }
 
 

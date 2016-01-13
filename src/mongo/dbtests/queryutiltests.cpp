@@ -15,16 +15,28 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
-#include "pch.h"
-#include "../db/queryutil.h"
-#include "mongo/db/queryoptimizer.h"
-#include "../db/querypattern.h"
-#include "../db/instance.h"
-#include "../db/pdfile.h"
+#include "mongo/pch.h"
+
+#include "mongo/db/instance.h"
 #include "mongo/db/json.h"
-#include "dbtests.h"
+#include "mongo/db/pdfile.h"
+#include "mongo/db/queryutil.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/dbtests/dbtests.h"
 
 namespace QueryUtilTests {
 
@@ -39,6 +51,14 @@ namespace QueryUtilTests {
         };
     } // namespace FieldIntervalTests
     
+    //
+    // TODO: Test cases inside namespace FieldRangeTests are testing
+    // code that will soon be fully deprecated and should eventually
+    // be deleted.
+    //
+    // Analogous tests for the new query system can be found in the
+    // index bounds builder test (db/query/index_bounds_builder_test.cpp).
+    //
     namespace FieldRangeTests {
         class ToString {
         public:
@@ -73,7 +93,7 @@ namespace QueryUtilTests {
             virtual bool isPointIntervalSet() { return false; }
             static void checkElt( BSONElement expected, BSONElement actual ) {
                 if ( expected.woCompare( actual, false ) ) {
-                    log() << "expected: " << expected << ", got: " << actual;
+                    mongo::unittest::log() << "expected: " << expected << ", got: " << actual;
                     ASSERT( false );
                 }
             }
@@ -405,68 +425,6 @@ namespace QueryUtilTests {
                 FieldRangeSet s6( "ns", BSON( "a" << GTE << 1 << LTE << 1 << LT << 1 ), true,
                                   true );
                 ASSERT( !s6.range( "a" ).equality() );
-            }
-        };
-
-        class QueryPatternBase {
-        protected:
-            static QueryPattern p( const BSONObj &query, const BSONObj &sort = BSONObj() ) {
-                return FieldRangeSet( "", query, true, true ).pattern( sort );
-            }
-        };
-
-        class QueryPatternTest : public QueryPatternBase {
-        public:
-            void run() {
-                ASSERT( p( BSON( "a" << 1 ) ) == p( BSON( "a" << 1 ) ) );
-                ASSERT( p( BSON( "a" << 1 ) ) == p( BSON( "a" << 5 ) ) );
-                ASSERT( p( BSON( "a" << 1 ) ) != p( BSON( "b" << 1 ) ) );
-                ASSERT( p( BSON( "a" << 1 ) ) != p( BSON( "a" << LTE << 1 ) ) );
-                ASSERT( p( BSON( "a" << 1 ) ) != p( BSON( "a" << 1 << "b" << 2 ) ) );
-                ASSERT( p( BSON( "a" << 1 << "b" << 3 ) ) != p( BSON( "a" << 1 ) ) );
-                ASSERT( p( BSON( "a" << LT << 1 ) ) == p( BSON( "a" << LTE << 5 ) ) );
-                ASSERT( p( BSON( "a" << LT << 1 << GTE << 0 ) ) == p( BSON( "a" << LTE << 5 << GTE << 0 ) ) );
-                ASSERT( p( BSON( "a" << 1 ) ) < p( BSON( "a" << 1 << "b" << 1 ) ) );
-                ASSERT( !( p( BSON( "a" << 1 << "b" << 1 ) ) < p( BSON( "a" << 1 ) ) ) );
-                ASSERT( p( BSON( "a" << 1 ), BSON( "b" << 1 ) ) == p( BSON( "a" << 4 ), BSON( "b" << "a" ) ) );
-                ASSERT( p( BSON( "a" << 1 ), BSON( "b" << 1 ) ) == p( BSON( "a" << 4 ), BSON( "b" << -1 ) ) );
-                ASSERT( p( BSON( "a" << 1 ), BSON( "b" << 1 ) ) != p( BSON( "a" << 4 ), BSON( "c" << 1 ) ) );
-                ASSERT( p( BSON( "a" << 1 ), BSON( "b" << 1 << "c" << -1 ) ) == p( BSON( "a" << 4 ), BSON( "b" << -1 << "c" << 1 ) ) );
-                ASSERT( p( BSON( "a" << 1 ), BSON( "b" << 1 << "c" << 1 ) ) != p( BSON( "a" << 4 ), BSON( "b" << 1 ) ) );
-                ASSERT( p( BSON( "a" << 1 ), BSON( "b" << 1 ) ) != p( BSON( "a" << 4 ), BSON( "b" << 1 << "c" << 1 ) ) );
-            }
-        };
-
-        class QueryPatternEmpty : public QueryPatternBase {
-        public:
-            void run() {
-                ASSERT( p( BSON( "a" << GT << 5 << LT << 7 ) ) !=
-                       p( BSON( "a" << GT << 7 << LT << 5 ) ) );
-            }
-        };
-
-        class QueryPatternNeConstraint : public QueryPatternBase {
-        public:
-            void run() {
-                ASSERT( p( BSON( "a" << NE << 5 ) ) != p( BSON( "a" << GT << 1 ) ) );
-                ASSERT( p( BSON( "a" << NE << 5 ) ) != p( BSONObj() ) );
-                ASSERT( p( BSON( "a" << NE << 5 ) ) == p( BSON( "a" << NE << "a" ) ) );
-            }
-        };
-        
-        /** Check QueryPattern categories for optimized bounds. */
-        class QueryPatternOptimizedBounds {
-        public:
-            void run() {
-                // With unoptimized bounds, different inequalities yield different query patterns.
-                ASSERT( p( BSON( "a" << GT << 1 ), false ) != p( BSON( "a" << LT << 1 ), false ) );
-                // SERVER-4675 Descriptive test - With optimized bounds, different inequalities
-                // yield different query patterns.
-                ASSERT( p( BSON( "a" << GT << 1 ), true ) == p( BSON( "a" << LT << 1 ), true ) );
-            }
-        private:
-            static QueryPattern p( const BSONObj &query, bool optimize ) {
-                return FieldRangeSet( "", query, true, optimize ).pattern( BSONObj() );
             }
         };
 
@@ -1206,24 +1164,23 @@ namespace QueryUtilTests {
 
     namespace FieldRangeSetTests {
 
-        class ToString {
+        class Basics {
         public:
             void run() {
-                BSONObj obj = BSON( "a" << 1 );
-                FieldRangeSet fieldRangeSet( "", obj, true, true );
-                fieldRangeSet.toString(); // Just test that we don't crash.
-            }
-        };
-        
-        class Namespace {
-        public:
-            void run() {
-                boost::shared_ptr<FieldRangeSet> frs;
                 {
-                    string ns = str::stream() << "foo";
-                    frs.reset( new FieldRangeSet( ns.c_str(), BSONObj(), true, true ) );
+                    BSONObj obj = BSON( "a" << 1 );
+                    FieldRangeSet fieldRangeSet( "", obj, true, true );
+                    fieldRangeSet.toString(); // Just test that we don't crash.
                 }
-                ASSERT_EQUALS( string( "foo" ), frs->ns() );
+
+                {
+                    boost::shared_ptr<FieldRangeSet> frs;
+                    {
+                        string ns = str::stream() << "foo";
+                        frs.reset( new FieldRangeSet( ns.c_str(), BSONObj(), true, true ) );
+                    }
+                    ASSERT_EQUALS( string( "foo" ), frs->ns() );
+                }
             }
         };
 
@@ -1633,28 +1590,34 @@ namespace QueryUtilTests {
             ~IndexBase() {
                 if ( !nsd() )
                     return;
-                string s( ns() );
-                dropNS( s );
+                _ctx.db()->dropCollection( ns() );
             }
         protected:
             static const char *ns() { return "unittests.FieldRangeSetPairTests"; }
             static NamespaceDetails *nsd() { return nsdetails( ns() ); }
-            IndexDetails *index( const BSONObj &key ) {
+            Client::Context* ctx() { return &_ctx; }
+            IndexDetails *index( const BSONObj &key, int* indexNoOut = NULL ) {
                 stringstream ss;
                 ss << indexNum_++;
                 string name = ss.str();
                 client_.resetIndexCache();
                 client_.ensureIndex( ns(), key, false, name.c_str() );
                 NamespaceDetails *d = nsd();
-                for( int i = 0; i < d->nIndexes; ++i ) {
-                    if ( d->idx(i).keyPattern() == key /*indexName() == name*/ || ( d->idx(i).isIdIndex() && IndexDetails::isIdIndexPattern( key ) ) )
+                for( int i = 0; i < d->getCompletedIndexCount(); ++i ) {
+                    if ( d->idx(i).keyPattern() == key /*indexName() == name*/ ||
+                         ( d->idx(i).isIdIndex() && IndexDetails::isIdIndexPattern( key ) ) ) {
+                        if ( indexNoOut )
+                            *indexNoOut = i;
                         return &d->idx(i);
+                    }
                 }
                 verify( false );
                 return 0;
             }
             int indexno( const BSONObj &key ) {
-                return nsd()->idxNo( *index(key) );
+                int idxNo;
+                ASSERT( index(key, &idxNo) );
+                return idxNo;
             }
             static DBDirectClient client_;
         private:
@@ -1679,76 +1642,6 @@ namespace QueryUtilTests {
             }
         };
         
-        /** Check that clearIndexesForPatterns() clears recorded query plans. */
-        class ClearIndexesForPatterns : public IndexBase {
-        public:
-            void run() {
-                index( BSON( "a" << 1 ) );
-                BSONObj query = BSON( "a" << GT << 5 << LT << 5 );
-                BSONObj sort = BSON( "a" << 1 );
-                
-                // Record the a:1 index for the query's single and multi key query patterns.
-                NamespaceDetailsTransient &nsdt = NamespaceDetailsTransient::get( ns() );
-                QueryPattern singleKey = FieldRangeSet( ns(), query, true, true ).pattern( sort );
-                nsdt.registerCachedQueryPlanForPattern( singleKey,
-                                                       CachedQueryPlan( BSON( "a" << 1 ), 1,
-                                                        CandidatePlanCharacter( true, true ) ) );
-                QueryPattern multiKey = FieldRangeSet( ns(), query, false, true ).pattern( sort );
-                nsdt.registerCachedQueryPlanForPattern( multiKey,
-                                                       CachedQueryPlan( BSON( "a" << 1 ), 5,
-                                                        CandidatePlanCharacter( true, true ) ) );
-                
-                // The single and multi key fields for this query must differ for the test to be
-                // valid.
-                ASSERT( singleKey != multiKey );
-                
-                // Clear the recorded query plans using clearIndexesForPatterns.
-                FieldRangeSetPair frsp( ns(), query );
-                QueryUtilIndexed::clearIndexesForPatterns( frsp, sort );
-                
-                // Check that the recorded query plans were cleared.
-                ASSERT_EQUALS( BSONObj(), nsdt.cachedQueryPlanForPattern( singleKey ).indexKey() );
-                ASSERT_EQUALS( BSONObj(), nsdt.cachedQueryPlanForPattern( multiKey ).indexKey() );
-            }
-        };
-
-        /** Check query plan returned by bestIndexForPatterns(). */
-        class BestIndexForPatterns : public IndexBase {
-        public:
-            void run() {
-                index( BSON( "a" << 1 ) );
-                index( BSON( "b" << 1 ) );
-                BSONObj query = BSON( "a" << GT << 5 << LT << 5 );
-                BSONObj sort = BSON( "a" << 1 );
-                NamespaceDetailsTransient &nsdt = NamespaceDetailsTransient::get( ns() );
-
-                // No query plan is returned when none has been recorded.
-                FieldRangeSetPair frsp( ns(), query );
-                ASSERT_EQUALS( BSONObj(),
-                              QueryUtilIndexed::bestIndexForPatterns( frsp, sort ).indexKey() );
-                
-                // A multikey index query plan is returned if recorded.
-                QueryPattern multiKey = FieldRangeSet( ns(), query, false, true ).pattern( sort );
-                nsdt.registerCachedQueryPlanForPattern( multiKey,
-                                                       CachedQueryPlan( BSON( "a" << 1 ), 5,
-                                                        CandidatePlanCharacter( true, true ) ) );
-                ASSERT_EQUALS( BSON( "a" << 1 ),
-                              QueryUtilIndexed::bestIndexForPatterns( frsp, sort ).indexKey() );
-
-                // A non multikey index query plan is preferentially returned if recorded.
-                QueryPattern singleKey = FieldRangeSet( ns(), query, true, true ).pattern( sort );
-                nsdt.registerCachedQueryPlanForPattern( singleKey,
-                                                       CachedQueryPlan( BSON( "b" << 1 ), 5,
-                                                        CandidatePlanCharacter( true, true ) ) );
-                ASSERT_EQUALS( BSON( "b" << 1 ),
-                              QueryUtilIndexed::bestIndexForPatterns( frsp, sort ).indexKey() );
-                
-                // The single and multi key fields for this query must differ for the test to be
-                // valid.
-                ASSERT( singleKey != multiKey );
-            }
-        };
-
     } // namespace FieldRangeSetPairTests
     
     namespace FieldRangeVectorTests {
@@ -1758,7 +1651,7 @@ namespace QueryUtilTests {
             void run() {
                 BSONObj obj = BSON( "a" << 1 );
                 FieldRangeSet fieldRangeSet( "", obj, true, true );
-                IndexSpec indexSpec( BSON( "a" << 1 ) );
+                BSONObj indexSpec( BSON( "a" << 1 ) );
                 FieldRangeVector fieldRangeVector( fieldRangeSet, indexSpec, 1 );
                 fieldRangeVector.toString(); // Just test that we don't crash.
             }
@@ -1797,7 +1690,7 @@ namespace QueryUtilTests {
         private:
             bool rangesRepresented( const BSONObj& index, bool singleKey, const BSONObj& query ) {
                 FieldRangeSet fieldRangeSet( "", query, singleKey, true );
-                IndexSpec indexSpec( index );
+                BSONObj indexSpec( index );
                 FieldRangeVector fieldRangeVector( fieldRangeSet, indexSpec, 1 );
                 return fieldRangeVector.hasAllIndexedRanges();
             }
@@ -1809,12 +1702,12 @@ namespace QueryUtilTests {
             void run() {
                 // Equality on a single field is a single interval.
                 FieldRangeVector frv1( FieldRangeSet( "dummy", BSON( "a" << 5 ), true, true ),
-                                       IndexSpec( BSON( "a" << 1 ) ),
+                                       ( BSON( "a" << 1 ) ),
                                        1 );
                 ASSERT( frv1.isSingleInterval() );
                 // Single interval on a single field is a single interval.
                 FieldRangeVector frv2( FieldRangeSet( "dummy", BSON( "a" << GT << 5 ), true, true ),
-                                       IndexSpec( BSON( "a" << 1 ) ),
+                                       ( BSON( "a" << 1 ) ),
                                        1 );
                 ASSERT( frv2.isSingleInterval() );
                 // Multiple intervals on a single field is not a single interval.
@@ -1822,7 +1715,7 @@ namespace QueryUtilTests {
                                                       fromjson( "{a:{$in:[4,5]}}" ),
                                                       true,
                                                       true ),
-                                      IndexSpec( BSON( "a" << 1 ) ),
+                                      ( BSON( "a" << 1 ) ),
                                       1 );
                 ASSERT( !frv3.isSingleInterval() );
 
@@ -1831,7 +1724,7 @@ namespace QueryUtilTests {
                                                       BSON( "a" << 5 << "b" << 6 ),
                                                       true,
                                                       true ),
-                                       IndexSpec( BSON( "a" << 1 << "b" << 1 ) ),
+                                       ( BSON( "a" << 1 << "b" << 1 ) ),
                                        1 );
                 ASSERT( frv4.isSingleInterval() );
                 // Equality on first field and single interval on second field is a compound
@@ -1840,7 +1733,7 @@ namespace QueryUtilTests {
                                                       BSON( "a" << 5 << "b" << GT << 6 ),
                                                       true,
                                                       true ),
-                                       IndexSpec( BSON( "a" << 1 << "b" << 1 ) ),
+                                       ( BSON( "a" << 1 << "b" << 1 ) ),
                                        1 );
                 ASSERT( frv5.isSingleInterval() );
                 // Single interval on first field and single interval on second field is not a
@@ -1849,7 +1742,7 @@ namespace QueryUtilTests {
                                                       BSON( "a" << LT << 5 << "b" << GT << 6 ),
                                                       true,
                                                       true ),
-                                       IndexSpec( BSON( "a" << 1 << "b" << 1 ) ),
+                                       ( BSON( "a" << 1 << "b" << 1 ) ),
                                        1 );
                 ASSERT( !frv6.isSingleInterval() );
                 // Multiple intervals on two fields is not a compound single interval.
@@ -1857,7 +1750,7 @@ namespace QueryUtilTests {
                                                       fromjson( "{a:{$in:[4,5]},b:{$in:[7,8]}}" ),
                                                       true,
                                                       true ),
-                                       IndexSpec( BSON( "a" << 1 << "b" << 1 ) ),
+                                       ( BSON( "a" << 1 << "b" << 1 ) ),
                                        1 );
                 ASSERT( !frv7.isSingleInterval() );
 
@@ -1866,7 +1759,7 @@ namespace QueryUtilTests {
                                                       BSON( "a" << 5 ),
                                                       true,
                                                       true ),
-                                       IndexSpec( BSON( "a" << 1 << "b" << 1 ) ),
+                                       ( BSON( "a" << 1 << "b" << 1 ) ),
                                        1 );
                 ASSERT( frv8.isSingleInterval() );
                 // With missing second field is still a single compound interval.
@@ -1874,7 +1767,7 @@ namespace QueryUtilTests {
                                                       BSON( "b" << 5 ),
                                                       true,
                                                       true ),
-                                       IndexSpec( BSON( "a" << 1 << "b" << 1 ) ),
+                                       ( BSON( "a" << 1 << "b" << 1 ) ),
                                        1 );
                 ASSERT( !frv9.isSingleInterval() );
 
@@ -1884,7 +1777,7 @@ namespace QueryUtilTests {
                                                        fromjson( "{a:5,b:6,c:{$gt:7}}" ),
                                                        true,
                                                        true ),
-                                        IndexSpec( BSON( "a" << 1 << "b" << 1 << "c" << 1 ) ),
+                                        ( BSON( "a" << 1 << "b" << 1 << "c" << 1 ) ),
                                         1 );
                 ASSERT( frv10.isSingleInterval() );
 
@@ -1893,7 +1786,7 @@ namespace QueryUtilTests {
                                                        fromjson( "{a:5,b:{$gt:7}}" ),
                                                        true,
                                                        true ),
-                                        IndexSpec( BSON( "a" << 1 << "b" << 1 << "c" << 1 ) ),
+                                        ( BSON( "a" << 1 << "b" << 1 << "c" << 1 ) ),
                                         1 );
                 ASSERT( frv11.isSingleInterval() );
                 // Equality, then single interval, then missing, then missing is a compound single
@@ -1902,7 +1795,7 @@ namespace QueryUtilTests {
                                                        fromjson( "{a:5,b:{$gt:7}}" ),
                                                        true,
                                                        true ),
-                                        IndexSpec( BSON( "a" << 1 <<
+                                        ( BSON( "a" << 1 <<
                                                          "b" << 1 <<
                                                          "c" << 1 <<
                                                          "d" << 1 ) ),
@@ -1914,7 +1807,7 @@ namespace QueryUtilTests {
                                                        fromjson( "{a:5,b:{$gt:7}}" ),
                                                        true,
                                                        true ),
-                                        IndexSpec( BSON( "a" << 1 <<
+                                        ( BSON( "a" << 1 <<
                                                          "b" << 1 <<
                                                          "c" << 1 <<
                                                          "d" << -1 ) ),
@@ -1926,7 +1819,7 @@ namespace QueryUtilTests {
                                                        fromjson( "{a:5,b:{$gt:7},d:{$gt:1}}" ),
                                                        true,
                                                        true ),
-                                        IndexSpec( BSON( "a" << 1 <<
+                                        ( BSON( "a" << 1 <<
                                                          "b" << 1 <<
                                                          "c" << 1 <<
                                                          "d" << 1 ) ),
@@ -1941,7 +1834,7 @@ namespace QueryUtilTests {
             void run() {
                 // Equality on a single field.
                 FieldRangeVector frv1( FieldRangeSet( "dummy", BSON( "a" << 5 ), true, true ),
-                                       IndexSpec( BSON( "a" << 1 ) ),
+                                       ( BSON( "a" << 1 ) ),
                                        1 );
                 ASSERT_EQUALS( BSON( "" << 5 ), frv1.startKey() );
                 ASSERT( frv1.startKeyInclusive() );
@@ -1949,7 +1842,7 @@ namespace QueryUtilTests {
                 ASSERT( frv1.endKeyInclusive() );
                 // Single interval on a single field.
                 FieldRangeVector frv2( FieldRangeSet( "dummy", BSON( "a" << GT << 5 ), true, true ),
-                                       IndexSpec( BSON( "a" << 1 ) ),
+                                       ( BSON( "a" << 1 ) ),
                                        1 );
                 ASSERT_EQUALS( BSON( "" << 5 ), frv2.startKey() );
                 ASSERT( !frv2.startKeyInclusive() );
@@ -1961,7 +1854,7 @@ namespace QueryUtilTests {
                                                       BSON( "a" << 5 << "b" << 6 ),
                                                       true,
                                                       true ),
-                                       IndexSpec( BSON( "a" << 1 << "b" << 1 ) ),
+                                       ( BSON( "a" << 1 << "b" << 1 ) ),
                                        1 );
                 ASSERT_EQUALS( BSON( "" << 5 << "" << 6 ), frv3.startKey() );
                 ASSERT( frv3.startKeyInclusive() );
@@ -1972,7 +1865,7 @@ namespace QueryUtilTests {
                                                       BSON( "a" << 5 << "b" << LT << 6 ),
                                                       true,
                                                       true ),
-                                       IndexSpec( BSON( "a" << 1 << "b" << 1 ) ),
+                                       ( BSON( "a" << 1 << "b" << 1 ) ),
                                        1 );
                 ASSERT_EQUALS( BSON( "" << 5 << "" << -numeric_limits<double>::max() ),
                                frv4.startKey() );
@@ -1986,7 +1879,7 @@ namespace QueryUtilTests {
                                                       BSON( "a" << 5 ),
                                                       true,
                                                       true ),
-                                       IndexSpec( BSON( "a" << 1 << "b" << 1 ) ),
+                                       ( BSON( "a" << 1 << "b" << 1 ) ),
                                        1 );
                 ASSERT_EQUALS( BSON( "" << 5 << "" << MINKEY ), frv5.startKey() );
                 ASSERT( frv5.startKeyInclusive() );
@@ -1997,7 +1890,7 @@ namespace QueryUtilTests {
                                                       fromjson( "{a:5,b:{$gt:7}}" ),
                                                       true,
                                                       true ),
-                                       IndexSpec( BSON( "a" << 1 << "b" << 1 << "c" << 1 ) ),
+                                       ( BSON( "a" << 1 << "b" << 1 << "c" << 1 ) ),
                                        1 );
                 ASSERT_EQUALS( BSON( "" << 5 << "" << 7 << "" << MAXKEY ), frv6.startKey() );
                 ASSERT( !frv6.startKeyInclusive() );
@@ -2011,7 +1904,7 @@ namespace QueryUtilTests {
                                                       fromjson( "{a:5,b:{$gt:7}}" ),
                                                       true,
                                                       true ),
-                                       IndexSpec( BSON( "a" << 1 <<
+                                       ( BSON( "a" << 1 <<
                                                         "b" << 1 <<
                                                         "c" << 1 <<
                                                         "d" << 1 ) ),
@@ -2032,7 +1925,7 @@ namespace QueryUtilTests {
                                                       fromjson( "{a:5,b:{$gt:7,$lt:10}}" ),
                                                       true,
                                                       true ),
-                                       IndexSpec( BSON( "a" << 1 <<
+                                       ( BSON( "a" << 1 <<
                                                         "b" << 1 <<
                                                         "c" << 1 <<
                                                         "d" << -1 ) ),
@@ -2049,7 +1942,7 @@ namespace QueryUtilTests {
                                                       fromjson( "{a:5,b:{$gt:7,$lt:10}}" ),
                                                       true,
                                                       true ),
-                                       IndexSpec( BSON( "a" << 1 <<
+                                       ( BSON( "a" << 1 <<
                                                         "b" << 1 <<
                                                         "c" << 1 <<
                                                         "d" << -1 ) ),
@@ -2073,8 +1966,7 @@ namespace QueryUtilTests {
             virtual ~Base() {}
             void run() {
                 FieldRangeSet fieldRangeSet( "", query(), true, true );
-                IndexSpec indexSpec( index(), BSONObj() );
-                FieldRangeVector fieldRangeVector( fieldRangeSet, indexSpec, 1 );
+                FieldRangeVector fieldRangeVector( fieldRangeSet, index(), 1 );
                 _iterator.reset( new FieldRangeVectorIterator( fieldRangeVector,
                                                               singleIntervalLimit() ) );
                 _iterator->advance( fieldRangeVector.startKey() );
@@ -2123,7 +2015,7 @@ namespace QueryUtilTests {
             }
             static void assertEqualWithoutFieldNames( const BSONObj &one, const BSONObj &two ) {
                 if ( !equalWithoutFieldNames( one, two ) ) {
-                    log() << one << " != " << two << endl;
+                    mongo::unittest::log() << one << " != " << two << endl;
                     ASSERT( equalWithoutFieldNames( one, two ) );
                 }
             }
@@ -2897,10 +2789,6 @@ namespace QueryUtilTests {
             add<FieldRangeTests::NonSingletonOr>();
             add<FieldRangeTests::Empty>();
             add<FieldRangeTests::Equality>();
-            add<FieldRangeTests::QueryPatternTest>();
-            add<FieldRangeTests::QueryPatternEmpty>();
-            add<FieldRangeTests::QueryPatternNeConstraint>();
-            add<FieldRangeTests::QueryPatternOptimizedBounds>();
             add<FieldRangeTests::NoWhere>();
             add<FieldRangeTests::Numeric>();
             add<FieldRangeTests::InLowerBound>();
@@ -2999,8 +2887,7 @@ namespace QueryUtilTests {
             add<FieldRangeTests::ExactMatchRepresentation::Intersection>();
             add<FieldRangeTests::ExactMatchRepresentation::Union>();
             add<FieldRangeTests::ExactMatchRepresentation::Difference>();
-            add<FieldRangeSetTests::ToString>();
-            add<FieldRangeSetTests::Namespace>();
+            add<FieldRangeSetTests::Basics>();
             add<FieldRangeSetTests::Intersect>();
             add<FieldRangeSetTests::MultiKeyIntersect>();
             add<FieldRangeSetTests::EmptyMultiKeyIntersect>();
@@ -3035,8 +2922,6 @@ namespace QueryUtilTests {
             add<FieldRangeSetPairTests::NoNonUniversalRanges>();
             add<FieldRangeSetPairTests::MatchPossible>();
             add<FieldRangeSetPairTests::MatchPossibleForIndex>();
-            add<FieldRangeSetPairTests::ClearIndexesForPatterns>();
-            add<FieldRangeSetPairTests::BestIndexForPatterns>();
             add<FieldRangeVectorTests::ToString>();
             add<FieldRangeVectorTests::HasAllIndexedRanges>();
             add<FieldRangeVectorTests::SingleInterval>();

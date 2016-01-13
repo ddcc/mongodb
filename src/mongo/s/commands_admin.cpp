@@ -12,30 +12,57 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include "mongo/db/commands.h"
 
 #include "mongo/client/connpool.h"
 #include "mongo/client/dbclientcursor.h"
+#include "mongo/client/replica_set_monitor.h"
+#include "mongo/db/audit.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/commands/shutdown.h"
 #include "mongo/db/dbmessage.h"
+#include "mongo/db/field_parser.h"
+#include "mongo/db/hasher.h"
+#include "mongo/db/index_names.h"
+#include "mongo/db/query/lite_parsed_query.h"
 #include "mongo/db/stats/counters.h"
+#include "mongo/db/wire_version.h"
+#include "mongo/db/write_concern.h"
 #include "mongo/s/chunk.h"
 #include "mongo/s/client_info.h"
+#include "mongo/s/cluster_write.h"
 #include "mongo/s/config.h"
-#include "mongo/s/field_parser.h"
+#include "mongo/s/dbclient_multi_command.h"
+#include "mongo/s/dbclient_shard_resolver.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/strategy.h"
 #include "mongo/s/type_chunk.h"
 #include "mongo/s/type_database.h"
 #include "mongo/s/type_shard.h"
 #include "mongo/s/writeback_listener.h"
+#include "mongo/s/write_ops/batch_downconvert.h"
+#include "mongo/s/write_ops/batch_write_exec.h"
+#include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/util/net/listen.h"
 #include "mongo/util/net/message.h"
 #include "mongo/util/processinfo.h"
@@ -85,7 +112,7 @@ namespace mongo {
                                                std::vector<Privilege>* out) {
                 ActionSet actions;
                 actions.addAction(ActionType::netstat);
-                out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+                out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
             }
             bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
                 result.append("configserver", configServer.getPrimary().getConnString() );
@@ -105,7 +132,7 @@ namespace mongo {
                                                std::vector<Privilege>* out) {
                 ActionSet actions;
                 actions.addAction(ActionType::flushRouterConfig);
-                out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+                out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
             }
             bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
                 grid.flushConfig();
@@ -122,7 +149,7 @@ namespace mongo {
                                                std::vector<Privilege>* out) {
                 ActionSet actions;
                 actions.addAction(ActionType::fsync);
-                out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+                out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
             }
             bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
                 if ( cmdObj["lock"].trueValue() ) {
@@ -165,15 +192,21 @@ namespace mongo {
             virtual void help( stringstream& help ) const {
                 help << " example: { moveprimary : 'foo' , to : 'localhost:9999' }";
             }
-            virtual void addRequiredPrivileges(const std::string& dbname,
-                                               const BSONObj& cmdObj,
-                                               std::vector<Privilege>* out) {
-                ActionSet actions;
-                actions.addAction(ActionType::movePrimary);
-                out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+            virtual Status checkAuthForCommand(ClientBasic* client,
+                                               const std::string& dbname,
+                                               const BSONObj& cmdObj) {
+                if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
+                        ResourcePattern::forDatabaseName(parseNs(dbname, cmdObj)),
+                        ActionType::moveChunk)) {
+                    return Status(ErrorCodes::Unauthorized, "Unauthorized");
+                }
+                return Status::OK();
+            }
+            virtual std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const {
+                return cmdObj.firstElement().valuestrsafe();
             }
             bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
-                string dbname = cmdObj.firstElement().valuestrsafe();
+                string dbname = parseNs("admin", cmdObj);
 
                 if ( dbname.size() == 0 ) {
                     errmsg = "no db";
@@ -237,21 +270,27 @@ namespace mongo {
                 set<string> shardedColls;
                 config->getAllShardedCollections( shardedColls );
 
+                // Record start in changelog
+                BSONObj moveStartDetails = buildMoveEntry( dbname,
+                                                           config->getPrimary().toString(),
+                                                           s.toString(),
+                                                           shardedColls );
+                configServer.logChange( "movePrimary.start", dbname, moveStartDetails );
+
                 BSONArrayBuilder barr;
                 barr.append( shardedColls );
 
-                scoped_ptr<ScopedDbConnection> toconn(
-                        ScopedDbConnection::getScopedDbConnection( s.getConnString() ) );
+                ScopedDbConnection toconn(s.getConnString());
 
                 // TODO ERH - we need a clone command which replays operations from clone start to now
                 //            can just use local.oplog.$main
                 BSONObj cloneRes;
-                bool worked = toconn->get()->runCommand(
+                bool worked = toconn->runCommand(
                     dbname.c_str(),
                     BSON( "clone" << config->getPrimary().getConnString() <<
                           "collsToIgnore" << barr.arr() ),
                     cloneRes );
-                toconn->done();
+                toconn.done();
 
                 if ( ! worked ) {
                     log() << "clone failed" << cloneRes << endl;
@@ -261,9 +300,7 @@ namespace mongo {
 
                 string oldPrimary = config->getPrimary().getConnString();
 
-                scoped_ptr<ScopedDbConnection> fromconn(
-                        ScopedDbConnection::getScopedDbConnection( config->getPrimary()
-                                                                   .getConnString() ) );
+                ScopedDbConnection fromconn(config->getPrimary().getConnString());
 
                 config->setPrimary( s.getConnString() );
 
@@ -273,7 +310,7 @@ namespace mongo {
                     log() << "movePrimary dropping database on " << oldPrimary << ", no sharded collections in " << dbname << endl;
 
                     try {
-                        fromconn->get()->dropDatabase( dbname.c_str() );
+                        fromconn->dropDatabase( dbname.c_str() );
                     }
                     catch( DBException& e ){
                         e.addContext( str::stream() << "movePrimary could not drop the database " << dbname << " on " << oldPrimary );
@@ -299,7 +336,7 @@ namespace mongo {
                         if( el.type() == String ){
                             try {
                                 log() << "movePrimary dropping cloned collection " << el.String() << " on " << oldPrimary << endl;
-                                fromconn->get()->dropCollection( el.String() );
+                                fromconn->dropCollection( el.String() );
                             }
                             catch( DBException& e ){
                                 e.addContext( str::stream() << "movePrimary could not drop the cloned collection " << el.String() << " on " << oldPrimary );
@@ -309,11 +346,36 @@ namespace mongo {
                     }
                 }
 
-                fromconn->done();
+                fromconn.done();
 
                 result << "primary " << s.toString();
 
+                // Record finish in changelog
+                BSONObj moveFinishDetails = buildMoveEntry( dbname,
+                                                            oldPrimary,
+                                                            s.toString(),
+                                                            shardedColls );
+                configServer.logChange( "movePrimary", dbname, moveFinishDetails );
+
                 return true;
+            }
+        private:
+            BSONObj buildMoveEntry( const string db,
+                                    const string from,
+                                    const string to,
+                                    set<string> shardedColls ) {
+                BSONObjBuilder details;
+                details.append( "database", db );
+                details.append( "from", from );
+                details.append( "to", to );
+                BSONArrayBuilder collB( details.subarrayStart( "shardedCollections" ) );
+                set<string>::iterator it;
+                for ( it = shardedColls.begin(); it != shardedColls.end(); ++it ) {
+                    collB.append( *it );
+                }
+                collB.done();
+
+                return details.obj();
             }
         } movePrimary;
 
@@ -325,15 +387,21 @@ namespace mongo {
                         << "Enable sharding for a db. (Use 'shardcollection' command afterwards.)\n"
                         << "  { enablesharding : \"<dbname>\" }\n";
             }
-            virtual void addRequiredPrivileges(const std::string& dbname,
-                                               const BSONObj& cmdObj,
-                                               std::vector<Privilege>* out) {
-                ActionSet actions;
-                actions.addAction(ActionType::enableSharding);
-                out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+            virtual Status checkAuthForCommand(ClientBasic* client,
+                                               const std::string& dbname,
+                                               const BSONObj& cmdObj) {
+                if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
+                        ResourcePattern::forDatabaseName(parseNs(dbname, cmdObj)),
+                        ActionType::enableSharding)) {
+                    return Status(ErrorCodes::Unauthorized, "Unauthorized");
+                }
+                return Status::OK();
+            }
+            virtual std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const {
+                return cmdObj.firstElement().valuestrsafe();
             }
             bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
-                string dbname = cmdObj.firstElement().valuestrsafe();
+                string dbname = parseNs("admin", cmdObj);
                 if ( dbname.size() == 0 ) {
                     errmsg = "no db";
                     return false;
@@ -359,6 +427,7 @@ namespace mongo {
                 
                 log() << "enabling sharding on: " << dbname << endl;
 
+                audit::logEnableSharding(ClientBasic::getCurrent(), dbname);
                 config->enableSharding();
 
                 return true;
@@ -376,15 +445,22 @@ namespace mongo {
                         << "Shard a collection.  Requires key.  Optional unique. Sharding must already be enabled for the database.\n"
                         << "  { enablesharding : \"<dbname>\" }\n";
             }
-            virtual void addRequiredPrivileges(const std::string& dbname,
-                                               const BSONObj& cmdObj,
-                                               std::vector<Privilege>* out) {
-                ActionSet actions;
-                actions.addAction(ActionType::shardCollection);
-                out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+            virtual Status checkAuthForCommand(ClientBasic* client,
+                                               const std::string& dbname,
+                                               const BSONObj& cmdObj) {
+                if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
+                        ResourcePattern::forExactNamespace(NamespaceString(parseNs(dbname,
+                                                                                   cmdObj))),
+                        ActionType::enableSharding)) {
+                    return Status(ErrorCodes::Unauthorized, "Unauthorized");
+                }
+                return Status::OK();
             }
-            bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
-                const string ns = cmdObj.firstElement().valuestrsafe();
+            virtual std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const {
+                return parseNsFullyQualified(dbname, cmdObj);
+            }
+            bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
+                const string ns = parseNs(dbname, cmdObj);
                 if ( ns.size() == 0 ) {
                     errmsg = "no ns";
                     return false;
@@ -413,15 +489,14 @@ namespace mongo {
                     return false;
                 }
 
+                bool isHashedShardKey = // br
+                        ( IndexNames::findPluginName( proposedKey ) == IndexNames::HASHED );
+
                 // Currently the allowable shard keys are either
                 // i) a hashed single field, e.g. { a : "hashed" }, or
                 // ii) a compound list of ascending fields, e.g. { a : 1 , b : 1 }
-                if ( proposedKey.firstElementType() == mongo::String ) {
+                if ( isHashedShardKey ) {
                     // case i)
-                    if ( !str::equals( proposedKey.firstElement().valuestrsafe() , "hashed" ) ) {
-                        errmsg = "unrecognized string: " + proposedKey.firstElement().str();
-                        return false;
-                    }
                     if ( proposedKey.nFields() > 1 ) {
                         errmsg = "hashed shard keys currently only support single field keys";
                         return false;
@@ -454,17 +529,22 @@ namespace mongo {
                     return false;
 
                 //the rest of the checks require a connection to the primary db
-                scoped_ptr<ScopedDbConnection> conn(
-                        ScopedDbConnection::getScopedDbConnection(
-                                        config->getPrimary().getConnString() ) );
+                ScopedDbConnection conn(config->getPrimary().getConnString());
 
                 //check that collection is not capped
-                BSONObj res = conn->get()->findOne( config->getName() + ".system.namespaces",
-                                                    BSON( "name" << ns ) );
+                BSONObj res;
+                {
+                    std::list<BSONObj> all = conn->getCollectionInfos( config->getName(),
+                                                                       BSON( "name" << nsToCollectionSubstring( ns ) ) );
+                    if ( !all.empty() ) {
+                        res = all.front().getOwned();
+                    }
+                }
+
                 if ( res["options"].type() == Object &&
                      res["options"].embeddedObject()["capped"].trueValue() ) {
                     errmsg = "can't shard capped collection";
-                    conn->done();
+                    conn.done();
                     return false;
                 }
 
@@ -482,6 +562,7 @@ namespace mongo {
                 //         ii. is not sparse
                 //         iii. contains no null values
                 //         iv. is not multikey (maybe lift this restriction later)
+                //         v. if a hashed index, has default seed (lift this restriction later)
                 //
                 // 3. If the proposed shard key is specified as unique, there must exist a useful,
                 //    unique index exactly equal to the proposedKey (not just a prefix).
@@ -499,7 +580,7 @@ namespace mongo {
                 // 1.  Verify consistency with existing unique indexes
                 BSONObj uniqueQuery = BSON( "ns" << ns << "unique" << true );
                 auto_ptr<DBClientCursor> uniqueQueryResult =
-                                conn->get()->query( indexNS , uniqueQuery );
+                                conn->query( indexNS , uniqueQuery );
 
                 ShardKeyPattern proposedShardKey( proposedKey );
                 while ( uniqueQueryResult->more() ) {
@@ -511,7 +592,7 @@ namespace mongo {
                                                << "and proposed shard key " << proposedKey << ". "
                                                << "Uniqueness can't be maintained unless "
                                                << "shard key is a prefix";
-                        conn->done();
+                        conn.done();
                         return false;
                     }
                 }
@@ -521,7 +602,7 @@ namespace mongo {
 
                 BSONObj allQuery = BSON( "ns" << ns );
                 auto_ptr<DBClientCursor> allQueryResult =
-                                conn->get()->query( indexNS , allQuery );
+                                conn->query( indexNS , allQuery );
 
                 BSONArrayBuilder allIndexes;
                 while ( allQueryResult->more() ) {
@@ -530,6 +611,22 @@ namespace mongo {
                     BSONObj currentKey = idx["key"].embeddedObject();
                     // Check 2.i. and 2.ii.
                     if ( ! idx["sparse"].trueValue() && proposedKey.isPrefixOf( currentKey ) ) {
+
+                        // We can't currently use hashed indexes with a non-default hash seed
+                        // Check v.
+                        // Note that this means that, for sharding, we only support one hashed index
+                        // per field per collection.
+                        if ( isHashedShardKey && !idx["seed"].eoo()
+                            && idx["seed"].numberInt() != BSONElementHasher::DEFAULT_HASH_SEED ) {
+                            errmsg = str::stream()
+                                    << "can't shard collection " << ns << " with hashed shard key "
+                                    << proposedKey
+                                    << " because the hashed index uses a non-default seed of "
+                                    << idx["seed"].numberInt();
+                            conn.done();
+                            return false;
+                        }
+
                         hasUsefulIndexForKey = true;
                     }
                 }
@@ -538,7 +635,7 @@ namespace mongo {
                 bool careAboutUnique = cmdObj["unique"].trueValue();
                 if ( hasUsefulIndexForKey && careAboutUnique ) {
                     BSONObj eqQuery = BSON( "ns" << ns << "key" << proposedKey );
-                    BSONObj eqQueryResult = conn->get()->findOne( indexNS, eqQuery );
+                    BSONObj eqQueryResult = conn->findOne( indexNS, eqQuery );
                     if ( eqQueryResult.isEmpty() ) {
                         hasUsefulIndexForKey = false;  // if no exact match, index not useful,
                                                        // but still possible to create one later
@@ -551,7 +648,7 @@ namespace mongo {
                             errmsg = str::stream() << "can't shard collection " << ns << ", "
                                                    << proposedKey << " index not unique, "
                                                    << "and unique index explicitly specified";
-                            conn->done();
+                            conn.done();
                             return false;
                         }
                     }
@@ -560,23 +657,22 @@ namespace mongo {
                 if ( hasUsefulIndexForKey ) {
                     // Check 2.iii and 2.iv. Make sure no null entries in the sharding index
                     // and that there is a useful, non-multikey index available
-                    BSONObjBuilder cmd;
-                    cmd.append( "checkShardingIndex" , ns );
-                    cmd.append( "keyPattern" , proposedKey );
-                    BSONObj cmdObj = cmd.obj();
-                    if ( ! conn->get()->runCommand( "admin" , cmdObj , res ) ) {
+                    BSONObjBuilder checkShardingIndexCmd;
+                    checkShardingIndexCmd.append( "checkShardingIndex" , ns );
+                    checkShardingIndexCmd.append( "keyPattern" , proposedKey );
+                    if ( ! conn.get()->runCommand( "admin", checkShardingIndexCmd.obj(), res ) ) {
                         errmsg = res["errmsg"].str();
-                        conn->done();
+                        conn.done();
                         return false;
                     }
                 }
                 // 4. if no useful index, and collection is non-empty, fail
-                else if ( conn->get()->count( ns ) != 0 ) {
+                else if ( conn->count( ns ) != 0 ) {
                     errmsg = str::stream() << "please create an index that starts with the "
                                            << "shard key before sharding.";
                     result.append( "proposedKey" , proposedKey );
                     result.appendArray( "curIndexes" , allIndexes.done() );
-                    conn->done();
+                    conn.done();
                     return false;
                 }
                 // 5. If no useful index exists, and collection empty, create one on proposedKey.
@@ -584,21 +680,23 @@ namespace mongo {
                 //    receiving shard whenever a migrate occurs.
                 else {
                     // call ensureIndex with cache=false, see SERVER-1691
-                    bool ensureSuccess = conn->get()->ensureIndex( ns ,
-                                                                   proposedKey ,
-                                                                   careAboutUnique ,
-                                                                   "" ,
-                                                                   false );
-                    if ( ! ensureSuccess ) {
-                        errmsg = "ensureIndex failed to create index on primary shard";
-                        conn->done();
+                    Status result = clusterCreateIndex( ns,
+                                                        proposedKey,
+                                                        careAboutUnique,
+                                                        WriteConcernOptions::Default,
+                                                        NULL );
+
+                    if ( !result.isOK() ) {
+                        errmsg = str::stream() << "ensureIndex failed to create index on "
+                                               << "primary shard: " << result.reason();
+                        conn.done();
                         return false;
                     }
                 }
 
-                bool isEmpty = ( conn->get()->count( ns ) == 0 );
+                bool isEmpty = ( conn->count( ns ) == 0 );
 
-                conn->done();
+                conn.done();
 
                 // Pre-splitting:
                 // For new collections which use hashed shard keys, we can can pre-split the
@@ -616,9 +714,6 @@ namespace mongo {
 
                 vector<BSONObj> initSplits;  // there will be at most numShards-1 of these
                 vector<BSONObj> allSplits;   // all of the initial desired split points
-
-                bool isHashedShardKey =
-                        str::equals(proposedKey.firstElement().valuestrsafe(), "hashed");
 
                 // only pre-split when using a hashed shard key and collection is still empty
                 if ( isHashedShardKey && isEmpty ){
@@ -656,14 +751,15 @@ namespace mongo {
                     }
                 }
 
-                tlog() << "CMD: shardcollection: " << cmdObj << endl;
+                MONGO_TLOG(0) << "CMD: shardcollection: " << cmdObj << endl;
 
+                audit::logShardCollection(ClientBasic::getCurrent(), ns, proposedKey, careAboutUnique);
                 config->shardCollection( ns , proposedKey , careAboutUnique , &initSplits );
 
                 result << "collectionsharded" << ns;
 
                 // only initially move chunks when using a hashed shard key
-                if (isHashedShardKey) {
+                if (isHashedShardKey && isEmpty) {
 
                     // Reload the new config info.  If we created more than one initial chunk, then
                     // we need to move them around to balance.
@@ -681,8 +777,9 @@ namespace mongo {
 
                         BSONObj moveResult;
                         if (!chunk->moveAndCommit(to, Chunk::MaxChunkSize,
-                                false, true, moveResult)) {
-                            warning() << "Couldn't move chunk " << chunk << " to shard "  << to
+                                false, true, 0, moveResult)) {
+                            warning().stream()
+                                      << "Couldn't move chunk " << chunk << " to shard "  << to
                                       << " while sharding collection " << ns << ". Reason: "
                                       <<  moveResult << endl;
                         }
@@ -700,20 +797,28 @@ namespace mongo {
                     ChunkPtr currentChunk = chunkManager->findIntersectingChunk( allSplits[0] );
                     vector<BSONObj> subSplits;
                     for ( unsigned i = 0 ; i <= allSplits.size(); i++){
-                        if ( i == allSplits.size() || ! currentChunk->containsPoint( allSplits[i] ) ) {
+                        if ( i == allSplits.size() ||
+                                ! currentChunk->containsPoint( allSplits[i] ) ) {
                             if ( ! subSplits.empty() ){
                                 BSONObj splitResult;
                                 if ( ! currentChunk->multiSplit( subSplits , splitResult ) ){
-                                    warning() << "Couldn't split chunk " << currentChunk
-                                              << " while sharding collection " << ns << ". Reason: "
-                                              << splitResult << endl;
+                                    warning().stream()
+                                        << "Couldn't split chunk " << currentChunk
+                                        << " while sharding collection " << ns << ". Reason: "
+                                        << splitResult << endl;
                                 }
                                 subSplits.clear();
                             }
                             if ( i < allSplits.size() )
                                 currentChunk = chunkManager->findIntersectingChunk( allSplits[i] );
                         } else {
-                            subSplits.push_back( allSplits[i] );
+                            BSONObj splitPoint(allSplits[i]);
+                            if ( currentChunk->getMin().woCompare( splitPoint ) == 0 ) {
+                                // Do not split on the boundaries.
+                                continue;
+                            }
+
+                            subSplits.push_back( splitPoint );
                         }
                     }
 
@@ -732,15 +837,22 @@ namespace mongo {
             virtual void help( stringstream& help ) const {
                 help << " example: { getShardVersion : 'alleyinsider.foo'  } ";
             }
-            virtual void addRequiredPrivileges(const std::string& dbname,
-                                               const BSONObj& cmdObj,
-                                               std::vector<Privilege>* out) {
-                ActionSet actions;
-                actions.addAction(ActionType::getShardVersion);
-                out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+            virtual Status checkAuthForCommand(ClientBasic* client,
+                                               const std::string& dbname,
+                                               const BSONObj& cmdObj) {
+                if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
+                        ResourcePattern::forExactNamespace(NamespaceString(parseNs(dbname,
+                                                                                   cmdObj))),
+                        ActionType::getShardVersion)) {
+                    return Status(ErrorCodes::Unauthorized, "Unauthorized");
+                }
+                return Status::OK();
             }
-            bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
-                string ns = cmdObj.firstElement().valuestrsafe();
+            virtual std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const {
+                return parseNsFullyQualified(dbname, cmdObj);
+            }
+            bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
+                string ns = parseNs(dbname, cmdObj);
                 if ( ns.size() == 0 ) {
                     errmsg = "need to specify fully namespace";
                     return false;
@@ -773,23 +885,30 @@ namespace mongo {
                         << " { split : 'alleyinsider.blog.posts' , find : { ts : 1 } }\n"
                         << " example: - split the shard that contains the key with this as the middle \n"
                         << " { split : 'alleyinsider.blog.posts' , middle : { ts : 1 } }\n"
-                        << " NOTE: this does not move move the chunks, it merely creates a logical separation \n"
+                        << " NOTE: this does not move the chunks, it merely creates a logical separation \n"
                         ;
             }
-            virtual void addRequiredPrivileges(const std::string& dbname,
-                                               const BSONObj& cmdObj,
-                                               std::vector<Privilege>* out) {
-                ActionSet actions;
-                actions.addAction(ActionType::split);
-                out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+            virtual Status checkAuthForCommand(ClientBasic* client,
+                                               const std::string& dbname,
+                                               const BSONObj& cmdObj) {
+                if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
+                        ResourcePattern::forExactNamespace(NamespaceString(parseNs(dbname,
+                                                                                   cmdObj))),
+                        ActionType::splitChunk)) {
+                    return Status(ErrorCodes::Unauthorized, "Unauthorized");
+                }
+                return Status::OK();
             }
-            bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
+            virtual std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const {
+                return parseNsFullyQualified(dbname, cmdObj);
+            }
+            bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
                 if ( ! okForConfigChanges( errmsg ) )
                     return false;
 
                 ShardConnection::sync();
 
-                string ns = cmdObj.firstElement().valuestrsafe();
+                string ns = parseNs(dbname, cmdObj);
                 if ( ns.size() == 0 ) {
                     errmsg = "no ns";
                     return false;
@@ -858,7 +977,8 @@ namespace mongo {
                     return false;
                 }
 
-                ChunkManagerPtr info = config->getChunkManager( ns );
+                // This refreshes the chunk metadata if stale.
+                ChunkManagerPtr info = config->getChunkManager( ns, true );
                 ChunkPtr chunk;
 
                 if (!find.isEmpty()) {
@@ -879,7 +999,9 @@ namespace mongo {
                 }
 
                 verify(chunk.get());
-                log() << "splitting: " << ns << "  shard: " << chunk << endl;
+                log() << "splitting chunk [" << chunk->getMin() << "," << chunk->getMax() << ")"
+                      << " in collection " << ns
+                      << " on shard " << chunk->getShard().getName() << endl;
 
                 BSONObj res;
                 bool worked;
@@ -909,7 +1031,7 @@ namespace mongo {
                     result.append( "cause" , res );
                     return false;
                 }
-                config->getChunkManager( ns , true );
+
                 return true;
             }
         } splitCollectionCmd;
@@ -924,21 +1046,28 @@ namespace mongo {
                      << "  { movechunk : 'test.foo' , bounds : [ { num : 0 } , { num : 10 } ] "
                      << " , to : 'shard001' }\n";
             }
-            virtual void addRequiredPrivileges(const std::string& dbname,
-                                               const BSONObj& cmdObj,
-                                               std::vector<Privilege>* out) {
-                ActionSet actions;
-                actions.addAction(ActionType::moveChunk);
-                out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+            virtual Status checkAuthForCommand(ClientBasic* client,
+                                               const std::string& dbname,
+                                               const BSONObj& cmdObj) {
+                if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
+                        ResourcePattern::forExactNamespace(NamespaceString(parseNs(dbname,
+                                                                                   cmdObj))),
+                        ActionType::moveChunk)) {
+                    return Status(ErrorCodes::Unauthorized, "Unauthorized");
+                }
+                return Status::OK();
             }
-            bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
+            virtual std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const {
+                return parseNsFullyQualified(dbname, cmdObj);
+            }
+            bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
                 if ( ! okForConfigChanges( errmsg ) )
                     return false;
 
                 ShardConnection::sync();
 
                 Timer t;
-                string ns = cmdObj.firstElement().valuestrsafe();
+                string ns = parseNs(dbname, cmdObj);
                 if ( ns.size() == 0 ) {
                     errmsg = "no ns";
                     return false;
@@ -976,7 +1105,8 @@ namespace mongo {
                     return false;
                 }
 
-                ChunkManagerPtr info = config->getChunkManager( ns );
+                // This refreshes the chunk metadata if stale.
+                ChunkManagerPtr info = config->getChunkManager( ns, true );
                 ChunkPtr c = find.isEmpty() ?
                                 info->findIntersectingChunk( bounds[0].Obj() ) :
                                 info->findChunkForDoc( find );
@@ -994,21 +1124,29 @@ namespace mongo {
                     return false;
                 }
 
-                tlog() << "CMD: movechunk: " << cmdObj << endl;
+                MONGO_TLOG(0) << "CMD: movechunk: " << cmdObj << endl;
+
+                StatusWith<int> maxTimeMS = LiteParsedQuery::parseMaxTimeMSCommand(cmdObj);
+
+                if (!maxTimeMS.isOK()) {
+                    errmsg = maxTimeMS.getStatus().reason();
+                    return false;
+                }
 
                 BSONObj res;
                 if (!c->moveAndCommit(to,
                                       maxChunkSizeBytes,
                                       cmdObj["_secondaryThrottle"].trueValue(),
                                       cmdObj["_waitForDelete"].trueValue(),
+                                      maxTimeMS.getValue(),
                                       res)) {
                     errmsg = "move failed";
                     result.append( "cause" , res );
+                    if ( !res["code"].eoo() ) {
+                        result.append( res["code"] );
+                    }
                     return false;
                 }
-                
-                // preemptively reload the config to get new version info
-                config->getChunkManager( ns , true );
 
                 result.append( "millis" , t.millis() );
                 return true;
@@ -1028,22 +1166,20 @@ namespace mongo {
                                                std::vector<Privilege>* out) {
                 ActionSet actions;
                 actions.addAction(ActionType::listShards);
-                out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+                out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
             }
             bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
-                scoped_ptr<ScopedDbConnection> conn(
-                        ScopedDbConnection::getInternalScopedDbConnection(
-                                configServer.getPrimary().getConnString(), 30));
+                ScopedDbConnection conn(configServer.getPrimary().getConnString(), 30);
 
                 vector<BSONObj> all;
-                auto_ptr<DBClientCursor> cursor = conn->get()->query( ShardType::ConfigNS , BSONObj() );
+                auto_ptr<DBClientCursor> cursor = conn->query( ShardType::ConfigNS , BSONObj() );
                 while ( cursor->more() ) {
                     BSONObj o = cursor->next();
                     all.push_back( o );
                 }
 
                 result.append("shards" , all );
-                conn->done();
+                conn.done();
 
                 return true;
             }
@@ -1061,7 +1197,7 @@ namespace mongo {
                                                std::vector<Privilege>* out) {
                 ActionSet actions;
                 actions.addAction(ActionType::addShard);
-                out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+                out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
             }
             bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
                 errmsg.clear();
@@ -1088,7 +1224,7 @@ namespace mongo {
 
                     // it's fine if mongods of a set all use default port
                     if ( ! serverAddrs[i].hasPort() ) {
-                        serverAddrs[i].setPort( CmdLine::ShardServerPort );
+                        serverAddrs[i].setPort(ServerGlobalParams::ShardServerPort);
                     }
                 }
 
@@ -1104,6 +1240,7 @@ namespace mongo {
                     maxSize = cmdObj[ ShardType::maxSize() ].numberLong();
                 }
 
+                audit::logAddShard(ClientBasic::getCurrent(), name, servers.toString(), maxSize);
                 if ( ! grid.addShard( &name , servers , maxSize , errmsg ) ) {
                     log() << "addshard request " << cmdObj << " failed: " << errmsg << endl;
                     return false;
@@ -1129,7 +1266,7 @@ namespace mongo {
                                                std::vector<Privilege>* out) {
                 ActionSet actions;
                 actions.addAction(ActionType::removeShard);
-                out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+                out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
             }
             bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
                 string target = cmdObj.firstElement().valuestrsafe();
@@ -1139,10 +1276,7 @@ namespace mongo {
                     return false;
                 }
 
-                scoped_ptr<ScopedDbConnection> connPtr(
-                        ScopedDbConnection::getInternalScopedDbConnection(
-                                configServer.getPrimary().getConnString(), 30));
-                ScopedDbConnection& conn = *connPtr;
+                ScopedDbConnection conn(configServer.getPrimary().getConnString(), 30);
 
                 if (conn->count(ShardType::ConfigNS,
                                 BSON(ShardType::name() << NE << s.getName() <<
@@ -1188,11 +1322,19 @@ namespace mongo {
 
                     log() << "going to start draining shard: " << s.getName() << endl;
                     BSONObj newStatus = BSON( "$set" << BSON( ShardType::draining(true) ) );
-                    conn->update( ShardType::ConfigNS , searchDoc , newStatus, false /* do no upsert */);
 
-                    errmsg = conn->getLastError();
-                    if ( errmsg.size() ) {
-                        log() << "error starting remove shard: " << s.getName() << " err: " << errmsg << endl;
+                    Status status = clusterUpdate( ShardType::ConfigNS,
+                                                   searchDoc,
+                                                   newStatus,
+                                                   false /* do no upsert */,
+                                                   false /* multi */,
+                                                   WriteConcernOptions::AllConfigs,
+                                                   NULL );
+
+                    if ( !status.isOK() ) {
+                        errmsg = status.reason();
+                        log() << "error starting remove shard: " << s.getName()
+                              << " err: " << errmsg << endl;
                         return false;
                     }
 
@@ -1201,10 +1343,15 @@ namespace mongo {
                     PRINT(primaryLocalDoc);
                     if (conn->count(DatabaseType::ConfigNS, primaryLocalDoc)) {
                         log() << "This shard is listed as primary of local db. Removing entry." << endl;
-                        conn->remove(DatabaseType::ConfigNS, BSON(DatabaseType::name("local")));
-                        errmsg = conn->getLastError();
-                        if ( errmsg.size() ) {
-                            log() << "error removing local db: " << errmsg << endl;
+                        Status status = clusterDelete( DatabaseType::ConfigNS,
+                                                       BSON(DatabaseType::name("local")),
+                                                       0 /* limit */,
+                                                       WriteConcernOptions::AllConfigs,
+                                                       NULL );
+
+                        if ( !status.isOK() ) {
+                            log() << "error removing local db: "
+                                  << status.reason() << endl;
                             return false;
                         }
                     }
@@ -1216,6 +1363,12 @@ namespace mongo {
                     result.append( "shard" , s.getName() );
                     result.appendElements(dbInfo);
                     conn.done();
+
+                    // Record start in changelog
+                    configServer.logChange( "removeShard.start",
+                                            "",
+                                            buildRemoveLogEntry( s, true ) );
+
                     return true;
                 }
 
@@ -1226,11 +1379,17 @@ namespace mongo {
                 long long dbCount = conn->count( DatabaseType::ConfigNS , primaryDoc );
                 if ( ( chunkCount == 0 ) && ( dbCount == 0 ) ) {
                     log() << "going to remove shard: " << s.getName() << endl;
-                    conn->remove( ShardType::ConfigNS , searchDoc );
+                    audit::logRemoveShard(ClientBasic::getCurrent(), s.getName());
+                    Status status = clusterDelete( ShardType::ConfigNS,
+                                                   searchDoc,
+                                                   0, // limit
+                                                   WriteConcernOptions::AllConfigs,
+                                                   NULL );
 
-                    errmsg = conn->getLastError();
-                    if ( errmsg.size() ) {
-                        log() << "error concluding remove shard: " << s.getName() << " err: " << errmsg << endl;
+                    if ( !status.isOK() ) {
+                        errmsg = status.reason();
+                        log() << "error concluding remove shard: " << s.getName()
+                              << " err: " << errmsg << endl;
                         return false;
                     }
 
@@ -1244,6 +1403,10 @@ namespace mongo {
                     result.append( "state" , "completed" );
                     result.append( "shard" , s.getName() );
                     conn.done();
+
+                    // Record finish in changelog
+                    configServer.logChange( "removeShard", "", buildRemoveLogEntry( s, false ) );
+
                     return true;
                 }
 
@@ -1260,6 +1423,14 @@ namespace mongo {
                 conn.done();
                 return true;
             }
+        private:
+            BSONObj buildRemoveLogEntry( Shard s, const bool isDraining ) {
+                BSONObjBuilder details;
+                details.append("shard", s.getName());
+                details.append("isDraining", isDraining);
+
+                return details.obj();
+            }
         } removeShardCmd;
 
 
@@ -1268,7 +1439,6 @@ namespace mongo {
         class IsDbGridCmd : public Command {
         public:
             virtual LockType locktype() const { return NONE; }
-            virtual bool requiresAuth() { return false; }
             virtual bool slaveOk() const {
                 return true;
             }
@@ -1286,7 +1456,6 @@ namespace mongo {
         class CmdIsMaster : public Command {
         public:
             virtual LockType locktype() const { return NONE; }
-            virtual bool requiresAuth() { return false; }
             virtual bool slaveOk() const {
                 return true;
             }
@@ -1302,7 +1471,14 @@ namespace mongo {
                 result.append("msg", "isdbgrid");
                 result.appendNumber("maxBsonObjectSize", BSONObjMaxUserSize);
                 result.appendNumber("maxMessageSizeBytes", MaxMessageSizeBytes);
+                result.appendNumber("maxWriteBatchSize",
+                                    BatchedCommandRequest::kMaxWriteBatchSize);
                 result.appendDate("localTime", jsTime());
+
+                // Mongos tries to keep exactly the same version range of the server it is
+                // compiled for.
+                result.append("maxWireVersion", maxWireVersion);
+                result.append("minWireVersion", minWireVersion);
 
                 return true;
             }
@@ -1318,7 +1494,6 @@ namespace mongo {
                 return true;
             }
             virtual LockType locktype() const { return NONE; }
-            virtual bool requiresAuth() { return false; }
             virtual void addRequiredPrivileges(const std::string& dbname,
                                                const BSONObj& cmdObj,
                                                std::vector<Privilege>* out) {} // No auth required
@@ -1335,8 +1510,6 @@ namespace mongo {
         class CmdShardingGetPrevError : public Command {
         public:
             virtual LockType locktype() const { return NONE; }
-            virtual bool requiresAuth() { return false; }
-
             virtual bool slaveOk() const {
                 return true;
             }
@@ -1362,26 +1535,149 @@ namespace mongo {
             virtual void help( stringstream& help ) const {
                 help << "check for an error on the last command executed";
             }
-            virtual bool requiresAuth() { return false; }
             virtual void addRequiredPrivileges(const std::string& dbname,
                                                const BSONObj& cmdObj,
                                                std::vector<Privilege>* out) {} // No auth required
             CmdShardingGetLastError() : Command("getLastError" , false , "getlasterror") { }
 
-            virtual bool run(const string& dbName, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
+            virtual bool run( const string& dbName,
+                              BSONObj& cmdObj,
+                              int,
+                              string& errmsg,
+                              BSONObjBuilder& result,
+                              bool ) {
+
+                //
+                // Mongos GLE - finicky.
+                //
+                // To emulate mongod, we first append any write errors we had, then try to append
+                // write concern error if there was no write error.  We need to contact the previous
+                // shards regardless to maintain 2.4 behavior.
+                //
+                // If there are any unexpected or connectivity errors when calling GLE, fail the
+                // command.
+                //
+                // Finally, report the write concern errors IF we don't already have an error.
+                // If we only get one write concern error back, report that, otherwise report an
+                // aggregated error.
+                //
+                // TODO: Do we need to contact the prev shards regardless - do we care that much
+                // about 2.4 behavior?
+                //
+
                 LastError *le = lastError.disableForCommand();
                 verify( le );
-                {
-                    if ( le->msg.size() && le->nPrev == 1 ) {
-                        le->appendSelf( result );
-                        return true;
+
+                // Write commands always have the error stored in the mongos last error
+                bool errorOccurred = false;
+                if ( le->nPrev == 1 ) {
+                    errorOccurred = le->appendSelf( result, false );
+                }
+
+                // For compatibility with 2.4 sharded GLE, we always enforce the write concern
+                // across all shards.
+
+                HostOpTimeMap hostOpTimes(ClientInfo::get()->getPrevHostOpTimes());
+                HostOpTimeMap resolvedHostOpTimes;
+                Status status(Status::OK());
+                for ( HostOpTimeMap::const_iterator it = hostOpTimes.begin(); 
+                      it != hostOpTimes.end();
+                      ++it ) {
+
+                    const ConnectionString& shardEndpoint = it->first;
+                    const HostOpTime hot = it->second;
+                    ConnectionString resolvedHost;
+                    status = DBClientShardResolver::findMaster(shardEndpoint.toString(), 
+                                                               &resolvedHost);
+                    if (!status.isOK()) break;
+                    resolvedHostOpTimes[resolvedHost] = hot;
+                }
+
+                DBClientMultiCommand dispatcher;
+                vector<LegacyWCResponse> wcResponses;
+                if (status.isOK()) {
+                    status = enforceLegacyWriteConcern( &dispatcher,
+                                                        dbName,
+                                                        cmdObj,
+                                                        resolvedHostOpTimes,
+                                                        &wcResponses );
+                }
+
+                // Don't forget about our last hosts, reset the client info
+                ClientInfo::get()->disableForCommand();
+
+                // We're now done contacting all remote servers, just report results
+
+                if ( !status.isOK() ) {
+                    // Return immediately if we failed to contact a shard, unexpected GLE issue
+                    // Can't return code, since it may have been set above (2.4 compatibility)
+                    result.append( "errmsg", status.reason() );
+                    return false;
+                }
+
+                // Go through all the write concern responses and find errors
+                BSONArrayBuilder shards;
+                BSONObjBuilder shardRawGLE;
+                BSONArrayBuilder errors;
+                BSONArrayBuilder errorRawGLE;
+
+                int numWCErrors = 0;
+                const LegacyWCResponse* lastErrResponse = NULL;
+
+                for ( vector<LegacyWCResponse>::const_iterator it = wcResponses.begin();
+                    it != wcResponses.end(); ++it ) {
+
+                    const LegacyWCResponse& wcResponse = *it;
+
+                    shards.append( wcResponse.shardHost );
+                    shardRawGLE.append( wcResponse.shardHost, wcResponse.gleResponse );
+
+                    if ( !wcResponse.errToReport.empty() ) {
+                        numWCErrors++;
+                        lastErrResponse = &wcResponse;
+                        errors.append( wcResponse.errToReport );
+                        errorRawGLE.append( wcResponse.gleResponse );
                     }
                 }
-                ClientInfo * client = ClientInfo::get();
-                bool res = client->getLastError( dbName, cmdObj , result, errmsg );
-                client->disableForCommand();
-                return res;
+
+                // Always report what we found to match 2.4 behavior and for debugging
+                if ( wcResponses.size() == 1u ) {
+                    result.append( "singleShard", wcResponses.front().shardHost );
+                }
+                else {
+                    result.append( "shards", shards.arr() );
+                    result.append( "shardRawGLE", shardRawGLE.obj() );
+                }
+
+                // Suppress write concern errors if a write error occurred, to match mongod behavior
+                if ( errorOccurred || numWCErrors == 0 ) {
+                    // Still need to return err
+                    if ( !errorOccurred ) result.appendNull( "err" );
+                    return true;
+                }
+
+                if ( numWCErrors == 1 ) {
+
+                    // Return the single write concern error we found, err should be set or not
+                    // from gle response
+                    result.appendElements( lastErrResponse->gleResponse );
+                    return lastErrResponse->gleResponse["ok"].trueValue();
+                }
+                else {
+
+                    // Return a generic combined WC error message
+                    result.append( "errs", errors.arr() );
+                    result.append( "errObjects", errorRawGLE.arr() );
+
+                    // Need to always return err
+                    result.appendNull( "err" );
+
+                    return appendCommandStatus( result,
+                        Status( ErrorCodes::WriteConcernFailed,
+                                "multiple write concern errors occurred" ) );
+                }
             }
+
         } cmdGetLastError;
 
     }
@@ -1394,7 +1690,6 @@ namespace mongo {
         virtual bool slaveOk() const {
             return true;
         }
-        virtual bool requiresAuth() { return false; }
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {} // No auth required
@@ -1404,12 +1699,13 @@ namespace mongo {
                 le->reset();
 
             ClientInfo * client = ClientInfo::get();
-            set<string> * shards = client->getPrev();
+            set<string> * shards = client->getPrevShardHosts();
 
             for ( set<string>::iterator i = shards->begin(); i != shards->end(); i++ ) {
                 string theShard = *i;
                 ShardConnection conn( theShard , "" );
                 BSONObj res;
+                // Don't care about result from shards.
                 conn->runCommand( dbName , cmdObj , res );
                 conn.done();
             }
@@ -1433,7 +1729,7 @@ namespace mongo {
                                            std::vector<Privilege>* out) {
             ActionSet actions;
             actions.addAction(ActionType::listDatabases);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
 
         bool run(const string& , BSONObj& jsobj, int, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
@@ -1500,11 +1796,9 @@ namespace mongo {
             }
             
             { // get config db from the config servers (first one)
-                scoped_ptr<ScopedDbConnection> conn(
-                        ScopedDbConnection::getInternalScopedDbConnection(
-                                configServer.getPrimary().getConnString(), 30));
+                ScopedDbConnection conn(configServer.getPrimary().getConnString(), 30);
                 BSONObj x;
-                if ( conn->get()->simpleCommand( "config" , &x , "dbstats" ) ){
+                if ( conn->simpleCommand( "config" , &x , "dbstats" ) ){
                     BSONObjBuilder b;
                     b.append( "name" , "config" );
                     b.appendBool( "empty" , false );
@@ -1517,15 +1811,13 @@ namespace mongo {
                 else {
                     bb.append( BSON( "name" << "config" ) );
                 }
-                conn->done();
+                conn.done();
             }
 
             { // get admin db from the config servers (first one)
-                scoped_ptr<ScopedDbConnection> conn(
-                        ScopedDbConnection::getInternalScopedDbConnection(
-                                configServer.getPrimary().getConnString(), 30));
+                ScopedDbConnection conn(configServer.getPrimary().getConnString(), 30);
                 BSONObj x;
-                if ( conn->get()->simpleCommand( "admin" , &x , "dbstats" ) ){
+                if ( conn->simpleCommand( "admin" , &x , "dbstats" ) ){
                     BSONObjBuilder b;
                     b.append( "name" , "admin" );
                     b.appendBool( "empty" , false );
@@ -1538,7 +1830,7 @@ namespace mongo {
                 else {
                     bb.append( BSON( "name" << "admin" ) );
                 }
-                conn->done();
+                conn.done();
             }
 
             bb.done();
@@ -1565,7 +1857,7 @@ namespace mongo {
                                            std::vector<Privilege>* out) {
             ActionSet actions;
             actions.addAction(ActionType::closeAllDatabases);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
 
         bool run(const string& , BSONObj& jsobj, int, string& errmsg, BSONObjBuilder& /*result*/, bool /*fromRepl*/) {
@@ -1583,13 +1875,10 @@ namespace mongo {
         virtual bool adminOnly() const { return true; }
         virtual LockType locktype() const { return NONE; }
         virtual void help( stringstream& help ) const { help << "Not supported through mongos"; }
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {
-            // TODO: Should this require no auth since it's not supported in mongos anyway?
-            ActionSet actions;
-            actions.addAction(ActionType::replSetGetStatus);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+        virtual Status checkAuthForCommand(ClientBasic* client,
+                                           const std::string& dbname,
+                                           const BSONObj& cmdObj) {
+            return Status::OK(); // Require no auth since this command isn't supported in mongos
         }
         bool run(const string& , BSONObj& jsobj, int, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
             if ( jsobj["forShell"].trueValue() ) {

@@ -5,15 +5,11 @@ var nodes = replTest.startSet();
 replTest.initiate();
 var master = replTest.getMaster();
 var mdb = master.getDB("test");
-mdb.foo.insert({ _id: "ABCDEF" });
-var gle = master.getDB("test").runCommand({getLastError : 1, w : 2, wtimeout : 60000});
-assert(gle.err === null);
+mdb.setWriteConcern({ w: 2, wtimeout: 60000 });
+assert.writeOK(mdb.foo.insert({ _id: "ABCDEF" }));
 
-mdb.foo.insert({ _id: /^A/ });
-var gle = master.getDB("test").runCommand({getLastError : 1, w : 2, wtimeout : 60000});
-assert(gle.code === 16824);
+assert.writeError(mdb.foo.insert({ _id: /^A/ }));
 
 // _id doesn't have to be first; still disallowed
-mdb.foo.insert({ xxx: "ABCDEF", _id: /ABCDEF/ });
-var gle = master.getDB("test").runCommand({getLastError : 1, w : 2, wtimeout : 60000});
-assert(gle.code === 16824);
+assert.writeError(mdb.foo.insert({ xxx: "ABCDEF", _id: /ABCDEF/ }));
+

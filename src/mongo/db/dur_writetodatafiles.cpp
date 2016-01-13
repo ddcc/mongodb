@@ -14,9 +14,21 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include "mongo/db/dur_commitjob.h"
 #include "mongo/db/dur_recover.h"
@@ -25,9 +37,6 @@
 #include "mongo/util/timer.h"
 
 namespace mongo {
-#ifdef _WIN32
-    extern SimpleMutex globalFlushMutex; // defined in mongo/util/mmap_win.cpp
-#endif
     namespace dur {
 
         void debugValidateAllMapsMatch();
@@ -79,7 +88,7 @@ namespace mongo {
                 - we couldn't do it from the private views then as they may be changing.  would have to then
                   be from the journal alignedbuffer.
                 - we need to be careful the file isn't unmapped on us -- perhaps a mutex or something
-                  with MongoMMF on closes or something to coordinate that.
+                  with DurableMappedFile on closes or something to coordinate that.
 
             concurrency: in mmmutex, not necessarily in dbMutex
 
@@ -87,9 +96,6 @@ namespace mongo {
         */
 
         void WRITETODATAFILES(const JSectHeader& h, AlignedBuilder& uncompressed) {
-#ifdef _WIN32
-            SimpleMutex::scoped_lock _globalFlushMutex(globalFlushMutex);
-#endif
             Timer t;
             WRITETODATAFILES_Impl1(h, uncompressed);
             unsigned long long m = t.micros();

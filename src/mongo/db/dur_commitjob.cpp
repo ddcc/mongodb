@@ -14,14 +14,28 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
-#include "pch.h"
-#include "dur_commitjob.h"
-#include "dur_stats.h"
-#include "taskqueue.h"
-#include "client.h"
-#include "../util/concurrency/threadlocal.h"
+#include "mongo/pch.h"
+
+#include "mongo/db/dur_commitjob.h"
+
+#include "mongo/db/client.h"
+#include "mongo/db/dur_stats.h"
+#include "mongo/db/taskqueue.h"
+#include "mongo/util/concurrency/threadlocal.h"
 #include "mongo/util/stacktrace.h"
 
 namespace mongo {
@@ -122,6 +136,7 @@ namespace mongo {
         /** base declare write intent function that all the helpers call. */
         /** we batch up our write intents so that we do not have to synchronize too often */
         void DurableImpl::declareWriteIntent(void *p, unsigned len) {
+            dassert( Lock::somethingWriteLocked() );
             cc().writeHappened();
             MemoryMappedFile::makeWritable(p, len);
             ThreadLocalIntents *t = tlIntents.getMake();
@@ -165,7 +180,8 @@ namespace mongo {
 
         /** note an operation other than a "basic write" */
         void CommitJob::noteOp(shared_ptr<DurOp> p) {
-            dassert( cmdLine.dur );
+            dassert( Lock::somethingWriteLocked() );
+            dassert(storageGlobalParams.dur);
             // DurOp's are rare so it is ok to have the lock cost here
             SimpleMutex::scoped_lock lk(groupCommitMutex);
             cc().writeHappened();
@@ -199,6 +215,7 @@ namespace mongo {
         }
 
         void CommitJob::note(void* p, int len) {
+            dassert( Lock::somethingWriteLocked() );
             groupCommitMutex.dassertLocked();
 
             dassert( _hasWritten );
@@ -220,7 +237,7 @@ namespace mongo {
                     static int n;
                     if( ++n < 10000 ) {
                         size_t ofs;
-                        MongoMMF *mmf = privateViews._find(w.p, ofs);
+                        DurableMappedFile *mmf = privateViews._find(w.p, ofs);
                         if( mmf ) {
                             log() << "DEBUG note write intent " << w.p << ' ' << mmf->filename() << " ofs:" << hex << ofs << " len:" << w.len << endl;
                         }

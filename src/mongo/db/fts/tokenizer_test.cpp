@@ -14,8 +14,21 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
+#include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/fts/tokenizer.h"
 #include "mongo/unittest/unittest.h"
 
@@ -23,12 +36,12 @@ namespace mongo {
     namespace fts {
 
         TEST( Tokenizer, Empty1 ) {
-            Tokenizer i( "english", "" );
+            Tokenizer i( languageEnglishV2, "" );
             ASSERT( !i.more() );
         }
 
         TEST( Tokenizer, Basic1 ) {
-            Tokenizer i( "english", "blue red green" );
+            Tokenizer i( languageEnglishV2, "blue red green" );
 
             ASSERT( i.more() );
             ASSERT_EQUALS( i.next().data.toString(), "blue" );
@@ -43,7 +56,7 @@ namespace mongo {
         }
 
         TEST( Tokenizer, Basic2 ) {
-            Tokenizer i( "english", "blue-red" );
+            Tokenizer i( languageEnglishV2, "blue-red" );
 
             Token a = i.next();
             Token b = i.next();
@@ -65,7 +78,7 @@ namespace mongo {
         }
 
         TEST( Tokenizer, Basic3 ) {
-            Tokenizer i( "english", "blue -red" );
+            Tokenizer i( languageEnglishV2, "blue -red" );
 
             Token a = i.next();
             Token b = i.next();
@@ -92,7 +105,7 @@ namespace mongo {
         }
 
         TEST( Tokenizer, Quote1English ) {
-            Tokenizer i( "english", "eliot's car" );
+            Tokenizer i( languageEnglishV2, "eliot's car" );
 
             Token a = i.next();
             Token b = i.next();
@@ -102,7 +115,7 @@ namespace mongo {
         }
 
         TEST( Tokenizer, Quote1French ) {
-            Tokenizer i( "french", "eliot's car" );
+            Tokenizer i( languageFrenchV2, "eliot's car" );
 
             Token a = i.next();
             Token b = i.next();

@@ -14,11 +14,24 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #include "mongo/pch.h"
 
 #include "mongo/db/fts/fts_query.h"
+#include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/fts/tokenizer.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/stringutils.h"
@@ -29,19 +42,24 @@ namespace mongo {
 
         using namespace mongoutils;
 
-        Status FTSQuery::parse(const string& query, const string& language) {
+        Status FTSQuery::parse(const string& query, const StringData& language,
+                               TextIndexVersion textIndexVersion) {
             _search = query;
-            _language = language;
+            StatusWithFTSLanguage swl = FTSLanguage::make( language, textIndexVersion );
+            if ( !swl.getStatus().isOK() ) {
+                return swl.getStatus();
+            }
+            _language = swl.getValue();
 
-            const StopWords* stopWords = StopWords::getStopWords( language );
-            Stemmer stemmer( language );
+            const StopWords* stopWords = StopWords::getStopWords( *_language );
+            Stemmer stemmer( *_language );
 
             bool inNegation = false;
             bool inPhrase = false;
 
             unsigned quoteOffset = 0;
 
-            Tokenizer i( _language, query );
+            Tokenizer i( *_language, query );
             while ( i.more() ) {
                 Token t = i.next();
 
@@ -61,8 +79,11 @@ namespace mongo {
                 else if ( t.type == Token::DELIMITER ) {
                     char c = t.data[0];
                     if ( c == '-' ) {
-                        if ( t.previousWhiteSpace )
+                        if ( !inPhrase && t.previousWhiteSpace ) {
+                            // phrases can be negated, and terms not in phrases can be negated.
+                            // terms in phrases can not be negated.
                             inNegation = true;
+                        }
                     }
                     else if ( c == '"' ) {
                         if ( inPhrase ) {
@@ -121,11 +142,6 @@ namespace mongo {
                 _debugHelp( ss, s, sep );
             }
 
-            void _debugHelp( stringstream& ss, const unordered_set<string>& v, const string& sep ) {
-                set<string> s( v.begin(), v.end() );
-                _debugHelp( ss, s, sep );
-            }
-
         }
 
         string FTSQuery::toString() const {
@@ -166,6 +182,15 @@ namespace mongo {
             _debugHelp( ss, getNegatedPhr(), "|" );
 
             return ss.str();
+        }
+
+        BSONObj FTSQuery::toBSON() const {
+            BSONObjBuilder bob;
+            bob.append( "terms", getTerms() );
+            bob.append( "negatedTerms", getNegatedTerms() );
+            bob.append( "phrases", getPhr() );
+            bob.append( "negatedPhrases", getNegatedPhr() );
+            return bob.obj();
         }
     }
 }

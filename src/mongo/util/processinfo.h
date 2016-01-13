@@ -17,23 +17,17 @@
 
 #pragma once
 
-#include <sys/types.h>
 #include <string>
 
-#ifndef _WIN32
-#include <unistd.h>
-#else
-typedef int pid_t;
-int getpid();
-#endif
-
-#include <db/jsobj.h>
+#include "mongo/platform/cstdint.h"
+#include "mongo/platform/process_id.h"
+#include "mongo/db/jsobj.h"
 
 namespace mongo {
 
     class ProcessInfo {
     public:
-        ProcessInfo( pid_t pid = getpid() );
+        ProcessInfo( ProcessId pid = ProcessId::getCurrent() );
         ~ProcessInfo();
 
         /**
@@ -92,6 +86,11 @@ namespace mongo {
         bool hasNumaEnabled() const { return sysInfo().hasNuma; }
 
         /**
+         * Determine if file zeroing is necessary for newly allocated data files.
+         */
+        static bool isDataFileZeroingNeeded() { return systemInfo->fileZeroNeeded;  }
+
+        /**
          * Get extra system stats
          */
         void appendSystemDetails( BSONObjBuilder& details ) const {
@@ -145,12 +144,19 @@ namespace mongo {
             string cpuArch;
             bool hasNuma;
             BSONObj _extraStats;
+
+            // This is an OS specific value, which determines whether files should be zero-filled
+            // at allocation time in order to avoid Microsoft KB 2731284.
+            //
+            bool fileZeroNeeded;
+
             SystemInfo() :
                     addrSize( 0 ),
                     memSize( 0 ),
                     numCores( 0 ),
                     pageSize( 0 ),
-                    hasNuma( false ) { 
+                    hasNuma( false ),
+                    fileZeroNeeded (false) { 
                 // populate SystemInfo during construction
                 collectSystemInfo();
             }
@@ -159,7 +165,7 @@ namespace mongo {
             void collectSystemInfo();
         };
 
-        pid_t _pid;
+        ProcessId _pid;
         static mongo::mutex _sysInfoLock;
 
         static bool checkNumaEnabled();
@@ -175,7 +181,7 @@ namespace mongo {
 
     };
 
-    void writePidFile( const std::string& path );
+    bool writePidFile( const std::string& path );
 
     void printMemInfo( const char * whereContextStr = 0 );
 

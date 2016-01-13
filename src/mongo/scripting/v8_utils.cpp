@@ -13,6 +13,18 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 #include "mongo/scripting/v8_utils.h"
@@ -125,38 +137,55 @@ namespace mongo {
             JSThread(JSThreadConfig& config) : _config(config) {}
 
             void operator()() {
-                _config._scope.reset(static_cast<V8Scope*>(globalScriptEngine->newScope()));
-                v8::Locker v8lock(_config._scope->getIsolate());
-                v8::Isolate::Scope iscope(_config._scope->getIsolate());
-                v8::HandleScope handle_scope;
-                v8::Context::Scope context_scope(_config._scope->getContext());
+                try {
+                    _config._scope.reset(static_cast<V8Scope*>(globalScriptEngine->newScope()));
+                    v8::Locker v8lock(_config._scope->getIsolate());
+                    v8::Isolate::Scope iscope(_config._scope->getIsolate());
+                    v8::HandleScope handle_scope;
+                    v8::Context::Scope context_scope(_config._scope->getContext());
 
-                BSONObj args = _config._args;
-                v8::Local<v8::Function> f = v8::Function::Cast(
-                        *(_config._scope->mongoToV8Element(args.firstElement(), true)));
-                int argc = args.nFields() - 1;
+                    BSONObj args = _config._args;
+                    v8::Local<v8::Function> f = v8::Function::Cast(
+                            *(_config._scope->mongoToV8Element(args.firstElement(), true)));
+                    int argc = args.nFields() - 1;
 
-                // TODO SERVER-8016: properly allocate handles on the stack
-                v8::Local<v8::Value> argv[24];
-                BSONObjIterator it(args);
-                it.next();
-                for(int i = 0; i < argc && i < 24; ++i) {
-                    argv[i] = v8::Local<v8::Value>::New(
-                            _config._scope->mongoToV8Element(*it, true));
+                    // TODO SERVER-8016: properly allocate handles on the stack
+                    v8::Local<v8::Value> argv[24];
+                    BSONObjIterator it(args);
                     it.next();
+                    for(int i = 0; i < argc && i < 24; ++i) {
+                        argv[i] = v8::Local<v8::Value>::New(
+                                _config._scope->mongoToV8Element(*it, true));
+                        it.next();
+                    }
+                    v8::TryCatch try_catch;
+                    v8::Handle<v8::Value> ret =
+                            f->Call(_config._scope->getContext()->Global(), argc, argv);
+                    if (ret.IsEmpty() || try_catch.HasCaught()) {
+                        string e = _config._scope->v8ExceptionToSTLString(&try_catch);
+                        log() << "js thread raised js exception: " << e << endl;
+                        ret = v8::Undefined();
+                        // TODO propagate exceptions (or at least the fact that an exception was
+                        // thrown) to the calling js on either join() or returnData().
+                    }
+                    // ret is translated to BSON to switch isolate
+                    BSONObjBuilder b;
+                    _config._scope->v8ToMongoElement(b, "ret", ret);
+                    _config._returnData = b.obj();
                 }
-                v8::TryCatch try_catch;
-                v8::Handle<v8::Value> ret =
-                        f->Call(_config._scope->getContext()->Global(), argc, argv);
-                if (ret.IsEmpty() || try_catch.HasCaught()) {
-                    string e = _config._scope->v8ExceptionToSTLString(&try_catch);
-                    log() << "js thread raised exception: " << e << endl;
-                    ret = v8::Undefined();
+                catch (const DBException& e) {
+                    // Keeping behavior the same as for js exceptions.
+                    log() << "js thread threw c++ exception: " << e.toString();
+                    _config._returnData = BSON("ret" << BSONUndefined);
                 }
-                // ret is translated to BSON to switch isolate
-                BSONObjBuilder b;
-                _config._scope->v8ToMongoElement(b, "ret", ret);
-                _config._returnData = b.obj();
+                catch (const std::exception& e) {
+                    log() << "js thread threw c++ exception: " << e.what();
+                    _config._returnData = BSON("ret" << BSONUndefined);
+                }
+                catch (...) {
+                    log() << "js thread threw c++ non-exception";
+                    _config._returnData = BSON("ret" << BSONUndefined);
+                }
             }
 
         private:

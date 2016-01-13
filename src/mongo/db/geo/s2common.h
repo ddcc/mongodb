@@ -12,11 +12,23 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
-#include "mongo/db/diskloc.h"
 #include "mongo/db/geo/geoparser.h"
-#include "third_party/s2/s2.h"
+#include "mongo/db/geo/geoconstants.h"
+#include "mongo/db/geo/s2.h"
 #include "third_party/s2/s2regioncoverer.h"
 #include "third_party/s2/s2cell.h"
 #include "third_party/s2/s2polyline.h"
@@ -26,19 +38,20 @@
 #pragma once
 
 namespace mongo {
-    // This is used by both s2cursor and s2nearcursor.
-    class S2SearchUtil {
-    public:
-        // Given a coverer, region, and field name, generate a BSONObj that we can pass to a
-        // FieldRangeSet so that we only examine the keys that the provided region may intersect.
-        static BSONObj coverAsBSON(const vector<S2CellId> &cover, const string& field,
-                                   const int coarsestIndexedLevel);
-        static void setCoverLimitsBasedOnArea(double area, S2RegionCoverer *coverer, int coarsestIndexedLevel);
+
+    // An enum describing the version of an S2 index.
+    enum S2IndexVersion {
+        // The first version of the S2 index, introduced in MongoDB 2.4.0.  Compatible with MongoDB
+        // 2.4.0 and later.  Supports the following GeoJSON objects: Point, LineString, Polygon.
+        S2_INDEX_VERSION_1 = 1,
+
+        // The current version of the S2 index, introduced in MongoDB 2.6.0.  Compatible with
+        // MongoDB 2.6.0 and later.  Introduced support for the following GeoJSON objects:
+        // MultiPoint, MultiLineString, MultiPolygon, GeometryCollection.
+        S2_INDEX_VERSION_2 = 2
     };
 
     struct S2IndexingParams {
-        static const double kRadiusOfEarthInMeters;
-
         // Since we take the cartesian product when we generate keys for an insert,
         // we need a cap.
         size_t maxKeysPerInsert;
@@ -51,6 +64,8 @@ namespace mongo {
         // And, what's the coarsest?  When we search in larger coverings we know we
         // can stop here -- we index nothing coarser than this.
         int coarsestIndexedLevel;
+        // Version of this index (specific to the index type).
+        S2IndexVersion indexVersion;
 
         double radius;
 
@@ -60,6 +75,7 @@ namespace mongo {
             ss << "maxCellsInCovering: " << maxCellsInCovering << endl;
             ss << "finestIndexedLevel: " << finestIndexedLevel << endl;
             ss << "coarsestIndexedLevel: " << coarsestIndexedLevel << endl;
+            ss << "indexVersion: " << indexVersion << endl;
             return ss.str();
         }
 
@@ -70,4 +86,15 @@ namespace mongo {
             coverer->set_max_cells(maxCellsInCovering);
         }
     };
+
+    class S2SearchUtil {
+    public:
+        // Given a coverer, region, and field name, generate a BSONObj that we can pass to a
+        // FieldRangeSet so that we only examine the keys that the provided region may intersect.
+        static BSONObj coverAsBSON(const vector<S2CellId> &cover, const string& field,
+                                   const int coarsestIndexedLevel);
+        static void setCoverLimitsBasedOnArea(double area, S2RegionCoverer *coverer, int coarsestIndexedLevel);
+        static bool distanceBetween(const S2Point& us, const BSONObj& them, double *out);
+    };
+
 }  // namespace mongo

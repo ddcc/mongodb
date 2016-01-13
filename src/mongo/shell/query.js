@@ -28,7 +28,7 @@ DBQuery.prototype.help = function () {
     print("\t.sort( {...} )")
     print("\t.limit( n )")
     print("\t.skip( n )")
-    print("\t.count() - total # of objects matching query, ignores skip,limit")
+    print("\t.count(applySkipLimit) - total # of objects matching query. by default ignores skip,limit")
     print("\t.size() - total # of objects cursor would return, honors skip,limit")
     print("\t.explain([verbose])")
     print("\t.hint(...)")
@@ -38,6 +38,9 @@ DBQuery.prototype.help = function () {
     print("\t.showDiskLoc() - adds a $diskLoc field to each returned object")
     print("\t.min(idxDoc)")
     print("\t.max(idxDoc)")
+    print("\t.comment(comment)")
+    print("\t.snapshot()")
+    print("\t.readPref(mode, tagset)")
     
     print("\nCursor methods");
     print("\t.toArray() - iterates through docs and returns an array of the results")
@@ -46,8 +49,8 @@ DBQuery.prototype.help = function () {
     print("\t.hasNext()")
     print("\t.next()")
     print("\t.objsLeftInBatch() - returns count of docs left in current batch (when exhausted, a new getMore will be issued)")
-    print("\t.count(applySkipLimit) - runs command at server")    
     print("\t.itcount() - iterates through documents and counts them")
+    print("\t.pretty() - pretty print each document, possibly over multiple lines")
 }
 
 DBQuery.prototype.clone = function(){
@@ -124,7 +127,7 @@ DBQuery.prototype.next = function(){
         throw "error hasNext: " + o;
     
     var ret = this._cursor.next();
-    if ( ret.$err && this._numReturned == 0 && ! this.hasNext() )
+    if ( ret.$err )
         throw "error: " + tojson( ret );
 
     this._numReturned++;
@@ -158,17 +161,25 @@ DBQuery.prototype.toArray = function(){
     return a;
 }
 
-DBQuery.prototype.count = function( applySkipLimit ){
+DBQuery.prototype.count = function( applySkipLimit ) {
     var cmd = { count: this._collection.getName() };
-    if ( this._query ){
-        if ( this._special )
+    if ( this._query ) {
+        if ( this._special ) {
             cmd.query = this._query.query;
-        else 
+            if ( this._query.$maxTimeMS ) {
+                cmd.maxTimeMS = this._query.$maxTimeMS;
+            }
+            if ( this._query.$hint ) {
+                cmd.hint = this._query.$hint;
+            }
+        }
+        else {
             cmd.query = this._query;
+        }
     }
     cmd.fields = this._fields || {};
 
-    if ( applySkipLimit ){
+    if ( applySkipLimit ) {
         if ( this._limit )
             cmd.limit = this._limit;
         if ( this._skip )
@@ -235,7 +246,11 @@ DBQuery.prototype.max = function( max ) {
 }
 
 DBQuery.prototype.showDiskLoc = function() {
-    return this._addSpecial( "$showDiskLoc" , true);
+    return this._addSpecial( "$showDiskLoc" , true );
+}
+
+DBQuery.prototype.maxTimeMS = function( maxTimeMS ) {
+    return this._addSpecial( "$maxTimeMS" , maxTimeMS );
 }
 
 /**
@@ -274,18 +289,15 @@ DBQuery.prototype.map = function( func ){
 DBQuery.prototype.arrayAccess = function( idx ){
     return this.toArray()[idx];
 }
+
 DBQuery.prototype.comment = function (comment) {
-    var n = this.clone();
-    n._ensureSpecial();
-    n._addSpecial("$comment", comment);
-    return this.next();
+    return this._addSpecial( "$comment" , comment );
 }
 
 DBQuery.prototype.explain = function (verbose) {
     /* verbose=true --> include allPlans, oldPlan fields */
     var n = this.clone();
-    n._ensureSpecial();
-    n._query.$explain = true;
+    n._addSpecial( "$explain", true );
     n._limit = Math.abs(n._limit) * -1;
     var e = n.next();
 
@@ -296,6 +308,7 @@ DBQuery.prototype.explain = function (verbose) {
 
         delete obj.allPlans;
         delete obj.oldPlan;
+        delete obj.stats;
 
         if (typeof(obj.length) == 'number'){
             for (var i=0; i < obj.length; i++){
@@ -321,9 +334,7 @@ DBQuery.prototype.explain = function (verbose) {
 }
 
 DBQuery.prototype.snapshot = function(){
-    this._ensureSpecial();
-    this._query.$snapshot = true;
-    return this;
+    return this._addSpecial( "$snapshot" , true );
 }
 
 DBQuery.prototype.pretty = function(){
@@ -377,4 +388,56 @@ DBQuery.Option = {
     exhaust: 0x40,
     partial: 0x80
 };
+
+function DBCommandCursor(mongo, cmdResult, batchSize) {
+    assert.commandWorked(cmdResult)
+    this._firstBatch = cmdResult.cursor.firstBatch.reverse(); // modifies input to allow popping
+    this._cursor = mongo.cursorFromId(cmdResult.cursor.ns, cmdResult.cursor.id, batchSize);
+}
+
+DBCommandCursor.prototype = {};
+DBCommandCursor.prototype.hasNext = function() {
+    return this._firstBatch.length || this._cursor.hasNext();
+}
+DBCommandCursor.prototype.next = function() {
+    if (this._firstBatch.length) {
+        // $err wouldn't be in _firstBatch since ok was true.
+        return this._firstBatch.pop();
+    }
+    else {
+        var ret = this._cursor.next();
+        if ( ret.$err )
+            throw "error: " + tojson( ret );
+        return ret;
+    }
+}
+DBCommandCursor.prototype.objsLeftInBatch = function() {
+    if (this._firstBatch.length) {
+        return this._firstBatch.length;
+    }
+    else {
+        return this._cursor.objsLeftInBatch();
+    }
+}
+
+DBCommandCursor.prototype.help = function () {
+    // This is the same as the "Cursor Methods" section of DBQuery.help().
+    print("\nCursor methods");
+    print("\t.toArray() - iterates through docs and returns an array of the results")
+    print("\t.forEach( func )")
+    print("\t.map( func )")
+    print("\t.hasNext()")
+    print("\t.next()")
+    print("\t.objsLeftInBatch() - returns count of docs left in current batch (when exhausted, a new getMore will be issued)")
+    print("\t.itcount() - iterates through documents and counts them")
+    print("\t.pretty() - pretty print each document, possibly over multiple lines")
+}
+
+// Copy these methods from DBQuery
+DBCommandCursor.prototype.toArray = DBQuery.prototype.toArray
+DBCommandCursor.prototype.forEach = DBQuery.prototype.forEach
+DBCommandCursor.prototype.map = DBQuery.prototype.map
+DBCommandCursor.prototype.itcount = DBQuery.prototype.itcount
+DBCommandCursor.prototype.shellPrint = DBQuery.prototype.shellPrint
+DBCommandCursor.prototype.pretty = DBQuery.prototype.pretty
 

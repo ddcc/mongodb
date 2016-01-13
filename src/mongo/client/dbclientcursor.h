@@ -22,6 +22,7 @@
 #include <stack>
 
 #include "mongo/client/dbclientinterface.h"
+#include "mongo/client/export_macros.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
 #include "mongo/util/net/message.h"
@@ -30,10 +31,10 @@ namespace mongo {
 
     class AScopedConnection;
 
-    /** for mock purposes only -- do not create variants of DBClientCursor, nor hang code here 
+    /** for mock purposes only -- do not create variants of DBClientCursor, nor hang code here
         @see DBClientMockCursor
      */
-    class DBClientCursorInterface : boost::noncopyable {
+    class MONGO_CLIENT_API DBClientCursorInterface : boost::noncopyable {
     public:
         virtual ~DBClientCursorInterface() {}
         virtual bool more() = 0;
@@ -44,7 +45,7 @@ namespace mongo {
     };
 
     /** Queries return a cursor object */
-    class DBClientCursor : public DBClientCursorInterface {
+    class MONGO_CLIENT_API DBClientCursor : public DBClientCursorInterface {
     public:
         /** If true, safe to call next().  Requests more from server if necessary. */
         bool more();
@@ -78,8 +79,7 @@ namespace mongo {
             BSONObj o = next();
             if( strcmp(o.firstElementFieldName(), "$err") == 0 ) {
                 string s = "nextSafe(): " + o.toString();
-                if( logLevel >= 5 )
-                    log() << s << endl;
+                LOG(5) << s;
                 uasserted(13106, s);
             }
             return o;
@@ -129,6 +129,9 @@ namespace mongo {
             _assertIfNull();
             return (resultFlags & flag) != 0;
         }
+
+        /// Change batchSize after construction. Can change after requesting first batch.
+        void setBatchSize(int newBatchSize) { batchSize = newBatchSize; }
 
         DBClientCursor( DBClientBase* client, const string &_ns, BSONObj _query, int _nToReturn,
                         int _nToSkip, const BSONObj *_fieldsToReturn, int queryOptions , int bs ) :
@@ -199,7 +202,19 @@ namespace mongo {
         void initLazy( bool isRetry = false );
         bool initLazyFinish( bool& retry );
 
-        class Batch : boost::noncopyable { 
+        /**
+         * Marks this object as dead and sends the KillCursors message to the server.
+         *
+         * Any errors that result from this are swallowed since this is typically performed as part
+         * of cleanup and a failure to kill the cursor should not result in a failure of the
+         * operation using the cursor.
+         *
+         * Killing an already killed or exhausted cursor does nothing, so it is safe to always call
+         * this if you want to ensure that a cursor is killed.
+         */
+        void kill();
+
+        class Batch : boost::noncopyable {
             friend class DBClientCursor;
             auto_ptr<Message> m;
             int nReturned;
@@ -215,7 +230,7 @@ namespace mongo {
 
         int nextBatchSize();
         void _finishConsInit();
-        
+
         Batch batch;
         DBClientBase* _client;
         string _originalHost;
@@ -253,7 +268,7 @@ namespace mongo {
 
     /** iterate over objects in current batch only - will not cause a network call
      */
-    class DBClientCursorBatchIterator {
+    class MONGO_CLIENT_API DBClientCursorBatchIterator {
     public:
         DBClientCursorBatchIterator( DBClientCursor &c ) : _c( c ), _n() {}
         bool moreInCurrentBatch() { return _c.moreInCurrentBatch(); }

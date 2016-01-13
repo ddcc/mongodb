@@ -1,3 +1,6 @@
+// Wrap whole file in a function to avoid polluting the global namespace
+(function() {
+
 _parsePath = function() {
     var dbpath = "";
     for( var i = 0; i < arguments.length; ++i )
@@ -108,12 +111,12 @@ MongoRunner.VersionSub = function(regex, version) {
 // These patterns allow substituting the binary versions used for each
 // version string to support the dev/stable MongoDB release cycle.
 MongoRunner.binVersionSubs = [ new MongoRunner.VersionSub(/^latest$/, ""),
-                               new MongoRunner.VersionSub(/^last-stable$/, "2.2"),
+                               new MongoRunner.VersionSub(/^last-stable$/, "2.4"),
                                new MongoRunner.VersionSub(/^oldest-supported$/, "1.8"),
                                // Latest unstable and next stable are effectively the
                                // same release
-                               new MongoRunner.VersionSub(/^2\.3(\..*){0,1}/, ""),
-                               new MongoRunner.VersionSub(/^2\.4(\..*){0,1}/, "") ];
+                               new MongoRunner.VersionSub(/^2\.5(\..*){0,1}/, ""),
+                               new MongoRunner.VersionSub(/^2\.6(\..*){0,1}/, "") ];
 
 MongoRunner.getBinVersionFor = function(version) {
  
@@ -185,7 +188,11 @@ MongoRunner.toRealPath = function( path, pathOpts ){
     }
     
     // Relative path
-    if( ! path.startsWith( "/" ) ){
+    // Detect Unix and Windows absolute paths
+    // as well as Windows drive letters
+    // Also captures Windows UNC paths
+
+    if( ! path.match( /^(\/|\\|[A-Za-z]:)/ ) ){
         if( path != "" && ! path.endsWith( "/" ) )
             path += "/"
                 
@@ -408,7 +415,20 @@ MongoRunner.mongoOptions = function( opts ){
     }
     
     // Default for waitForConnect is true
-    if (waitForConnect == undefined || waitForConnect == null) opts.waitForConnect = true;
+    opts.waitForConnect = (waitForConnect == undefined || waitForConnect == null) ?
+        true : waitForConnect;
+    
+    if( jsTestOptions().useSSL ) {
+        if (!opts.sslMode) opts.sslMode = "requireSSL";
+        if (!opts.sslPEMKeyFile) opts.sslPEMKeyFile = "jstests/libs/server.pem";
+        if (!opts.sslCAFile) opts.sslCAFile = "jstests/libs/ca.pem";
+        opts.sslWeakCertificateValidation = "";
+        opts.sslAllowInvalidCertificates = "";
+    }
+
+    if ( jsTestOptions().useX509 && !opts.clusterAuthMode ) {
+        opts.clusterAuthMode = "x509";
+    }
     
     opts.port = opts.port || MongoRunner.nextOpenPort()
     MongoRunner.usedPortMap[ "" + parseInt( opts.port ) ] = true
@@ -463,6 +483,18 @@ MongoRunner.mongodOptions = function( opts ){
         opts.keyFile = jsTestOptions().keyFile
     }
 
+    if( jsTestOptions().useSSL ) {
+        if (!opts.sslMode) opts.sslMode = "requireSSL";
+        if (!opts.sslPEMKeyFile) opts.sslPEMKeyFile = "jstests/libs/server.pem";
+        if (!opts.sslCAFile) opts.sslCAFile = "jstests/libs/ca.pem";
+        opts.sslWeakCertificateValidation = "";
+        opts.sslAllowInvalidCertificates = "";
+    }
+
+    if ( jsTestOptions().useX509 && !opts.clusterAuthMode ) {
+        opts.clusterAuthMode = "x509";
+    }
+
     if( opts.noReplSet ) opts.replSet = null
     if( opts.arbiter ) opts.oplogSize = 1
             
@@ -470,7 +502,7 @@ MongoRunner.mongodOptions = function( opts ){
 }
 
 MongoRunner.mongosOptions = function( opts ){
-    
+
     opts = MongoRunner.mongoOptions( opts )
     
     // Normalize configdb option to be host string if currently a host
@@ -656,6 +688,35 @@ MongoRunner.isStopped = function( port ){
     return MongoRunner.usedPortMap[ "" + parseInt( port ) ] ? false : true
 }
 
+/**
+ * Starts an instance of the specified mongo tool
+ *
+ * @param {String} binaryName The name of the tool to run
+ * @param {Object} opts options to pass to the tool
+ *    {
+ *      binVersion {string}: version of tool to run
+ *    }
+ *
+ * @see MongoRunner.arrOptions
+ */
+MongoRunner.runMongoTool = function( binaryName, opts ){
+
+    var opts = opts || {}
+
+    var argsArray = MongoRunner.arrOptions(binaryName, opts)
+
+    return runMongoProgram.apply(null, argsArray);
+
+}
+
+// Given a test name figures out a directory for that test to use for dump files and makes sure
+// that directory exists and is empty.
+MongoRunner.getAndPrepareDumpDirectory = function(testName) {
+    var dir = MongoRunner.dataPath + testName + "_external/";
+    resetDbpath(dir);
+    return dir;
+}
+
 startMongodTest = function (port, dirname, restart, extraOptions ) {
     if (!port)
         port = MongoRunner.nextOpenPort();
@@ -670,22 +731,33 @@ startMongodTest = function (port, dirname, restart, extraOptions ) {
          useHostname = extraOptions.useHostname;
          delete extraOptions.useHostname;
     }
-
     
     var options = 
         {
             port: port,
-            dbpath: "/data/db/" + dirname,
+            dbpath: MongoRunner.dataPath + dirname,
             noprealloc: "",
             smallfiles: "",
             oplogSize: "40",
             nohttpinterface: ""
         };
-    
+
     if( jsTestOptions().noJournal ) options["nojournal"] = ""
     if( jsTestOptions().noJournalPrealloc ) options["nopreallocj"] = ""
     if( jsTestOptions().auth ) options["auth"] = ""
     if( jsTestOptions().keyFile && (!extraOptions || !extraOptions['keyFile']) ) options['keyFile'] = jsTestOptions().keyFile
+
+    if( jsTestOptions().useSSL ) {
+        if (!options["sslMode"]) options["sslMode"] = "requireSSL";
+        if (!options["sslPEMKeyFile"]) options["sslPEMKeyFile"] = "jstests/libs/server.pem";
+        if (!options["sslCAFile"]) options["sslCAFile"] = "jstests/libs/ca.pem";
+        options["sslWeakCertificateValidation"] = "";
+        options["sslAllowInvalidCertificates"] = "";
+    }
+
+    if ( jsTestOptions().useX509 && !options["clusterAuthMode"] ) {
+        options["clusterAuthMode"] = "x509";
+    }
 
     if ( extraOptions )
         Object.extend( options , extraOptions );
@@ -694,10 +766,7 @@ startMongodTest = function (port, dirname, restart, extraOptions ) {
 
     conn.name = (useHostname ? getHostName() : "localhost") + ":" + port;
 
-    if (options['auth'] || options['keyFile']) {
-        if (!this.shardsvr && !options.replSet) {
-            jsTest.addAuth(conn);
-        }
+    if (jsTestOptions().auth || jsTestOptions().keyFile || jsTestOptions().useX509) {
         jsTest.authenticate(conn);
     }
     return conn;
@@ -729,20 +798,70 @@ startMongos = function(args){
 }
 
 /**
+ * Returns a new argArray with any test-specific arguments added.
+ */
+function appendSetParameterArgs(argArray) {
+    var programName = argArray[0];
+    if (programName.endsWith('mongod') || programName.endsWith('mongos')) {
+        if (jsTest.options().enableTestCommands) {
+            argArray.push.apply(argArray, ['--setParameter', "enableTestCommands=1"]);
+        }
+        if (jsTest.options().authMechanism && jsTest.options().authMechanism != "MONGODB-CR") {
+            var hasAuthMechs = false;
+            for (i in argArray) {
+                if (typeof argArray[i] === 'string' &&
+                    argArray[i].indexOf('authenticationMechanisms') != -1) {
+                    hasAuthMechs = true;
+                    break;
+                }
+            }
+            if (!hasAuthMechs) {
+                argArray.push.apply(argArray,
+                                    ['--setParameter',
+                                     "authenticationMechanisms=" + jsTest.options().authMechanism]);
+            }
+        }
+        if (jsTest.options().auth) {
+            argArray.push.apply(argArray, ['--setParameter', "enableLocalhostAuthBypass=false"]);
+        }
+
+        // mongos only options
+        if (programName.endsWith('mongos')) {
+            // apply setParameters for mongos
+            if (jsTest.options().setParametersMongos) {
+                var params = jsTest.options().setParametersMongos.split(",");
+                if (params && params.length > 0) {
+                    params.forEach(function(p) {
+                        if (p) argArray.push.apply(argArray, ['--setParameter', p])
+                    });
+                }
+            }
+        }
+        // mongod only options
+        else if (programName.endsWith('mongod')) {
+            // apply setParameters for mongod
+            if (jsTest.options().setParameters) {
+                var params = jsTest.options().setParameters.split(",");
+                if (params && params.length > 0) {
+                    params.forEach(function(p) {
+                        if (p) argArray.push.apply(argArray, ['--setParameter', p])
+                    });
+                }
+            }
+        }
+    }
+    return argArray;
+};
+
+/**
  * Start a mongo process with a particular argument array.  If we aren't waiting for connect, 
  * return null.
  */
 MongoRunner.startWithArgs = function(argArray, waitForConnect) {
-
-    var port = _parsePort.apply(null, argArray);
-    
-    // Enable test commands.
     // TODO: Make there only be one codepath for starting mongo processes
-    var programName = argArray[0];
-    if (jsTest.options().enableTestCommands && (programName.endsWith('mongod') || programName.endsWith('mongos'))) {
-        argArray.push.apply(argArray, ['--setParameter', 'enableTestCommands=1']);
-    }
-    
+
+    argArray = appendSetParameterArgs(argArray);
+    var port = _parsePort.apply(null, argArray);
     var pid = _startMongoProgram.apply(null, argArray);
 
     var conn = null;
@@ -782,11 +901,7 @@ startMongoProgram = function(){
     // TODO: Make this work better with multi-version testing so that we can support
     // enabling this on 2.4 when testing 2.6
     var args = argumentsToArray( arguments );
-    var programName = args[0];
-    if (jsTest.options().enableTestCommands && (programName.endsWith('mongod') || programName.endsWith('mongos'))) {
-        args.push.apply(args, ['--setParameter', 'enableTestCommands=1']);
-    }
-
+    args = appendSetParameterArgs(args);
     var pid = _startMongoProgram.apply( null, args );
 
     var m;
@@ -813,16 +928,24 @@ startMongoProgram = function(){
 
 runMongoProgram = function() {
     var args = argumentsToArray( arguments );
+    var progName = args[0];
+
     if ( jsTestOptions().auth ) {
-        var progName = args[0];
         args = args.slice(1);
         args.unshift( progName,
-                      '-u', jsTestOptions().adminUser,
-                      '-p', jsTestOptions().adminPassword,
+                      '-u', jsTestOptions().authUser,
+                      '-p', jsTestOptions().authPassword,
                       '--authenticationMechanism', DB.prototype._defaultAuthenticationMechanism,
                       '--authenticationDatabase=admin'
                     );
     }
+
+    if (progName == 'mongo' && !_useWriteCommandsDefault()) {
+        progName = args[0];
+        args = args.slice(1);
+        args.unshift(progName, '--useLegacyWriteOps');
+    }
+
     return _runMongoProgram.apply( null, args );
 }
 
@@ -831,15 +954,22 @@ runMongoProgram = function() {
 // command line arguments to the program.  Returns pid of the spawned program.
 startMongoProgramNoConnect = function() {
     var args = argumentsToArray( arguments );
+    var progName = args[0];
+
     if ( jsTestOptions().auth ) {
-        var progName = args[0];
         args = args.slice(1);
         args.unshift(progName,
-                     '-u', jsTestOptions().adminUser,
-                     '-p', jsTestOptions().adminPassword,
+                     '-u', jsTestOptions().authUser,
+                     '-p', jsTestOptions().authPassword,
                      '--authenticationMechanism', DB.prototype._defaultAuthenticationMechanism,
                      '--authenticationDatabase=admin');
     }
+
+    if (progName == 'mongo' && !_useWriteCommandsDefault()) {
+        args = args.slice(1);
+        args.unshift(progName, '--useLegacyWriteOps');
+    }
+
     return _startMongoProgram.apply( null, args );
 }
 
@@ -850,3 +980,5 @@ myPort = function() {
     else
         return 27017;
 }
+
+}());

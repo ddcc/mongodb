@@ -12,19 +12,33 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include "mongo/s/balance.h"
 
+#include "mongo/base/owned_pointer_map.h"
 #include "mongo/client/dbclientcursor.h"
-#include "mongo/client/distlock.h"
-#include "mongo/db/cmdline.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/write_concern.h"
 #include "mongo/s/chunk.h"
+#include "mongo/s/cluster_write.h"
 #include "mongo/s/config.h"
 #include "mongo/s/config_server_checker_service.h"
+#include "mongo/s/distlock.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/server.h"
 #include "mongo/s/shard.h"
@@ -33,9 +47,13 @@
 #include "mongo/s/type_mongos.h"
 #include "mongo/s/type_settings.h"
 #include "mongo/s/type_tags.h"
+#include "mongo/util/fail_point_service.h"
+#include "mongo/util/log.h"
 #include "mongo/util/version.h"
 
 namespace mongo {
+
+    MONGO_FP_DECLARE(skipBalanceRound);
 
     Balancer balancer;
 
@@ -84,6 +102,7 @@ namespace mongo {
                                      Chunk::MaxChunkSize,
                                      secondaryThrottle,
                                      waitForDelete,
+                                     0, /* maxTimeMS */
                                      res)) {
                     movedCount++;
                     continue;
@@ -123,19 +142,17 @@ namespace mongo {
         return movedCount;
     }
 
-    void Balancer::_ping( DBClientBase& conn, bool waiting ) {
-        WriteConcern w = conn.getWriteConcern();
-        conn.setWriteConcern( W_NONE );
-
-        conn.update( MongosType::ConfigNS ,
-                     BSON( MongosType::name(_myid) ) ,
-                     BSON( "$set" << BSON( MongosType::ping(jsTime()) <<
-                                           MongosType::up((int)(time(0)-_started)) <<
-                                           MongosType::waiting(waiting) <<
-                                           MongosType::mongoVersion(versionString) ) ) ,
-                     true );
-
-        conn.setWriteConcern( w);
+    void Balancer::_ping( bool waiting ) {
+        clusterUpdate( MongosType::ConfigNS,
+                       BSON( MongosType::name( _myid )),
+                       BSON( "$set" << BSON( MongosType::ping(jsTime()) <<
+                                             MongosType::up(static_cast<int>(time(0)-_started)) <<
+                                             MongosType::waiting(waiting) <<
+                                             MongosType::mongoVersion(versionString) )),
+                       true, // upsert
+                       false, // multi
+                       WriteConcernOptions::Unacknowledged,
+                       NULL );
     }
 
     bool Balancer::_checkOIDs() {
@@ -146,7 +163,7 @@ namespace mongo {
 
         for ( vector<Shard>::iterator i=all.begin(); i!=all.end(); ++i ) {
             Shard s = *i;
-            BSONObj f = s.runCommand( "admin" , "features" , true );
+            BSONObj f = s.runCommand( "admin" , "features" );
             if ( f["oidMachine"].isNumber() ) {
                 int x = f["oidMachine"].numberInt();
                 if ( oids.count(x) == 0 ) {
@@ -154,8 +171,8 @@ namespace mongo {
                 }
                 else {
                     log() << "error: 2 machines have " << x << " as oid machine piece " << s.toString() << " and " << oids[x].toString() << endl;
-                    s.runCommand( "admin" , BSON( "features" << 1 << "oidReset" << 1 ) , true );
-                    oids[x].runCommand( "admin" , BSON( "features" << 1 << "oidReset" << 1 ) , true );
+                    s.runCommand( "admin" , BSON( "features" << 1 << "oidReset" << 1 ) );
+                    oids[x].runCommand( "admin" , BSON( "features" << 1 << "oidReset" << 1 ) );
                     return false;
                 }
             }
@@ -198,6 +215,13 @@ namespace mongo {
         //
 
         auto_ptr<DBClientCursor> cursor = conn.query(CollectionType::ConfigNS, BSONObj());
+
+        if ( NULL == cursor.get() ) {
+            warning() << "could not query " << CollectionType::ConfigNS
+                      << " while trying to balance" << endl;
+            return;
+        }
+
         vector< string > collections;
         while ( cursor->more() ) {
             BSONObj col = cursor->nextSafe();
@@ -228,24 +252,17 @@ namespace mongo {
         // TODO: skip unresponsive shards and mark information as stale.
         //
 
-        vector<Shard> allShards;
-        Shard::getAllShards( allShards );
-        if ( allShards.size() < 2) {
-            LOG(1) << "can't balance without more active shards" << endl;
+        ShardInfoMap shardInfo;
+        Status loadStatus = DistributionStatus::populateShardInfoMap(&shardInfo);
+
+        if (!loadStatus.isOK()) {
+            warning() << "failed to load shard metadata" << causedBy(loadStatus) << endl;
             return;
         }
-        
-        ShardInfoMap shardInfo;
-        for ( vector<Shard>::const_iterator it = allShards.begin(); it != allShards.end(); ++it ) {
-            const Shard& s = *it;
-            ShardStatus status = s.getStatus();
-            shardInfo[ s.getName() ] = ShardInfo( s.getMaxSize(),
-                                                  status.mapped(),
-                                                  s.isDraining(),
-                                                  status.hasOpsQueued(),
-                                                  s.tags(),
-                                                  status.mongoVersion()
-                                                  );
+
+        if (shardInfo.size() < 2) {
+            LOG(1) << "can't balance without more active shards" << endl;
+            return;
         }
 
         OCCASIONALLY warnOnMultiVersion( shardInfo );
@@ -257,37 +274,63 @@ namespace mongo {
         for (vector<string>::const_iterator it = collections.begin(); it != collections.end(); ++it ) {
             const string& ns = *it;
 
-            map< string,vector<BSONObj> > shardToChunksMap;
+            OwnedPointerMap<string, OwnedPointerVector<ChunkType> > shardToChunksMap;
             cursor = conn.query(ChunkType::ConfigNS,
                                 QUERY(ChunkType::ns(ns)).sort(ChunkType::min()));
 
             set<BSONObj> allChunkMinimums;
 
             while ( cursor->more() ) {
-                BSONObj chunk = cursor->nextSafe().getOwned();
-                vector<BSONObj>& chunks = shardToChunksMap[chunk[ChunkType::shard()].String()];
-                allChunkMinimums.insert( chunk[ChunkType::min()].Obj() );
-                chunks.push_back( chunk );
+                BSONObj chunkDoc = cursor->nextSafe().getOwned();
+
+                auto_ptr<ChunkType> chunk(new ChunkType());
+                string errmsg;
+                if (!chunk->parseBSON(chunkDoc, &errmsg)) {
+                    error() << "bad chunk format for " << chunkDoc
+                            << ": " << errmsg << endl;
+                    return;
+                }
+
+                allChunkMinimums.insert(chunk->getMin().getOwned());
+                OwnedPointerVector<ChunkType>*& chunkList =
+                        shardToChunksMap.mutableMap()[chunk->getShard()];
+
+                if (chunkList == NULL) {
+                    chunkList = new OwnedPointerVector<ChunkType>();
+                }
+
+                chunkList->mutableVector().push_back(chunk.release());
             }
             cursor.reset();
 
-            if (shardToChunksMap.empty()) {
+            if (shardToChunksMap.map().empty()) {
                 LOG(1) << "skipping empty collection (" << ns << ")";
                 continue;
             }
 
-            for ( vector<Shard>::iterator i=allShards.begin(); i!=allShards.end(); ++i ) {
+            for (ShardInfoMap::const_iterator i = shardInfo.begin(); i != shardInfo.end(); ++i) {
                 // this just makes sure there is an entry in shardToChunksMap for every shard
-                Shard s = *i;
-                shardToChunksMap[s.getName()].size();
+                OwnedPointerVector<ChunkType>*& chunkList =
+                        shardToChunksMap.mutableMap()[i->first];
+
+                if (chunkList == NULL) {
+                    chunkList = new OwnedPointerVector<ChunkType>();
+                }
             }
 
-            DistributionStatus status( shardInfo, shardToChunksMap );
+            DistributionStatus status(shardInfo, shardToChunksMap.map());
 
             // load tags
-            conn.ensureIndex(TagsType::ConfigNS,
-                             BSON(TagsType::ns() << 1 << TagsType::min() << 1),
-                             true);
+            Status result = clusterCreateIndex(TagsType::ConfigNS,
+                                               BSON(TagsType::ns() << 1 << TagsType::min() << 1),
+                                               true, // unique
+                                               WriteConcernOptions::AllConfigs,
+                                               NULL);
+
+            if ( !result.isOK() ) {
+                warning() << "could not create index tags_1_min_1: " << result.reason() << endl;
+                continue;
+            }
 
             cursor = conn.query(TagsType::ConfigNS,
                                 QUERY(TagsType::ns(ns)).sort(TagsType::min()));
@@ -376,7 +419,7 @@ namespace mongo {
             log() << "config servers and shards contacted successfully" << endl;
 
             StringBuilder buf;
-            buf << getHostNameCached() << ":" << cmdLine.port;
+            buf << getHostNameCached() << ":" << serverGlobalParams.port;
             _myid = buf.str();
             _started = time(0);
 
@@ -417,12 +460,10 @@ namespace mongo {
 
             try {
 
-                scoped_ptr<ScopedDbConnection> connPtr(
-                        ScopedDbConnection::getInternalScopedDbConnection(config.toString(), 30));
-                ScopedDbConnection& conn = *connPtr;
+                ScopedDbConnection conn(config.toString(), 30);
 
                 // ping has to be first so we keep things in the config server in sync
-                _ping( conn.conn() );
+                _ping();
 
                 // use fresh shard state
                 Shard::reloadShardInfo();
@@ -432,11 +473,12 @@ namespace mongo {
 
                 BSONObj balancerConfig;
                 // now make sure we should even be running
-                if ( ! grid.shouldBalance( "", &balancerConfig ) ) {
+                if (!grid.shouldBalance( "", &balancerConfig) ||
+                        MONGO_FAIL_POINT(skipBalanceRound)) {
                     LOG(1) << "skipping balancing round because balancing is disabled" << endl;
 
                     // Ping again so scripts can determine if we're active without waiting
-                    _ping( conn.conn(), true );
+                    _ping( true );
 
                     conn.done();
 
@@ -455,7 +497,7 @@ namespace mongo {
                         LOG(1) << "skipping balancing round because another balancer is active" << endl;
 
                         // Ping again so scripts can determine if we're active without waiting
-                        _ping( conn.conn(), true );
+                        _ping( true );
 
                         conn.done();
                         
@@ -467,6 +509,7 @@ namespace mongo {
                         conn.done();
                         warning() << "Skipping balancing round because data inconsistency"
                                   << " was detected amongst the config servers." << endl;
+                        sleepsecs( sleepTime );
                         continue;
                     }
 
@@ -501,7 +544,7 @@ namespace mongo {
                 }
 
                 // Ping again so scripts can determine if we're active without waiting
-                _ping( conn.conn(), true );
+                _ping( true );
                 
                 conn.done();
 

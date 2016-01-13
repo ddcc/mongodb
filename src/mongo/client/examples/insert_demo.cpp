@@ -24,13 +24,20 @@
 */
 
 #include <iostream>
-#include "dbclient.h" // the mongo c++ driver
+#include "mongo/client/dbclient.h" // the mongo c++ driver
 
 using namespace std;
 using namespace mongo;
 using namespace bson;
 
 int main() {
+
+    Status status = client::initialize();
+    if ( !status.isOK() ) {
+        std::cout << "failed to initialize the client driver: " << status.toString() << endl;
+        return EXIT_FAILURE;
+    }
+
     try {
         cout << "connecting to localhost..." << endl;
         DBClientConnection c;
@@ -55,8 +62,8 @@ int main() {
     } 
     catch(DBException& e) { 
         cout << "caught DBException " << e.toString() << endl;
-        return 1;
+        return EXIT_FAILURE;
     }
 
-    return 0;
+    return EXIT_SUCCESS;
 }

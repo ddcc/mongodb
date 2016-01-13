@@ -12,6 +12,18 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 #pragma once
@@ -83,7 +95,16 @@ namespace mongo {
          * + Mongos pings include a "configVersion" field indicating the current config version
          * + Mongos explicitly ignores any collection with a "primary" field
          */
-        UpgradeHistory_MandatoryEpochVersion = 4
+        UpgradeHistory_MandatoryEpochVersion = 4,
+
+        /**
+         * Version upgrade with the following changes:
+         *
+         * + Dropping a collection from mongos now waits for the chunks to be removed from the
+         *   config server before contacting each shard. Because of this, mongos should be
+         *   upgraded first before mongod or never drop collections during upgrade.
+         */
+        UpgradeHistory_DummyBumpPre2_6 = 5
     };
 
     //
@@ -92,10 +113,10 @@ namespace mongo {
     //
 
     // Earliest version we're compatible with
-    const int MIN_COMPATIBLE_CONFIG_VERSION = UpgradeHistory_NoEpochVersion;
+    const int MIN_COMPATIBLE_CONFIG_VERSION = UpgradeHistory_MandatoryEpochVersion;
 
     // Latest version we know how to communicate with
-    const int CURRENT_CONFIG_VERSION = UpgradeHistory_MandatoryEpochVersion;
+    const int CURRENT_CONFIG_VERSION = UpgradeHistory_DummyBumpPre2_6;
 
     //
     // DECLARATION OF UPGRADE FUNCTIONALITY
@@ -103,11 +124,11 @@ namespace mongo {
     // config_upgrade.cpp::createRegistry()
     //
 
-    bool doUpgradeV0ToV4(const ConnectionString& configLoc,
+    bool doUpgradeV0ToV5(const ConnectionString& configLoc,
                          const VersionType& lastVersionInfo,
                          string* errMsg);
 
-    bool doUpgradeV3ToV4(const ConnectionString& configLoc,
+    bool doUpgradeV4ToV5(const ConnectionString& configLoc,
                          const VersionType& lastVersionInfo,
                          string* errMsg);
 

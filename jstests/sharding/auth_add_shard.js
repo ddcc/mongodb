@@ -33,7 +33,7 @@ if (user) {
 }
 else {
     print("adding user");
-    mongos.getDB(adminUser.db).addUser(adminUser.username, adminUser.password);
+    mongos.getDB(adminUser.db).createUser({user: adminUser.username, pwd: adminUser.password, roles: jsTest.adminUserRoles});
 }
 
 //login as admin user

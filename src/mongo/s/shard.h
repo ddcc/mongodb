@@ -14,6 +14,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
 #pragma once
@@ -48,8 +60,7 @@ namespace mongo {
 
         Shard( const Shard& other )
             : _name( other._name ) , _addr( other._addr ) , _cs( other._cs ) , 
-              _maxSize( other._maxSize ) , _isDraining( other._isDraining ),
-              _tags( other._tags ) {
+              _maxSize( other._maxSize ) , _isDraining( other._isDraining ) {
         }
 
         Shard( const Shard* other )
@@ -62,6 +73,8 @@ namespace mongo {
             s.reset( ident );
             return s;
         }
+
+        static Shard findIfExists( const string& shardName );
 
         /**
          * @param ident either name or address
@@ -123,10 +136,10 @@ namespace mongo {
         bool ok() const { return _addr.size() > 0; }
 
         // Set internal to true to run the command with internal authentication privileges.
-        BSONObj runCommand( const string& db , const string& simple , bool internal = false ) const {
-            return runCommand( db , BSON( simple << 1 ) , internal );
+        BSONObj runCommand( const string& db , const string& simple ) const {
+            return runCommand( db , BSON( simple << 1 ) );
         }
-        BSONObj runCommand( const string& db , const BSONObj& cmd , bool internal = false) const ;
+        BSONObj runCommand( const string& db , const BSONObj& cmd ) const ;
 
         ShardStatus getStatus() const ;
         
@@ -136,9 +149,6 @@ namespace mongo {
          * of if the replica set contains node
          */
         bool containsNode( const string& node ) const;
-
-        const set<string>& tags() const { return _tags; }
-        void addTag( const string& tag ) { _tags.insert( tag ); }
 
         static void getAllShards( vector<Shard>& all );
         static void printShardInfo( ostream& out );
@@ -167,7 +177,6 @@ namespace mongo {
         ConnectionString _cs;
         long long _maxSize;    // in MBytes, 0 is unlimited
         bool      _isDraining; // shard is currently being removed
-        set<string> _tags;
     };
     typedef shared_ptr<Shard> ShardPtr;
 
@@ -306,6 +315,11 @@ namespace mongo {
          * thread local storage pool of the current thread.
          */
         static void clearPool();
+
+        /**
+         * Forgets a namespace to prevent future versioning.
+         */
+        static void forgetNS( const string& ns );
 
     private:
         void _init();

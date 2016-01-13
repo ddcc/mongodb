@@ -14,6 +14,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
 
@@ -22,21 +34,21 @@
    mostly around shard management and checking
  */
 
-#include "pch.h"
+#include "mongo/pch.h"
+
+#include "mongo/s/d_logic.h"
+
 #include <map>
 #include <string>
 
-#include "../db/commands.h"
-#include "../db/jsobj.h"
-#include "../db/dbmessage.h"
-
-#include "../client/connpool.h"
-
-#include "../util/queue.h"
-
-#include "shard.h"
-#include "d_logic.h"
-#include "d_writeback.h"
+#include "mongo/client/connpool.h"
+#include "mongo/db/client.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/dbmessage.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/s/d_writeback.h"
+#include "mongo/s/shard.h"
+#include "mongo/util/queue.h"
 
 using namespace std;
 
@@ -56,7 +68,7 @@ namespace mongo {
         const char *ns = d.getns();
         string errmsg;
         // We don't care about the version here, since we're returning it later in the writeback
-        ConfigVersion received, wanted;
+        ChunkVersion received, wanted;
         if ( shardVersionOk( ns , errmsg, received, wanted ) ) {
             return false;
         }

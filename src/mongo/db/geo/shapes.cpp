@@ -12,6 +12,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #include "mongo/pch.h"
@@ -194,9 +206,6 @@ namespace mongo {
             // XXX: why is there a mod here?
             Point p2 = _points[i % size()];
 
-            GEODEBUG("Doing intersection check of " << fudgeBox.toString()
-                     << " with seg " << p1.toString() << " to " << p2.toString());
-
             // We need to check whether or not this segment intersects our error box
             if (fudge > 0 &&
                     // Points not too far below box
@@ -208,16 +217,13 @@ namespace mongo {
                     // Points not too far to right of box
                     fudgeBox._max.x >= std::min(p1.x, p2.x)) {
 
-                GEODEBUG("Doing detailed check");
 
                 // If our box contains one or more of these points, we need to do an exact
                 // check.
                 if (fudgeBox.inside(p1)) {
-                    GEODEBUG("Point 1 inside");
                     return 0;
                 }
                 if (fudgeBox.inside(p2)) {
-                    GEODEBUG("Point 2 inside");
                     return 0;
                 }
 
@@ -227,13 +233,11 @@ namespace mongo {
 
                     double xintersT = (fudgeBox._max.y - p1.y) * invSlope + p1.x;
                     if (fudgeBox._min.x <= xintersT && fudgeBox._max.x >= xintersT) {
-                        GEODEBUG("Top intersection @ " << xintersT);
                         return 0;
                     }
 
                     double xintersB = (fudgeBox._min.y - p1.y) * invSlope + p1.x;
                     if (fudgeBox._min.x <= xintersB && fudgeBox._max.x >= xintersB) {
-                        GEODEBUG("Bottom intersection @ " << xintersB);
                         return 0;
                     }
                 }
@@ -244,13 +248,11 @@ namespace mongo {
 
                     double yintersR = (p1.x - fudgeBox._max.x) * slope + p1.y;
                     if (fudgeBox._min.y <= yintersR && fudgeBox._max.y >= yintersR) {
-                        GEODEBUG("Right intersection @ " << yintersR);
                         return 0;
                     }
 
                     double yintersL = (p1.x - fudgeBox._min.x) * slope + p1.y;
                     if (fudgeBox._min.y <= yintersL && fudgeBox._max.y >= yintersL) {
-                        GEODEBUG("Left intersection @ " << yintersL);
                         return 0;
                     }
                 }
@@ -459,4 +461,5 @@ namespace mongo {
 
         return sqrt((a * a) + (b * b));
     }
+
 }  // namespace mongo

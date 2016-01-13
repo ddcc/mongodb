@@ -1,4 +1,3 @@
-// sniffer.cpp
 /*
  *    Copyright (C) 2010 10gen Inc.
  *
@@ -13,50 +12,62 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
-
 
 /*
   TODO:
     large messages - need to track what's left and ignore
-    single object over packet size - can only display begging of object
+    single object over packet size - can only display beginning of object
 
     getmore
     delete
     killcursors
 
  */
-#include "../pch.h"
-#include <pcap.h>
+#include "mongo/pch.h"
 
 #ifdef _WIN32
 #undef min
 #undef max
 #endif
 
-#include "mongo/base/initializer.h"
-#include "../bson/util/builder.h"
-#include "../util/net/message.h"
-#include "../util/mmap.h"
-#include "../db/dbmessage.h"
-
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
+#include <boost/shared_ptr.hpp>
 #include <ctype.h>
 #include <errno.h>
-#include <sys/types.h>
-#ifndef _WIN32
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#endif
-
 #include <iostream>
 #include <map>
+#include <pcap.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string>
+#include <string.h>
+#include <sys/types.h>
 
-#include <boost/shared_ptr.hpp>
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#endif
+
+#include "mongo/base/initializer.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/client/dbclientinterface.h"
+#include "mongo/db/dbmessage.h"
+#include "mongo/util/net/message.h"
+#include "mongo/util/mmap.h"
+#include "mongo/util/text.h"
 
 using namespace std;
 using mongo::Message;
@@ -67,8 +78,6 @@ using mongo::BufBuilder;
 using mongo::DBClientConnection;
 using mongo::QueryResult;
 using mongo::MemoryMappedFile;
-
-mongo::CmdLine mongo::cmdLine;
 
 #define SNAP_LEN 65535
 
@@ -329,9 +338,7 @@ void processMessage( Connection& c , Message& m ) {
             break;
         }
         case mongo::dbKillCursors: {
-            int *x = (int *) m.singleData()->_data;
-            x++; // reserved
-            int n = *x;
+            int n = d.pullInt();
             out() << "\tkillCursors n: " << n << endl;
             break;
         }
@@ -357,7 +364,7 @@ void processMessage( Connection& c , Message& m ) {
                 if ( m.operation() == mongo::dbGetMore ) {
                     DbMessage d( m );
                     d.pullInt();
-                    long long &cId = d.pullInt64();
+                    long long cId = d.pullInt64();
                     cId = mapCursor[ c ][ cId ];
                 }
                 Message response;
@@ -425,7 +432,8 @@ void processDiagLog( const char * file ) {
 
 void usage() {
     cout <<
-         "Usage: mongosniff [--help] [--forward host:port] [--source (NET <interface> | (FILE | DIAGLOG) <filename>)] [<port0> <port1> ... ]\n"
+         "Usage: mongosniff [--help] [--forward host:port] [--objcheck] [--source (NET <interface> | (FILE | DIAGLOG) <filename>)] [<port0> <port1> ... ]\n"
+         "--help          Print this help message.\n"
          "--forward       Forward all parsed request messages to mongod instance at \n"
          "                specified host:port\n"
          "--source        Source of traffic to sniff, either a network interface or a\n"
@@ -438,11 +446,10 @@ void usage() {
          "                when there are dropped tcp packets.\n"
          "<port0>...      These parameters are used to filter sniffing.  By default, \n"
          "                only port 27017 is sniffed.\n"
-         "--help          Print this help message.\n"
          << endl;
 }
 
-int main(int argc, char **argv, char** envp) {
+int toolMain(int argc, char **argv, char** envp) {
     mongo::runGlobalInitializersOrDie(argc, argv, envp);
 
     stringstream nullStream;
@@ -453,8 +460,14 @@ int main(int argc, char **argv, char** envp) {
     pcap_t *handle;
 
     struct bpf_program fp;
-    bpf_u_int32 mask;
-    bpf_u_int32 net;
+
+// PCAP_NETMASK_UNKNOWN was introduced in pcap 1.1.0, so work around earlier versions. See
+// http://anonsvn.wireshark.org/viewvc?revision=33461&view=revision for details.
+#if defined(PCAP_NETMASK_UNKNOWN)
+    bpf_u_int32 mask = PCAP_NETMASK_UNKNOWN;
+#else
+    bpf_u_int32 mask = 0;
+#endif
 
     bool source = false;
     bool replay = false;
@@ -523,6 +536,7 @@ int main(int argc, char **argv, char** envp) {
             }
             cout << "found device: " << dev << endl;
         }
+        bpf_u_int32 net;
         if (pcap_lookupnet(dev, &net, &mask, errbuf) == -1) {
             cerr << "can't get netmask: " << errbuf << endl;
             return -1;
@@ -545,7 +559,7 @@ int main(int argc, char **argv, char** envp) {
         cerr << "don't know how to handle datalink type: " << pcap_datalink( handle ) << endl;
     }
 
-    verify( pcap_compile(handle, &fp, const_cast< char * >( "tcp" ) , 0, net) != -1 );
+    verify( pcap_compile(handle, &fp, const_cast< char * >( "tcp" ) , 0, mask) != -1 );
     verify( pcap_setfilter(handle, &fp) != -1 );
 
     cout << "sniffing... ";
@@ -561,3 +575,20 @@ int main(int argc, char **argv, char** envp) {
     return 0;
 }
 
+#if defined(_WIN32)
+// In Windows, wmain() is an alternate entry point for main(), and receives the same parameters
+// as main() but encoded in Windows Unicode (UTF-16); "wide" 16-bit wchar_t characters.  The
+// WindowsCommandLine object converts these wide character strings to a UTF-8 coded equivalent
+// and makes them available through the argv() and envp() members.  This enables toolMain()
+// to process UTF-8 encoded arguments and environment variables without regard to platform.
+int wmain(int argc, wchar_t* argvW[], wchar_t* envpW[]) {
+    WindowsCommandLine wcl(argc, argvW, envpW);
+    int exitCode = toolMain(argc, wcl.argv(), wcl.envp());
+    ::_exit(exitCode);
+}
+#else
+int main(int argc, char* argv[], char** envp) {
+    int exitCode = toolMain(argc, argv, envp);
+    ::_exit(exitCode);
+}
+#endif

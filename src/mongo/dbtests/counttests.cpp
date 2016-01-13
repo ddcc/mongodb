@@ -14,38 +14,50 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 #include <boost/thread/thread.hpp>
 
-#include "../db/ops/count.h"
-
-#include "../db/cursor.h"
-#include "../db/pdfile.h"
 #include "mongo/db/db.h"
 #include "mongo/db/json.h"
+#include "mongo/db/ops/count.h"
+#include "mongo/db/catalog/collection.h"
 
-#include "dbtests.h"
+#include "mongo/dbtests/dbtests.h"
 
 namespace CountTests {
 
     class Base {
         Lock::DBWrite lk;
         Client::Context _context;
+        Database* _database;
+        Collection* _collection;
     public:
         Base() : lk(ns()), _context( ns() ) {
+            _database = _context.db();
+            _collection = _database->getCollection( ns() );
+            if ( _collection ) {
+                _database->dropCollection( ns() );
+            }
+            _collection = _database->createCollection( ns() );
+
             addIndex( fromjson( "{\"a\":1}" ) );
         }
         ~Base() {
             try {
-                boost::shared_ptr<Cursor> c = theDataFileMgr.findAll( ns() );
-                vector<DiskLoc> toDelete;
-                for(; c->ok(); c->advance() )
-                    toDelete.push_back( c->currLoc() );
-                for( vector<DiskLoc>::iterator i = toDelete.begin(); i != toDelete.end(); ++i )
-                    theDataFileMgr.deleteRecord( ns(), i->rec(), *i, false );
-                DBDirectClient cl;
-                cl.dropIndexes( ns() );
+                uassertStatusOK( _database->dropCollection( ns() ) );
             }
             catch ( ... ) {
                 FAIL( "Exception while cleaning up collection" );
@@ -55,21 +67,30 @@ namespace CountTests {
         static const char *ns() {
             return "unittests.counttests";
         }
-        static void addIndex( const BSONObj &key ) {
+        void addIndex( const BSONObj &key ) {
             BSONObjBuilder b;
             b.append( "name", key.firstElementFieldName() );
             b.append( "ns", ns() );
             b.append( "key", key );
             BSONObj o = b.done();
-            stringstream indexNs;
-            indexNs << "unittests.system.indexes";
-            theDataFileMgr.insert( indexNs.str().c_str(), o.objdata(), o.objsize() );
+            Status s = _collection->getIndexCatalog()->createIndex( o, false );
+            uassertStatusOK( s );
         }
-        static void insert( const char *s ) {
+        void insert( const char *s ) {
             insert( fromjson( s ) );
         }
-        static void insert( const BSONObj &o ) {
-            theDataFileMgr.insert( ns(), o.objdata(), o.objsize() );
+        void insert( const BSONObj &o ) {
+            if ( o["_id"].eoo() ) {
+                BSONObjBuilder b;
+                OID oid;
+                oid.init();
+                b.appendOID( "_id", &oid );
+                b.appendElements( o );
+                _collection->insertDocument( b.obj(), false );
+            }
+            else {
+                _collection->insertDocument( o, false );
+            }
         }
         static BSONObj countCommand( const BSONObj &query ) {
             return BSON( "query" << query );

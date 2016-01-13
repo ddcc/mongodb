@@ -34,7 +34,8 @@ Mongo.prototype.getSlaveOk = function() {
 }
 
 Mongo.prototype.getDB = function( name ){
-    if (jsTest.options().keyFile && ((typeof this.authenticated == 'undefined') || !this.authenticated)) {
+    if ((jsTest.options().keyFile || jsTest.options().useX509) && 
+         ((typeof this.authenticated == 'undefined') || !this.authenticated)) {
         jsTest.authenticate(this)
     }
     return new DB( this , name );
@@ -153,3 +154,79 @@ connect = function(url, user, pass) {
     }
     return db;
 }
+
+/** deprecated, use writeMode below
+ * 
+ */
+Mongo.prototype.useWriteCommands = function() {
+	return (this.writeMode() != "legacy");
+}
+
+Mongo.prototype.forceWriteMode = function( mode ) {
+    this._writeMode = mode;
+}
+
+Mongo.prototype.hasWriteCommands = function() {
+    if ( !('_hasWriteCommands' in this) ) {
+        var isMaster = this.getDB("admin").runCommand({ isMaster : 1 });
+        this._hasWriteCommands = (isMaster.ok && 
+                                  'minWireVersion' in isMaster &&
+                                  isMaster.minWireVersion <= 2 && 
+                                  2 <= isMaster.maxWireVersion );
+    }
+    
+    return this._hasWriteCommands;
+}
+
+/**
+ * {String} Returns the current mode set. Will be commands/legacy/compatibility
+ * 
+ * Sends isMaster to determine if the connection is capable of using bulk write operations, and
+ * caches the result.
+ */
+
+Mongo.prototype.writeMode = function() {
+
+    if ( '_writeMode' in this ) {
+        return this._writeMode;
+    }
+
+    // get default from shell params
+    if ( _writeMode )
+        this._writeMode = _writeMode();
+    
+    // can't use "commands" mode unless server version is good.
+    if ( this.hasWriteCommands() ) {
+        // good with whatever is already set
+    }
+    else if ( this._writeMode == "commands" ) {
+        print("Cannot use commands write mode, degrading to compatibility mode");
+        this._writeMode = "compatibility";
+    }
+    
+    return this._writeMode;
+};
+
+
+
+//
+// Write Concern can be set at the connection level, and is used for all write operations unless
+// overridden at the collection level.
+//
+
+Mongo.prototype.setWriteConcern = function( wc ) {
+    if ( wc instanceof WriteConcern ) {
+        this._writeConcern = wc;
+    }
+    else {
+        this._writeConcern = new WriteConcern( wc );
+    }
+};
+
+Mongo.prototype.getWriteConcern = function() {
+    return this._writeConcern;
+};
+
+Mongo.prototype.unsetWriteConcern = function() {
+    delete this._writeConcern;
+};

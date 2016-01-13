@@ -159,7 +159,10 @@
       <UniqueIdentifier>{0d7ccbd5-b4e4-4e57-ae0b-b4a80a6fa6bb}</UniqueIdentifier>
     </Filter>
     <Filter Include="third_party\MurmurHash3">
-      <UniqueIdentifier>{5ced80f0-4dce-421a-ba59-1b338973dd97}</UniqueIdentifier>
+      <UniqueIdentifier>{51e6660e-644c-44e4-b9f9-a44b6f25ccd8}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="logger">
+      <UniqueIdentifier>{f78649b9-5f23-47ef-84ec-bfa2a80e77c7}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
@@ -332,9 +335,6 @@
     <ClCompile Include="..\util\processinfo_win32.cpp">
       <Filter>util\Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\util\ramlog.cpp">
-      <Filter>util\Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="..\util\util.cpp">
       <Filter>util\Source Files</Filter>
     </ClCompile>
@@ -455,9 +455,6 @@
     <ClCompile Include="..\db\dbmessage.cpp">
       <Filter>db\Source FIles</Filter>
     </ClCompile>
-    <ClCompile Include="..\client\connection_factory.cpp">
-      <Filter>client</Filter>
-    </ClCompile>
     <ClCompile Include="..\util\concurrency\mutexdebugger.cpp">
       <Filter>util\concurrency</Filter>
     </ClCompile>
@@ -466,9 +463,6 @@
     </ClCompile>
     <ClCompile Include="..\util\safe_num.cpp">
       <Filter>util\Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="..\base\configuration_variable_manager.cpp">
-      <Filter>base</Filter>
     </ClCompile>
     <ClCompile Include="..\base\global_initializer.cpp">
       <Filter>base</Filter>
@@ -514,18 +508,6 @@
     </ClCompile>
     <ClCompile Include="..\bson\util\bson_extract.cpp">
       <Filter>bson\util</Filter>
-    </ClCompile>
-    <ClCompile Include="..\bson\mutable\mutable_bson.cpp">
-      <Filter>bson\mutable</Filter>
-    </ClCompile>
-    <ClCompile Include="..\bson\mutable\mutable_bson_builder.cpp">
-      <Filter>bson\mutable</Filter>
-    </ClCompile>
-    <ClCompile Include="..\bson\mutable\mutable_bson_heap.cpp">
-      <Filter>bson\mutable</Filter>
-    </ClCompile>
-    <ClCompile Include="..\bson\mutable\mutable_bson_internal.cpp">
-      <Filter>bson\mutable</Filter>
     </ClCompile>
     <ClCompile Include="..\scripting\engine_v8.cpp">
       <Filter>scripting</Filter>
@@ -1004,12 +986,6 @@
     <ClCompile Include="..\scripting\engine_none.cpp">
       <Filter>scripting</Filter>
     </ClCompile>
-    <ClCompile Include="..\scripting\engine_spidermonkey.cpp">
-      <Filter>scripting</Filter>
-    </ClCompile>
-    <ClCompile Include="..\scripting\sm_db.cpp">
-      <Filter>scripting</Filter>
-    </ClCompile>
     <ClCompile Include="..\scripting\v8_deadline_monitor_test.cpp">
       <Filter>scripting</Filter>
     </ClCompile>
@@ -1019,17 +995,137 @@
     <ClCompile Include="..\client\sasl_client_authenticate.cpp">
       <Filter>client</Filter>
     </ClCompile>
+    <ClCompile Include="..\bson\mutable\document.cpp">
+      <Filter>bson\mutable</Filter>
+    </ClCompile>
+    <ClCompile Include="..\bson\mutable\element.cpp">
+      <Filter>bson\mutable</Filter>
+    </ClCompile>
+    <ClCompile Include="..\bson\mutable\mutable_bson_algo_test.cpp">
+      <Filter>bson\mutable</Filter>
+    </ClCompile>
+    <ClCompile Include="..\bson\mutable\mutable_bson_test.cpp">
+      <Filter>bson\mutable</Filter>
+    </ClCompile>
+    <ClCompile Include="..\platform\atomic_word_test.cpp">
+      <Filter>platform</Filter>
+    </ClCompile>
+    <ClCompile Include="..\platform\bits_test.cpp">
+      <Filter>platform</Filter>
+    </ClCompile>
+    <ClCompile Include="..\platform\random_test.cpp">
+      <Filter>platform</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\third_party\murmurhash3\MurmurHash3.cpp">
       <Filter>third_party\MurmurHash3</Filter>
     </ClCompile>
+    <ClCompile Include="..\base\counter_test.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\initializer_dependency_graph_test.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\initializer_test.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\owned_pointer_map_test.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\owned_pointer_vector_test.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\parse_number_test.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\status_test.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\string_data_test.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
+    <ClCompile Include="..\bson\bson_field_test.cpp">
+      <Filter>bson</Filter>
+    </ClCompile>
+    <ClCompile Include="..\bson\bson_obj_test.cpp">
+      <Filter>bson</Filter>
+    </ClCompile>
+    <ClCompile Include="..\bson\bson_validate_test.cpp">
+      <Filter>bson</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\hex.cpp">
+      <Filter>util\Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\platform\process_id.cpp">
+      <Filter>platform</Filter>
+    </ClCompile>
+    <ClCompile Include="..\platform\process_id_test.cpp">
+      <Filter>platform</Filter>
+    </ClCompile>
     <ClCompile Include="..\platform\strcasestr.cpp">
+      <Filter>platform</Filter>
+    </ClCompile>
+    <ClCompile Include="..\platform\posix_fadvise.cpp">
       <Filter>platform</Filter>
     </ClCompile>
     <ClCompile Include="..\platform\backtrace.cpp">
       <Filter>platform</Filter>
     </ClCompile>
-    <ClCompile Include="..\platform\posix_fadvise.cpp">
-      <Filter>platform</Filter>
+    <ClCompile Include="..\logger\console.cpp">
+      <Filter>logger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\logger\log_manager.cpp">
+      <Filter>logger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\logger\log_severity.cpp">
+      <Filter>logger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\logger\log_test.cpp">
+      <Filter>logger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\logger\logger.cpp">
+      <Filter>logger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\logger\logstream_builder.cpp">
+      <Filter>logger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\logger\message_event_utf8_encoder.cpp">
+      <Filter>logger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\logger\message_log_domain.cpp">
+      <Filter>logger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\logger\ramlog.cpp">
+      <Filter>logger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\logger\rotatable_file_manager.cpp">
+      <Filter>logger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\logger\rotatable_file_writer.cpp">
+      <Filter>logger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\logger\rotatable_file_writer_test.cpp">
+      <Filter>logger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\concurrency\rwlockimpl.cpp">
+      <Filter>util\concurrency</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\concurrency\synchronization.cpp">
+      <Filter>util\concurrency</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\concurrency\task.cpp">
+      <Filter>util\concurrency</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\concurrency\thread_name.cpp">
+      <Filter>util\concurrency</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\concurrency\thread_pool.cpp">
+      <Filter>util\concurrency</Filter>
+    </ClCompile>
+    <ClCompile Include="..\bson\mutable\mutable_bson_test_utils.cpp">
+      <Filter>bson\mutable</Filter>
+    </ClCompile>
+    <ClCompile Include="..\bson\optime.cpp">
+      <Filter>bson</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -1141,8 +1237,20 @@
     <None Include="types.js">
       <Filter>JavaScript source files\Included in all executables</Filter>
     </None>
-    <None Include="..\..\third_party\murmurhash3\SConscript">
-      <Filter>third_party\MurmurHash3</Filter>
+    <None Include="..\platform\SConscript">
+      <Filter>platform</Filter>
+    </None>
+    <None Include="..\base\SConscript">
+      <Filter>base</Filter>
+    </None>
+    <None Include="..\logger\SConscript">
+      <Filter>logger</Filter>
+    </None>
+    <None Include="..\util\concurrency\README">
+      <Filter>util\concurrency</Filter>
+    </None>
+    <None Include="..\util\concurrency\SConscript">
+      <Filter>util\concurrency</Filter>
     </None>
   </ItemGroup>
   <ItemGroup>
@@ -1179,9 +1287,6 @@
     </ClInclude>
     <ClInclude Include="..\client\constants.h">
       <Filter>client</Filter>
-    </ClInclude>
-    <ClInclude Include="..\s\d_chunk_manager.h">
-      <Filter>s</Filter>
     </ClInclude>
     <ClInclude Include="..\client\dbclient_rs.h">
       <Filter>client</Filter>
@@ -1241,9 +1346,6 @@
       <Filter>client</Filter>
     </ClInclude>
     <ClInclude Include="..\db\repl\rs_config.h">
-      <Filter>db\repl</Filter>
-    </ClInclude>
-    <ClInclude Include="..\db\repl\rs_optime.h">
       <Filter>db\repl</Filter>
     </ClInclude>
     <ClInclude Include="..\db\repl\rs_exception.h">
@@ -1360,9 +1462,6 @@
     <ClInclude Include="..\db\index.h">
       <Filter>db\Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\db\indexkey.h">
-      <Filter>db\Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="..\db\instance.h">
       <Filter>db\Header Files</Filter>
     </ClInclude>
@@ -1390,15 +1489,6 @@
     <ClInclude Include="..\db\namespacestring.h">
       <Filter>db\Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\db\nonce.h">
-      <Filter>db\Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="..\db\oplog.h">
-      <Filter>db\Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="..\db\oplogreader.h">
-      <Filter>db\Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="..\db\pdfile.h">
       <Filter>db\Header Files</Filter>
     </ClInclude>
@@ -1412,12 +1502,6 @@
       <Filter>db\Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\db\queryutil.h">
-      <Filter>db\Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="..\db\repl.h">
-      <Filter>db\Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="..\db\replutil.h">
       <Filter>db\Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\db\repl\rs.h">
@@ -1495,9 +1579,6 @@
     <ClInclude Include="..\util\md5.hpp">
       <Filter>util\Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\util\optime.h">
-      <Filter>util\Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="..\util\password.h">
       <Filter>util\Header Files</Filter>
     </ClInclude>
@@ -1531,7 +1612,6 @@
     <ClInclude Include="..\util\stacktrace.h">
       <Filter>util\Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\targetver.h" />
     <ClInclude Include="..\util\timer-win32-inl.h">
       <Filter>util\Header Files</Filter>
     </ClInclude>
@@ -1646,9 +1726,6 @@
     <ClInclude Include="..\platform\unordered_set.h">
       <Filter>platform</Filter>
     </ClInclude>
-    <ClInclude Include="..\base\configuration_variable_manager.h">
-      <Filter>base</Filter>
-    </ClInclude>
     <ClInclude Include="..\base\disallow_copying.h">
       <Filter>base</Filter>
     </ClInclude>
@@ -1708,18 +1785,6 @@
     </ClInclude>
     <ClInclude Include="..\bson\util\bson_extract.h">
       <Filter>bson\util</Filter>
-    </ClInclude>
-    <ClInclude Include="..\bson\mutable\mutable_bson.h">
-      <Filter>bson\mutable</Filter>
-    </ClInclude>
-    <ClInclude Include="..\bson\mutable\mutable_bson_builder.h">
-      <Filter>bson\mutable</Filter>
-    </ClInclude>
-    <ClInclude Include="..\bson\mutable\mutable_bson_heap.h">
-      <Filter>bson\mutable</Filter>
-    </ClInclude>
-    <ClInclude Include="..\bson\mutable\mutable_bson_internal.h">
-      <Filter>bson\mutable</Filter>
     </ClInclude>
     <ClInclude Include="..\scripting\engine_v8.h">
       <Filter>scripting</Filter>
@@ -2366,9 +2431,6 @@
     <ClInclude Include="..\util\string_map_internal.h">
       <Filter>util\Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\util\string_writer.h">
-      <Filter>util\Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="..\util\timer-inl.h">
       <Filter>util\Header Files</Filter>
     </ClInclude>
@@ -2390,12 +2452,6 @@
     <ClInclude Include="..\scripting\bench.h">
       <Filter>scripting</Filter>
     </ClInclude>
-    <ClInclude Include="..\scripting\engine_spidermonkey.h">
-      <Filter>scripting</Filter>
-    </ClInclude>
-    <ClInclude Include="..\scripting\engine_spidermonkey_internal.h">
-      <Filter>scripting</Filter>
-    </ClInclude>
     <ClInclude Include="..\scripting\v8_deadline_monitor.h">
       <Filter>scripting</Filter>
     </ClInclude>
@@ -2405,17 +2461,158 @@
     <ClInclude Include="..\client\sasl_client_authenticate.h">
       <Filter>client</Filter>
     </ClInclude>
+    <ClInclude Include="..\bson\mutable\algorithm.h">
+      <Filter>bson\mutable</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\mutable\const_element.h">
+      <Filter>bson\mutable</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\mutable\const_element-inl.h">
+      <Filter>bson\mutable</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\mutable\document.h">
+      <Filter>bson\mutable</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\mutable\document-inl.h">
+      <Filter>bson\mutable</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\mutable\element.h">
+      <Filter>bson\mutable</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\mutable\element-inl.h">
+      <Filter>bson\mutable</Filter>
+    </ClInclude>
+    <ClInclude Include="..\platform\atomic_intrinsics_gcc.h">
+      <Filter>platform</Filter>
+    </ClInclude>
+    <ClInclude Include="..\platform\compiler_gcc.h">
+      <Filter>platform</Filter>
+    </ClInclude>
+    <ClInclude Include="..\platform\hash_namespace.h">
+      <Filter>platform</Filter>
+    </ClInclude>
+    <ClInclude Include="..\db\repl\is_master.h">
+      <Filter>db\repl</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\sequence_util.h">
+      <Filter>util\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\status_with.h">
+      <Filter>base</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\third_party\murmurhash3\MurmurHash3.h">
       <Filter>third_party\MurmurHash3</Filter>
     </ClInclude>
+    <ClInclude Include="..\util\safe_num-inl.h">
+      <Filter>util\Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\status-inl.h">
+      <Filter>base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\platform\process_id.h">
+      <Filter>platform</Filter>
+    </ClInclude>
     <ClInclude Include="..\platform\strcasestr.h">
+      <Filter>platform</Filter>
+    </ClInclude>
+    <ClInclude Include="..\platform\posix_fadvise.h">
       <Filter>platform</Filter>
     </ClInclude>
     <ClInclude Include="..\platform\backtrace.h">
       <Filter>platform</Filter>
     </ClInclude>
-    <ClInclude Include="..\platform\posix_fadvise.h">
-      <Filter>platform</Filter>
+    <ClInclude Include="..\logger\appender.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\console.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\console_appender.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\encoder.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\labeled_level.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\log_domain.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\log_domain-impl.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\log_manager.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\log_severity.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\log_severity-inl.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\logger.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\logstream_builder.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\message_event.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\message_event_utf8_encoder.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\message_log_domain.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\ramlog.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\rotatable_file_appender.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\rotatable_file_manager.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\rotatable_file_writer.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\syslog_appender.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\logger\tee.h">
+      <Filter>logger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\concurrency\mapsf.h">
+      <Filter>util\concurrency</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\concurrency\mvar.h">
+      <Filter>util\concurrency</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\concurrency\qlock.h">
+      <Filter>util\concurrency</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\concurrency\simplerwlock.h">
+      <Filter>util\concurrency</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\concurrency\synchronization.h">
+      <Filter>util\concurrency</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\concurrency\thread_name.h">
+      <Filter>util\concurrency</Filter>
+    </ClInclude>
+    <ClInclude Include="..\util\concurrency\ticketholder.h">
+      <Filter>util\concurrency</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\mutable\damage_vector.h">
+      <Filter>bson\mutable</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\mutable\mutable_bson_test_utils.h">
+      <Filter>bson\mutable</Filter>
+    </ClInclude>
+    <ClInclude Include="..\bson\optime.h">
+      <Filter>bson</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

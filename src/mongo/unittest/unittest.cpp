@@ -12,6 +12,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
 #include "mongo/pch.h"
@@ -21,14 +33,22 @@
 #include <iostream>
 #include <map>
 
+#include "mongo/base/init.h"
+#include "mongo/logger/console_appender.h"
+#include "mongo/logger/log_manager.h"
+#include "mongo/logger/message_event_utf8_encoder.h"
+#include "mongo/logger/message_log_domain.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
+#include "mongo/util/timer.h"
 
 namespace mongo {
 
     namespace unittest {
 
         namespace {
+            logger::MessageLogDomain* unittestOutput =
+                logger::globalLogManager()->getNamedDomain("unittest");
             typedef std::map<std::string, Suite*> SuiteMap;
 
             inline SuiteMap& _allSuites() {
@@ -38,15 +58,32 @@ namespace mongo {
 
         }  // namespace
 
+        logger::LogstreamBuilder log() {
+            return LogstreamBuilder(unittestOutput, getThreadName(), logger::LogSeverity::Log());
+        }
+
+        MONGO_INITIALIZER_WITH_PREREQUISITES(UnitTestOutput, ("GlobalLogManager", "default"))(
+                InitializerContext*) {
+
+            unittestOutput->attachAppender(
+                    logger::MessageLogDomain::AppenderAutoPtr(
+                            new logger::ConsoleAppender<logger::MessageLogDomain::Event>(
+                                    new logger::MessageEventDetailsEncoder)));
+            return Status::OK();
+        }
+
         class Result {
         public:
-            Result( const std::string& name ) : _name( name ) , _rc(0) , _tests(0) , _fails(0) , _asserts(0) {}
+            Result( const std::string& name )
+                : _name( name ) , _rc(0) , _tests(0) , _fails() , _asserts(0), _millis(0) {}
 
             std::string toString() {
                 std::stringstream ss;
 
                 char result[128];
-                sprintf(result, "%-20s | tests: %4d | fails: %4d | assert calls: %6d\n", _name.c_str(), _tests, _fails, _asserts);
+                sprintf(result,
+                        "%-30s | tests: %4d | fails: %4d | assert calls: %10d | time secs: %6.3f\n",
+                        _name.c_str(), _tests, static_cast<int>(_fails.size()), _asserts, _millis/1000.0 );
                 ss << result;
 
                 for ( std::vector<std::string>::iterator i=_messages.begin(); i!=_messages.end(); i++ ) {
@@ -64,8 +101,9 @@ namespace mongo {
 
             int _rc;
             int _tests;
-            int _fails;
+            std::vector<std::string> _fails;
             int _asserts;
+            int _millis;
             std::vector<std::string> _messages;
 
             static Result * cur;
@@ -117,6 +155,7 @@ namespace mongo {
             setupTests();
             LOG(1) << "\t done setupTests" << std::endl;
 
+            Timer timer;
             Result * r = new Result( _name );
             Result::cur = r;
 
@@ -156,14 +195,15 @@ namespace mongo {
                 if ( ! passes ) {
                     std::string s = err.str();
                     log() << "FAIL: " << s << std::endl;
-                    r->_fails++;
+                    r->_fails.push_back(tc->getName());
                     r->_messages.push_back( s );
                 }
             }
 
-            if ( r->_fails )
+            if ( !r->_fails.empty() )
                 r->_rc = 17;
 
+            r->_millis = timer.millis();
 
             onCurrentTestNameChange( "" );
 
@@ -212,8 +252,11 @@ namespace mongo {
             int rc = 0;
 
             int tests = 0;
-            int fails = 0;
             int asserts = 0;
+            int millis = 0;
+
+            Result totals ("TOTALS");
+            std::vector<std::string> failedSuites;
 
             for ( std::vector<Result*>::iterator i=results.begin(); i!=results.end(); i++ ) {
                 Result* r = *i;
@@ -222,16 +265,38 @@ namespace mongo {
                     rc = r->rc();
 
                 tests += r->_tests;
-                fails += r->_fails;
+                if ( !r->_fails.empty() ) {
+                    failedSuites.push_back(r->toString());
+                    for ( std::vector<std::string>::const_iterator j=r->_fails.begin();
+                          j!=r->_fails.end(); j++ ) {
+                        const std::string& s = (*j);
+                        totals._fails.push_back(r->_name + "/" + s);
+                    }
+                }
                 asserts += r->_asserts;
+                millis += r->_millis;
             }
 
-            Result totals ("TOTALS");
             totals._tests = tests;
-            totals._fails = fails;
             totals._asserts = asserts;
+            totals._millis = millis;
 
             log() << totals.toString(); // includes endl
+
+            // summary
+            if ( !totals._fails.empty() ) {
+                log() << "Failing tests:" << std::endl;
+                for ( std::vector<std::string>::const_iterator i=totals._fails.begin();
+                      i!=totals._fails.end(); i++ ) {
+                    const std::string& s = (*i);
+                    log() << "\t " << s << " Failed";
+                }
+                log() << "FAILURE - " << totals._fails.size() << " tests in "
+                      << failedSuites.size() << " suites failed";
+            }
+            else {
+                log() << "SUCCESS - All tests in all suites passed";
+            }
 
             return rc;
         }
@@ -271,7 +336,7 @@ namespace mongo {
             return os.str();
         }
 
-        TestAssertion::TestAssertion( const std::string& file, unsigned line )
+        TestAssertion::TestAssertion( const char* file, unsigned line )
             : _file( file ), _line( line ) {
 
             ++Result::cur->_asserts;
@@ -283,8 +348,8 @@ namespace mongo {
             throw TestAssertionFailureException( _file, _line, message );
         }
 
-        ComparisonAssertion::ComparisonAssertion( const std::string& aexp, const std::string& bexp,
-                                                  const std::string& file, unsigned line )
+        ComparisonAssertion::ComparisonAssertion( const char* aexp, const char* bexp,
+                                                  const char* file, unsigned line )
             : TestAssertion( file, line ), _aexp( aexp ), _bexp( bexp ) {}
 
         std::vector<std::string> getAllSuiteNames() {

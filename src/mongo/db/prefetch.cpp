@@ -12,6 +12,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #include "mongo/pch.h"
@@ -20,10 +32,11 @@
 
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/diskloc.h"
-#include "mongo/db/index.h"
-#include "mongo/db/index_update.h"
+#include "mongo/db/index/index_access_method.h"
+#include "mongo/db/structure/catalog/index_details.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/namespace_details.h"
+#include "mongo/db/structure/catalog/namespace_details.h"
 #include "mongo/db/repl/rs.h"
 #include "mongo/db/stats/timer_stats.h"
 #include "mongo/db/commands/server_status.h"
@@ -60,12 +73,18 @@ namespace mongo {
             // prefetch ignores other ops
             return;
         }
-         
+
         BSONObj obj = op.getObjectField(opField);
         const char *ns = op.getStringField("ns");
-        NamespaceDetails *nsd = nsdetails(ns);
-        if (!nsd) return; // maybe not opened yet
-        
+
+        Database* db = cc().database();
+        if ( !db )
+            return;
+
+        Collection* collection = db->getCollection( ns );
+        if ( !collection )
+            return;
+
         LOG(4) << "index prefetch for op " << *opType << endl;
 
         DEV Lock::assertAtLeastReadLocked(ns);
@@ -85,7 +104,7 @@ namespace mongo {
         // a way to achieve that would be to prefetch the record first, and then afterwards do 
         // this part.
         //
-        prefetchIndexPages(nsd, obj);
+        prefetchIndexPages(collection, obj);
 
         // do not prefetch the data for inserts; it doesn't exist yet
         // 
@@ -96,14 +115,13 @@ namespace mongo {
         if ((*opType == 'u') &&
             // do not prefetch the data for capped collections because
             // they typically do not have an _id index for findById() to use.
-            !nsd->isCapped()) {
+            !collection->details()->isCapped()) {
             prefetchRecordPages(ns, obj);
         }
     }
 
-    void prefetchIndexPages(NamespaceDetails *nsd, const BSONObj& obj) {
+    void prefetchIndexPages(Collection* collection, const BSONObj& obj) {
         DiskLoc unusedDl; // unused
-        IndexInterface::IndexInserter inserter;
         BSONObjSet unusedKeys;
         ReplSetImpl::IndexPrefetchConfig prefetchConfig = theReplSet->getIndexPrefetchConfig();
 
@@ -118,16 +136,13 @@ namespace mongo {
             TimerHolder timer( &prefetchIndexStats);
             // on the update op case, the call to prefetchRecordPages will touch the _id index.
             // thus perhaps this option isn't very useful?
-            int indexNo = nsd->findIdIndex();
-            if (indexNo == -1) return;
             try {
-                fetchIndexInserters(/*out*/unusedKeys, 
-                                    inserter, 
-                                    nsd, 
-                                    indexNo, 
-                                    obj, 
-                                    unusedDl, 
-                                    /*allowDups*/true);
+                IndexDescriptor* desc = collection->getIndexCatalog()->findIdIndex();
+                if ( !desc )
+                    return;
+                IndexAccessMethod* iam = collection->getIndexCatalog()->getIndex( desc );
+                verify( iam );
+                iam->touch(obj);
             }
             catch (const DBException& e) {
                 LOG(2) << "ignoring exception in prefetchIndexPages(): " << e.what() << endl;
@@ -138,18 +153,15 @@ namespace mongo {
         {
             // indexCount includes all indexes, including ones
             // in the process of being built
-            int indexCount = nsd->getTotalIndexCount();
-            for ( int indexNo = 0; indexNo < indexCount; indexNo++ ) {
+            IndexCatalog::IndexIterator ii = collection->getIndexCatalog()->getIndexIterator( true );
+            while ( ii.more() ) {
                 TimerHolder timer( &prefetchIndexStats);
                 // This will page in all index pages for the given object.
                 try {
-                    fetchIndexInserters(/*out*/unusedKeys, 
-                                        inserter, 
-                                        nsd, 
-                                        indexNo, 
-                                        obj, 
-                                        unusedDl, 
-                                        /*allowDups*/true);
+                    IndexDescriptor* desc = ii.next();
+                    IndexAccessMethod* iam = collection->getIndexCatalog()->getIndex( desc );
+                    verify( iam );
+                    iam->touch(obj);
                 }
                 catch (const DBException& e) {
                     LOG(2) << "ignoring exception in prefetchIndexPages(): " << e.what() << endl;

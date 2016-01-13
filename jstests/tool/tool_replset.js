@@ -33,7 +33,7 @@ var replSetConnString = "tool_replset/127.0.0.1:" + replTest.ports[0] +
 
 // Test with mongodump/mongorestore
 print("dump the db");
-var data = "/data/db/tool_replset-dump1/";
+var data = MongoRunner.dataDir + "/tool_replset-dump1/";
 runMongoProgram("mongodump", "--host", replSetConnString, "--out", data);
 
 print("db successfully dumped, dropping now");
@@ -51,7 +51,7 @@ replTest.awaitReplication();
 
 // Test with mongoexport/mongoimport
 print("export the collection");
-var extFile = "/data/db/tool_replset/export";
+var extFile = MongoRunner.dataDir + "/tool_replset/export";
 runMongoProgram("mongoexport", "--host", replSetConnString, "--out", extFile,
                 "-d", "foo", "-c", "bar");
 
@@ -81,6 +81,18 @@ print("running mongooplog to replay the oplog")
 
 assert.eq(101, master.getDB("foo").getCollection("bar").count(), "count after running mongooplog " +
 		  "was not 101 as expected")
+
+// Dump local oplog with --dbpath option (SERVER-14249)
+replTest.stop(0);
+var dataDir = MongoRunner.dataDir + "/tool_replset-0/";
+data = MongoRunner.dataDir + "/tool_replset-dump-dbpath/";
+print("dump oplog with --dbpath");
+runMongoProgram("mongodump", "--dbpath", dataDir, "--out", data + "oplog", "-d", "local");
+assert.isnull(rawMongoProgramOutput().match(/assert/));
+// mongodump with --dbpath -d local & -c oplog.rs
+runMongoProgram("mongodump", "--dbpath", dataDir, "--out", data + "oplog", "-d", "local",
+                "-c", "oplog.rs");
+assert.isnull(rawMongoProgramOutput().match(/assert/));
 
 print("all tests successful, stopping replica set")
 

@@ -14,9 +14,21 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include "mongo/s/d_writeback.h"
 
@@ -155,8 +167,8 @@ namespace mongo {
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::writebacklisten);
-            out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+            actions.addAction(ActionType::internal);
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
 
@@ -207,15 +219,12 @@ namespace mongo {
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::writeBacksQueued);
-            out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+            actions.addAction(ActionType::internal);
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         WriteBacksQueuedCommand() : Command( "writeBacksQueued" ) {}
 
-        void help(stringstream& help) const {
-            help << "Returns whether there are operations in the writeback queue at the time the command was called. "
-                 << "This is an internal command";
-        }
+        void help(stringstream& h) const { h<<"internal"; }
 
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             writeBackManager.appendStats( result );

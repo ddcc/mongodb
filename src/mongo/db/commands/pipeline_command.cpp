@@ -12,15 +12,31 @@
  *
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * As a special exception, the copyright holders give permission to link the
+ * code of portions of this program with the OpenSSL library under certain
+ * conditions as described in each individual source file and distribute
+ * linked combinations including the program with the OpenSSL library. You
+ * must comply with the GNU Affero General Public License in all respects for
+ * all of the code used other than as permitted herein. If you modify file(s)
+ * with this exception, you may extend this exception to your version of the
+ * file(s), but you are not obligated to do so. If you do not wish to do so,
+ * delete this exception statement from your version. If you delete this
+ * exception statement from all source files in the program, then also delete
+ * it in the license file.
  */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
+#include <boost/smart_ptr.hpp>
 #include <vector>
 
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/catalog/database.h"
+#include "mongo/db/client.h"
+#include "mongo/db/curop.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/interrupt_status_mongod.h"
 #include "mongo/db/pipeline/accumulator.h"
@@ -30,8 +46,209 @@
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/pipeline_d.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/query/find_constants.h"
+#include "mongo/db/query/get_runner.h"
+#include "mongo/db/storage_options.h"
 
 namespace mongo {
+
+namespace {
+
+    /**
+     * This is a Runner implementation backed by an aggregation pipeline.
+     */
+    class PipelineRunner : public Runner {
+    public:
+        PipelineRunner(intrusive_ptr<Pipeline> pipeline, const boost::shared_ptr<Runner>& child)
+            : _pipeline(pipeline)
+            , _includeMetaData(_pipeline->getContext()->inShard) // send metadata to merger
+            , _childRunner(child)
+        {}
+
+        virtual RunnerState getNext(BSONObj* objOut, DiskLoc* dlOut) {
+            if (!objOut || dlOut)
+                return RUNNER_ERROR;
+
+            if (!_stash.empty()) {
+                *objOut = _stash.back();
+                _stash.pop_back();
+                return RUNNER_ADVANCED;
+            }
+
+            if (boost::optional<BSONObj> next = getNextBson()) {
+                *objOut = *next;
+                return RUNNER_ADVANCED;
+            }
+
+            return RUNNER_EOF;
+        }
+        virtual bool isEOF() {
+            if (!_stash.empty())
+                return false;
+
+            if (boost::optional<BSONObj> next = getNextBson()) {
+                _stash.push_back(*next);
+                return false;
+            }
+
+            return true;
+        }
+        virtual const string& ns() {
+            return _pipeline->getContext()->ns.ns();
+        }
+
+        virtual Status getInfo(TypeExplain** explain,
+                               PlanInfo** planInfo) const {
+            // This should never get called in practice anyway.
+            return Status(ErrorCodes::InternalError,
+                          "PipelineCursor doesn't implement getExplainPlan");
+        }
+
+        // propagate to child runner if still in use
+        virtual void invalidate(const DiskLoc& dl, InvalidationType type) {
+            if (boost::shared_ptr<Runner> runner = _childRunner.lock()) {
+                runner->invalidate(dl, type);
+            }
+        }
+        virtual void kill() {
+            if (boost::shared_ptr<Runner> runner = _childRunner.lock()) {
+                runner->kill();
+            }
+        }
+
+        // These are all no-ops for PipelineRunners
+        virtual void setYieldPolicy(YieldPolicy policy) {}
+        virtual void saveState() {}
+        virtual bool restoreState() { return true; }
+        virtual const Collection* collection() { return NULL; }
+
+        /**
+         * Make obj the next object returned by getNext().
+         */
+        void pushBack(const BSONObj& obj) {
+            _stash.push_back(obj);
+        }
+
+    private:
+        boost::optional<BSONObj> getNextBson() {
+            if (boost::optional<Document> next = _pipeline->output()->getNext()) {
+                if (_includeMetaData) {
+                    return next->toBsonWithMetaData();
+                }
+                else {
+                    return next->toBson();
+                }
+            }
+
+            return boost::none;
+        }
+
+        // Things in the _stash sould be returned before pulling items from _pipeline.
+        const intrusive_ptr<Pipeline> _pipeline;
+        vector<BSONObj> _stash;
+        const bool _includeMetaData;
+        boost::weak_ptr<Runner> _childRunner;
+    };
+}
+
+    static bool isCursorCommand(BSONObj cmdObj) {
+        BSONElement cursorElem = cmdObj["cursor"];
+        if (cursorElem.eoo())
+            return false;
+
+        uassert(16954, "cursor field must be missing or an object",
+                cursorElem.type() == Object);
+
+        BSONObj cursor = cursorElem.embeddedObject();
+        BSONElement batchSizeElem = cursor["batchSize"];
+        if (batchSizeElem.eoo()) {
+            uassert(16955, "cursor object can't contain fields other than batchSize",
+                cursor.isEmpty());
+        }
+        else {
+            uassert(16956, "cursor.batchSize must be a number",
+                    batchSizeElem.isNumber());
+
+            // This can change in the future, but for now all negatives are reserved.
+            uassert(16957, "Cursor batchSize must not be negative",
+                    batchSizeElem.numberLong() >= 0);
+        }
+
+        return true;
+    }
+
+    static void handleCursorCommand(const string& ns,
+                                    ClientCursorPin* pin,
+                                    PipelineRunner* runner,
+                                    const BSONObj& cmdObj,
+                                    BSONObjBuilder& result) {
+
+        ClientCursor* cursor = pin ? pin->c() : NULL;
+        if (pin) {
+            invariant(cursor);
+            invariant(cursor->getRunner() == runner);
+            invariant(cursor->isAggCursor);
+        }
+
+        BSONElement batchSizeElem = cmdObj.getFieldDotted("cursor.batchSize");
+        const long long batchSize = batchSizeElem.isNumber()
+                                    ? batchSizeElem.numberLong()
+                                    : 101; // same as query
+
+        // can't use result BSONObjBuilder directly since it won't handle exceptions correctly.
+        BSONArrayBuilder resultsArray;
+        const int byteLimit = MaxBytesToReturnToClientAtOnce;
+        BSONObj next;
+        for (int objCount = 0; objCount < batchSize; objCount++) {
+            // The initial getNext() on a PipelineRunner may be very expensive so we don't
+            // do it when batchSize is 0 since that indicates a desire for a fast return.
+            if (runner->getNext(&next, NULL) != Runner::RUNNER_ADVANCED) {
+                if (pin) pin->deleteUnderlying();
+                // make it an obvious error to use cursor or runner after this point
+                cursor = NULL;
+                runner = NULL;
+                break;
+            }
+
+            if (resultsArray.len() + next.objsize() > byteLimit) {
+                // too big. next will be the first doc in the second batch
+                runner->pushBack(next);
+                break;
+            }
+
+            resultsArray.append(next);
+        }
+
+        // NOTE: runner->isEOF() can have side effects such as writing by $out. However, it should
+        // be relatively quick since if there was no pin then the input is empty. Also, this
+        // violates the contract for batchSize==0. Sharding requires a cursor to be returned in that
+        // case. This is ok for now however, since you can't have a sharded collection that doesn't
+        // exist.
+        const bool canReturnMoreBatches = pin;
+        if (!canReturnMoreBatches && runner && !runner->isEOF()) {
+            // msgasserting since this shouldn't be possible to trigger from today's aggregation
+            // language. The wording assumes that the only reason pin would be null is if the
+            // collection doesn't exist.
+            msgasserted(17391, str::stream()
+                << "Aggregation has more results than fit in initial batch, but can't "
+                << "create cursor since collection " << ns << " doesn't exist");
+        }
+
+        if (cursor) {
+            // If a time limit was set on the pipeline, remaining time is "rolled over" to the
+            // cursor (for use by future getmore ops).
+            cursor->setLeftoverMaxTimeMicros( cc().curop()->getRemainingMaxTimeMicros() );
+
+            cc().curop()->debug().cursorid = cursor->cursorid();
+        }
+
+        BSONObjBuilder cursorObj(result.subobjStart("cursor"));
+        cursorObj.append("id", cursor ? cursor->cursorid() : 0LL);
+        cursorObj.append("ns", ns);
+        cursorObj.append("firstBatch", resultsArray.arr());
+        cursorObj.done();
+    }
+
 
     class PipelineCommand :
         public Command {
@@ -40,143 +257,121 @@ namespace mongo {
 
         // Locks are managed manually, in particular by DocumentSourceCursor.
         virtual LockType locktype() const { return NONE; }
-        virtual bool slaveOk() const { return true; }
+        virtual bool slaveOk() const { return false; }
+        virtual bool slaveOverrideOk() const { return true; }
         virtual void help(stringstream &help) const {
-            help << "{ pipeline : [ { <data-pipe-op>: {...}}, ... ] }";
+            help << "{ pipeline: [ { $operator: {...}}, ... ]"
+                 << ", explain: <bool>"
+                 << ", allowDiskUse: <bool>"
+                 << ", cursor: {batchSize: <number>}"
+                 << " }"
+                 << endl
+                 << "See http://dochub.mongodb.org/core/aggregation for more details."
+                 ;
         }
 
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
-            ActionSet actions;
-            actions.addAction(ActionType::find);
-            out->push_back(Privilege(parseNs(dbname, cmdObj), actions));
+            Pipeline::addRequiredPrivileges(this, dbname, cmdObj, out);
         }
 
         virtual bool run(const string &db, BSONObj &cmdObj, int options, string &errmsg,
                          BSONObjBuilder &result, bool fromRepl) {
 
+            string ns = parseNs(db, cmdObj);
+
             intrusive_ptr<ExpressionContext> pCtx =
-                ExpressionContext::create(&InterruptStatusMongod::status);
+                new ExpressionContext(InterruptStatusMongod::status, NamespaceString(ns));
+            pCtx->tempDir = storageGlobalParams.dbpath + "/_tmp";
 
             /* try to parse the command; if this fails, then we didn't run */
             intrusive_ptr<Pipeline> pPipeline = Pipeline::parseCommand(errmsg, cmdObj, pCtx);
             if (!pPipeline.get())
                 return false;
 
-            string ns = parseNs(db, cmdObj);
-
-            if (pPipeline->getSplitMongodPipeline()) {
-                // This is only used in testing
-                return executeSplitPipeline(result, errmsg, ns, db, pPipeline, pCtx);
-            }
-
 #if _DEBUG
             // This is outside of the if block to keep the object alive until the pipeline is finished.
             BSONObj parsed;
-            if (!pPipeline->isExplain() && !pCtx->getInShard()) {
+            if (!pPipeline->isExplain() && !pCtx->inShard) {
                 // Make sure all operations round-trip through Pipeline::toBson()
                 // correctly by reparsing every command on DEBUG builds. This is
                 // important because sharded aggregations rely on this ability.
                 // Skipping when inShard because this has already been through the
                 // transformation (and this unsets pCtx->inShard).
-                BSONObjBuilder bb;
-                pPipeline->toBson(&bb);
-                parsed = bb.obj();
+                parsed = pPipeline->serialize().toBson();
                 pPipeline = Pipeline::parseCommand(errmsg, parsed, pCtx);
                 verify(pPipeline);
             }
 #endif
 
-            // This does the mongod-specific stuff like creating a cursor
-            PipelineD::prepareCursorSource(pPipeline, nsToDatabase(ns), pCtx);
-            return pPipeline->run(result, errmsg);
-        }
+            PipelineRunner* runner = NULL;
+            scoped_ptr<ClientCursorPin> pin; // either this OR the runnerHolder will be non-null
+            auto_ptr<PipelineRunner> runnerHolder;
+            {
+                // This will throw if the sharding version for this connection is out of date. The
+                // lock must be held continuously from now until we have we created both the output
+                // ClientCursor and the input Runner. This ensures that both are using the same
+                // sharding version that we synchronize on here. This is also why we always need to
+                // create a ClientCursor even when we aren't outputting to a cursor. See the comment
+                // on ShardFilterStage for more details.
+                Client::ReadContext ctx(ns);
 
-    private:
-        /*
-          Execute the pipeline for the explain.  This is common to both the
-          locked and unlocked code path.  However, the results are different.
-          For an explain, with no lock, it really outputs the pipeline
-          chain rather than fetching the data.
-         */
-        bool executeSplitPipeline(BSONObjBuilder& result, string& errmsg,
-                                  const string& ns, const string& db,
-                                  intrusive_ptr<Pipeline>& pPipeline,
-                                  intrusive_ptr<ExpressionContext>& pCtx) {
-            /* setup as if we're in the router */
-            pCtx->setInRouter(true);
+                Collection* collection = ctx.ctx().db()->getCollection(ns);
 
-            /*
-            Here, we'll split the pipeline in the same way we would for sharding,
-            for testing purposes.
+                // This does mongod-specific stuff like creating the input Runner and adding to the
+                // front of the pipeline if needed.
+                boost::shared_ptr<Runner> input = PipelineD::prepareCursorSource(pPipeline, pCtx);
+                pPipeline->stitch();
 
-            Run the shard pipeline first, then feed the results into the remains
-            of the existing pipeline.
+                runnerHolder.reset(new PipelineRunner(pPipeline, input));
+                runner = runnerHolder.get();
 
-            Start by splitting the pipeline.
-            */
-            intrusive_ptr<Pipeline> pShardSplit = pPipeline->splitForSharded();
+                if (!collection && input) {
+                    // If we don't have a collection, we won't be able to register any Runners, so
+                    // make sure that the input Runner (likely an EOFRunner) doesn't need to be
+                    // registered.
+                    invariant(!input->collection());
+                }
 
-            /*
-            Write the split pipeline as we would in order to transmit it to
-            the shard servers.
-            */
-            BSONObjBuilder shardBuilder;
-            pShardSplit->toBson(&shardBuilder);
-            BSONObj shardBson(shardBuilder.done());
+                if (collection) {
+                    ClientCursor* cursor = new ClientCursor(collection,
+                                                            runnerHolder.release(),
+                                                            0, /* queryOptions */
+                                                            cmdObj.getOwned());
 
-            DEV (log() << "\n---- shardBson\n" <<
-                shardBson.jsonString(Strict, 1) << "\n----\n").flush();
-
-            /* for debugging purposes, show what the pipeline now looks like */
-            DEV {
-                BSONObjBuilder pipelineBuilder;
-                pPipeline->toBson(&pipelineBuilder);
-                BSONObj pipelineBson(pipelineBuilder.done());
-                (log() << "\n---- pipelineBson\n" <<
-                pipelineBson.jsonString(Strict, 1) << "\n----\n").flush();
-            }
-
-            /* on the shard servers, create the local pipeline */
-            intrusive_ptr<ExpressionContext> pShardCtx(
-                ExpressionContext::create(&InterruptStatusMongod::status));
-            intrusive_ptr<Pipeline> pShardPipeline(
-                Pipeline::parseCommand(errmsg, shardBson, pShardCtx));
-            if (!pShardPipeline.get()) {
-                return false;
-            }
-
-            PipelineD::prepareCursorSource(pShardPipeline, nsToDatabase(ns), pCtx);
-
-            /* run the shard pipeline */
-            BSONObjBuilder shardResultBuilder;
-            string shardErrmsg;
-            pShardPipeline->run(shardResultBuilder, shardErrmsg);
-            BSONObj shardResult(shardResultBuilder.done());
-
-            /* pick out the shard result, and prepare to read it */
-            intrusive_ptr<DocumentSourceBsonArray> pShardSource;
-            BSONObjIterator shardIter(shardResult);
-            while(shardIter.more()) {
-                BSONElement shardElement(shardIter.next());
-                const char *pFieldName = shardElement.fieldName();
-
-                if ((strcmp(pFieldName, "result") == 0) ||
-                    (strcmp(pFieldName, "serverPipeline") == 0)) {
-                    pPipeline->addInitialSource(DocumentSourceBsonArray::create(&shardElement, pCtx));
-
-                    /*
-                    Connect the output of the shard pipeline with the mongos
-                    pipeline that will merge the results.
-                    */
-                    return pPipeline->run(result, errmsg);
+                    cursor->isAggCursor = true; // enable special locking behavior
+                    pin.reset(new ClientCursorPin(collection, cursor->cursorid()));
+                    // Don't add any code between here and the start of the try block.
                 }
             }
 
-            /* NOTREACHED */
-            verify(false);
-            return false;
+            try {
+                // Unless set to true, the ClientCursor created above will be deleted on block exit.
+                bool keepCursor = false;
+
+                // If both explain and cursor are specified, explain wins.
+                if (pPipeline->isExplain()) {
+                    result << "stages" << Value(pPipeline->writeExplainOps());
+                }
+                else if (isCursorCommand(cmdObj)) {
+                    handleCursorCommand(ns, pin.get(), runner, cmdObj, result);
+                    keepCursor = true;
+                }
+                else {
+                    pPipeline->run(result);
+                }
+
+                if (!keepCursor && pin) pin->deleteUnderlying();
+            }
+            catch (...) {
+                // Clean up cursor on way out of scope.
+                if (pin) pin->deleteUnderlying();
+                throw;
+            }
+            // Any code that needs the cursor pinned must be inside the try block, above.
+
+            return true;
         }
     } cmdPipeline;
 

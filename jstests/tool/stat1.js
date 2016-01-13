@@ -3,16 +3,15 @@
 port = allocatePorts( 1 )[ 0 ];
 baseName = "tool_stat1";
 
-m = startMongod( "--auth", "--port", port, "--dbpath", "/data/db/" + baseName, "--nohttpinterface", "--bind_ip", "127.0.0.1" );
+m = startMongod( "--auth", "--port", port, "--dbpath", MongoRunner.dataPath + baseName, "--nohttpinterface", "--bind_ip", "127.0.0.1" );
 db = m.getDB( "admin" );
 
 t = db[ baseName ];
 t.drop();
 
-users = db.getCollection( "system.users" );
-users.remove( {} );
+db.dropAllUsers();
 
-db.addUser( "eliot" , "eliot" );
+db.createUser({user:  "eliot" , pwd: "eliot", roles: jsTest.adminUserRoles});
 
 assert( db.auth( "eliot" , "eliot" ) , "auth failed" );
 

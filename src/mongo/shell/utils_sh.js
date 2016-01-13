@@ -7,7 +7,7 @@ sh._checkMongos = function() {
 }
 
 sh._checkFullName = function( fullName ) {
-    assert( fullName , "neeed a full name" )
+    assert( fullName , "need a full name" )
     assert( fullName.indexOf( "." ) > 0 , "name needs to be fully qualified <db>.<collection>'" )
 }
 
@@ -341,6 +341,10 @@ sh.removeShardTag = function( shard, tag ) {
 }
 
 sh.addTagRange = function( ns, min, max, tag ) {
+    if ( bsonWoCompare( min, max ) == 0 ) {
+        throw new Error("min and max cannot be the same");
+    }
+
     var config = db.getSisterDB( "config" );
     config.tags.update( {_id: { ns : ns , min : min } } , 
             {_id: { ns : ns , min : min }, ns : ns , min : min , max : max , tag : tag } , 

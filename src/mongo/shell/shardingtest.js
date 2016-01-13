@@ -399,8 +399,7 @@ ShardingTest = function( testName , numShards , verboseLevel , numMongos , other
         );
     }
 
-    if (jsTestOptions().keyFile && !keyFile) {
-        jsTest.addAuth( this._configConnection );
+    if (jsTestOptions().keyFile || jsTestOptions().useX509) {
         jsTest.authenticate( this._configConnection );
         jsTest.authenticateNodes( this._configServers );
         jsTest.authenticateNodes( this._mongos );
@@ -541,7 +540,7 @@ ShardingTest.prototype.stop = function(){
     }
     if ( this._alldbpaths ){
         for( i=0; i<this._alldbpaths.length; i++ ){
-            resetDbpath( "/data/db/" + this._alldbpaths[i] );
+            resetDbpath( MongoRunner.dataPath + this._alldbpaths[i] );
         }
     }
 
@@ -897,8 +896,8 @@ ShardingTest.prototype.isSharded = function( collName ){
     
 }
 
-ShardingTest.prototype.shardGo = function( collName , key , split , move , dbName ){
-    
+ShardingTest.prototype.shardGo = function( collName , key , split , move , dbName, waitForDelete ){
+
     split = ( split != false ? ( split || key ) : split )
     move = ( split != false && move != false ? ( move || split ) : false )
     
@@ -933,7 +932,7 @@ ShardingTest.prototype.shardGo = function( collName , key , split , move , dbNam
     
     var result = null
     for( var i = 0; i < 5; i++ ){
-        result = this.s.adminCommand( { movechunk : c , find : move , to : this.getOther( this.getServer( dbName ) ).name } );
+        result = this.s.adminCommand( { movechunk : c , find : move , to : this.getOther( this.getServer( dbName ) ).name, _waitForDelete: waitForDelete } );
         if( result.ok ) break;
         sleep( 5 * 1000 );
     }

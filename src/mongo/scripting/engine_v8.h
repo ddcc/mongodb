@@ -17,10 +17,12 @@
 
 #pragma once
 
+#include <boost/shared_ptr.hpp>
 #include <v8.h>
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/base/string_data.h"
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/platform/unordered_map.h"
@@ -59,22 +61,26 @@ namespace mongo {
     class ObjTracker {
     public:
         /** Track an object to be freed when it is no longer referenced in JavaScript.
+         * Return handle to object instance shared pointer.
          * @param  instanceHandle  persistent handle to the weakly referenced object
          * @param  rawData         pointer to the object instance
          */
-        void track(v8::Persistent<v8::Value> instanceHandle, _ObjType* instance) {
+        v8::Local<v8::External> track(v8::Persistent<v8::Value> instanceHandle,
+                                      _ObjType* instance) {
             TrackedPtr* collectionHandle = new TrackedPtr(instance, this);
             _container.insert(collectionHandle);
             instanceHandle.MakeWeak(collectionHandle, deleteOnCollect);
+            return v8::External::New(&(collectionHandle->_objPtr));
         }
         /**
          * Free any remaining objects and their TrackedPtrs.  Invoked when the
          * V8Scope is destructed.
          */
         ~ObjTracker() {
-            if (!_container.empty())
+            if (!_container.empty()) {
                 LOG(1) << "freeing " << _container.size() << " uncollected "
                        << typeid(_ObjType).name() << " objects" << endl;
+            }
             typename set<TrackedPtr*>::iterator it = _container.begin();
             while (it != _container.end()) {
                 delete *it;
@@ -92,7 +98,7 @@ namespace mongo {
             TrackedPtr(_ObjType* instance, ObjTracker<_ObjType>* tracker) :
                 _objPtr(instance),
                 _tracker(tracker) { }
-            scoped_ptr<_ObjType> _objPtr;
+            boost::shared_ptr<_ObjType> _objPtr;
             ObjTracker<_ObjType>* _tracker;
         };
 
@@ -181,7 +187,7 @@ namespace mongo {
         virtual BSONObj getObject(const char* field);
 
         virtual void setNumber(const char* field, double val);
-        virtual void setString(const char* field, const char* val);
+        virtual void setString(const char* field, const StringData& val);
         virtual void setBoolean(const char* field, bool val);
         virtual void setElement(const char* field, const BSONElement& e);
         virtual void setObject(const char* field, const BSONObj& obj, bool readOnly);
@@ -272,7 +278,7 @@ namespace mongo {
          * Create a V8 string with a local handle
          */
         static inline v8::Handle<v8::String> v8StringData(StringData str) {
-            return v8::String::New(str.rawData());
+            return v8::String::New(str.rawData(), str.size());
         }
 
         /**
@@ -292,9 +298,17 @@ namespace mongo {
         v8::Persistent<v8::Object> getGlobal() { return _global; }
 
         ObjTracker<BSONHolder> bsonHolderTracker;
-        ObjTracker<DBClientWithCommands> dbClientWithCommandsTracker;
         ObjTracker<DBClientBase> dbClientBaseTracker;
-        ObjTracker<DBClientCursor> dbClientCursorTracker;
+        // Track both cursor and connection.
+        // This ensures the connection outlives the cursor.
+        struct DBConnectionAndCursor {
+            boost::shared_ptr<DBClientBase> conn;
+            boost::shared_ptr<DBClientCursor> cursor;
+            DBConnectionAndCursor(boost::shared_ptr<DBClientBase> conn,
+                                  boost::shared_ptr<DBClientCursor> cursor)
+                : conn(conn), cursor(cursor) { }
+        };
+        ObjTracker<DBConnectionAndCursor> dbConnectionAndCursor;
 
         // These are all named after the JS constructor name + FT
         v8::Handle<v8::FunctionTemplate> ObjectIdFT()       const { return _ObjectIdFT; }
@@ -336,6 +350,10 @@ namespace mongo {
         }
 
     private:
+        /**
+         * Recursion limit when converting from JS objects to BSON.
+         */
+        static const int objectDepthLimit = 150;
 
         /**
          * Attach data to obj such that the data has the same lifetime as the Object obj points to.
@@ -392,7 +410,7 @@ namespace mongo {
         /**
          * Create a new function; primarily used for BSON/V8 conversion.
          */
-        v8::Local<v8::Value> newFunction(const char *code);
+        v8::Local<v8::Value> newFunction(const StringData& code);
 
         template <typename _HandleType>
         bool checkV8ErrorState(const _HandleType& resultHandle,
@@ -430,7 +448,31 @@ namespace mongo {
 
         v8::Persistent<v8::Function> _jsRegExpConstructor;
 
-        v8::Isolate* _isolate;
+        /// Like v8::Isolate* but calls Dispose() in destructor.
+        class IsolateHolder {
+            MONGO_DISALLOW_COPYING(IsolateHolder);
+        public:
+            IsolateHolder() :_isolate(NULL) {}
+            ~IsolateHolder() {
+                if (_isolate) {
+                    _isolate->Dispose();
+                    _isolate = NULL;
+                }
+            }
+
+            void set(v8::Isolate* isolate) {
+                fassert(17184, !_isolate);
+                _isolate = isolate;
+            }
+
+            v8::Isolate* operator -> () const { return _isolate; };
+            operator v8::Isolate* () const { return _isolate; };
+        private:
+            v8::Isolate* _isolate;
+        };
+
+        IsolateHolder _isolate; // NOTE: this must be destructed before the ObjTrackers
+
         V8CpuProfiler _cpuProfiler;
 
         // See comments in strLitToV8

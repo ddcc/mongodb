@@ -14,6 +14,18 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include <map>
@@ -24,6 +36,7 @@
 
 #include "mongo/db/fts/fts_command.h"
 #include "mongo/s/strategy.h"
+#include "mongo/util/timer.h"
 
 
 namespace mongo {
@@ -59,8 +72,8 @@ namespace mongo {
 
             Timer timer;
 
-            map<Shard, BSONObj> results;
-            SHARDED->commandOp( dbName, cmdObj, cmdOptions, ns, filter, results );
+            vector<Strategy::CommandResult> results;
+            STRATEGY->commandOp( dbName, cmdObj, cmdOptions, ns, filter, &results );
 
             vector<Scored> all;
             long long nscanned = 0;
@@ -68,13 +81,14 @@ namespace mongo {
 
             BSONObjBuilder shardStats;
 
-            for ( map<Shard,BSONObj>::const_iterator i = results.begin(); i != results.end(); ++i ) {
-                BSONObj r = i->second;
+            for ( vector<Strategy::CommandResult>::const_iterator i = results.begin();
+                    i != results.end(); ++i ) {
+                BSONObj r = i->result;
 
-                LOG(2) << "fts result for shard: " << i->first << "\n" << r << endl;
+                LOG(2) << "fts result for shard: " << i->shardTarget << "\n" << r << endl;
 
                 if ( !r["ok"].trueValue() ) {
-                    errmsg = str::stream() << "failure on shard: " << i->first.toString()
+                    errmsg = str::stream() << "failure on shard: " << i->shardTarget.toString()
                                            << ": " << r["errmsg"];
                     result.append( "rawresult", r );
                     return false;
@@ -85,7 +99,7 @@ namespace mongo {
                     nscanned += x["nscanned"].numberLong();
                     nscannedObjects += x["nscannedObjects"].numberLong();
 
-                    shardStats.append( i->first.getName(), x );
+                    shardStats.append( i->shardTarget.getName(), x );
                 }
 
                 if ( r["results"].isABSONObj() ) {

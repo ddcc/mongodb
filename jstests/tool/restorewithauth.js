@@ -16,7 +16,7 @@
 
 var port = allocatePorts(1)[0];
 baseName = "jstests_restorewithauth";
-var conn = startMongod( "--port", port, "--dbpath", "/data/db/" + baseName, "--nohttpinterface",
+var conn = startMongod( "--port", port, "--dbpath", MongoRunner.dataPath + baseName, "--nohttpinterface",
                         "--nojournal", "--bind_ip", "127.0.0.1" );
 
 // write to ns foo.bar
@@ -36,7 +36,7 @@ foo.bar.createIndex({x:1});
 assert.eq(foo.system.indexes.count(), 3);
 
 // get data dump
-var dumpdir = "/data/db/restorewithauth-dump1/";
+var dumpdir = MongoRunner.dataDir + "/restorewithauth-dump1/";
 resetDbpath( dumpdir );
 x = runMongoProgram("mongodump", "--db", "foo", "-h", "127.0.0.1:"+port, "--out", dumpdir);
 
@@ -47,12 +47,12 @@ foo.dropDatabase();
 stopMongod( port );
 
 // start mongod with --auth
-conn = startMongod( "--auth", "--port", port, "--dbpath", "/data/db/" + baseName, "--nohttpinterface",
+conn = startMongod( "--auth", "--port", port, "--dbpath", MongoRunner.dataPath + baseName, "--nohttpinterface",
                     "--nojournal", "--bind_ip", "127.0.0.1" );
 
 // admin user
 var admin = conn.getDB( "admin" )
-admin.addUser( "admin" , "admin" );
+admin.createUser({user:  "admin" , pwd: "admin", roles: jsTest.adminUserRoles});
 admin.auth( "admin" , "admin" );
 
 var foo = conn.getDB( "foo" )
@@ -92,7 +92,7 @@ foo.dropDatabase();
 assert.eq(foo.system.namespaces.count({name: "foo.bar"}), 0);
 assert.eq(foo.system.namespaces.count({name: "foo.baz"}), 0);
 
-foo.addUser('user', 'password');
+foo.createUser({user: 'user', pwd: 'password', roles: jsTest.basicUserRoles});
 
 // now try to restore dump with foo database credentials
 x = runMongoProgram("mongorestore",
@@ -108,6 +108,6 @@ assert.eq(foo.system.namespaces.count({name: "foo.bar"}), 1);
 assert.eq(foo.system.namespaces.count({name: "foo.baz"}), 1);
 assert.eq(foo.bar.count(), 4);
 assert.eq(foo.baz.count(), 4);
-assert.eq(foo.system.indexes.count(), 5); // _id on foo, _id on bar, x on foo, _id + 1 on system.users
+assert.eq(foo.system.indexes.count(), 3); // _id on foo, _id on bar, x on foo
 
 stopMongod( port );

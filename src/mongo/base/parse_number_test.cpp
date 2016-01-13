@@ -12,6 +12,18 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 #include "mongo/pch.h"
@@ -21,6 +33,7 @@
 #include "mongo/base/parse_number.h"
 #include "mongo/base/status.h"
 #include "mongo/platform/cstdint.h"
+#include "mongo/platform/float_utils.h"
 #include "mongo/util/mongoutils/str.h"  // for str::stream()!
 #include "mongo/unittest/unittest.h"
 
@@ -220,6 +233,78 @@ namespace {
 
         for (uint32_t i = 0; i <= 255; ++i)
             ASSERT_PARSES(uint8_t, std::string(mongoutils::str::stream() << i), i);
+    }
+
+    TEST(Double, TestRejectingBadBases) {
+        double ignored;
+
+        // Only supported base for parseNumberFromStringWithBase<double> is 0.
+        ASSERT_EQUALS(ErrorCodes::BadValue, parseNumberFromStringWithBase("0", -1, &ignored));
+        ASSERT_EQUALS(ErrorCodes::BadValue, parseNumberFromStringWithBase("0", 1, &ignored));
+        ASSERT_EQUALS(ErrorCodes::BadValue, parseNumberFromStringWithBase("0", 8, &ignored));
+        ASSERT_EQUALS(ErrorCodes::BadValue, parseNumberFromStringWithBase("0", 10, &ignored));
+        ASSERT_EQUALS(ErrorCodes::BadValue, parseNumberFromStringWithBase("0", 16, &ignored));
+    }
+
+    TEST(Double, TestParsingGarbage) {
+        double d;
+        CommonNumberParsingTests<double>::TestParsingGarbage();
+        ASSERT_EQUALS(ErrorCodes::FailedToParse, parseNumberFromString<double>("1.0.1", &d));
+        ASSERT_EQUALS(ErrorCodes::FailedToParse, parseNumberFromString<double>("1.0-1", &d));
+        ASSERT_EQUALS(ErrorCodes::FailedToParse, parseNumberFromString<double>(" 1.0", &d));
+        ASSERT_EQUALS(ErrorCodes::FailedToParse, parseNumberFromString<double>("1.0P4", &d));
+        ASSERT_EQUALS(ErrorCodes::FailedToParse, parseNumberFromString<double>("1e6	", &d));
+        ASSERT_EQUALS(ErrorCodes::FailedToParse, parseNumberFromString<double>("	1e6", &d));
+        ASSERT_EQUALS(ErrorCodes::FailedToParse, parseNumberFromString<double>("1e6 ", &d));
+        ASSERT_EQUALS(ErrorCodes::FailedToParse, parseNumberFromString<double>(" 1e6", &d));
+        ASSERT_EQUALS(ErrorCodes::FailedToParse, parseNumberFromString<double>("0xabcab.defPa", &d));
+        ASSERT_EQUALS(ErrorCodes::FailedToParse,
+                      parseNumberFromString<double>(StringData("1.0\0garbage",
+                                                               StringData::LiteralTag()),
+                              &d));
+    }
+
+    TEST(Double, TestParsingOverflow) {
+        double d;
+        ASSERT_EQUALS(ErrorCodes::FailedToParse, parseNumberFromString("1e309", &d));
+        ASSERT_EQUALS(ErrorCodes::FailedToParse, parseNumberFromString("-1e309", &d));
+        ASSERT_EQUALS(ErrorCodes::FailedToParse, parseNumberFromString("1e-400", &d));
+        ASSERT_EQUALS(ErrorCodes::FailedToParse, parseNumberFromString("-1e-400", &d));
+    }
+
+    TEST(Double, TestParsingNan) {
+        double d = 0;
+        ASSERT_OK(parseNumberFromString("NaN", &d));
+        ASSERT_TRUE(isNaN(d));
+    }
+
+    TEST(Double, TestParsingInfinity) {
+        double d = 0;
+        ASSERT_OK(parseNumberFromString("infinity", &d));
+        ASSERT_TRUE(isInf(d));
+        d = 0;
+        ASSERT_OK(parseNumberFromString("-Infinity", &d));
+        ASSERT_TRUE(isInf(d));
+    }
+
+    TEST(Double, TestParsingNormal) {
+        ASSERT_PARSES(double, "10", 10);
+        ASSERT_PARSES(double, "0", 0);
+        ASSERT_PARSES(double, "1", 1);
+        ASSERT_PARSES(double, "-10", -10);
+        ASSERT_PARSES(double, "1e8", 1e8);
+        ASSERT_PARSES(double, "1e-8", 1e-8);
+        ASSERT_PARSES(double, "12e-8", 12e-8);
+        ASSERT_PARSES(double, "-485.381e-8", -485.381e-8);
+
+#if !(defined(_WIN32) || defined(__sunos__))
+        // Parse hexadecimal representations of a double.  Hex literals not supported by MSVC, and
+        // not parseable by the Windows SDK libc or the Solaris libc in the mode we build.
+
+        ASSERT_PARSES(double, "0xff", 0xff);
+        ASSERT_PARSES(double, "-0xff", -0xff);
+        ASSERT_PARSES(double, "0xabcab.defdefP-10", 0xabcab.defdefP-10);
+#endif
     }
 
 }  // namespace

@@ -12,21 +12,34 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #include "mongo/platform/basic.h"
 
 #include "mongo/base/owned_pointer_vector.h"
 #include "mongo/base/status.h"
+#include "mongo/db/audit.h"
 #include "mongo/db/auth/authorization_manager.h"
-#include "mongo/db/auth/principal.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cmdline.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/instance.h"
-#include "mongo/db/repl.h"
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/connections.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/replication_server_status.h"  // replSettings
 #include "mongo/db/repl/rs.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/platform/bits.h"
@@ -60,7 +73,7 @@ namespace mongo {
 
     void replset::sethbmsg(const string& s, const int level) {
         if (theReplSet) {
-            theReplSet->sethbmsg(s, logLevel);
+            theReplSet->sethbmsg(s, level);
         }
     }
 
@@ -100,6 +113,22 @@ namespace mongo {
         changeState(MemberState::RS_RECOVERING);
     }
 
+namespace {
+    void dropAllTempCollections() {
+        vector<string> dbNames;
+        getDatabaseNames(dbNames);
+        for (vector<string>::const_iterator it = dbNames.begin(); it != dbNames.end(); ++it) {
+            // The local db is special because it isn't replicated. It is cleared at startup even on
+            // replica set members.
+            if (*it == "local")
+                continue;
+
+            Client::Context ctx(*it);
+            cc().database()->clearTmpCollections();
+        }
+    }
+}
+
     void ReplSetImpl::assumePrimary() {
         LOG(2) << "replSet assuming primary" << endl;
         verify( iAmPotentiallyHot() );
@@ -118,7 +147,14 @@ namespace mongo {
             OpTime::setLast( lastOp[ "ts" ].date() );
         }
 
+        // Generate new election unique id
+        elect.setElectionId(OID::gen());
         changeState(MemberState::RS_PRIMARY);
+
+        // This must be done after becoming primary but before releasing the write lock. This adds
+        // the dropCollection entries for every temp collection to the opLog since we want it to be
+        // replicated to secondaries.
+        dropAllTempCollections();
     }
 
     void ReplSetImpl::changeState(MemberState s) { box.change(s, _self); }
@@ -138,13 +174,17 @@ namespace mongo {
             _maintenanceMode++;
             changeState(MemberState::RS_RECOVERING);
         }
-        else {
+        else if (_maintenanceMode > 0) {
             _maintenanceMode--;
             // no need to change state, syncTail will try to go live as a secondary soon
 
             log() << "leaving maintenance mode (" << _maintenanceMode << " other tasks)" << rsLog;
         }
+        else {
+            return false;
+        }
 
+        fassert(16844, _maintenanceMode >= 0);
         return true;
     }
 
@@ -294,6 +334,7 @@ namespace mongo {
         const StateBox::SP sp = box.get();
         bool isp = sp.state.primary();
         b.append("setName", name());
+        b.append("setVersion", version());
         b.append("ismaster", isp);
         b.append("secondary", sp.state.secondary());
         {
@@ -342,6 +383,9 @@ namespace mongo {
             b.append("tags", a.done());
         }
         b.append("me", myConfig().h.toString());
+        if (isp) {
+            b.append("electionId", getElectionId());
+        }
     }
 
     /** @param cfgString <setname>/<seedhost1>,<seedhost2> */
@@ -422,7 +466,7 @@ namespace mongo {
         }
 
         // Figure out indexPrefetch setting
-        std::string& prefetch = cmdLine.rsIndexPrefetch;
+        std::string& prefetch = replSettings.rsIndexPrefetch;
         if (!prefetch.empty()) {
             IndexPrefetchConfig prefetchConfig = PREFETCH_ALL;
             if (prefetch == "none")
@@ -449,6 +493,7 @@ namespace mongo {
         _writerPool(replWriterThreadCount),
         _prefetcherPool(replPrefetcherThreadCount),
         oplogVersion(0),
+        initialSyncRequested(false), // only used for resync
         _indexPrefetchConfig(PREFETCH_ALL) {
     }
 
@@ -461,8 +506,6 @@ namespace mongo {
         return ret.release();
     }
 
-    void newReplUp();
-
     void ReplSetImpl::loadLastOpTimeWritten(bool quiet) {
         Lock::DBRead lk(rsoplog);
         BSONObj o;
@@ -473,8 +516,21 @@ namespace mongo {
         }
     }
 
+    OpTime ReplSetImpl::getEarliestOpTimeWritten() const {
+        Lock::DBRead lk(rsoplog);
+        BSONObj o;
+        uassert(17347, "Problem reading earliest entry from oplog", Helpers::getFirst(rsoplog, o));
+        return o["ts"]._opTime();
+    }
+
     /* call after constructing to start - returns fairly quickly after launching its threads */
     void ReplSetImpl::_go() {
+        {
+            boost::unique_lock<boost::mutex> lk(rss.mtx);
+            while (!rss.indexRebuildDone) {
+                rss.cond.wait(lk);
+            }
+        }
         try {
             loadLastOpTimeWritten();
         }
@@ -486,6 +542,20 @@ namespace mongo {
             return;
         }
 
+        // initialize _me in SyncSourceFeedback
+        bool meEnsured = false;
+        while (!inShutdown() && !meEnsured) {
+            try {
+                theReplSet->syncSourceFeedback.ensureMe();
+                meEnsured = true;
+            }
+            catch (const DBException& e) {
+                warning() << "failed to write to local.me: " << e.what()
+                          << " trying again in one second";
+                sleepsecs(1);
+            }
+        }
+
         changeState(MemberState::RS_STARTUP2);
         startThreads();
         newReplUp(); // oplog.cpp
@@ -493,6 +563,7 @@ namespace mongo {
 
     ReplSetImpl::StartupStatus ReplSetImpl::startupStatus = PRESTART;
     DiagStr ReplSetImpl::startupStatusMsg;
+    ReplicationStartSynchronizer ReplSetImpl::rss;
 
     extern BSONObj *getLastErrorDefault;
 
@@ -524,6 +595,7 @@ namespace mongo {
         // node/nodes and nothing else is changing, this is additive. If it's
         // not a reconfig, we're not adding anything
         bool additive = reconf;
+        bool updateConfigs = false;
         {
             unsigned nfound = 0;
             int me = 0;
@@ -539,8 +611,11 @@ namespace mongo {
                     if( old ) {
                         nfound++;
                         verify( (int) old->id() == m._id );
-                        if( old->config() != m ) {
+                        if (!old->config().isSameIgnoringTags(m)) {
                             additive = false;
+                        }
+                        if (!updateConfigs && old->config() != m) {
+                            updateConfigs = true;
                         }
                     }
                     else {
@@ -596,14 +671,49 @@ namespace mongo {
         // this is a shortcut for simple changes
         if( additive ) {
             log() << "replSet info : additive change to configuration" << rsLog;
-            for( list<ReplSetConfig::MemberCfg*>::const_iterator i = newOnes.begin(); i != newOnes.end(); i++ ) {
+            if (updateConfigs) {
+                // we have new configs for existing members, so we need to repopulate _members
+                // with the most recent configs
+                _members.orphanAll();
+                ghost->clearCache();
+
+                // for logging
+                string members = "";
+
+                // not setting _self to 0 as other threads use _self w/o locking
+                int me = 0;
+                for(vector<ReplSetConfig::MemberCfg>::const_iterator i = config().members.begin();
+                    i != config().members.end(); i++) {
+                    const ReplSetConfig::MemberCfg& m = *i;
+                    Member *mi;
+                    members += (members == "" ? "" : ", ") + m.h.toString();
+                    if (m.h.isSelf()) {
+                        verify(me++ == 0);
+                        mi = new Member(m.h, m._id, &m, true);
+                        if (!reconf) {
+                            log() << "replSet I am " << m.h.toString() << rsLog;
+                        }
+                        setSelfTo(mi);
+                    }
+                    else {
+                        mi = new Member(m.h, m._id, &m, false);
+                        _members.push(mi);
+                    }
+                }
+                // trigger a handshake to update the syncSource of our writeconcern information
+                syncSourceFeedback.forwardSlaveHandshake();
+            }
+
+            // add any new members
+            for (list<ReplSetConfig::MemberCfg*>::const_iterator i = newOnes.begin();
+                    i != newOnes.end();
+                    i++) {
                 ReplSetConfig::MemberCfg *m = *i;
                 Member *mi = new Member(m->h, m->_id, m, false);
 
-                /** we will indicate that new members are up() initially so that we don't relinquish our
-                    primary state because we can't (transiently) see a majority.  they should be up as we
-                    check that new members are up before getting here on reconfig anyway.
-                    */
+                // we will indicate that new members are up() initially so that we don't relinquish
+                // our primary state because we can't (transiently) see a majority. they should be
+                // up as we check that new members are up before getting here on reconfig anyway.
                 mi->get_hbinfo().health = 0.1;
 
                 _members.push(mi);
@@ -684,7 +794,7 @@ namespace mongo {
         int n = 0;
         for( vector<ReplSetConfig*>::iterator i = cfgs.begin(); i != cfgs.end(); i++ ) {
             ReplSetConfig* cfg = *i;
-            DEV LOG(1) << n+1 << " config shows version " << cfg->version << rsLog;
+            DEV { LOG(1) << n+1 << " config shows version " << cfg->version << rsLog; }
             if( ++n == 1 ) myVersion = cfg->version;
             if( cfg->ok() && cfg->version > v ) {
                 highest = cfg;
@@ -728,15 +838,16 @@ namespace mongo {
                 {
                     scoped_lock lck( replSettings.discoveredSeeds_mx );
                     if( replSettings.discoveredSeeds.size() > 0 ) {
-                        for (set<string>::iterator i = replSettings.discoveredSeeds.begin(); 
-                             i != replSettings.discoveredSeeds.end(); 
-                             i++) {
+                        for (set<string>::iterator i = replSettings.discoveredSeeds.begin();
+                             i != replSettings.discoveredSeeds.end();) {
                             try {
                                 configs.mutableVector().push_back( ReplSetConfig::make(HostAndPort(*i)) );
+                                ++i;
                             }
-                            catch( DBException& ) {
-                                LOG(1) << "replSet exception trying to load config from discovered seed " << *i << rsLog;
-                                replSettings.discoveredSeeds.erase(*i);
+                            catch(const DBException& ex) {
+                                log() << "replSet exception trying to load config from "
+                                    "discovered seed " << *i << "; " << ex.toString() << rsLog;
+                                replSettings.discoveredSeeds.erase(*(i++));
                             }
                         }
                     }
@@ -782,7 +893,7 @@ namespace mongo {
                         log() << "replSet can't get " << rsConfigNs << " config from self or any seed (yet)" << rsLog;
                     }
 
-                    sleepsecs(10);
+                    sleepsecs(1);
                     continue;
                 }
 
@@ -820,6 +931,11 @@ namespace mongo {
         newConfig.saveConfigLocally(comment);
 
         try {
+            BSONObj oldConfForAudit = config().asBson();
+            BSONObj newConfForAudit = newConfig.asBson();
+            audit::logReplSetReconfig(ClientBasic::getCurrent(),
+                                      &oldConfForAudit,
+                                      &newConfForAudit);
             if (initFromConfig(newConfig, true)) {
                 log() << "replSet replSetReconfig new config saved locally" << rsLog;
             }
@@ -874,9 +990,7 @@ namespace mongo {
     }
 
     void replLocalAuth() {
-        if ( noauth )
-            return;
-        cc().getAuthorizationManager()->grantInternalAuthorization("_repl");
+        cc().getAuthorizationSession()->grantInternalAuthorization();
     }
 
     const char* ReplSetImpl::_initialSyncFlagString = "doingInitialSync";
@@ -900,14 +1014,13 @@ namespace mongo {
         }
         return false;
     }
+    void ReplSetImpl::setMinValid(OpTime ts) {
+        Lock::DBWrite lk( "local" );
+        Helpers::putSingleton("local.replset.minvalid", BSON("$set" << BSON("ts" << ts)));
+    }
 
     void ReplSetImpl::setMinValid(BSONObj obj) {
-        BSONObjBuilder builder;
-        BSONObjBuilder subobj(builder.subobjStart("$set"));
-        subobj.appendTimestamp("ts", obj["ts"].date());
-        subobj.done();
-        Lock::DBWrite lk( "local" );
-        Helpers::putSingleton("local.replset.minvalid", builder.obj());
+        setMinValid(obj["ts"]._opTime());
     }
 
     OpTime ReplSetImpl::getMinValid() {
@@ -919,11 +1032,23 @@ namespace mongo {
         return OpTime();
     }
 
-    void ReplSetImpl::registerSlave(const BSONObj& rid, const int memberId) {
+    bool ReplSetImpl::registerSlave(const BSONObj& rid, const int memberId) {
         // To prevent race conditions with clearing the cache at reconfig time,
         // we lock the replset mutex here.
-        lock lk(this);
-        ghost->associateSlave(rid, memberId);
+        Member* member = NULL;
+        {
+            lock lk(this);
+            ghost->associateSlave(rid, memberId);
+            member = getMutableMember(memberId);
+        }
+
+        // it is possible that a node that was removed in a reconfig tried to handshake this node
+        // in that case, the Member will no longer be in the _members List and member will be NULL
+        if (!member) {
+            return false;
+        }
+        syncSourceFeedback.associateMember(rid, member);
+        return true;
     }
 
     class ReplIndexPrefetch : public ServerParameter {

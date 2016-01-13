@@ -15,16 +15,21 @@
  *    limitations under the License.
  */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include "mongo/shell/shell_utils.h"
 
+#include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/dbclientinterface.h"
+#include "mongo/db/catalog/index_key_validate.h"
+#include "mongo/db/index/external_key_generator.h"
 #include "mongo/scripting/engine.h"
+#include "mongo/shell/shell_options.h"
 #include "mongo/shell/shell_utils_extended.h"
 #include "mongo/shell/shell_utils_launcher.h"
 #include "mongo/util/processinfo.h"
-#include "mongo/util/version.h"
+#include "mongo/util/text.h"
+#include "mongo/util/version_reporting.h"
 
 namespace mongo {
 
@@ -133,6 +138,46 @@ namespace mongo {
             return BSON( "" << b.done() );
         }
 
+        BSONObj isKeyTooLarge(const BSONObj& a, void* data) {
+            uassert(17428, "keyTooLarge takes exactly 2 arguments", a.nFields() == 2);
+            BSONObjIterator i(a);
+            BSONObj index = i.next().Obj();
+            BSONObj doc = i.next().Obj();
+
+            return BSON("" << isAnyIndexKeyTooLarge(index, doc));
+        }
+
+        BSONObj validateIndexKey(const BSONObj& a, void* data) {
+            BSONObj key = a[0].Obj();
+            Status indexValid = validateKeyPattern(key);
+            if (!indexValid.isOK()) {
+                return BSON("" << BSON("ok" << false << "type"
+                               << indexValid.codeString() << "errmsg" << indexValid.reason()));
+            }
+            return BSON("" << BSON("ok" << true));
+        }
+
+        BSONObj replMonitorStats(const BSONObj& a, void* data) {
+            uassert(17134, "replMonitorStats requires a single string argument (the ReplSet name)",
+                    a.nFields() == 1 && a.firstElement().type() == String);
+
+            ReplicaSetMonitorPtr rsm = ReplicaSetMonitor::get(a.firstElement().valuestrsafe(),true);
+            if (!rsm) {
+                return BSON("" << "no ReplSetMonitor exists by that name");
+            }
+            BSONObjBuilder result;
+            rsm->appendInfo(result);
+            return result.obj();
+        }
+
+        BSONObj useWriteCommandsDefault(const BSONObj& a, void* data) {
+            return BSON("" << shellGlobalParams.useWriteCommandsDefault);
+        }
+
+        BSONObj writeMode(const BSONObj&, void*) {
+            return BSON("" << shellGlobalParams.writeMode);
+        }
+
         BSONObj interpreterVersion(const BSONObj& a, void* data) {
             uassert( 16453, "interpreterVersion accepts no arguments", a.nFields() == 0 );
             return BSON( "" << globalScriptEngine->getInterpreterVersionString() );
@@ -141,11 +186,14 @@ namespace mongo {
         void installShellUtils( Scope& scope ) {
             scope.injectNative( "quit", Quit );
             scope.injectNative( "getMemInfo" , JSGetMemInfo );
+            scope.injectNative( "_replMonitorStats" , replMonitorStats );
             scope.injectNative( "_srand" , JSSrand );
             scope.injectNative( "_rand" , JSRand );
             scope.injectNative( "_isWindows" , isWindows );
             scope.injectNative( "interpreterVersion", interpreterVersion );
             scope.injectNative( "getBuildInfo", getBuildInfo );
+            scope.injectNative( "isKeyTooLarge", isKeyTooLarge );
+            scope.injectNative( "validateIndexKey", validateIndexKey );
 
 #ifndef MONGO_SAFE_SHELL
             //can't launch programs
@@ -155,6 +203,9 @@ namespace mongo {
         }
 
         void initScope( Scope &scope ) {
+            // Need to define this method before JSFiles::utils is executed.
+            scope.injectNative("_useWriteCommandsDefault", useWriteCommandsDefault);
+            scope.injectNative("_writeMode", writeMode);
             scope.externalSetup();
             mongo::shell_utils::installShellUtils( scope );
             scope.execSetup(JSFiles::servers);
@@ -166,10 +217,9 @@ namespace mongo {
 
             if ( !_dbConnect.empty() ) {
                 uassert( 12513, "connect failed", scope.exec( _dbConnect , "(connect)" , false , true , false ) );
-                if ( !_dbAuth.empty() ) {
-                    installGlobalUtils( scope );
-                    uassert( 12514, "login failed", scope.exec( _dbAuth , "(auth)" , true , true , false ) );
-                }
+            }
+            if ( !_dbAuth.empty() ) {
+                uassert( 12514, "login failed", scope.exec( _dbAuth , "(auth)" , true , true , false ) );
             }
         }
 
@@ -247,6 +297,20 @@ namespace mongo {
                 return;
             }
             connectionRegistry.registerConnection( c );
+        }
+
+        bool fileExists(const std::string& file) {
+            try {
+#ifdef _WIN32
+                boost::filesystem::path p(toWideString(file.c_str()));
+#else
+                boost::filesystem::path p(file);
+#endif
+                return boost::filesystem::exists(p);
+            }
+            catch ( ... ) {
+                return false;
+            }
         }
     }
 }

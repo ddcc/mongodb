@@ -1,14 +1,15 @@
 // mongo tool tests, very basic to start with
 
 baseName = "jstests_tool_tool1";
-dbPath = "/data/db/" + baseName + "/";
-externalPath = "/data/db/" + baseName + "_external/";
-externalFile = externalPath + "export.json";
+dbPath = MongoRunner.dataPath + baseName + "/";
+externalPath = MongoRunner.dataPath + baseName + "_external/";
+externalBaseName = "export.json";
+externalFile = externalPath + externalBaseName;
 
 function fileSize(){
     var l = listFiles( externalPath );
     for ( var i=0; i<l.length; i++ ){
-        if ( l[i].name == externalFile )
+        if ( l[i].baseName == externalBaseName )
             return l[i].size;
     }
     return -1;

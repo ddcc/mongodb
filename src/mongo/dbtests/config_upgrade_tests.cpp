@@ -12,6 +12,18 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 #include "mongo/dbtests/config_server_fixture.h"
@@ -91,82 +103,6 @@ namespace mongo {
 
             storeConfigVersion(version);
             return clusterId;
-        }
-
-        /**
-         * Stores a collection where some chunks have epochs, and some do not.
-         */
-        void storePartialEpochCollection(const string& ns, int numChunks, bool epochForCollection) {
-
-            OID epoch = OID::gen();
-
-            BSONObjBuilder bob;
-            bob << CollectionType::ns(ns);
-            bob << CollectionType::DEPRECATED_lastmod(ChunkVersion(1, 0, OID()).toLong());
-            bob << CollectionType::keyPattern(BSON("_id" << 1));
-            if (epochForCollection) {
-                bob << CollectionType::DEPRECATED_lastmodEpoch(epoch);
-            }
-
-            client().insert(CollectionType::ConfigNS, bob.obj());
-
-            for (int i = 0; i < numChunks; i++) {
-
-                BSONObjBuilder bob;
-                bob << ChunkType::name(OID::gen().toString());
-                bob << ChunkType::ns(ns);
-                bob << ChunkType::min(BSON("_id" << i));
-                bob << ChunkType::max(BSON("_id" << (i + 1)));
-                bob << ChunkType::shard("test");
-                bob << ChunkType::DEPRECATED_lastmod(ChunkVersion(i + 1, 0, OID()).toLong());
-
-                // Make sure the first chunk never has an epoch, so we can be sure there's something
-                // to upgrade
-                if (i % 2 == 0) {
-                    bob << CollectionType::DEPRECATED_lastmodEpoch(epoch);
-                }
-
-                client().insert(ChunkType::ConfigNS, bob.obj());
-            }
-        }
-
-        /**
-         * Checks whether or not a collection's epochs are present in all chunks.
-         */
-        bool areCollectionEpochsFilled(const string& ns) {
-
-            BSONObj collectionDoc = client().findOne(CollectionType::ConfigNS,
-                                                     BSON(CollectionType::ns(ns)));
-
-            CollectionType savedCollection;
-
-            string errMsg;
-            ASSERT(savedCollection.parseBSON(collectionDoc, &errMsg));
-
-            // Test this first, otherwise invalid
-            if (!savedCollection.isEpochSet() || !savedCollection.getEpoch().isSet()) return false;
-            ASSERT(savedCollection.isValid(&errMsg));
-
-            auto_ptr<DBClientCursor> cursor = client().query(ChunkType::ConfigNS,
-                                                             BSON(ChunkType::ns(ns)));
-
-            ASSERT(cursor.get());
-
-            while (cursor->more()) {
-
-                BSONObj chunkDoc = cursor->next();
-
-                ChunkType chunk;
-                ASSERT(chunk.parseBSON(chunkDoc, &errMsg));
-
-                // Test this first, otherwise invalid
-                if (!chunk.getVersion().epoch().isSet()) return false;
-                ASSERT(chunk.isValid(&errMsg));
-
-                if (chunk.getVersion().epoch() != savedCollection.getEpoch()) return false;
-            }
-
-            return true;
         }
 
         /**
@@ -348,82 +284,6 @@ namespace mongo {
         // Our version is < 9.9, so this doesn't work (until we hit v99.99)
         status = checkClusterMongoVersions(configSvr(), "99.99");
         ASSERT(status.code() == ErrorCodes::RemoteValidationError);
-    }
-
-    TEST_F(ConfigUpgradeTests, UpgradeNoFlag) {
-
-        //
-        // Tests that we don't upgrade from a version that we are able to if the upgrade flag is
-        // not set.
-        //
-
-        stopBalancer();
-
-        storeConfigVersion(MIN_COMPATIBLE_CONFIG_VERSION);
-
-        string collectionA("foo.barA");
-        string collectionB("foo.barB");
-
-        storePartialEpochCollection(collectionA, 5, true); // 5 chunks, epoch for collection
-        storePartialEpochCollection(collectionB, 10, false); // 10 chunks, no epoch for collection
-
-        VersionType versionOld;
-        VersionType version;
-        string errMsg;
-
-        // Version 3 w/o --upgrade flag (invalid)
-        bool result = checkAndUpgradeConfigVersion(configSvr(),
-                                                   false,
-                                                   &versionOld,
-                                                   &version,
-                                                   &errMsg);
-
-        ASSERT(!result);
-        ASSERT(!areCollectionEpochsFilled(collectionA));
-        ASSERT(!areCollectionEpochsFilled(collectionB));
-    }
-
-    TEST_F(ConfigUpgradeTests, CollectionUpgrade) {
-
-        //
-        // Tests adding epochs during upgrade to collections and chunks.
-        //
-
-        stopBalancer();
-
-        storeConfigVersion(MIN_COMPATIBLE_CONFIG_VERSION);
-
-        string collectionA("foo.barA");
-        string collectionB("foo.barB");
-
-        storePartialEpochCollection(collectionA, 5, true); // 5 chunks, epoch for collection
-        storePartialEpochCollection(collectionB, 10, false); // 10 chunks, no epoch for collection
-
-        // Store shards and pings to test compatibility check logic
-        storeShardsAndPings(5, 10);
-
-        VersionType versionOld;
-        VersionType version;
-        string errMsg;
-
-        bool result = checkAndUpgradeConfigVersion(configSvr(),
-                                                   true,
-                                                   &versionOld,
-                                                   &version,
-                                                   &errMsg);
-
-        // Be proactive and give us debugging information
-        if (errMsg != "") dumpServer();
-
-        ASSERT_EQUALS(errMsg, "");
-        ASSERT(result);
-        ASSERT_EQUALS(versionOld.getCurrentVersion(), MIN_COMPATIBLE_CONFIG_VERSION);
-        ASSERT_EQUALS(version.getMinCompatibleVersion(), MIN_COMPATIBLE_CONFIG_VERSION);
-        ASSERT_EQUALS(version.getCurrentVersion(), CURRENT_CONFIG_VERSION);
-        ASSERT_NOT_EQUALS(version.getClusterId(), OID());
-
-        ASSERT(areCollectionEpochsFilled(collectionA));
-        ASSERT(areCollectionEpochsFilled(collectionB));
     }
 
 } // end namespace

@@ -14,38 +14,54 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
+#include <time.h>
+
+#include "mongo/bson/util/builder.h"
+#include "mongo/client/dbclient_rs.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/privilege.h"
-#include "pdfile.h"
-#include "jsobj.h"
-#include "../bson/util/builder.h"
-#include <time.h>
-#include "introspect.h"
-#include "../client/dbclient_rs.h"
-#include "../util/lruishmap.h"
-#include "../util/md5.hpp"
-#include "../util/processinfo.h"
-#include "json.h"
-#include "repl.h"
-#include "repl_block.h"
-#include "replutil.h"
-#include "commands.h"
-#include "db.h"
-#include "instance.h"
-#include "lasterror.h"
-#include "../scripting/engine.h"
-#include "stats/counters.h"
-#include "background.h"
-#include "../util/version.h"
-#include "../util/ramlog.h"
-#include "repl/multicmd.h"
-#include "server.h"
+#include "mongo/db/background.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/commands/shutdown.h"
+#include "mongo/db/db.h"
+#include "mongo/db/instance.h"
+#include "mongo/db/introspect.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/db/json.h"
+#include "mongo/db/lasterror.h"
+#include "mongo/db/log_process_details.h"
+#include "mongo/db/pdfile.h"
+#include "mongo/db/repl/multicmd.h"
+#include "mongo/db/repl/write_concern.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/stats/counters.h"
+#include "mongo/scripting/engine.h"
+#include "mongo/server.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/fail_point_service.h"
+#include "mongo/util/lruishmap.h"
+#include "mongo/util/md5.hpp"
+#include "mongo/util/processinfo.h"
+#include "mongo/util/ramlog.h"
+#include "mongo/util/version_reporting.h"
 
 namespace mongo {
 
@@ -107,7 +123,6 @@ namespace mongo {
         CmdBuildInfo() : Command( "buildInfo", true, "buildinfo" ) {}
         virtual bool slaveOk() const { return true; }
         virtual bool adminOnly() const { return false; }
-        virtual bool requiresAuth() { return false; }
         virtual LockType locktype() const { return NONE; }
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
@@ -137,7 +152,6 @@ namespace mongo {
         virtual bool slaveOk() const { return true; }
         virtual void help( stringstream &help ) const { help << "a way to check that the server is alive. responds immediately even if server is in a db lock."; }
         virtual LockType locktype() const { return NONE; }
-        virtual bool requiresAuth() { return false; }
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {} // No auth required
@@ -152,7 +166,6 @@ namespace mongo {
         FeaturesCmd() : Command( "features", true ) {}
         void help(stringstream& h) const { h << "return build level feature settings"; }
         virtual bool slaveOk() const { return true; }
-        virtual bool readOnly() { return true; }
         virtual LockType locktype() const { return NONE; }
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
@@ -190,7 +203,7 @@ namespace mongo {
                                            std::vector<Privilege>* out) {
             ActionSet actions;
             actions.addAction(ActionType::hostInfo);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             ProcessInfo p;
@@ -227,10 +240,13 @@ namespace mongo {
                                            std::vector<Privilege>* out) {
             ActionSet actions;
             actions.addAction(ActionType::logRotate);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         virtual bool run(const string& ns, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            return rotateLogs();
+            bool didRotate = rotateLogs();
+            if (didRotate)
+                logProcessDetailsForLogRotate();
+            return didRotate;
         }
 
     } logRotateCmd;
@@ -261,7 +277,6 @@ namespace mongo {
                     c->help( help );
                     temp.append( "help" , help.str() );
                 }
-                temp.append( "lockType" , c->locktype() );
                 temp.append( "slaveOk" , c->slaveOk() );
                 temp.append( "adminOnly" , c->adminOnly() );
                 //optionally indicates that the command can be forced to run on a slave/secondary
@@ -275,7 +290,20 @@ namespace mongo {
 
     } listCommandsCmd;
 
+    namespace {
+        MONGO_FP_DECLARE(crashOnShutdown);
+
+        int* volatile illegalAddress;
+    }  // namespace
+
     bool CmdShutdown::shutdownHelper() {
+        MONGO_FAIL_POINT_BLOCK(crashOnShutdown, crashBlock) {
+            const std::string crashHow = crashBlock.getData()["how"].str();
+            if (crashHow == "fault") {
+                ++*illegalAddress;
+            }
+            ::abort();
+        }
         Client * c = currentClient.get();
         if ( c ) {
             c->shutdown();
@@ -311,21 +339,6 @@ namespace mongo {
         }
     } cmdForceError;
 
-    class AvailableQueryOptions : public Command {
-    public:
-        AvailableQueryOptions() : Command( "availableQueryOptions" , false , "availablequeryoptions" ) {}
-        virtual bool slaveOk() const { return true; }
-        virtual LockType locktype() const { return NONE; }
-        virtual bool requiresAuth() { return false; }
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {} // No auth required
-        virtual bool run(const string& dbname , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
-            result << "options" << QueryOption_AllSupported;
-            return true;
-        }
-    } availableQueryOptionsCmd;
-
     class GetLogCmd : public Command {
     public:
         GetLogCmd() : Command( "getLog" ){}
@@ -338,7 +351,7 @@ namespace mongo {
                                            std::vector<Privilege>* out) {
             ActionSet actions;
             actions.addAction(ActionType::getLog);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         virtual void help( stringstream& help ) const {
             help << "{ getLog : '*' }  OR { getLog : 'global' }";
@@ -358,20 +371,18 @@ namespace mongo {
                 result.appendArray( "names" , arr.arr() );
             }
             else {
-                RamLog* rl = RamLog::get( p );
-                if ( ! rl ) {
+                RamLog* ramlog = RamLog::getIfExists(p);
+                if ( ! ramlog ) {
                     errmsg = str::stream() << "no RamLog named: " << p;
                     return false;
                 }
+                RamLog::LineIterator rl(ramlog);
 
-                result.appendNumber( "totalLinesWritten", rl->getTotalLinesWritten() );
-
-                vector<const char*> lines;
-                rl->get( lines );
+                result.appendNumber( "totalLinesWritten", rl.getTotalLinesWritten() );
 
                 BSONArrayBuilder arr( result.subarrayStart( "log" ) );
-                for ( unsigned i=0; i<lines.size(); i++ )
-                    arr.append( lines[i] );
+                while (rl.more())
+                    arr.append(rl.next());
                 arr.done();
             }
             return true;
@@ -391,11 +402,11 @@ namespace mongo {
                                            std::vector<Privilege>* out) {
             ActionSet actions;
             actions.addAction(ActionType::getCmdLineOpts);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         virtual bool run(const string&, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            result.append("argv", CmdLine::getArgvArray());
-            result.append("parsed", CmdLine::getParsedOpts());
+            result.append("argv", serverGlobalParams.argvArray);
+            result.append("parsed", serverGlobalParams.parsedOpts);
             return true;
         }
 

@@ -12,6 +12,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
 /*
@@ -33,6 +45,7 @@
 #include <boost/scoped_ptr.hpp>
 #include <boost/shared_ptr.hpp>
 
+#include "mongo/logger/logstream_builder.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -51,12 +64,12 @@
 /**
  * Assert that a Status code is OK.
  */
-#define ASSERT_OK(EXPRESSION) ASSERT_EQUALS(Status::OK(), (EXPRESSION))
+#define ASSERT_OK(EXPRESSION) ASSERT_EQUALS(::mongo::Status::OK(), (EXPRESSION))
 
 /**
  * Assert that a status code is anything but OK.
  */
-#define ASSERT_NOT_OK(EXPRESSION) ASSERT_NOT_EQUALS(Status::OK(), (EXPRESSION))
+#define ASSERT_NOT_OK(EXPRESSION) ASSERT_NOT_EQUALS(::mongo::Status::OK(), (EXPRESSION))
 
 /**
  * Fails if "EXPRESSION" is true.
@@ -79,7 +92,7 @@
 /**
  * Binary comparison utility macro.  Do not use directly.
  */
-#define _ASSERT_COMPARISON(COMPARISON, a, b) mongo::unittest::ComparisonAssertion( \
+#define _ASSERT_COMPARISON(COMPARISON, a, b) ::mongo::unittest::ComparisonAssertion( \
             #a, #b , __FILE__ , __LINE__ ).assert##COMPARISON( (a), (b) )
 
 /**
@@ -168,6 +181,12 @@ namespace mongo {
     namespace unittest {
 
         class Result;
+
+        /**
+         * Gets a LogstreamBuilder for logging to the unittest log domain, which may have
+         * different target from the global log domain.
+         */
+        mongo::logger::LogstreamBuilder log();
 
         /**
          * Type representing the function composing a test.
@@ -348,16 +367,20 @@ namespace mongo {
         class TestAssertion : private boost::noncopyable {
 
         public:
-            TestAssertion( const std::string& file, unsigned line );
+            /**
+             * file string must stay in scope and remain unchanged for the lifetime
+             * of the TestAssertion object.
+             */
+            TestAssertion( const char* file, unsigned line );
             ~TestAssertion();
 
-            void fail( const std::string& message) const;
+            MONGO_COMPILER_NORETURN void fail( const std::string& message) const;
             void failIf( bool flag, const std::string &message ) const {
                 if ( flag ) fail( message );
             }
 
         private:
-            const std::string _file;
+            const char* _file;
             const unsigned _line;
         };
 
@@ -366,8 +389,12 @@ namespace mongo {
          */
         class ComparisonAssertion : private TestAssertion {
         public:
-            ComparisonAssertion( const std::string& aexp , const std::string& bexp ,
-                                 const std::string& file , unsigned line );
+            /**
+             * All char* arguments must stay in scope and remain unchanged for the lifetime
+             * of the ComparisonAssertion object.
+             */
+            ComparisonAssertion( const char* aexp , const char* bexp ,
+                                 const char* file , unsigned line );
 
             template<typename A,typename B>
             void assertEqual( const A& a , const B& b ) {
@@ -416,17 +443,17 @@ namespace mongo {
             std::string getComparisonFailureMessage(const std::string &theOperator,
                                                     const A& a, const B& b);
 
-            std::string _aexp;
-            std::string _bexp;
+            const char* _aexp;
+            const char* _bexp;
         };
 
         /**
          * Helper for ASSERT_APPROX_EQUAL to ensure that the arguments are evaluated only once.
          */
         template < typename A, typename B, typename ABSOLUTE_ERR >
-        inline void assertApproxEqual(const std::string& aexp, const std::string& bexp,
+        inline void assertApproxEqual(const char* aexp, const char* bexp,
                                       const A& a, const B& b, const ABSOLUTE_ERR& absoluteErr,
-                                      const std::string& file , unsigned line) {
+                                      const char* file , unsigned line) {
             if (std::abs(a - b) <= absoluteErr)
                 return;
             TestAssertion(file, line).fail(mongoutils::str::stream()

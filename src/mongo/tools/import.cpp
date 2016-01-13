@@ -1,5 +1,3 @@
-// import.cpp
-
 /**
 *    Copyright (C) 2008 10gen Inc.
 *
@@ -14,24 +12,37 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
-#include "pch.h"
-#include "db/json.h"
-#include "tool.h"
-#include "../util/text.h"
-#include "mongo/base/initializer.h"
-#include <fstream>
-#include <iostream>
-#include <boost/program_options.hpp>
+#include "mongo/pch.h"
+
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem/operations.hpp>
+#include <fstream>
+#include <iostream>
+
+#include "mongo/base/initializer.h"
+#include "mongo/db/json.h"
+#include "mongo/tools/mongoimport_options.h"
+#include "mongo/tools/tool.h"
+#include "mongo/util/options_parser/option_section.h"
+#include "mongo/util/text.h"
 
 using namespace mongo;
 using std::string;
 using std::stringstream;
-
-namespace po = boost::program_options;
 
 class Import : public Tool {
 
@@ -39,12 +50,6 @@ class Import : public Tool {
     Type _type;
 
     const char * _sep;
-    bool _ignoreBlanks;
-    bool _headerLine;
-    bool _upsert;
-    bool _doimport;
-    bool _jsonArray;
-    vector<string> _upsertFields;
     static const int BUF_SIZE;
 
     void csvTokenizeRow(const string& row, vector<string>& tokens) {
@@ -93,7 +98,7 @@ class Import : public Tool {
     }
 
     void _append( BSONObjBuilder& b , const string& fieldName , const string& data ) {
-        if ( _ignoreBlanks && data.size() == 0 )
+        if (mongoImportGlobalParams.ignoreBlanks && data.size() == 0)
             return;
 
         if ( b.appendAsNumber( fieldName , data ) )
@@ -109,23 +114,19 @@ class Import : public Tool {
      * increment buf by this amount.
      */
     int getLine(istream* in, char* buf) {
-        if (_jsonArray) {
-            in->read(buf, BUF_SIZE);
-            uassert(13295, "JSONArray file too large", (in->rdstate() & ios_base::eofbit));
-            buf[ in->gcount() ] = '\0';
+        in->getline( buf , BUF_SIZE );
+        if ((in->rdstate() & ios_base::eofbit) && (in->rdstate() & ios_base::failbit)) {
+            // this is the last line, and it's empty (not even a newline)
+            buf[0] = '\0';
+            return 0;
         }
-        else {
-            in->getline( buf , BUF_SIZE );
-            if ((in->rdstate() & ios_base::eofbit) && (in->rdstate() & ios_base::failbit)) {
-                // this is the last line, and it's empty (not even a newline)
-                buf[0] = '\0';
-                return 0;
-            }
 
-            uassert(16329, str::stream() << "read error, or input line too long (max length: "
-                    << BUF_SIZE << ")", !(in->rdstate() & ios_base::failbit));
-            LOG(1) << "got line:" << buf << endl;
+        uassert(16329, str::stream() << "read error, or input line too long (max length: "
+                << BUF_SIZE << ")", !(in->rdstate() & ios_base::failbit));
+        if (logger::globalLogDomain()->shouldLog(logger::LogSeverity::Debug(1))) {
+            toolInfoLog() << "got line:" << buf << std::endl;
         }
+
         uassert( 10263 ,  "unknown error reading file" ,
                  (!(in->rdstate() & ios_base::badbit)) &&
                  (!(in->rdstate() & ios_base::failbit) || (in->rdstate() & ios_base::eofbit)) );
@@ -141,27 +142,44 @@ class Import : public Tool {
     }
 
     /*
-     * Parses a BSON object out of a JSON array.
-     * Returns number of bytes processed on success and -1 on failure.
+     * description:
+     *     given a pointer into a JSON array, returns the next valid JSON object
+     * args:
+     *     buf - pointer into the JSON array
+     *     o - BSONObj to fill
+     *     numBytesRead - return parameter for how far we read
+     * return:
+     *     true if an object was successfully parsed
+     *     false if there is no object left to parse
+     * throws:
+     *     exception on parsing error
      */
-    int parseJSONArray(char* buf, BSONObj& o) {
-        int len = 0;
-        while (buf[0] != '{' && buf[0] != '\0') {
-            len++;
+    bool parseJSONArray(char* buf, BSONObj* o, int* numBytesRead) {
+
+        // Skip extra characters since fromjson must be passed a character buffer that starts with a
+        // valid JSON object, and does not accept JSON arrays.
+        // (NOTE: this doesn't catch all invalid JSON arrays, but does fail on invalid characters)
+        *numBytesRead = 0;
+        while (buf[0] == '[' ||
+               buf[0] == ']' ||
+               buf[0] == ',' ||
+               isspace(buf[0])) {
+            (*numBytesRead)++;
             buf++;
         }
+
         if (buf[0] == '\0')
-            return -1;
+            return false;
 
-        int jslen;
         try {
-            o = fromjson(buf, &jslen);
+            int len = 0;
+            *o = fromjson(buf, &len);
+            (*numBytesRead) += len;
         } catch ( MsgAssertionException& e ) {
-            uasserted(13293, string("BSON representation of supplied JSON array is too large: ") + e.what());
+            uasserted(13293, string("Invalid JSON passed to mongoimport: ") + e.what());
         }
-        len += jslen;
 
-        return len;
+        return true;
     }
 
     /*
@@ -218,7 +236,7 @@ class Import : public Tool {
                     line += num;
                     numBytesRead += num;
 
-                    uassert (15854, "CSV file ends while inside quoted field", line[0] != '\0');
+                    uassert(15854, "CSV file ends while inside quoted field", line[0] != '\0');
                     numBytesRead += strlen( line );
                 } else {
                     break;
@@ -241,13 +259,13 @@ class Import : public Tool {
         unsigned int pos=0;
         for (vector<string>::iterator it = tokens.begin(); it != tokens.end(); ++it) {
             string token = *it;
-            if ( _headerLine ) {
-                _fields.push_back(token);
+            if (mongoImportGlobalParams.headerLine) {
+                toolGlobalParams.fields.push_back(token);
             }
             else {
                 string name;
-                if ( pos < _fields.size() ) {
-                    name = _fields[pos];
+                if (pos < toolGlobalParams.fields.size()) {
+                    name = toolGlobalParams.fields[pos];
                 }
                 else {
                     stringstream ss;
@@ -264,36 +282,12 @@ class Import : public Tool {
     }
 
 public:
-    Import() : Tool( "import" ) {
-        addFieldOptions();
-        add_options()
-        ("ignoreBlanks","if given, empty fields in csv and tsv will be ignored")
-        ("type",po::value<string>() , "type of file to import.  default: json (json,csv,tsv)")
-        ("file",po::value<string>() , "file to import from; if not specified stdin is used" )
-        ("drop", "drop collection first " )
-        ("headerline","first line in input file is a header (CSV and TSV only)")
-        ("upsert", "insert or update objects that already exist" )
-        ("upsertFields", po::value<string>(), "comma-separated fields for the query part of the upsert. You should make sure this is indexed" )
-        ("stopOnError", "stop importing at first error rather than continuing" )
-        ("jsonArray", "load a json array, not one item per line. Currently limited to 16MB." )
-        ;
-        add_hidden_options()
-        ("noimport", "don't actually import. useful for benchmarking parser" )
-        ;
-        addPositionArg( "file" , 1 );
+    Import() : Tool() {
         _type = JSON;
-        _ignoreBlanks = false;
-        _headerLine = false;
-        _upsert = false;
-        _doimport = true;
-        _jsonArray = false;
     }
-    ;
-    virtual void printExtraHelp( ostream & out ) {
-        out << "Import CSV, TSV or JSON data into MongoDB.\n" << endl;
-        out << "When importing JSON documents, each document must be a separate line of the input file.\n";
-        out << "\nExample:\n";
-        out << "  mongoimport --host myhost --db my_cms --collection docs < mydocfile.json\n" << endl;
+
+    virtual void printHelp( ostream & out ) {
+        printMongoImportHelp(&out);
     }
 
     unsigned long long lastErrorFailures;
@@ -305,33 +299,57 @@ public:
             if( str::contains(s,"uplicate") ) {
                 // we don't want to return an error from the mongoimport process for
                 // dup key errors
-                log() << s << endl;
+                toolInfoLog() << s << endl;
             }
             else {
                 lastErrorFailures++;
-                log() << "error: " << s << endl;
+                toolInfoLog() << "error: " << s << endl;
                 return false;
             }
         }
         return true;
     }
 
+    void importDocument (const std::string &ns, const BSONObj& o) {
+        bool doUpsert = mongoImportGlobalParams.upsert;
+        BSONObjBuilder b;
+        if (mongoImportGlobalParams.upsert) {
+            for (vector<string>::const_iterator it = mongoImportGlobalParams.upsertFields.begin(),
+                 end = mongoImportGlobalParams.upsertFields.end(); it != end; ++it) {
+                BSONElement e = o.getFieldDotted(it->c_str());
+                if (e.eoo()) {
+                    doUpsert = false;
+                    break;
+                }
+                b.appendAs(e, *it);
+            }
+        }
+
+        if (doUpsert) {
+            conn().update(ns, Query(b.obj()), o, true);
+        }
+        else {
+            conn().insert(ns.c_str(), o);
+        }
+    }
+
     int run() {
-        string filename = getParam( "file" );
         long long fileSize = 0;
         int headerRows = 0;
 
         istream * in = &cin;
 
-        ifstream file( filename.c_str() , ios_base::in);
+        ifstream file(mongoImportGlobalParams.filename.c_str(), ios_base::in);
 
-        if ( filename.size() > 0 && filename != "-" ) {
-            if ( ! boost::filesystem::exists( filename ) ) {
-                error() << "file doesn't exist: " << filename << endl;
+        if (mongoImportGlobalParams.filename.size() > 0 &&
+            mongoImportGlobalParams.filename != "-") {
+            if ( ! boost::filesystem::exists(mongoImportGlobalParams.filename) ) {
+                toolError() << "file doesn't exist: " << mongoImportGlobalParams.filename
+                          << std::endl;
                 return -1;
             }
             in = &file;
-            fileSize = boost::filesystem::file_size( filename );
+            fileSize = boost::filesystem::file_size(mongoImportGlobalParams.filename);
         }
 
         // check if we're actually talking to a machine that can write
@@ -345,156 +363,204 @@ public:
             ns = getNS();
         }
         catch (...) {
-            printHelp(cerr);
-            return -1;
-        }
-
-        LOG(1) << "ns: " << ns << endl;
-
-        if ( hasParam( "drop" ) ) {
-            log() << "dropping: " << ns << endl;
-            conn().dropCollection( ns.c_str() );
-        }
-
-        if ( hasParam( "ignoreBlanks" ) ) {
-            _ignoreBlanks = true;
-        }
-
-        if ( hasParam( "upsert" ) || hasParam( "upsertFields" )) {
-            _upsert = true;
-
-            string uf = getParam("upsertFields");
-            if (uf.empty()) {
-                _upsertFields.push_back("_id");
+            // The only time getNS throws is when the collection was not specified.  In that case,
+            // check if the user specified a file name and use that as the collection name.
+            if (!mongoImportGlobalParams.filename.empty()) {
+                string oldCollName =
+                    boost::filesystem::path(mongoImportGlobalParams.filename).leaf().string();
+                oldCollName = oldCollName.substr( 0 , oldCollName.find_last_of( "." ) );
+                cerr << "using filename '" << oldCollName << "' as collection." << endl;
+                ns = toolGlobalParams.db + "." + oldCollName;
             }
             else {
-                StringSplitter(uf.c_str(), ",").split(_upsertFields);
-            }
-        }
-
-        if ( hasParam( "noimport" ) ) {
-            _doimport = false;
-        }
-
-        if ( hasParam( "type" ) ) {
-            string type = getParam( "type" );
-            if ( type == "json" )
-                _type = JSON;
-            else if ( type == "csv" ) {
-                _type = CSV;
-                _sep = ",";
-            }
-            else if ( type == "tsv" ) {
-                _type = TSV;
-                _sep = "\t";
-            }
-            else {
-                error() << "don't know what type [" << type << "] is" << endl;
+                printHelp(cerr);
                 return -1;
             }
         }
 
-        if ( _type == CSV || _type == TSV ) {
-            _headerLine = hasParam( "headerline" );
-            if ( _headerLine ) {
+        if (logger::globalLogDomain()->shouldLog(logger::LogSeverity::Debug(1))) {
+            toolInfoLog() << "ns: " << ns << endl;
+        }
+
+        if (mongoImportGlobalParams.drop) {
+            toolInfoLog() << "dropping: " << ns << endl;
+            conn().dropCollection(ns.c_str());
+        }
+
+        if (mongoImportGlobalParams.type == "json")
+            _type = JSON;
+        else if (mongoImportGlobalParams.type == "csv") {
+            _type = CSV;
+            _sep = ",";
+        }
+        else if (mongoImportGlobalParams.type == "tsv") {
+            _type = TSV;
+            _sep = "\t";
+        }
+        else {
+            toolError() << "don't know what type [" << mongoImportGlobalParams.type << "] is"
+                      << std::endl;
+            return -1;
+        }
+
+        if (_type == CSV || _type == TSV) {
+            if (mongoImportGlobalParams.headerLine) {
                 headerRows = 1;
             }
             else {
-                needFields();
+                if (!toolGlobalParams.fieldsSpecified) {
+                    throw UserException(9998, "You need to specify fields or have a headerline to "
+                                              "import this file type");
+                }
             }
         }
 
-        if (_type == JSON && hasParam("jsonArray")) {
-            _jsonArray = true;
-        }
 
         time_t start = time(0);
-        LOG(1) << "filesize: " << fileSize << endl;
+        if (logger::globalLogDomain()->shouldLog(logger::LogSeverity::Debug(1))) {
+            toolInfoLog() << "filesize: " << fileSize << endl;
+        }
         ProgressMeter pm( fileSize );
         int num = 0;
         int lastNumChecked = num;
         int errors = 0;
         lastErrorFailures = 0;
         int len = 0;
-        // buffer and line are only used when parsing a jsonArray
-        boost::scoped_array<char> buffer(new char[BUF_SIZE+2]);
-        char* line = buffer.get();
 
-        while ( _jsonArray || in->rdstate() == 0 ) {
-            try {
-                BSONObj o;
-                if (_jsonArray) {
-                    int bytesProcessed = 0;
-                    if (line == buffer.get()) { // Only read on first pass - the whole array must be on one line.
-                        bytesProcessed = getLine(in, line);
-                        line += bytesProcessed;
-                        len += bytesProcessed;
-                    }
-                    if ((bytesProcessed = parseJSONArray(line, o)) < 0) {
-                        len += bytesProcessed;
+        // We have to handle jsonArrays differently since we can't read line by line
+        if (_type == JSON && mongoImportGlobalParams.jsonArray) {
+
+            // We cycle through these buffers in order to continuously read from the stream
+            boost::scoped_array<char> buffer1(new char[BUF_SIZE]);
+            boost::scoped_array<char> buffer2(new char[BUF_SIZE]);
+            char* current_buffer = buffer1.get();
+            char* next_buffer = buffer2.get();
+            char* temp_buffer;
+
+            // buffer_base_offset is the offset into the stream where our buffer starts, while
+            // input_stream_offset is the total number of bytes read from the stream
+            uint64_t buffer_base_offset = 0;
+            uint64_t input_stream_offset = 0;
+
+            // Fill our buffer
+            // NOTE: istream::get automatically appends '\0' at the end of what it reads
+            in->get(current_buffer, BUF_SIZE, '\0');
+            uassert(16808, str::stream() << "read error: " << strerror(errno), !in->fail());
+
+            // Record how far we read into the stream.
+            input_stream_offset += in->gcount();
+
+            while (true) {
+                try {
+
+                    BSONObj o;
+
+                    // Try to parse (parseJSONArray)
+                    if (!parseJSONArray(current_buffer, &o, &len)) {
                         break;
                     }
-                    len += bytesProcessed;
-                    line += bytesProcessed;
-                }
-                else {
-                    if (!parseRow(in, o, len)) {
-                        continue;
-                    }
-                }
 
-                if ( _headerLine ) {
-                    _headerLine = false;
-                }
-                else if (_doimport) {
-                    bool doUpsert = _upsert;
-                    BSONObjBuilder b;
-                    if (_upsert) {
-                        for (vector<string>::const_iterator it=_upsertFields.begin(), end=_upsertFields.end(); it!=end; ++it) {
-                            BSONElement e = o.getFieldDotted(it->c_str());
-                            if (e.eoo()) {
-                                doUpsert = false;
-                                break;
-                            }
-                            b.appendAs(e, *it);
+                    // Import documents
+                    if (mongoImportGlobalParams.doimport) {
+                        importDocument(ns, o);
+
+                        if (num < 10) {
+                            // we absolutely want to check the first and last op of the batch. we do
+                            // a few more as that won't be too time expensive.
+                            checkLastError();
+                            lastNumChecked = num;
                         }
                     }
 
-                    if (doUpsert) {
-                        conn().update(ns, Query(b.obj()), o, true);
-                    }
-                    else {
-                        conn().insert( ns.c_str() , o );
+                    // Copy over the part of buffer that was not parsed
+                    strcpy(next_buffer, current_buffer + len);
+
+                    // Advance our buffer base past what we've already parsed
+                    buffer_base_offset += len;
+
+                    // Fill up the end of our next buffer only if there is something in the stream
+                    if (!in->eof()) {
+                        // NOTE: istream::get automatically appends '\0' at the end of what it reads
+                        in->get(next_buffer + (input_stream_offset - buffer_base_offset),
+                                BUF_SIZE - (input_stream_offset - buffer_base_offset), '\0');
+                        uassert(16809, str::stream() << "read error: "
+                                                     << strerror(errno), !in->fail());
+
+                        // Record how far we read into the stream.
+                        input_stream_offset += in->gcount();
                     }
 
-                    if( num < 10 ) { 
-                        // we absolutely want to check the first and last op of the batch. we do 
-                        // a few more as that won't be too time expensive.
-                        checkLastError();
-                        lastNumChecked = num;
-                    }
+                    // Swap buffer pointers
+                    temp_buffer = current_buffer;
+                    current_buffer = next_buffer;
+                    next_buffer = temp_buffer;
+
+                    num++;
+                }
+                catch ( const std::exception& e ) {
+                    toolError() << "exception: " << e.what()
+                              << ", current buffer: " << current_buffer << std::endl;
+                    errors++;
+
+                    // Since we only support JSON arrays all on one line, we might as well stop now
+                    // because we can't read any more documents
+                    break;
                 }
 
-                num++;
+                if (!toolGlobalParams.quiet) {
+                    if (pm.hit(len + 1)) {
+                        log() << "\t\t\t" << num << "\t" << (num / (time(0) - start)) << "/second"
+                              << std::endl;
+                    }
+                }
             }
-            catch ( std::exception& e ) {
-                log() << "exception:" << e.what() << endl;
-                log() << line << endl;
-                errors++;
+        }
+        else {
+            while (in->rdstate() == 0) {
+                try {
+                    BSONObj o;
 
-                if (hasParam("stopOnError") || _jsonArray)
-                    break;
-            }
+                    if (!parseRow(in, o, len)) {
+                        continue;
+                    }
 
-            if ( pm.hit( len + 1 ) ) {
-                log() << "\t\t\t" << num << "\t" << ( num / ( time(0) - start ) ) << "/second" << endl;
+                    if (mongoImportGlobalParams.headerLine) {
+                        mongoImportGlobalParams.headerLine = false;
+                    }
+                    else if (mongoImportGlobalParams.doimport) {
+                        importDocument(ns, o);
+
+                        if (num < 10) {
+                            // we absolutely want to check the first and last op of the batch. we do
+                            // a few more as that won't be too time expensive.
+                            checkLastError();
+                            lastNumChecked = num;
+                        }
+                    }
+
+                    num++;
+                }
+                catch ( const std::exception& e ) {
+                    toolError() << "exception:" << e.what() << std::endl;
+                    errors++;
+
+                    if (mongoImportGlobalParams.stopOnError)
+                        break;
+                }
+
+                if (!toolGlobalParams.quiet) {
+                    if (pm.hit(len + 1)) {
+                        log() << "\t\t\t" << num << "\t" << (num / (time(0) - start)) << "/second"
+                              << std::endl;
+                    }
+                }
             }
         }
 
         // this is for two reasons: to wait for all operations to reach the server and be processed, and this will wait until all data reaches the server,
         // and secondly to check if there were an error (on the last op)
         if( lastNumChecked+1 != num ) { // avoid redundant log message if already reported above
-            log() << "check " << lastNumChecked << " " << num << endl;
+            toolInfoLog() << "check " << lastNumChecked << " " << num << endl;
             checkLastError();
         }
 
@@ -502,20 +568,19 @@ public:
 
         // the message is vague on lastErrorFailures as we don't call it on every single operation. 
         // so if we have a lastErrorFailure there might be more than just what has been counted.
-        log() << (lastErrorFailures ? "tried to import " : "imported ") << ( num - headerRows ) << " objects" << endl;
+        toolInfoLog() << (lastErrorFailures ? "tried to import " : "imported ")
+                      << (num - headerRows) << " objects" << std::endl;
 
         if ( !hadErrors )
             return 0;
 
-        error() << "encountered " << (lastErrorFailures?"at least ":"") << lastErrorFailures+errors <<  " error(s)" << ( lastErrorFailures+errors == 1 ? "" : "s" ) << endl;
+        toolError() << "encountered " << (lastErrorFailures?"at least ":"")
+                  << lastErrorFailures+errors <<  " error(s)"
+                  << (lastErrorFailures+errors == 1 ? "" : "s") << std::endl;
         return -1;
     }
 };
 
-int main( int argc , char ** argv, char** envp ) {
-    mongo::runGlobalInitializersOrDie(argc, argv, envp);
-    Import import;
-    return import.main( argc , argv );
-}
-
 const int Import::BUF_SIZE(1024 * 1024 * 16);
+
+REGISTER_MONGO_TOOL(Import);

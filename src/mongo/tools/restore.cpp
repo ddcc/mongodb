@@ -1,5 +1,3 @@
-// @file restore.cpp
-
 /**
 *    Copyright (C) 2008 10gen Inc.
 *
@@ -14,150 +12,230 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include <boost/filesystem/convenience.hpp>
 #include <boost/filesystem/operations.hpp>
-#include <boost/program_options.hpp>
-#include <boost/scoped_ptr.hpp>
 #include <boost/lexical_cast.hpp>
+#include <boost/scoped_ptr.hpp>
 #include <fcntl.h>
 #include <fstream>
 #include <set>
 
-#include "mongo/base/initializer.h"
-#include "mongo/db/namespacestring.h"
+#include "mongo/base/init.h"
+#include "mongo/bson/util/bson_extract.h"
+#include "mongo/client/auth_helpers.h"
+#include "mongo/client/dbclientcursor.h"
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_manager_global.h"
+#include "mongo/db/auth/authz_manager_external_state_d.h"
+#include "mongo/db/auth/user_name.h"
+#include "mongo/db/auth/role_name.h"
+#include "mongo/db/json.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/tools/mongorestore_options.h"
 #include "mongo/tools/tool.h"
 #include "mongo/util/mmap.h"
+#include "mongo/util/options_parser/option_section.h"
 #include "mongo/util/stringutils.h"
-#include "mongo/db/json.h"
-#include "mongo/client/dbclientcursor.h"
 
 using namespace mongo;
-
-namespace po = boost::program_options;
 
 namespace {
     const char* OPLOG_SENTINEL = "$oplog";  // compare by ptr not strcmp
 }
 
+MONGO_INITIALIZER_WITH_PREREQUISITES(RestoreAuthExternalState, ("ToolAuthExternalState"))(
+        InitializerContext* context) {
+    // Give restore the mongod implementation of AuthorizationManager so that it can run
+    // the _mergeAuthzCollections command directly against the data files
+    clearGlobalAuthorizationManager();
+    setGlobalAuthorizationManager(new AuthorizationManager(
+            new AuthzManagerExternalStateMongod()));
+
+    return Status::OK();
+}
+
 class Restore : public BSONTool {
 public:
 
-    bool _drop;
-    bool _keepIndexVersion;
-    bool _restoreOptions;
-    bool _restoreIndexes;
-    int _w;
     string _curns;
     string _curdb;
     string _curcoll;
-    set<string> _users; // For restoring users with --drop
+    string _serverBinVersion; // Version identifier of the server we're restoring to
+    set<UserName> _users; // Holds users that are already in the cluster when restoring with --drop
+    set<RoleName> _roles; // Holds roles that are already in the cluster when restoring with --drop
     scoped_ptr<Matcher> _opmatcher; // For oplog replay
     scoped_ptr<OpTime> _oplogLimitTS; // for oplog replay (limit)
     int _oplogEntrySkips; // oplog entries skipped
     int _oplogEntryApplies; // oplog entries applied
-    Restore() : BSONTool( "restore" ) , _drop(false) {
-        // Default values set here will show up in help text, but will supercede any default value
-        // used when calling getParam below.
-        add_options()
-        ("drop" , "drop each collection before import" )
-        ("oplogReplay", "replay oplog for point-in-time restore")
-        ("oplogLimit", po::value<string>(), "include oplog entries before the provided Timestamp "
-                "(seconds[:ordinal]) during the oplog replay; the ordinal value is optional")
-        ("keepIndexVersion" , "don't upgrade indexes to newest version")
-        ("noOptionsRestore" , "don't restore collection options")
-        ("noIndexRestore" , "don't restore indexes")
-        ("w" , po::value<int>()->default_value(0) , "minimum number of replicas per write" )
-        ;
-        add_hidden_options()
-        ("dir", po::value<string>()->default_value("dump"), "directory to restore from")
-        ("indexesLast" , "wait to add indexes (now default)") // left in for backwards compatibility
-        ;
-        addPositionArg("dir", 1);
+    int _serverAuthzVersion; // authSchemaVersion of the cluster being restored into.
+    int _dumpFileAuthzVersion; // version extracted from admin.system.version file in dump.
+    bool _serverAuthzVersionDocExists; // Whether the remote cluster has an admin.system.version doc
+    Restore() : BSONTool(), _oplogEntrySkips(0), _oplogEntryApplies(0), _serverAuthzVersion(0),
+            _dumpFileAuthzVersion(0), _serverAuthzVersionDocExists(false) { }
+
+    virtual void printHelp(ostream& out) {
+        printMongoRestoreHelp(&out);
     }
 
-    virtual void printExtraHelp(ostream& out) {
-        out << "Import BSON files into MongoDB.\n" << endl;
-        out << "usage: " << _name << " [options] [directory or filename to restore from]" << endl;
+    void storeRemoteAuthzVersion() {
+        Status status = auth::getRemoteStoredAuthorizationVersion(&conn(),
+                                                                  &_serverAuthzVersion);
+        uassertStatusOK(status);
+        uassert(17370,
+                mongoutils::str::stream() << "Restoring users and roles is only supported for "
+                        "clusters with auth schema versions " <<
+                        AuthorizationManager::schemaVersion24 << " or " <<
+                        AuthorizationManager::schemaVersion26Final << ", found: " <<
+                        _serverAuthzVersion,
+                _serverAuthzVersion == AuthorizationManager::schemaVersion24 ||
+                _serverAuthzVersion == AuthorizationManager::schemaVersion26Final);
+
+        _serverAuthzVersionDocExists = !conn().findOne(
+                AuthorizationManager::versionCollectionNamespace,
+                AuthorizationManager::versionDocumentQuery).isEmpty();
     }
 
     virtual int doRun() {
 
-        boost::filesystem::path root = getParam("dir");
+        boost::filesystem::path root = mongoRestoreGlobalParams.restoreDirectory;
 
         // check if we're actually talking to a machine that can write
         if (!isMaster()) {
             return -1;
         }
 
-        if (isMongos() && _db == "" && exists(root / "config")) {
-            log() << "Cannot do a full restore on a sharded system" << endl;
+        if (isMongos() && toolGlobalParams.db == "" && exists(root / "config")) {
+            toolError() << "Cannot do a full restore on a sharded system" << std::endl;
             return -1;
         }
 
-        _drop = hasParam( "drop" );
-        _keepIndexVersion = hasParam("keepIndexVersion");
-        _restoreOptions = !hasParam("noOptionsRestore");
-        _restoreIndexes = !hasParam("noIndexRestore");
-        // Make sure default value set here stays in sync with the one set in the constructor above.
-        _w = getParam( "w" , 0 );
+        {
+            // Store server's version
+            BSONObj out;
+            if (! conn().simpleCommand("admin", &out, "buildinfo")) {
+                toolError() << "buildinfo command failed: "
+                        << out["errmsg"].String() << std::endl;
+                return -1;
+            }
 
-        bool doOplog = hasParam( "oplogReplay" );
+            _serverBinVersion = out["version"].String();
+        }
 
-        if (doOplog) {
+        if (mongoRestoreGlobalParams.restoreUsersAndRoles) {
+            storeRemoteAuthzVersion(); // populate _serverAuthzVersion
+
+            if (_serverAuthzVersion == AuthorizationManager::schemaVersion26Final) {
+                uassert(17410,
+                        mongoutils::str::stream() << mongoRestoreGlobalParams.tempUsersColl <<
+                                " collection already exists, but is needed to restore user data.  "
+                                "Drop this collection or specify a different collection (via "
+                                "--tempUsersColl) to use to temporarily hold user data during the "
+                                "restore process",
+                        !conn().exists(mongoRestoreGlobalParams.tempUsersColl));
+                uassert(17411,
+                        mongoutils::str::stream() << mongoRestoreGlobalParams.tempRolesColl <<
+                                " collection already exists, but is needed to restore role data.  "
+                                "Drop this collection or specify a different collection (via "
+                                "--tempRolesColl) to use to temporarily hold role data during the "
+                                "restore process",
+                        !conn().exists(mongoRestoreGlobalParams.tempRolesColl));
+            }
+
+            if (toolGlobalParams.db.empty() && toolGlobalParams.coll.empty() &&
+                    exists(root / "admin" / "system.version.bson")) {
+                // Will populate _dumpFileAuthzVersion
+                processFileAndMetadata(root / "admin" / "system.version.bson",
+                                       "admin.system.version");
+            } else if (!toolGlobalParams.db.empty()) {
+                // DB-specific restore
+                if (exists(root / "$admin.system.users.bson")) {
+                    uassert(17372,
+                            mongoutils::str::stream() << "$admin.system.users.bson file found, "
+                                    "which implies that the dump was taken from a system with "
+                                    "schema version " << AuthorizationManager::schemaVersion26Final
+                                    << " users, but server has authorization schema version "
+                                    << _serverAuthzVersion,
+                            _serverAuthzVersion == AuthorizationManager::schemaVersion26Final);
+                    toolInfoLog() << "Restoring users for the " << toolGlobalParams.db <<
+                            " database to admin.system.users" << endl;
+                    processFileAndMetadata(root / "$admin.system.users.bson", "admin.system.users");
+                }
+                if (exists(root / "$admin.system.roles.bson")) {
+                    uassert(17373,
+                            mongoutils::str::stream() << "$admin.system.roles.bson file found, "
+                                    "which implies that the dump was taken from a system with  "
+                                    "schema version " << AuthorizationManager::schemaVersion26Final
+                                    << " authorization data, but server has authorization schema "
+                                    "version " << _serverAuthzVersion,
+                            _serverAuthzVersion == AuthorizationManager::schemaVersion26Final);
+                    toolInfoLog() << "Restoring roles for the " << toolGlobalParams.db <<
+                            " database to admin.system.roles" << endl;
+                    processFileAndMetadata(root / "$admin.system.roles.bson", "admin.system.roles");
+                }
+            }
+        }
+
+        if (mongoRestoreGlobalParams.oplogReplay) {
             // fail early if errors
 
-            if (_db != "") {
-                log() << "Can only replay oplog on full restore" << endl;
+            if (toolGlobalParams.db != "") {
+                toolError() << "Can only replay oplog on full restore" << std::endl;
                 return -1;
             }
 
             if ( ! exists(root / "oplog.bson") ) {
-                log() << "No oplog file to replay. Make sure you run mongodump with --oplog." << endl;
+                toolError() << "No oplog file to replay. Make sure you run mongodump with --oplog."
+                          << std::endl;
                 return -1;
             }
 
-
-            BSONObj out;
-            if (! conn().simpleCommand("admin", &out, "buildinfo")) {
-                log() << "buildinfo command failed: " << out["errmsg"].String() << endl;
+            if (versionCmp(_serverBinVersion, "1.7.4-pre-") < 0) {
+                toolError() << "Can only replay oplog to server version >= 1.7.4" << std::endl;
                 return -1;
             }
 
-            StringData version = out["version"].valuestr();
-            if (versionCmp(version, "1.7.4-pre-") < 0) {
-                log() << "Can only replay oplog to server version >= 1.7.4" << endl;
-                return -1;
-            }
-
-            string oplogLimit = getParam( "oplogLimit", "" );
             string oplogInc = "0";
 
-            if(!oplogLimit.empty()) {
-                size_t i = oplogLimit.find_first_of(':');
+            if(!mongoRestoreGlobalParams.oplogLimit.empty()) {
+                size_t i = mongoRestoreGlobalParams.oplogLimit.find_first_of(':');
                 if ( i != string::npos ) {
-                    if ( i + 1 < oplogLimit.length() ) {
-                        oplogInc = oplogLimit.substr(i + 1);
+                    if (i + 1 < mongoRestoreGlobalParams.oplogLimit.length()) {
+                        oplogInc = mongoRestoreGlobalParams.oplogLimit.substr(i + 1);
                     }
 
-                    oplogLimit = oplogLimit.substr(0, i);
+                    mongoRestoreGlobalParams.oplogLimit =
+                        mongoRestoreGlobalParams.oplogLimit.substr(0, i);
                 }
 
                 try {
                     _oplogLimitTS.reset(new OpTime(
-                        boost::lexical_cast<unsigned long>(oplogLimit.c_str()),
+                        boost::lexical_cast<unsigned long>(
+                            mongoRestoreGlobalParams.oplogLimit.c_str()),
                         boost::lexical_cast<unsigned long>(oplogInc.c_str())));
-                } catch( const boost::bad_lexical_cast& error) {
-                    log() << "Could not parse oplogLimit into Timestamp from values ( "
-                          << oplogLimit << " , " << oplogInc << " )"
-                          << endl;
+                } catch( const boost::bad_lexical_cast& ) {
+                    toolError() << "Could not parse oplogLimit into Timestamp from values ( "
+                              << mongoRestoreGlobalParams.oplogLimit << " , " << oplogInc << " )"
+                              << std::endl;
                     return -1;
                 }
 
-                if (!oplogLimit.empty()) {
+                if (!mongoRestoreGlobalParams.oplogLimit.empty()) {
                     // Only for a replica set as master will have no-op entries so we would need to
                     // skip them all to find the real op
                     scoped_ptr<DBClientCursor> cursor(
@@ -168,9 +246,9 @@ public:
                     if (cursor->more()) {
                         tsOptime = cursor->next().getField("ts")._opTime();
                         if (tsOptime > *_oplogLimitTS.get()) {
-                            log() << "The oplogLimit is not newer than"
-                                  << " the last oplog entry on the server."
-                                  << endl;
+                            toolError() << "The oplogLimit is not newer than"
+                                      << " the last oplog entry on the server."
+                                      << std::endl;
                             return -1;
                         }
                     }
@@ -183,17 +261,17 @@ public:
                     BSONObj query = BSON("ts" << tsRestrictBldr.obj());
 
                     if (!tsOptime.isNull()) {
-                        log() << "Latest oplog entry on the server is " << tsOptime.getSecs()
-                                << ":" << tsOptime.getInc() << endl;
-                        log() << "Only applying oplog entries matching this criteria: "
-                                << query.jsonString() << endl;
+                        toolInfoLog() << "Latest oplog entry on the server is " << tsOptime.getSecs()
+                                      << ":" << tsOptime.getInc() << std::endl;
+                        toolInfoLog() << "Only applying oplog entries matching this criteria: "
+                                      << query.jsonString() << std::endl;
                     }
                     _opmatcher.reset(new Matcher(query));
                 }
             }
         }
 
-        /* If _db is not "" then the user specified a db name to restore as.
+        /* If toolGlobalParams.db is not "" then the user specified a db name to restore as.
          *
          * In that case we better be given either a root directory that
          * contains only .bson files or a single .bson file  (a db).
@@ -202,21 +280,22 @@ public:
          * given either a root directory that contains only a single
          * .bson file, or a single .bson file itself (a collection).
          */
-        drillDown(root, _db != "", _coll != "", !(_oplogLimitTS.get() == NULL), true);
+        drillDown(root, toolGlobalParams.db != "", toolGlobalParams.coll != "",
+                  !(_oplogLimitTS.get() == NULL), true);
 
         // should this happen for oplog replay as well?
-        string err = conn().getLastError(_db == "" ? "admin" : _db);
+        string err = conn().getLastError(toolGlobalParams.db == "" ? "admin" : toolGlobalParams.db);
         if (!err.empty()) {
-            error() << err;
+            toolError() << err << std::endl;
         }
 
-        if (doOplog) {
-            log() << "\t Replaying oplog" << endl;
+        if (mongoRestoreGlobalParams.oplogReplay) {
+            toolInfoLog() << "\t Replaying oplog" << std::endl;
             _curns = OPLOG_SENTINEL;
             processFile( root / "oplog.bson" );
-            log() << "Applied " << _oplogEntryApplies << " oplog entries out of "
-                  << _oplogEntryApplies + _oplogEntrySkips << " (" << _oplogEntrySkips
-                  << " skipped)." << endl;
+            toolInfoLog() << "Applied " << _oplogEntryApplies << " oplog entries out of "
+                          << _oplogEntryApplies + _oplogEntrySkips << " (" << _oplogEntrySkips
+                          << " skipped)." << std::endl;
         }
 
         return EXIT_CLEAN;
@@ -228,7 +307,9 @@ public:
                     bool oplogReplayLimit,
                     bool top_level=false) {
         bool json_metadata = false;
-        LOG(2) << "drillDown: " << root.string() << endl;
+        if (logger::globalLogDomain()->shouldLog(logger::LogSeverity::Debug(2))) {
+            toolInfoLog() << "drillDown: " << root.string() << std::endl;
+        }
 
         // skip hidden files and directories
         if (root.leaf().string()[0] == '.' && root.leaf().string() != ".")
@@ -244,18 +325,23 @@ public:
 
                 if (use_db) {
                     if (boost::filesystem::is_directory(p)) {
-                        error() << "ERROR: root directory must be a dump of a single database" << endl;
-                        error() << "       when specifying a db name with --db" << endl;
-                        printHelp(cout);
+                        toolError() << "ERROR: root directory must be a dump of a single database"
+                                  << std::endl;
+                        toolError() << "       when specifying a db name with --db" << std::endl;
+                        toolError() << "       use the --help option for more information"
+                                  << std::endl;
                         return;
                     }
                 }
 
                 if (use_coll) {
                     if (boost::filesystem::is_directory(p) || i != end) {
-                        error() << "ERROR: root directory must be a dump of a single collection" << endl;
-                        error() << "       when specifying a collection name with --collection" << endl;
-                        printHelp(cout);
+                        toolError() << "ERROR: root directory must be a dump of a single collection"
+                                  << std::endl;
+                        toolError() << "       when specifying a collection name with --collection"
+                                  << std::endl;
+                        toolError() << "       use the --help option for more information"
+                                  << std::endl;
                         return;
                     }
                 }
@@ -283,27 +369,16 @@ public:
             return;
         }
 
-        if ( endsWith( root.string().c_str() , ".metadata.json" ) ) {
-            // Metadata files are handled when the corresponding .bson file is handled
-            return;
-        }
-
-        if ( ! ( endsWith( root.string().c_str() , ".bson" ) ||
-                 endsWith( root.string().c_str() , ".bin" ) ) ) {
-            error() << "don't know what to do with file [" << root.string() << "]" << endl;
-            return;
-        }
-
-        log() << root.string() << endl;
-
-        if ( root.leaf() == "system.profile.bson" ) {
-            log() << "\t skipping" << endl;
-            return;
+        if (oplogReplayLimit) {
+            toolError() << "The oplogLimit option cannot be used if "
+                      << "normal databases/collections exist in the dump directory."
+                      << std::endl;
+            exit(EXIT_FAILURE);
         }
 
         string ns;
         if (use_db) {
-            ns += _db;
+            ns += toolGlobalParams.db;
         }
         else {
             ns = root.parent_path().filename().string();
@@ -316,82 +391,224 @@ public:
         string oldCollName = root.leaf().string(); // Name of the collection that was dumped from
         oldCollName = oldCollName.substr( 0 , oldCollName.find_last_of( "." ) );
         if (use_coll) {
-            ns += "." + _coll;
+            ns += "." + toolGlobalParams.coll;
         }
         else {
             ns += "." + oldCollName;
         }
 
-        if (oplogReplayLimit) {
-            error() << "The oplogLimit option cannot be used if "
-                    << "normal databases/collections exist in the dump directory."
-                    << endl;
-            exit(EXIT_FAILURE);
+        if ( endsWith( root.string().c_str() , ".metadata.json" ) ) {
+            // Metadata files are handled when the corresponding .bson file is handled
+            return;
         }
 
-        log() << "\tgoing into namespace [" << ns << "]" << endl;
+        if ((root.leaf() == "system.version.bson" && toolGlobalParams.db.empty()) ||
+                root.leaf() == "$admin.system.users.bson" ||
+                root.leaf() == "$admin.system.roles.bson") {
+            // These files were already explicitly handled at the beginning of the restore.
+            return;
+        }
 
-        if ( _drop ) {
-            if (root.leaf() != "system.users.bson" ) {
-                log() << "\t dropping" << endl;
-                conn().dropCollection( ns );
-            } else {
-                // Create map of the users currently in the DB
-                BSONObj fields = BSON("user" << 1);
-                scoped_ptr<DBClientCursor> cursor(conn().query(ns, Query(), 0, 0, &fields));
-                while (cursor->more()) {
-                    BSONObj user = cursor->next();
-                    _users.insert(user["user"].String());
+        if ( ! ( endsWith( root.string().c_str() , ".bson" ) ||
+                 endsWith( root.string().c_str() , ".bin" ) ) ) {
+            toolError() << "don't know what to do with file [" << root.string() << "]" << std::endl;
+            return;
+        }
+
+        toolInfoLog() << root.string() << std::endl;
+
+        if ( root.leaf() == "system.profile.bson" ) {
+            toolInfoLog() << "\t skipping system.profile.bson" << std::endl;
+            return;
+        }
+
+        processFileAndMetadata(root, ns);
+    }
+
+    static std::string getMessageAboutBrokenDBUserRestore(const StringData& serverBinVersion) {
+        return str::stream() << "Running mongorestore with --drop, --db, and "
+                "--restoreDbUsersAndRoles flags has erroneous behavior when the target server "
+                "version is between 2.6.0 and 2.6.3 (see SERVER-14212). Detected server version " <<
+                serverBinVersion << ". Aborting.";
+    }
+
+    /**
+     * 1) Drop collection if --drop was specified.  For system.users or system.roles collections,
+     * however, you don't want to remove all the users/roles up front as some of them may be needed
+     * by the restore.  Instead, keep a set of all the users/roles originally in the server, then
+     * after restoring the users/roles from the dump, remove any users roles that were present in
+     * the system originally but aren't in the dump.
+     *
+     * 2) Parse metadata file (if present) and if the collection doesn't exist (or was just dropped
+     * b/c we're using --drop), create the collection with the options from the metadata file
+     *
+     * 3) Restore the data from the dump file for this collection
+     *
+     * 4) If the user asked to drop this collection, then at this point the _users and _roles sets
+     * will contain users and roles that were in the collection but not in the dump we are
+     * restoring. Iterate these sets and delete any users and roles that are there.
+     *
+     * 5) Restore indexes based on index definitions from the metadata file.
+     */
+    void processFileAndMetadata(const boost::filesystem::path& root, const std::string& ns) {
+
+        _curns = ns;
+        _curdb = nsToDatabase(_curns);
+        _curcoll = nsToCollectionSubstring(_curns).toString();
+
+        toolInfoLog() << "\tgoing into namespace [" << _curns << "]" << std::endl;
+
+        // 1) Drop collection if needed.  Save user and role data if this is a system.users or
+        // system.roles collection
+        if (mongoRestoreGlobalParams.drop) {
+            if (_curcoll == "system.users") {
+                if (_serverAuthzVersion == AuthorizationManager::schemaVersion24 ||
+                            _curdb != "admin") {
+                    // Restoring 2.4-style user docs so can't use the _mergeAuthzCollections command
+                    // Create map of the users currently in the DB so the ones that don't show up in
+                    // the dump file can be removed later.
+                    BSONObj fields = BSON("user" << 1 << "userSource" << 1);
+                    scoped_ptr<DBClientCursor> cursor(conn().query(_curns, Query(), 0, 0, &fields));
+                    while (cursor->more()) {
+                        BSONObj user = cursor->next();
+                        string userDB;
+                        uassertStatusOK(bsonExtractStringFieldWithDefault(user,
+                                                                          "userSource",
+                                                                          _curdb,
+                                                                          &userDB));
+                        _users.insert(UserName(user["user"].String(), userDB));
+                    }
                 }
+            }
+            else if (!startsWith(_curcoll, "system.")) { // Can't drop system collections
+                toolInfoLog() << "\t dropping" << std::endl;
+                conn().dropCollection( ns );
+            }
+        } else {
+            // If drop is not used, warn if the collection exists.
+            scoped_ptr<DBClientCursor> cursor(conn().query(_curdb + ".system.namespaces",
+                                                           Query(BSON("name" << ns))));
+            if (cursor->more()) {
+                // collection already exists show warning
+                toolError() << "Restoring to " << ns << " without dropping. Restored data "
+                        << "will be inserted without raising errors; check your server log"
+                        << std::endl;
             }
         }
 
+        // 2) Create collection with options from metadata file if present
         BSONObj metadataObject;
-        if (_restoreOptions || _restoreIndexes) {
+        if (mongoRestoreGlobalParams.restoreOptions || mongoRestoreGlobalParams.restoreIndexes) {
+            string oldCollName = root.leaf().string(); // Name of collection that was dumped from
+            oldCollName = oldCollName.substr( 0 , oldCollName.find_last_of( "." ) );
             boost::filesystem::path metadataFile = (root.branch_path() / (oldCollName + ".metadata.json"));
             if (!boost::filesystem::exists(metadataFile.string())) {
                 // This is fine because dumps from before 2.1 won't have a metadata file, just print a warning.
                 // System collections shouldn't have metadata so don't warn if that file is missing.
                 if (!startsWith(metadataFile.leaf().string(), "system.")) {
-                    log() << metadataFile.string() << " not found. Skipping." << endl;
+                    toolInfoLog() << metadataFile.string() << " not found. Skipping." << std::endl;
                 }
             } else {
                 metadataObject = parseMetadataFile(metadataFile.string());
             }
         }
 
-        _curns = ns.c_str();
-        _curdb = NamespaceString(_curns).db;
-        _curcoll = NamespaceString(_curns).coll;
-
-        // If drop is not used, warn if the collection exists.
-         if (!_drop) {
-             scoped_ptr<DBClientCursor> cursor(conn().query(_curdb + ".system.namespaces",
-                                                             Query(BSON("name" << ns))));
-             if (cursor->more()) {
-                 // collection already exists show warning
-                 warning() << "Restoring to " << ns << " without dropping. Restored data "
-                              "will be inserted without raising errors; check your server log"
-                              << endl;
-             }
-         }
-
-        if (_restoreOptions && metadataObject.hasField("options")) {
+        if (mongoRestoreGlobalParams.restoreOptions && metadataObject.hasField("options")) {
             // Try to create collection with given options
             createCollectionWithOptions(metadataObject["options"].Obj());
         }
 
+        // 3) Actually restore the BSONObjs inside the dump file
         processFile( root );
-        if (_drop && root.leaf() == "system.users.bson") {
-            // Delete any users that used to exist but weren't in the dump file
-            for (set<string>::iterator it = _users.begin(); it != _users.end(); ++it) {
-                BSONObj userMatch = BSON("user" << *it);
-                conn().remove(ns, Query(userMatch));
+
+        // 4) If running with --drop, remove any users/roles that were in the system at the
+        // beginning of the restore but weren't found in the dump file
+        if (_curcoll == "system.users") {
+            if ((_serverAuthzVersion == AuthorizationManager::schemaVersion24 ||
+                    _curdb != "admin")) {
+                // Restoring 2.4 style user docs so don't use the _mergeAuthzCollections command
+                if (mongoRestoreGlobalParams.drop) {
+                    // Delete any users that used to exist but weren't in the dump file
+                    for (set<UserName>::iterator it = _users.begin(); it != _users.end(); ++it) {
+                        const UserName& name = *it;
+                        BSONObjBuilder queryBuilder;
+                        queryBuilder << "user" << name.getUser();
+                        if (name.getDB() == _curdb) {
+                            // userSource field won't be present for v1 users docs in the same db as
+                            // the user is defined on.
+                            queryBuilder << "userSource" << BSONNULL;
+                        } else {
+                            queryBuilder << "userSource" << name.getDB();
+                        }
+                        conn().remove(_curns, Query(queryBuilder.done()));
+                    }
+                    _users.clear();
+                }
+            } else {
+                // Use _mergeAuthzCollections command to move into admin.system.users the user
+                // docs that were restored into the temp user collection
+                BSONObjBuilder cmdBuilder;
+                cmdBuilder.append("_mergeAuthzCollections", 1);
+                cmdBuilder.append("tempUsersCollection", mongoRestoreGlobalParams.tempUsersColl);
+                cmdBuilder.append("drop", mongoRestoreGlobalParams.drop);
+                cmdBuilder.append("writeConcern", BSON("w" << mongoRestoreGlobalParams.w));
+                if (versionCmp(_serverBinVersion, "2.6.4-pre-") < 0) {
+                    uassert(18528,
+                            getMessageAboutBrokenDBUserRestore(_serverBinVersion),
+                            !mongoRestoreGlobalParams.drop ||
+                                    toolGlobalParams.db.empty() ||
+                                    toolGlobalParams.db == "admin");
+                } else {
+                    // If we're doing a db-specific restore of the "admin" db, we want user data for
+                    // *all* databases restored, not just the admin db, so we pass "" as the "db"
+                    // param to _mergeAuthzCollections
+                    cmdBuilder.append("db",
+                                      toolGlobalParams.db == "admin" ? "" : toolGlobalParams.db);
+                }
+
+                BSONObj res;
+                conn().runCommand("admin", cmdBuilder.done(), res);
+                uassert(17412,
+                        mongoutils::str::stream() << "Cannot restore users because the "
+                                "_mergeAuthzCollections command failed: " << res.toString(),
+                        res["ok"].trueValue());
+
+                conn().dropCollection(mongoRestoreGlobalParams.tempUsersColl);
             }
-            _users.clear();
+        }
+        if (_curns == "admin.system.roles") {
+            // Use _mergeAuthzCollections command to move into admin.system.roles the role
+            // docs that were restored into the temp roles collection
+            BSONObjBuilder cmdBuilder;
+            cmdBuilder.append("_mergeAuthzCollections", 1);
+            cmdBuilder.append("tempRolesCollection", mongoRestoreGlobalParams.tempRolesColl);
+            cmdBuilder.append("drop", mongoRestoreGlobalParams.drop);
+            cmdBuilder.append("writeConcern", BSON("w" << mongoRestoreGlobalParams.w));
+            if (versionCmp(_serverBinVersion, "2.6.4-pre-") < 0) {
+                uassert(18529,
+                        getMessageAboutBrokenDBUserRestore(_serverBinVersion),
+                        !mongoRestoreGlobalParams.drop ||
+                                toolGlobalParams.db.empty() ||
+                                toolGlobalParams.db == "admin");
+            } else {
+                // If we're doing a db-specific restore of the "admin" db, we want role data for
+                // *all* databases restored, not just the admin db, so we pass "" as the "db"
+                // param to _mergeAuthzCollections
+                cmdBuilder.append("db", toolGlobalParams.db == "admin" ? "" : toolGlobalParams.db);
+            }
+
+            BSONObj res;
+            conn().runCommand("admin", cmdBuilder.done(), res);
+            uassert(17413,
+                    mongoutils::str::stream() << "Cannot restore roles because the "
+                            "_mergeAuthzCollections command failed: " << res.toString(),
+                    res["ok"].trueValue());
+
+            conn().dropCollection(mongoRestoreGlobalParams.tempRolesColl);
         }
 
-        if (_restoreIndexes && metadataObject.hasField("indexes")) {
+        // 5) Restore indexes
+        if (mongoRestoreGlobalParams.restoreIndexes && metadataObject.hasField("indexes")) {
             vector<BSONElement> indexes = metadataObject["indexes"].Array();
             for (vector<BSONElement>::iterator it = indexes.begin(); it != indexes.end(); ++it) {
                 createIndex((*it).Obj(), false);
@@ -419,31 +636,127 @@ public:
             _oplogEntryApplies++;
 
             // wait for ops to propagate to "w" nodes (doesn't warn if w used without replset)
-            if ( _w > 0 ) {
-                string err = conn().getLastError(db, false, false, _w);
+            if (mongoRestoreGlobalParams.w > 0) {
+                string err = conn().getLastError(db, false, false, mongoRestoreGlobalParams.w);
                 if (!err.empty()) {
-                    error() << "Error while replaying oplog: " << err;
+                    toolError() << "Error while replaying oplog: " << err << std::endl;
+                }
+            }
+            return;
+        }
+
+        if (nsToCollectionSubstring(_curns) == "system.indexes") {
+            createIndex(obj, true);
+        }
+        else if (_curns == "admin.system.roles") {
+            // To prevent modifying roles when other role modifications may be going on, restore
+            // the roles to a temporary collection and merge them into admin.system.roles later
+            // using the _mergeAuthzCollections command.
+            conn().insert(mongoRestoreGlobalParams.tempRolesColl, obj);
+        }
+        else if (_curcoll == "system.users") {
+            uassert(17416,
+                    mongoutils::str::stream() << "Cannot modify user data on a server with version "
+                            "greater than or equal to 2.5.4 that has not yet updated the "
+                            "authorization data to schema version " <<
+                            AuthorizationManager::schemaVersion26Final <<
+                            ". Found server version " << _serverBinVersion << " with "
+                            "authorization schema version " << _serverAuthzVersion,
+                    _curdb != "admin" ||
+                    versionCmp(_serverBinVersion, "2.5.4") < 0 ||
+                    _serverAuthzVersion == AuthorizationManager::schemaVersion26Final);
+
+            if (obj.hasField("credentials")) {
+                if (_serverAuthzVersion == AuthorizationManager::schemaVersion24) {
+                    // v3 user, v1 system
+                    uasserted(17407,
+                              mongoutils::str::stream()
+                                      << "Server has authorization schema version "
+                                      << AuthorizationManager::schemaVersion24
+                                      << ", but found a schema version "
+                                      << AuthorizationManager::schemaVersion26Final << " user: "
+                                      << obj.toString());
+                } else {
+                    // v3 user, v3 system
+                    uassert(17414,
+                            mongoutils::str::stream() << "Found a schema version " <<
+                                    AuthorizationManager::schemaVersion26Final <<
+                                    " user when restoring to a non-admin db system.users "
+                                    "collection: " << obj.toString(),
+                            _curdb == "admin");
+                    // To prevent modifying users when other user modifications may be going on,
+                    // restore the users to a temporary collection and merge them into
+                    // admin.system.users later using the _mergeAuthzCollections command.
+                    conn().insert(mongoRestoreGlobalParams.tempUsersColl, obj);
+                }
+            } else {
+                if (_curdb == "admin" &&
+                        _serverAuthzVersion == AuthorizationManager::schemaVersion26Final &&
+                        !_serverAuthzVersionDocExists) {
+                    // server with schemaVersion26Final implies it is running 2.5.4 or greater.
+                    uasserted(17415,
+                              mongoutils::str::stream() << "Cannot restore users with schema " <<
+                                      "version " << AuthorizationManager::schemaVersion24 <<
+                                      " to a system with server version 2.5.4 or greater");
+                }
+
+                if (_serverAuthzVersion == AuthorizationManager::schemaVersion24 ||
+                        _curdb != "admin") { // Restoring 2.4 schema users to non-admin dbs is OK)
+                    // v1 user, v1 system
+                    string userDB;
+                    uassertStatusOK(bsonExtractStringFieldWithDefault(obj,
+                                                                      "userSource",
+                                                                      _curdb,
+                                                                      &userDB));
+
+                    if (mongoRestoreGlobalParams.drop && _users.count(UserName(obj["user"].String(),
+                                                                               userDB))) {
+                        // Since system collections can't be dropped, we have to manually
+                        // replace the contents of the system.users collection
+                        BSONObj userMatch = BSON("user" << obj["user"].String() <<
+                                                 "userSource" << userDB);
+                        conn().update(_curns, Query(userMatch), obj);
+                        _users.erase(UserName(obj["user"].String(), userDB));
+                    } else {
+                        conn().insert(_curns, obj);
+                    }
+                } else {
+                    // v1 user, v3 system
+                    // TODO(spencer): SERVER-12491 Rather than failing here, we should convert the
+                    // v1 user to an equivalent v3 schema user
+                    uasserted(17408,
+                              mongoutils::str::stream()
+                                      << "Server has authorization schema version "
+                                      << AuthorizationManager::schemaVersion26Final
+                                      << ", but found a schema version "
+                                      << AuthorizationManager::schemaVersion24 << " user: "
+                                      << obj.toString());
                 }
             }
         }
-        else if (NamespaceString(_curns).coll == "system.indexes") {
-            createIndex(obj, true);
+        else {
+            if (_curns == "admin.system.version") {
+                long long authVersion;
+                uassertStatusOK(bsonExtractIntegerField(obj,
+                                                        AuthorizationManager::schemaVersionFieldName,
+                                                        &authVersion));
+                _dumpFileAuthzVersion = static_cast<int>(authVersion);
+                uassert(17371,
+                        mongoutils::str::stream() << "Server's authorization data schema version "
+                                "does not match that of the data in the dump file.  Server's schema"
+                                " version: " << _serverAuthzVersion << ", schema version in dump: "
+                                << _dumpFileAuthzVersion,
+                    _serverAuthzVersion == _dumpFileAuthzVersion);
+            }
+            conn().insert(_curns, obj);
         }
-        else if (_drop && endsWith(_curns.c_str(), ".system.users") && _users.count(obj["user"].String())) {
-            // Since system collections can't be dropped, we have to manually
-            // replace the contents of the system.users collection
-            BSONObj userMatch = BSON("user" << obj["user"].String());
-            conn().update(_curns, Query(userMatch), obj);
-            _users.erase(obj["user"].String());
-        } else {
-            conn().insert( _curns , obj );
 
-            // wait for insert to propagate to "w" nodes (doesn't warn if w used without replset)
-            if ( _w > 0 ) {
-                string err = conn().getLastError(_curdb, false, false, _w);
-                if (!err.empty()) {
-                    error() << err;
-                }
+        // wait for insert (or update) to propagate to "w" nodes (doesn't warn if w used
+        // without replset)
+        if (mongoRestoreGlobalParams.w > 0) {
+            string err = conn().getLastError(_curdb, false, false, mongoRestoreGlobalParams.w);
+            if (!err.empty()) {
+                toolError() << err << std::endl;
             }
         }
     }
@@ -454,11 +767,13 @@ private:
         long long fileSize = boost::filesystem::file_size(filePath);
         ifstream file(filePath.c_str(), ios_base::in);
 
-        scoped_ptr<char> buf(new char[fileSize]);
+        boost::scoped_array<char> buf(new char[fileSize + 1]);
         file.read(buf.get(), fileSize);
+        buf[fileSize] = '\0';
+
         int objSize;
         BSONObj obj;
-        obj = fromjson (buf.get(), &objSize);
+        obj = fromjson(buf.get(), &objSize);
         return obj;
     }
 
@@ -484,34 +799,30 @@ private:
         return nfields == obj2.nFields();
     }
 
-    void createCollectionWithOptions(BSONObj cmdObj) {
+    void createCollectionWithOptions(BSONObj obj) {
+        BSONObjIterator i(obj);
 
-        // Create a new cmdObj to skip undefined fields and fix collection name
+        // Rebuild obj as a command object for the "create" command.
+        // - {create: <name>} comes first, where <name> is the new name for the collection
+        // - elements with type Undefined get skipped over
         BSONObjBuilder bo;
-
-        // Add a "create" field if it doesn't exist
-        if (!cmdObj.hasField("create")) {
-            bo.append("create", _curcoll);
-        }
-
-        BSONObjIterator i(cmdObj);
-        while ( i.more() ) {
+        bo.append("create", _curcoll);
+        while (i.more()) {
             BSONElement e = i.next();
 
-            // Replace the "create" field with the name of the collection we are actually creating
             if (strcmp(e.fieldName(), "create") == 0) {
-                bo.append("create", _curcoll);
+                continue;
             }
-            else {
-                if (e.type() == Undefined) {
-                    log() << _curns << ": skipping undefined field: " << e.fieldName() << endl;
-                }
-                else {
-                    bo.append(e);
-                }
+
+            if (e.type() == Undefined) {
+                toolInfoLog() << _curns << ": skipping undefined field: " << e.fieldName()
+                              << std::endl;
+                continue;
             }
+
+            bo.append(e);
         }
-        cmdObj = bo.obj();
+        obj = bo.obj();
 
         BSONObj fields = BSON("options" << 1);
         scoped_ptr<DBClientCursor> cursor(conn().query(_curdb + ".system.namespaces", Query(BSON("name" << _curns)), 0, 0, &fields));
@@ -519,9 +830,12 @@ private:
         bool createColl = true;
         if (cursor->more()) {
             createColl = false;
-            BSONObj obj = cursor->next();
-            if (!obj.hasField("options") || !optionsSame(cmdObj, obj["options"].Obj())) {
-                    log() << "WARNING: collection " << _curns << " exists with different options than are in the metadata.json file and not using --drop. Options in the metadata file will be ignored." << endl;
+            BSONObj nsObj = cursor->next();
+            if (!nsObj.hasField("options") || !optionsSame(obj, nsObj["options"].Obj())) {
+                toolError() << "WARNING: collection " << _curns
+                          << " exists with different options than are in the metadata.json file and"
+                          << " not using --drop. Options in the metadata file will be ignored."
+                          << std::endl;
             }
         }
 
@@ -530,10 +844,11 @@ private:
         }
 
         BSONObj info;
-        if (!conn().runCommand(_curdb, cmdObj, info)) {
+        if (!conn().runCommand(_curdb, obj, info)) {
             uasserted(15936, "Creating collection " + _curns + " failed. Errmsg: " + info["errmsg"].String());
         } else {
-            log() << "\tCreated collection " << _curns << " with options: " << cmdObj.jsonString() << endl;
+            toolInfoLog() << "\tCreated collection " << _curns << " with options: "
+                          << obj.jsonString() << std::endl;
         }
     }
 
@@ -547,23 +862,26 @@ private:
             BSONElement e = i.next();
             if (strcmp(e.fieldName(), "ns") == 0) {
                 NamespaceString n(e.String());
-                string s = _curdb + "." + (keepCollName ? n.coll : _curcoll);
+                string s = _curdb + "." + (keepCollName ? n.coll().toString() : _curcoll);
                 bo.append("ns", s);
             }
-            else if (strcmp(e.fieldName(), "v") != 0 || _keepIndexVersion) { // Remove index version number
+            // Remove index version number
+            else if (strcmp(e.fieldName(), "v") != 0 || mongoRestoreGlobalParams.keepIndexVersion) {
                 bo.append(e);
             }
         }
         BSONObj o = bo.obj();
-        LOG(0) << "\tCreating index: " << o << endl;
+        if (logger::globalLogDomain()->shouldLog(logger::LogSeverity::Debug(0))) {
+            toolInfoLog() << "\tCreating index: " << o << std::endl;
+        }
         conn().insert( _curdb + ".system.indexes" ,  o );
 
         // We're stricter about errors for indexes than for regular data
-        BSONObj err = conn().getLastErrorDetailed(_curdb, false, false, _w);
+        BSONObj err = conn().getLastErrorDetailed(_curdb, false, false, mongoRestoreGlobalParams.w);
 
         if (err.hasField("err") && !err["err"].isNull()) {
-            if (err["err"].str() == "norepl" && _w > 1) {
-                error() << "Cannot specify write concern for non-replicas" << endl;
+            if (err["err"].str() == "norepl" && mongoRestoreGlobalParams.w > 1) {
+                toolError() << "Cannot specify write concern for non-replicas" << std::endl;
             }
             else {
                 string errCode;
@@ -572,8 +890,8 @@ private:
                     errCode = str::stream() << err["code"].numberInt();
                 }
 
-                error() << "Error creating index " << o["ns"].String() << ": "
-                        << errCode << " " << err["err"] << endl;
+                toolError() << "Error creating index " << o["ns"].String() << ": "
+                          << errCode << " " << err["err"] << std::endl;
             }
 
             ::abort();
@@ -584,8 +902,4 @@ private:
     }
 };
 
-int main( int argc , char ** argv, char ** envp ) {
-    mongo::runGlobalInitializersOrDie(argc, argv, envp);
-    Restore restore;
-    return restore.main( argc , argv );
-}
+REGISTER_MONGO_TOOL(Restore);

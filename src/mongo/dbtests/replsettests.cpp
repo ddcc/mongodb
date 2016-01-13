@@ -15,20 +15,34 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
-#include "pch.h"
-#include "../db/repl.h"
+#include "mongo/pch.h"
 
-#include "../db/db.h"
-#include "../db/instance.h"
-#include "../db/json.h"
-
-#include "dbtests.h"
-#include "../db/oplog.h"
-
-#include "mongo/db/repl/rs.h"
+#include "mongo/db/db.h"
+#include "mongo/db/index_builder.h"
+#include "mongo/db/instance.h"
+#include "mongo/db/json.h"
+#include "mongo/db/kill_current_op.h"
 #include "mongo/db/repl/bgsync.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/replication_server_status.h"  // replSettings
+#include "mongo/db/repl/rs.h"
+#include "mongo/dbtests/dbtests.h"
+#include "mongo/util/time_support.h"
+
 
 namespace mongo {
     void createOplog();
@@ -117,18 +131,12 @@ namespace ReplSetTests {
     private:
         static DBDirectClient client_;
     protected:
-        BackgroundSyncTest* _bgsync;
-        replset::SyncTail* _tailer;
+        static BackgroundSyncTest* _bgsync;
+        static replset::SyncTail* _tailer;
     public:
         Base() {
-            cmdLine._replSet = "foo";
-            cmdLine.oplogSize = 5 * 1024 * 1024;
-            createOplog();
-            setup();
         }
         ~Base() {
-            delete _bgsync;
-            delete _tailer;
         }
 
         static const char *ns() {
@@ -139,8 +147,24 @@ namespace ReplSetTests {
 
         static void insert( const BSONObj &o, bool god = false ) {
             Lock::DBWrite lk(ns());
-            Client::Context ctx( ns() );
-            theDataFileMgr.insert( ns(), o.objdata(), o.objsize(), false, god );
+            Client::Context ctx(ns());
+            Database* db = ctx.db();
+            Collection* coll = db->getCollection(ns());
+            if (!coll) {
+                coll = db->createCollection(ns());
+            }
+
+            if (o.hasField("_id")) {
+                coll->insertDocument(o, true);
+                return;
+            }
+
+            class BSONObjBuilder b;
+            OID id;
+            id.init();
+            b.appendOID("_id", &id);
+            b.appendElements(o);
+            coll->insertDocument(b.obj(), true);
         }
 
         BSONObj findOne( const BSONObj &query = BSONObj() ) const {
@@ -156,9 +180,13 @@ namespace ReplSetTests {
                 return;
             }
 
-            dropCollection( string(ns()), errmsg, result );
+            c.ctx().db()->dropCollection(ns());
         }
-        void setup() {
+        static void setup() {
+            replSettings.replSet = "foo";
+            replSettings.oplogSize = 5 * 1024 * 1024;
+            createOplog();
+
             // setup background sync instance
             _bgsync = new BackgroundSyncTest();
 
@@ -168,12 +196,15 @@ namespace ReplSetTests {
             // setup theReplSet
             ReplSetTest *rst = ReplSetTest::make();
             rst->setSyncTail(_bgsync);
+
             delete theReplSet;
             theReplSet = rst;
         }
     };
 
     DBDirectClient Base::client_;
+    BackgroundSyncTest* Base::_bgsync = NULL;
+    replset::SyncTail* Base::_tailer = NULL;
 
     class MockInitialSync : public replset::InitialSync {
         int step;
@@ -295,7 +326,7 @@ namespace ReplSetTests {
             if (nsdetails(_cappedNs) != NULL) {
                 string errmsg;
                 BSONObjBuilder result;
-                dropCollection( string(_cappedNs), errmsg, result );
+                c.db()->dropCollection( _cappedNs );
             }
         }
 
@@ -360,13 +391,15 @@ namespace ReplSetTests {
         }
 
         void insert() {
-            Client::Context ctx( cappedNs() );
+            Client::Context ctx(cappedNs());
+            Database* db = ctx.db();
+            Collection* coll = db->getCollection(cappedNs());
+            if (!coll) {
+                coll = db->createCollection(cappedNs());
+            }
+
             BSONObj o = BSON(GENOID << "x" << 456);
-            DiskLoc loc = theDataFileMgr.insert( cappedNs().c_str(),
-                                                 o.objdata(),
-                                                 o.objsize(),
-                                                 false,
-                                                 false );
+            DiskLoc loc = coll->insertDocument(o, true).getValue();
             verify(!loc.isNull());
         }
     public:
@@ -384,8 +417,8 @@ namespace ReplSetTests {
 
             // check _id index created
             Client::Context ctx(cappedNs());
-            NamespaceDetails *nsd = nsdetails(cappedNs());
-            verify(nsd->findIdIndex() > -1);
+            Collection* collection = ctx.db()->getCollection( cappedNs() );
+            verify(collection->getIndexCatalog()->findIdIndex());
         }
     };
 
@@ -412,8 +445,8 @@ namespace ReplSetTests {
             // this changed in 2.1.2
             // we now have indexes on capped collections
             Client::Context ctx(cappedNs());
-            NamespaceDetails *nsd = nsdetails(cappedNs());
-            verify(nsd->findIdIndex() >= 0);
+            Collection* collection = ctx.db()->getCollection( cappedNs() );
+            verify(collection->getIndexCatalog()->findIdIndex());
         }
     };
 
@@ -542,6 +575,7 @@ namespace ReplSetTests {
         }
 
         void setupTests() {
+            Base::setup();
             add< TestInitApplyOp >();
             add< TestInitApplyOp2 >();
             add< CappedInitialSync >();

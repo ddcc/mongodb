@@ -33,6 +33,7 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bson_builder_base.h"
 #include "mongo/bson/bson_field.h"
+#include "mongo/client/export_macros.h"
 
 #if defined(_DEBUG) && defined(MONGO_EXPOSE_MACROS)
 #include "mongo/util/log.h"
@@ -48,12 +49,15 @@ namespace mongo {
     /** Utility for creating a BSONObj.
         See also the BSON() and BSON_ARRAY() macros.
     */
-    class BSONObjBuilder : public BSONBuilderBase, private boost::noncopyable {
+    class MONGO_CLIENT_API BSONObjBuilder : public BSONBuilderBase, private boost::noncopyable {
     public:
         /** @param initsize this is just a hint as to the final size of the object */
         BSONObjBuilder(int initsize=512) : _b(_buf), _buf(initsize + sizeof(unsigned)), _offset( sizeof(unsigned) ), _s( this ) , _tracker(0) , _doneCalled(false) {
             _b.appendNum((unsigned)0); // ref-count
             _b.skip(4); /*leave room for size field and ref-count*/
+
+            // Reserve space for the EOO byte. This means _done() can't fail.
+            _b.reserveBytes(1);
         }
 
         /** @param baseBuilder construct a BSONObjBuilder using an existing BufBuilder
@@ -61,11 +65,17 @@ namespace mongo {
          */
         BSONObjBuilder( BufBuilder &baseBuilder ) : _b( baseBuilder ), _buf( 0 ), _offset( baseBuilder.len() ), _s( this ) , _tracker(0) , _doneCalled(false) {
             _b.skip( 4 );
+
+            // Reserve space for the EOO byte. This means _done() can't fail.
+            _b.reserveBytes(1);
         }
 
         BSONObjBuilder( const BSONSizeTracker & tracker ) : _b(_buf) , _buf(tracker.getSize() + sizeof(unsigned) ), _offset( sizeof(unsigned) ), _s( this ) , _tracker( (BSONSizeTracker*)(&tracker) ) , _doneCalled(false) {
             _b.appendNum((unsigned)0); // ref-count
             _b.skip(4);
+
+            // Reserve space for the EOO byte. This means _done() can't fail.
+            _b.reserveBytes(1);
         }
 
         ~BSONObjBuilder() {
@@ -196,13 +206,15 @@ namespace mongo {
 
         /** appends a number.  if n < max(int)/2 then uses int, otherwise long long */
         BSONObjBuilder& appendIntOrLL( const StringData& fieldName , long long n ) {
-            long long x = n;
-            if ( x < 0 )
-                x = x * -1;
-            if ( x < ( (std::numeric_limits<int>::max)() / 2 ) ) // extra () to avoid max macro on windows
-                append( fieldName , (int)n );
-            else
+            // extra () to avoid max macro on windows
+            static const long long maxInt = (std::numeric_limits<int>::max)() / 2;
+            static const long long minInt = -maxInt;
+            if ( minInt < n && n < maxInt ) {
+                append( fieldName , static_cast<int>( n ) );
+            }
+            else {
                 append( fieldName , n );
+            }
             return *this;
         }
 
@@ -230,15 +242,20 @@ namespace mongo {
 
         BSONObjBuilder& appendNumber( const StringData& fieldName, long long llNumber ) {
             static const long long maxInt = ( 1LL << 30 );
+            static const long long minInt = -maxInt;
             static const long long maxDouble = ( 1LL << 40 );
+            static const long long minDouble = -maxDouble;
 
-            long long nonNegative = llNumber >= 0 ? llNumber : -llNumber;
-            if ( nonNegative < maxInt )
+            if ( minInt < llNumber && llNumber < maxInt ) {
                 append( fieldName, static_cast<int>( llNumber ) );
-            else if ( nonNegative < maxDouble )
+            }
+            else if ( minDouble < llNumber && llNumber < maxDouble ) {
                 append( fieldName, static_cast<double>( llNumber ) );
-            else
+            }
+            else {
                 append( fieldName, llNumber );
+            }
+
             return *this;
         }
 
@@ -355,7 +372,7 @@ namespace mongo {
             return appendCode(fieldName, code.code);
         }
 
-        /** Append a string element. 
+        /** Append a string element.
             @param sz size includes terminating null character */
         BSONObjBuilder& append(const StringData& fieldName, const char *str, int sz) {
             _b.appendNum((char) String);
@@ -592,8 +609,20 @@ namespace mongo {
         BSONObj asTempObj() {
             BSONObj temp(_done());
             _b.setlen(_b.len()-1); //next append should overwrite the EOO
+            _b.reserveBytes(1); // Rereserve room for the real EOO
             _doneCalled = false;
             return temp;
+        }
+
+        /** Make it look as if "done" has been called, so that our destructor is a no-op. Do
+         *  this if you know that you don't care about the contents of the builder you are
+         *  destroying.
+         *
+         *  Note that it is invalid to call any method other than the destructor after invoking
+         *  this method.
+         */
+        void abandon() {
+            _doneCalled = true;
         }
 
         void decouple() {
@@ -662,8 +691,14 @@ namespace mongo {
                 return _b.buf() + _offset;
 
             _doneCalled = true;
+
+            // TODO remove this or find some way to prevent it from failing. Since this is intended
+            // for use with BSON() literal queries, it is less likely to result in oversized BSON.
             _s.endField();
+
+            _b.claimReservedBytes(1); // Prevents adding EOO from failing.
             _b.appendNum((char) EOO);
+
             char *data = _b.buf() + _offset;
             int size = _b.len() - _offset;
             *((int*)data) = size;
@@ -774,7 +809,7 @@ namespace mongo {
             return _b.subarrayStart( num() );
         }
 
-        // These should only be used where you really need interface compatability with BSONObjBuilder
+        // These should only be used where you really need interface compatibility with BSONObjBuilder
         // Currently they are only used by update.cpp and it should probably stay that way
         BufBuilder &subobjStart( const StringData& name ) {
             fill( name );
@@ -803,6 +838,11 @@ namespace mongo {
             return *this;
         }
 
+        BSONArrayBuilder& appendTimestamp(unsigned long long ts) {
+            _b.appendTimestamp(num(), ts);
+            return *this;
+        }
+
         BSONArrayBuilder& append(const StringData& s) {
             _b.append(num(), s);
             return *this;
@@ -814,6 +854,8 @@ namespace mongo {
 
         int len() const { return _b.len(); }
         int arrSize() const { return _i; }
+
+        BufBuilder& bb() { return _b.bb(); }
 
     private:
         // These two are undefined privates to prevent their accidental

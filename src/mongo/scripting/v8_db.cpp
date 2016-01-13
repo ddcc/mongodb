@@ -13,17 +13,30 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 #include "mongo/scripting/v8_db.h"
 
 #include <iostream>
+#include <iomanip>
 #include <boost/scoped_array.hpp>
 
 #include "mongo/base/init.h"
 #include "mongo/client/sasl_client_authenticate.h"
 #include "mongo/client/syncclusterconnection.h"
-#include "mongo/db/namespacestring.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/s/d_logic.h"
 #include "mongo/scripting/engine_v8.h"
 #include "mongo/scripting/v8_utils.h"
@@ -99,6 +112,7 @@ namespace mongo {
         scope->injectV8Method("update", mongoUpdate, proto);
         scope->injectV8Method("auth", mongoAuth, proto);
         scope->injectV8Method("logout", mongoLogout, proto);
+        scope->injectV8Method("cursorFromId", mongoCursorFromId, proto);
 
         fassert(16468, _mongoPrototypeManipulatorsFrozen);
         for (size_t i = 0; i < _mongoPrototypeManipulators.size(); ++i)
@@ -129,18 +143,18 @@ namespace mongo {
             return v8AssertionException(errmsg);
         }
 
-        DBClientWithCommands* conn;
+        DBClientBase* conn;
         conn = cs.connect(errmsg);
         if (!conn) {
             return v8AssertionException(errmsg);
         }
 
         v8::Persistent<v8::Object> self = v8::Persistent<v8::Object>::New(args.This());
-        scope->dbClientWithCommandsTracker.track(self, conn);
+        v8::Local<v8::External> connHandle = scope->dbClientBaseTracker.track(self, conn);
 
         ScriptEngine::runConnectCallback(*conn);
 
-        args.This()->SetInternalField(0, v8::External::New(conn));
+        args.This()->SetInternalField(0, connHandle);
         args.This()->ForceSet(scope->v8StringData("slaveOk"), v8::Boolean::New(false));
         args.This()->ForceSet(scope->v8StringData("host"), scope->v8StringData(host));
 
@@ -157,22 +171,23 @@ namespace mongo {
 
         DBClientBase* conn = createDirectClient();
         v8::Persistent<v8::Object> self = v8::Persistent<v8::Object>::New(args.This());
-        scope->dbClientBaseTracker.track(self, conn);
+        v8::Local<v8::External> connHandle = scope->dbClientBaseTracker.track(self, conn);
 
-        args.This()->SetInternalField(0, v8::External::New(conn));
+        args.This()->SetInternalField(0, connHandle);
         args.This()->ForceSet(scope->v8StringData("slaveOk"), v8::Boolean::New(false));
         args.This()->ForceSet(scope->v8StringData("host"), scope->v8StringData("EMBEDDED"));
 
         return v8::Undefined();
     }
 
-    DBClientBase* getConnection(V8Scope* scope, const v8::Arguments& args) {
+    boost::shared_ptr<DBClientBase> getConnection(V8Scope* scope, const v8::Arguments& args) {
         verify(scope->MongoFT()->HasInstance(args.This()));
         verify(args.This()->InternalFieldCount() == 1);
         v8::Local<v8::External> c = v8::External::Cast(*(args.This()->GetInternalField(0)));
-        DBClientBase* conn = (DBClientBase*)(c->Value());
-        massert(16667, "Unable to get db client connection", conn);
-        return conn;
+        boost::shared_ptr<DBClientBase>* conn =
+            static_cast<boost::shared_ptr<DBClientBase>*>(c->Value());
+        massert(16667, "Unable to get db client connection", conn && conn->get());
+        return *conn;
     }
 
     /**
@@ -181,7 +196,7 @@ namespace mongo {
     v8::Handle<v8::Value> mongoFind(V8Scope* scope, const v8::Arguments& args) {
         argumentCheck(args.Length() == 7, "find needs 7 args")
         argumentCheck(args[1]->IsObject(), "needs to be an object")
-        DBClientBase * conn = getConnection(scope, args);
+        boost::shared_ptr<DBClientBase> conn = getConnection(scope, args);
         const string ns = toSTLString(args[0]);
         BSONObj fields;
         BSONObj q = scope->v8ToMongo(args[1]->ToObject());
@@ -190,7 +205,7 @@ namespace mongo {
         if (haveFields)
             fields = scope->v8ToMongo(args[2]->ToObject());
 
-        auto_ptr<mongo::DBClientCursor> cursor;
+        boost::shared_ptr<mongo::DBClientCursor> cursor;
         int nToReturn = args[3]->Int32Value();
         int nToSkip = args[4]->Int32Value();
         int batchSize = args[5]->Int32Value();
@@ -202,9 +217,35 @@ namespace mongo {
         }
 
         v8::Handle<v8::Function> cons = scope->InternalCursorFT()->GetFunction();
-        v8::Persistent<v8::Object> c = v8::Persistent<v8::Object>::New(cons->NewInstance());
+        v8::Handle<v8::Object> c = cons->NewInstance();
         c->SetInternalField(0, v8::External::New(cursor.get()));
-        scope->dbClientCursorTracker.track(c, cursor.release());
+        scope->dbConnectionAndCursor.track(
+            v8::Persistent<v8::Value>::New(c),
+            new V8Scope::DBConnectionAndCursor(conn, cursor));
+        return c;
+    }
+
+    v8::Handle<v8::Value> mongoCursorFromId(V8Scope* scope, const v8::Arguments& args) {
+        argumentCheck(args.Length() == 2 || args.Length() == 3, "cursorFromId needs 2 or 3 args")
+        argumentCheck(scope->NumberLongFT()->HasInstance(args[1]), "2nd arg must be a NumberLong")
+        argumentCheck(args[2]->IsUndefined() || args[2]->IsNumber(), "3rd arg must be a js Number")
+
+        boost::shared_ptr<DBClientBase> conn = getConnection(scope, args);
+        const string ns = toSTLString(args[0]);
+        long long cursorId = numberLongVal(scope, args[1]->ToObject());
+
+        boost::shared_ptr<mongo::DBClientCursor> cursor(
+            new DBClientCursor(conn.get(), ns, cursorId, 0, 0));
+
+        if (!args[2]->IsUndefined())
+            cursor->setBatchSize(args[2]->Int32Value());
+
+        v8::Handle<v8::Function> cons = scope->InternalCursorFT()->GetFunction();
+        v8::Handle<v8::Object> c = cons->NewInstance();
+        c->SetInternalField(0, v8::External::New(cursor.get()));
+        scope->dbConnectionAndCursor.track(
+            v8::Persistent<v8::Value>::New(c),
+            new V8Scope::DBConnectionAndCursor(conn, cursor));
         return c;
     }
 
@@ -218,7 +259,7 @@ namespace mongo {
             return v8AssertionException("js db in read only mode");
         }
 
-        DBClientBase * conn = getConnection(scope, args);
+        boost::shared_ptr<DBClientBase> conn = getConnection(scope, args);
         const string ns = toSTLString(args[0]);
 
         v8::Handle<v8::Integer> flags = args[2]->ToInteger();
@@ -266,7 +307,7 @@ namespace mongo {
             return v8AssertionException("js db in read only mode");
         }
 
-        DBClientBase * conn = getConnection(scope, args);
+        boost::shared_ptr<DBClientBase> conn = getConnection(scope, args);
         const string ns = toSTLString(args[0]);
 
         v8::Handle<v8::Object> in = args[1]->ToObject();
@@ -292,7 +333,7 @@ namespace mongo {
             return v8AssertionException("js db in read only mode");
         }
 
-        DBClientBase * conn = getConnection(scope, args);
+        boost::shared_ptr<DBClientBase> conn = getConnection(scope, args);
         const string ns = toSTLString(args[0]);
 
         v8::Handle<v8::Object> q = args[1]->ToObject();
@@ -308,7 +349,7 @@ namespace mongo {
     }
 
     v8::Handle<v8::Value> mongoAuth(V8Scope* scope, const v8::Arguments& args) {
-        DBClientWithCommands* conn = getConnection(scope, args);
+        boost::shared_ptr<DBClientBase> conn = getConnection(scope, args);
         if (NULL == conn)
             return v8AssertionException("no connection");
 
@@ -319,8 +360,8 @@ namespace mongo {
             break;
         case 3:
             params = BSON(saslCommandMechanismFieldName << "MONGODB-CR" <<
-                          saslCommandPrincipalSourceFieldName << toSTLString(args[0]) <<
-                          saslCommandPrincipalFieldName << toSTLString(args[1]) <<
+                          saslCommandUserDBFieldName << toSTLString(args[0]) <<
+                          saslCommandUserFieldName << toSTLString(args[1]) <<
                           saslCommandPasswordFieldName << toSTLString(args[2]));
             break;
         default:
@@ -337,7 +378,7 @@ namespace mongo {
 
     v8::Handle<v8::Value> mongoLogout(V8Scope* scope, const v8::Arguments& args) {
         argumentCheck(args.Length() == 1, "logout needs 1 arg")
-        DBClientBase* conn = getConnection(scope, args);
+        boost::shared_ptr<DBClientBase> conn = getConnection(scope, args);
         const string db = toSTLString(args[0]);
         BSONObj ret;
         conn->logout(db, ret);
@@ -708,7 +749,7 @@ namespace mongo {
                 return v8AssertionException("Timestamp increment must be a number");
             }
             int64_t t = args[0]->IntegerValue();
-            int64_t largestVal = ((2039LL-1970LL) *365*24*60*60); //seconds between 1970-2038
+            int64_t largestVal = int64_t(OpTime::max().getSecs());
             if( t > largestVal )
                 return v8AssertionException( str::stream()
                         << "The first argument must be in seconds; "
@@ -732,24 +773,22 @@ namespace mongo {
         v8::Local<v8::Object> it = args.This();
         verify(scope->BinDataFT()->HasInstance(it));
 
-        if (args.Length() == 2) {
-            // 2 args: type, base64 string
-            v8::Handle<v8::Value> type = args[0];
-            if (!type->IsNumber() || type->Int32Value() < 0 || type->Int32Value() > 255) {
-                return v8AssertionException(
-                        "BinData subtype must be a Number between 0 and 255 inclusive)");
-            }
-            v8::String::Utf8Value utf(args[1]);
-            // uassert if invalid base64 string
-            string tmpBase64 = base64::decode(*utf);
-            // length property stores the decoded length
-            it->ForceSet(scope->v8StringData("len"), v8::Number::New(tmpBase64.length()));
-            it->ForceSet(scope->v8StringData("type"), type);
-            it->SetInternalField(0, args[1]);
+        argumentCheck(args.Length() == 2, "BinData takes 2 arguments -- BinData(subtype,data)");
+
+        // 2 args: type, base64 string
+        v8::Handle<v8::Value> type = args[0];
+        if (!type->IsNumber() || type->Int32Value() < 0 || type->Int32Value() > 255) {
+            return v8AssertionException(
+                    "BinData subtype must be a Number between 0 and 255 inclusive)");
         }
-        else if (args.Length() != 0) {
-            return v8AssertionException("BinData takes 2 arguments -- BinData(subtype,data)");
-        }
+        v8::String::Utf8Value utf(args[1]);
+        // uassert if invalid base64 string
+        string tmpBase64 = base64::decode(*utf);
+        // length property stores the decoded length
+        it->ForceSet(scope->v8StringData("len"), v8::Number::New(tmpBase64.length()),
+                     v8::ReadOnly);
+        it->ForceSet(scope->v8StringData("type"), type, v8::ReadOnly);
+        it->SetInternalField(0, args[1]);
 
         return it;
     }
@@ -775,23 +814,22 @@ namespace mongo {
     v8::Handle<v8::Value> binDataToHex(V8Scope* scope, const v8::Arguments& args) {
         v8::Handle<v8::Object> it = args.This();
         verify(scope->BinDataFT()->HasInstance(it));
-        int len = v8::Handle<v8::Number>::Cast(it->Get(v8::String::New("len")))->Int32Value();
         verify(it->InternalFieldCount() == 1);
         string data = base64::decode(toSTLString(it->GetInternalField(0)));
         stringstream ss;
         ss.setf (ios_base::hex, ios_base::basefield);
         ss.fill ('0');
         ss.setf (ios_base::right, ios_base::adjustfield);
-        for(int i = 0; i < len; i++) {
-            unsigned v = (unsigned char) data[i];
+        for(std::string::iterator it = data.begin(); it != data.end(); ++it) {
+            unsigned v = (unsigned char) *it;
             ss << setw(2) << v;
         }
         return v8::String::New(ss.str().c_str());
     }
 
-    static v8::Handle<v8::Value> hexToBinData(V8Scope* scope, v8::Local<v8::Object> it, int type,
-                                              string hexstr) {
-        verify(scope->BinDataFT()->HasInstance(it));
+    static v8::Handle<v8::Value> hexToBinData(V8Scope* scope, int type, string hexstr) {
+        // SERVER-9686: This function does not correctly check to make sure hexstr is actually made
+        // up of valid hex digits, and fails in the hex utility functions
 
         int len = hexstr.length() / 2;
         scoped_array<char> data(new char[len]);
@@ -801,38 +839,35 @@ namespace mongo {
         }
 
         string encoded = base64::encode(data.get(), len);
-        it->ForceSet(v8::String::New("len"), v8::Number::New(len));
-        it->ForceSet(v8::String::New("type"), v8::Number::New(type));
-        it->SetInternalField(0, v8::String::New(encoded.c_str(), encoded.length()));
-        return it;
+        v8::Handle<v8::Value> argv[2];
+        argv[0] = v8::Number::New(type);
+        argv[1] = v8::String::New(encoded.c_str());
+        return scope->BinDataFT()->GetFunction()->NewInstance(2, argv);
     }
 
     v8::Handle<v8::Value> uuidInit(V8Scope* scope, const v8::Arguments& args) {
         argumentCheck(args.Length() == 1, "UUID needs 1 argument")
         v8::String::Utf8Value utf(args[0]);
         argumentCheck(utf.length() == 32, "UUID string must have 32 characters")
-
-        v8::Handle<v8::Function> f = scope->BinDataFT()->GetFunction();
-        v8::Local<v8::Object> it = f->NewInstance();
-        return hexToBinData(scope, it, bdtUUID, *utf);
+        return hexToBinData(scope, bdtUUID, *utf);
     }
 
     v8::Handle<v8::Value> md5Init(V8Scope* scope, const v8::Arguments& args) {
         argumentCheck(args.Length() == 1, "MD5 needs 1 argument")
         v8::String::Utf8Value utf(args[0]);
         argumentCheck(utf.length() == 32, "MD5 string must have 32 characters")
-
-        v8::Handle<v8::Function> f = scope->BinDataFT()->GetFunction();
-        v8::Local<v8::Object> it = f->NewInstance();
-        return hexToBinData(scope, it, MD5Type, *utf);
+        return hexToBinData(scope, MD5Type, *utf);
     }
 
     v8::Handle<v8::Value> hexDataInit(V8Scope* scope, const v8::Arguments& args) {
         argumentCheck(args.Length() == 2, "HexData needs 2 arguments")
+        v8::Handle<v8::Value> type = args[0];
+        if (!type->IsNumber() || type->Int32Value() < 0 || type->Int32Value() > 255) {
+            return v8AssertionException(
+                    "HexData subtype must be a Number between 0 and 255 inclusive");
+        }
         v8::String::Utf8Value utf(args[1]);
-        v8::Handle<v8::Function> f = scope->BinDataFT()->GetFunction();
-        v8::Local<v8::Object> it = f->NewInstance();
-        return hexToBinData(scope, it, args[0]->IntegerValue(), *utf);
+        return hexToBinData(scope, type->Int32Value(), *utf);
     }
 
     v8::Handle<v8::Value> numberLongInit(V8Scope* scope, const v8::Arguments& args) {
@@ -969,6 +1004,22 @@ namespace mongo {
         return v8::String::New(ret.c_str());
     }
 
+    v8::Handle<v8::Value> v8ObjectInvalidForStorage(V8Scope* scope, const v8::Arguments& args) {
+        argumentCheck(args.Length() == 1, "invalidForStorage needs 1 argument")
+        if (args[0]->IsNull()) {
+            return v8::Null();
+        }
+        argumentCheck(args[0]->IsObject(), "argument to invalidForStorage has to be an object")
+        Status validForStorage = scope->v8ToMongo(args[0]->ToObject()).storageValid(true);
+        if (validForStorage.isOK()) {
+            return v8::Null();
+        }
+
+        std::string errmsg = str::stream() << validForStorage.codeString()
+                                           << ": "<< validForStorage.reason();
+        return v8::String::New(errmsg.c_str());
+    }
+
     v8::Handle<v8::Value> bsonsize(V8Scope* scope, const v8::Arguments& args) {
         argumentCheck(args.Length() == 1, "bsonsize needs 1 argument")
         if (args[0]->IsNull()) {
@@ -976,6 +1027,18 @@ namespace mongo {
         }
         argumentCheck(args[0]->IsObject(), "argument to bsonsize has to be an object")
         return v8::Number::New(scope->v8ToMongo(args[0]->ToObject()).objsize());
+    }
+
+    v8::Handle<v8::Value> bsonWoCompare(V8Scope* scope, const v8::Arguments& args) {
+        argumentCheck(args.Length() == 2, "bsonWoCompare needs 2 argument");
+
+        argumentCheck(args[0]->IsObject(), "first argument to bsonWoCompare has to be an object");
+        argumentCheck(args[1]->IsObject(), "second argument to bsonWoCompare has to be an object");
+
+        BSONObj firstObject(scope->v8ToMongo(args[0]->ToObject()));
+        BSONObj secondObject(scope->v8ToMongo(args[1]->ToObject()));
+
+        return v8::Number::New(firstObject.woCompare(secondObject));
     }
 
 }

@@ -10,49 +10,65 @@ Import("env")
 Import("shellEnv")
 Import("testEnv")
 Import("has_option")
-Import("usesm usev8")
-Import("installSetup")
+Import("get_option")
+Import("usev8")
 Import("enforce_glibc")
 Import("darwin windows solaris linux nix")
 
 env.SConscript(['base/SConscript',
                 'db/auth/SConscript',
+                'db/exec/SConscript',
                 'db/fts/SConscript',
+                'db/index/SConscript',
+                'db/ops/SConscript',
+                'db/query/SConscript',
+                'db/sorter/SConscript',
                 'db/SConscript',
+                'installer/msi/SConscript',
+                'logger/SConscript',
                 'platform/SConscript',
                 's/SConscript',
-                'unittest/SConscript'])
+                'unittest/SConscript',
+                'util/concurrency/SConscript',
+                'util/options_parser/SConscript',
+                'util/cmdline_utils/SConscript'])
 
 def add_exe( v ):
     return "${PROGPREFIX}%s${PROGSUFFIX}" % v
 
 # ------    SOURCE FILE SETUP -----------
 
-env.StaticLibrary('foundation',
-                  [ 'util/assert_util.cpp',
-                    'util/concurrency/mutexdebugger.cpp',
-                    'util/debug_util.cpp',
-                    'util/exception_filter_win32.cpp',
-                    'util/file.cpp',
-                    'util/log.cpp',
-                    'util/platform_init.cpp',
-                    'util/signal_handlers.cpp',
-                    'util/text.cpp',
-                    'util/time_support.cpp',
-                    'util/timer.cpp'
-                    ],
-                  LIBDEPS=['stacktrace',
-                           '$BUILD_DIR/mongo/base/base',
-                           '$BUILD_DIR/mongo/platform/platform',
-                           '$BUILD_DIR/third_party/shim_allocator',
-                           '$BUILD_DIR/third_party/shim_boost'])
+env.Library('foundation',
+            [ 'util/assert_util.cpp',
+              'util/concurrency/mutexdebugger.cpp',
+              'util/debug_util.cpp',
+              'util/exception_filter_win32.cpp',
+              'util/file.cpp',
+              'util/log.cpp',
+              'util/platform_init.cpp',
+              'util/text.cpp',
+              'util/time_support.cpp',
+              'util/timer.cpp',
+              "util/util.cpp",
+              "util/startup_test.cpp",
+              ],
+            LIBDEPS=['stacktrace',
+                     '$BUILD_DIR/mongo/base/base',
+                     '$BUILD_DIR/mongo/logger/logger',
+                     '$BUILD_DIR/mongo/platform/platform',
+                     '$BUILD_DIR/mongo/util/concurrency/thread_name',
+                     '$BUILD_DIR/third_party/shim_allocator',
+                     '$BUILD_DIR/third_party/shim_boost',
+                     '$BUILD_DIR/third_party/shim_tz'])
 
 env.CppUnitTest('text_test', 'util/text_test.cpp', LIBDEPS=['foundation'])
+env.CppUnitTest('util/time_support_test', 'util/time_support_test.cpp', LIBDEPS=['foundation'])
 
-env.StaticLibrary('stringutils', ['util/stringutils.cpp', 'util/base64.cpp',])
+env.Library('stringutils', ['util/stringutils.cpp', 'util/base64.cpp', 'util/hex.cpp'])
 
-env.StaticLibrary('md5', [
-        'util/md5.cpp'
+env.Library('md5', [
+        'util/md5.cpp',
+        'util/password_digest.cpp',
         ])
 
 env.CppUnitTest( "md5_test", ["util/md5_test.cpp", "util/md5main.cpp" ],
@@ -61,15 +77,14 @@ env.CppUnitTest( "md5_test", ["util/md5_test.cpp", "util/md5main.cpp" ],
 env.CppUnitTest( "stringutils_test", [ "util/stringutils_test.cpp" ],
                  LIBDEPS=["stringutils"] )
 
-env.StaticLibrary('bson', [
-        'bson/mutable/mutable_bson.cpp',
-        'bson/mutable/mutable_bson_builder.cpp',
-        'bson/mutable/mutable_bson_heap.cpp',
-        'bson/mutable/mutable_bson_internal.cpp',
+env.Library('bson', [
+        'bson/mutable/document.cpp',
+        'bson/mutable/element.cpp',
         'bson/util/bson_extract.cpp',
         'util/safe_num.cpp',
         'bson/bson_validate.cpp',
         'bson/oid.cpp',
+        "bson/optime.cpp",
         'db/jsobj.cpp',
         'db/json.cpp'
         ], LIBDEPS=[
@@ -79,20 +94,18 @@ env.StaticLibrary('bson', [
         '$BUILD_DIR/mongo/platform/platform',
         ])
 
+env.Library('mutable_bson_test_utils', [
+        'bson/mutable/mutable_bson_test_utils.cpp'
+        ], LIBDEPS=['bson'])
+
 env.CppUnitTest('builder_test', ['bson/util/builder_test.cpp'],
                 LIBDEPS=['bson'])
 
 env.CppUnitTest('mutable_bson_test', ['bson/mutable/mutable_bson_test.cpp'],
-                 LIBDEPS=['bson'])
-
-env.CppUnitTest('mutable_bson_heap_test', ['bson/mutable/mutable_bson_heap_test.cpp'],
-                 LIBDEPS=['bson'])
-
-env.CppUnitTest('mutable_bson_builder_test', ['bson/mutable/mutable_bson_builder_test.cpp'],
-                LIBDEPS=['bson'])
+                 LIBDEPS=['bson', 'mutable_bson_test_utils'])
 
 env.CppUnitTest('mutable_bson_algo_test', ['bson/mutable/mutable_bson_algo_test.cpp'],
-                LIBDEPS=['bson'])
+                LIBDEPS=['bson', 'mutable_bson_test_utils'])
 
 env.CppUnitTest('safe_num_test', ['util/safe_num_test.cpp'],
                 LIBDEPS=['bson'])
@@ -104,14 +117,85 @@ env.CppUnitTest('string_map_test', ['util/string_map_test.cpp'],
 env.CppUnitTest('bson_field_test', ['bson/bson_field_test.cpp'],
                 LIBDEPS=['bson'])
 
+env.CppUnitTest('bson_obj_test', ['bson/bson_obj_test.cpp'],
+                LIBDEPS=['bson'])
+
 env.CppUnitTest('bson_validate_test', ['bson/bson_validate_test.cpp'],
                 LIBDEPS=['bson'])
 
-env.CppUnitTest('namespacestring_test', ['db/namespacestring_test.cpp'],
+env.CppUnitTest('bsonobjbuilder_test', ['bson/bsonobjbuilder_test.cpp'],
                 LIBDEPS=['bson'])
 
-env.CppUnitTest('index_set_test', ['db/index_set_test.cpp'],
-                LIBDEPS=['bson','index_set'])
+env.CppUnitTest('namespacestring_test', ['db/namespace_string_test.cpp'],
+                LIBDEPS=['bson'])
+
+env.CppUnitTest('namespace_test', ['db/structure/catalog/namespace_test.cpp'],
+                LIBDEPS=['foundation'])
+
+env.CppUnitTest('update_index_data_test', ['db/update_index_data_test.cpp'],
+                LIBDEPS=['bson','update_index_data','db/common'])
+
+env.Library('path',
+            ['db/matcher/path.cpp',
+             'db/matcher/path_internal.cpp'],
+            LIBDEPS=['bson',
+                     '$BUILD_DIR/mongo/db/common'])
+
+env.CppUnitTest('path_test', ['db/matcher/path_test.cpp'],
+                LIBDEPS=['path'])
+
+
+env.Library('expressions',
+            ['db/matcher/expression.cpp',
+             'db/matcher/expression_array.cpp',
+             'db/matcher/expression_leaf.cpp',
+             'db/matcher/expression_tree.cpp',
+             'db/matcher/expression_parser.cpp',
+             'db/matcher/expression_parser_tree.cpp',
+             'db/matcher/matchable.cpp',
+             'db/matcher/match_details.cpp'],
+            LIBDEPS=['bson',
+                     'path',
+                     '$BUILD_DIR/mongo/db/common',
+                     '$BUILD_DIR/third_party/shim_pcrecpp'
+                     ] )
+
+env.Library('expressions_geo',
+            ['db/matcher/expression_geo.cpp',
+             'db/matcher/expression_parser_geo.cpp'],
+            LIBDEPS=['expressions','geoquery','geoparser'] )
+
+env.Library('expressions_text',
+            ['db/matcher/expression_text.cpp',
+             'db/matcher/expression_parser_text.cpp'],
+            LIBDEPS=['expressions','db/fts/base'] )
+
+env.Library('expressions_where',
+            ['db/matcher/expression_where.cpp'],
+            LIBDEPS=['expressions'] )
+
+env.CppUnitTest('expression_test',
+                ['db/matcher/expression_test.cpp',
+                 'db/matcher/expression_leaf_test.cpp',
+                 'db/matcher/expression_tree_test.cpp',
+                 'db/matcher/expression_array_test.cpp'],
+                LIBDEPS=['expressions'] )
+
+env.CppUnitTest('expression_geo_test',
+                ['db/matcher/expression_geo_test.cpp',
+                 'db/matcher/expression_parser_geo_test.cpp'],
+                LIBDEPS=['expressions_geo'] )
+
+env.CppUnitTest('expression_text_test',
+                ['db/matcher/expression_parser_text_test.cpp'],
+                LIBDEPS=['expressions_text'] )
+
+env.CppUnitTest('expression_parser_test',
+                ['db/matcher/expression_parser_test.cpp',
+                 'db/matcher/expression_parser_array_test.cpp',
+                 'db/matcher/expression_parser_tree_test.cpp',
+                 'db/matcher/expression_parser_leaf_test.cpp'],
+                LIBDEPS=['expressions'] )
 
 
 env.CppUnitTest('bson_extract_test', ['bson/util/bson_extract_test.cpp'], LIBDEPS=['bson'])
@@ -121,58 +205,119 @@ env.CppUnitTest('descriptive_stats_test',
                 LIBDEPS=['foundation', 'bson']);
 
 env.CppUnitTest('sock_test', ['util/net/sock_test.cpp'],
-                LIBDEPS=['mongocommon', 'notmongodormongos'],
+                LIBDEPS=['network',
+                         'synchronization',
+                ])
+
+env.CppUnitTest('curop_test',
+                ['db/curop_test.cpp'],
+                LIBDEPS=['serveronly', 'coredb', 'coreserver'],
                 NO_CRUTCH=True)
 
-env.StaticLibrary( 'mongohasher', [ "db/hasher.cpp" ] )
+env.Library('index_names',["db/index_names.cpp"])
 
+env.Library( 'mongohasher', [ "db/hasher.cpp" ] )
 
+env.Library('synchronization', [ 'util/concurrency/synchronization.cpp' ])
+
+env.Library('auth_helpers', ['client/auth_helpers.cpp'])
+
+env.Library('spin_lock', ["util/concurrency/spin_lock.cpp"])
+env.CppUnitTest('spin_lock_test', ['util/concurrency/spin_lock_test.cpp'],
+                LIBDEPS=['spin_lock', '$BUILD_DIR/third_party/shim_boost'])
+
+env.Library('network', [
+            "util/net/sock.cpp",
+            "util/net/socket_poll.cpp",
+            "util/net/ssl_manager.cpp",
+            "util/net/ssl_options.cpp",
+            "util/net/httpclient.cpp",
+            "util/net/message.cpp",
+            "util/net/message_port.cpp",
+            "util/net/listen.cpp" ],
+            LIBDEPS=['$BUILD_DIR/mongo/util/options_parser/options_parser',
+                     'background_job',
+                     'fail_point',
+                     'foundation',
+                     'server_options_core',
+            ])
+
+env.Library(
+    target='index_key_validate',
+    source=[
+        "db/catalog/index_key_validate.cpp",
+    ],
+    LIBDEPS=[
+        'bson',
+        'db/common',
+        'index_names',
+    ])
+
+env.Library('clientdriver', [
+            "client/connpool.cpp",
+            "client/dbclient.cpp",
+            "client/dbclient_rs.cpp",
+            "client/dbclientcursor.cpp",
+            "client/replica_set_monitor.cpp",
+            'client/sasl_client_authenticate.cpp',
+            "client/syncclusterconnection.cpp",
+            "db/dbmessage.cpp"
+            ],
+            LIBDEPS=['auth_helpers',
+                     'network',
+            ])
+
+env.CppUnitTest("replica_set_monitor_test",
+                ["client/replica_set_monitor_test.cpp"],
+                LIBDEPS=["clientdriver"])
+
+env.Library('lasterror', [
+            "db/lasterror.cpp",
+            ],
+            LIBDEPS=['network',
+                     'foundation',
+            ])
+
+env.Library('version',
+            [
+                'buildinfo.cpp',
+                'util/version.cpp'
+            ],
+            LIBDEPS=[
+                'bson',
+                '$BUILD_DIR/mongo/base/base'
+            ])
 commonFiles = [ "pch.cpp",
-                "buildinfo.cpp",
-                "db/lasterror.cpp",
-                "db/namespace.cpp",
+                "db/structure/catalog/namespace.cpp",
                 "shell/mongo.cpp",
-                "util/background.cpp",
                 "util/intrusive_counter.cpp",
-                "util/util.cpp",
                 "util/file_allocator.cpp",
                 "util/trace.cpp",
-                "util/ramlog.cpp",
+                "util/paths.cpp",
                 "util/progress_meter.cpp",
                 "util/concurrency/task.cpp",
                 "util/concurrency/thread_pool.cpp",
                 "util/password.cpp",
                 "util/concurrency/rwlockimpl.cpp",
                 "util/histogram.cpp",
-                "util/concurrency/spin_lock.cpp",
                 "util/text_startuptest.cpp",
+                'util/signal_win32.cpp',
                 "util/stack_introspect.cpp",
-                "util/concurrency/synchronization.cpp",
-                "util/net/sock.cpp",
-                "util/net/ssl_manager.cpp",
-                "util/net/httpclient.cpp",
-                "util/net/message.cpp",
-                "util/net/message_port.cpp",
-                "util/net/listen.cpp",
-                "util/startup_test.cpp",
-                "util/version.cpp",
-                "client/connpool.cpp",
-                "client/dbclient.cpp",
-                "client/dbclient_rs.cpp",
-                "client/dbclientcursor.cpp",
-                "client/model.cpp",
-                'client/sasl_client_authenticate.cpp',
-                "client/syncclusterconnection.cpp",
-                "db/dbmessage.cpp"
+                "util/version_reporting.cpp",
                 ]
 
 extraCommonLibdeps = []
 
 if env['MONGO_BUILD_SASL_CLIENT']:
-    env.StaticLibrary('sasl_client_session',
-                      ['client/sasl_client_session.cpp'],
-                      LIBDEPS=['foundation'],
-                      SYSLIBDEPS=['sasl2'])
+    saslLibs = ['sasl2']
+    if env['PYSYSPLATFORM'] == "win32":
+        saslLibs.extend(["secur32"])
+
+    env.Library('sasl_client_session',
+                ['client/sasl_client_session.cpp',
+                 'client/sasl_sspi.cpp'],
+                LIBDEPS=['foundation'],
+                SYSLIBDEPS=saslLibs)
     commonFiles.extend(['client/sasl_client_authenticate_impl.cpp'])
     extraCommonLibdeps.append('sasl_client_session')
 
@@ -187,48 +332,86 @@ if not os.path.exists( str( processInfoPlatformFile ) ):
 
 processInfoFiles.append( processInfoPlatformFile )
 
-env.StaticLibrary("processinfo",
-                  processInfoFiles,
-                  LIBDEPS=["foundation", "bson"])
+env.Library("processinfo",
+            processInfoFiles,
+            LIBDEPS=["foundation", "bson"])
 
 env.CppUnitTest("processinfo_test",
                 ["util/processinfo_test.cpp"],
                 LIBDEPS=["processinfo"])
 
-env.StaticLibrary("server_parameters",
-                  ["db/server_parameters.cpp"],
-                  LIBDEPS=["foundation","bson"])
+env.Library("server_parameters",
+            ["db/server_parameters.cpp"],
+            LIBDEPS=["foundation","bson"])
 
 env.CppUnitTest("server_parameters_test",
                 [ "db/server_parameters_test.cpp" ],
                 LIBDEPS=["server_parameters"] )
 
 
-env.StaticLibrary("fail_point",
-                  ["util/fail_point.cpp",
-                   "util/fail_point_registry.cpp",
-                   "util/fail_point_service.cpp"],
-                  LIBDEPS=["foundation", "bson"])
+env.Library("fail_point",
+            ["util/fail_point.cpp",
+             "util/fail_point_registry.cpp",
+             "util/fail_point_service.cpp"],
+            LIBDEPS=["foundation", "bson"])
 
-env.StaticLibrary('mongocommon', commonFiles,
-                  LIBDEPS=['bson',
-                           'foundation',
-                           'mongohasher',
-                           'md5',
-                           'processinfo',
-                           'stacktrace',
-                           'stringutils',
-                           'fail_point',
-                           '$BUILD_DIR/third_party/pcrecpp',
-                           '$BUILD_DIR/third_party/murmurhash3/murmurhash3',
-                           '$BUILD_DIR/third_party/shim_boost'] +
-                           extraCommonLibdeps)
+env.Library('mongocommon', commonFiles,
+            LIBDEPS=['auth_helpers',
+                     'bson',
+                     'background_job',
+                     'clientdriver',
+                     'fail_point',
+                     'foundation',
+                     'lasterror',
+                     'md5',
+                     'mongohasher',
+                     'network',
+                     'processinfo',
+                     'spin_lock',
+                     'stacktrace',
+                     'stringutils',
+                     'synchronization',
+                     'util/concurrency/thread_name',
+                     'version',
+                     '$BUILD_DIR/third_party/shim_pcrecpp',
+                     '$BUILD_DIR/third_party/murmurhash3/murmurhash3',
+                     '$BUILD_DIR/third_party/shim_boost',
+                     '$BUILD_DIR/mongo/util/options_parser/options_parser',
+                     ] +
+                     extraCommonLibdeps)
 
-env.StaticLibrary("coredb", [
+env.CppUnitTest(
+    target="util/version_test",
+    source=["util/version_test.cpp"],
+    LIBDEPS=["mongocommon"]
+)
+
+env.Library('background_job', ["util/background.cpp"],
+            LIBDEPS=['spin_lock'])
+
+env.CppUnitTest(
+    target="background_job_test",
+    source=[
+        "util/background_job_test.cpp",
+    ],
+    LIBDEPS=[
+        "background_job",
+        "network", # Temporary crutch since the ssl cleanup is hard coded in background.cpp
+        "synchronization",
+    ]
+)
+
+tcmallocServerStatus = []
+if get_option('allocator') == 'tcmalloc':
+    tcmallocServerStatus.append("util/tcmalloc_server_status_section.cpp")
+
+env.Library("coredb", [
         "client/parallel.cpp",
+        "db/audit.cpp",
         "db/commands.cpp",
         "db/commands/authentication_commands.cpp",
         "db/commands/connection_status.cpp",
+        "db/commands/copydb_common.cpp",
         "db/commands/fail_point_cmd.cpp",
         "db/commands/find_and_modify_common.cpp",
         "db/commands/hashcmd.cpp",
@@ -236,65 +419,77 @@ env.StaticLibrary("coredb", [
         "db/commands/mr_common.cpp",
         "db/commands/rename_collection_common.cpp",
         "db/commands/server_status.cpp",
+        "db/commands/shutdown.cpp",
         "db/commands/parameters.cpp",
+        "db/commands/user_management_commands.cpp",
+        "db/commands/write_commands/write_commands_common.cpp",
         "db/pipeline/pipeline.cpp",
         "db/dbcommands_generic.cpp",
-        "db/dbwebserver.cpp",
         "db/keypattern.cpp",
-        "db/matcher.cpp",
-        "db/pipeline/accumulator.cpp",
+        "db/matcher/matcher.cpp",
         "db/pipeline/accumulator_add_to_set.cpp",
         "db/pipeline/accumulator_avg.cpp",
         "db/pipeline/accumulator_first.cpp",
         "db/pipeline/accumulator_last.cpp",
         "db/pipeline/accumulator_min_max.cpp",
         "db/pipeline/accumulator_push.cpp",
-        "db/pipeline/accumulator_single_value.cpp",
         "db/pipeline/accumulator_sum.cpp",
-        "db/pipeline/builder.cpp",
-        "db/pipeline/doc_mem_monitor.cpp",
+        "db/pipeline/dependencies.cpp",
         "db/pipeline/document.cpp",
         "db/pipeline/document_source.cpp",
         "db/pipeline/document_source_bson_array.cpp",
         "db/pipeline/document_source_command_shards.cpp",
-        "db/pipeline/document_source_filter.cpp",
-        "db/pipeline/document_source_filter_base.cpp",
         "db/pipeline/document_source_geo_near.cpp",
         "db/pipeline/document_source_group.cpp",
         "db/pipeline/document_source_limit.cpp",
         "db/pipeline/document_source_match.cpp",
+        "db/pipeline/document_source_merge_cursors.cpp",
         "db/pipeline/document_source_out.cpp",
         "db/pipeline/document_source_project.cpp",
+        "db/pipeline/document_source_redact.cpp",
         "db/pipeline/document_source_skip.cpp",
         "db/pipeline/document_source_sort.cpp",
         "db/pipeline/document_source_unwind.cpp",
         "db/pipeline/expression.cpp",
-        "db/pipeline/expression_context.cpp",
         "db/pipeline/field_path.cpp",
         "db/pipeline/value.cpp",
         "db/projection.cpp",
-        "db/querypattern.cpp",
         "db/queryutil.cpp",
         "db/stats/timer_stats.cpp",
-        "db/stats/top.cpp",
         "s/shardconnection.cpp",
-        ],
+        ]
+        + tcmallocServerStatus
+        ,
                   LIBDEPS=['db/auth/serverauth',
                            'db/common',
                            'server_parameters',
                            'geoparser',
                            'geoquery',
-                           '$BUILD_DIR/mongo/foundation'])
+                           'expressions',
+                           'expressions_geo',
+                           'expressions_where',
+                           'expressions_text',
+                           'index_names',
+                           'db/exec/working_set',
+                           'db/index/key_generator',
+                           '$BUILD_DIR/mongo/foundation',
+                           '$BUILD_DIR/third_party/shim_snappy',
+                           'server_options',
+                           '$BUILD_DIR/mongo/util/cmdline_utils/cmdline_utils',
+                           'clientdriver',
+                           ])
 
 coreServerFiles = [ "db/client_basic.cpp",
-                    "db/common.cpp",
                     "util/net/miniwebserver.cpp",
-                    "db/indexkey.cpp",
                     "db/stats/counters.cpp",
                     "db/stats/service_stats.cpp",
+                    "db/log_process_details.cpp",
+                    "db/conn_pool_options.cpp"
                     ]
 
-env.StaticLibrary('ntservice', ['util/ntservice.cpp'], LIBDEPS=['foundation'])
+env.Library('ntservice', ['util/ntservice.cpp'],
+            LIBDEPS=['foundation',
+                     '$BUILD_DIR/mongo/util/options_parser/options_parser'])
 if windows:
     env.CppUnitTest('ntservice_test', 'util/ntservice_test.cpp',
                     LIBDEPS=['ntservice'],
@@ -305,24 +500,20 @@ scripting_common_files = [ "scripting/engine.cpp",
                            "scripting/bench.cpp",
                            ]
 
-env.StaticLibrary('bson_template_evaluator', ["scripting/bson_template_evaluator.cpp"],
-                  LIBDEPS=['bson'])
+env.Library('bson_template_evaluator', ["scripting/bson_template_evaluator.cpp"],
+            LIBDEPS=['bson'])
 env.CppUnitTest('bson_template_evaluator_test', ['scripting/bson_template_evaluator_test.cpp'],
                 LIBDEPS=['bson_template_evaluator'])
 
-if usesm:
-    env.StaticLibrary('scripting', scripting_common_files + ['scripting/engine_spidermonkey.cpp',
-                                                             'scripting/sm_db.cpp'],
-                      LIBDEPS=['$BUILD_DIR/third_party/js-1.7/js', 'bson_template_evaluator'])
-elif usev8:
-    env.StaticLibrary('scripting', scripting_common_files + ['scripting/engine_v8.cpp',
-                                                             'scripting/v8_db.cpp',
-                                                             'scripting/v8_utils.cpp',
-                                                             'scripting/v8_profiler.cpp'],
-                       LIBDEPS=['bson_template_evaluator', '$BUILD_DIR/third_party/shim_v8'])
+if usev8:
+    env.Library('scripting', scripting_common_files + ['scripting/engine_v8.cpp',
+                                                       'scripting/v8_db.cpp',
+                                                       'scripting/v8_utils.cpp',
+                                                       'scripting/v8_profiler.cpp'],
+                 LIBDEPS=['bson_template_evaluator', '$BUILD_DIR/third_party/shim_v8'])
 else:
-    env.StaticLibrary('scripting', scripting_common_files + ['scripting/engine_none.cpp'],
-                      LIBDEPS=['bson_template_evaluator'])
+    env.Library('scripting', scripting_common_files + ['scripting/engine_none.cpp'],
+                LIBDEPS=['bson_template_evaluator'])
 
 mmapFiles = [ "util/mmap.cpp" ]
 
@@ -331,24 +522,15 @@ if has_option( "mm" ):
 else:
     mmapFiles += [ "util/mmap_${OS_FAMILY}.cpp" ]
 
-# handle systeminfo*
-systemInfoPlatformFile = env.File( "util/systeminfo_${PYSYSPLATFORM}.cpp" )
-# NOTE( schwerin ): This is a very un-scons-y way to make this decision, and prevents one from using
-# code generation to produce util/systeminfo_$PYSYSPLATFORM.cpp.
-if not os.path.exists( str( systemInfoPlatformFile ) ):
-    systemInfoPlatformFile = env.File( "util/systeminfo_none.cpp" )
-
-coreServerFiles.append( systemInfoPlatformFile )
-
 if has_option( "asio" ):
     coreServerFiles += [ "util/net/message_server_asio.cpp" ]
 
-env.StaticLibrary('index_set', [ 'db/index_set.cpp' ] )
+env.Library('update_index_data', [ 'db/update_index_data.cpp' ], LIPDEPS=[ 'db/common' ])
 
-# mongod files - also files used in tools. present in dbtests, but not in mongos and not in client libs.
+# mongod files - also files used in tools. present in dbtests, but not in mongos and not in client
+# libs.
 serverOnlyFiles = [ "db/curop.cpp",
                     "db/kill_current_op.cpp",
-                    "db/memconcept.cpp",
                     "db/interrupt_status_mongod.cpp",
                     "db/d_globals.cpp",
                     "db/pagefault.cpp",
@@ -357,13 +539,13 @@ serverOnlyFiles = [ "db/curop.cpp",
                     "db/d_concurrency.cpp",
                     "db/lockstat.cpp",
                     "db/lockstate.cpp",
-                    "db/key.cpp",
-                    "db/btreebuilder.cpp",
+                    "db/structure/btree/key.cpp",
+                    "db/structure/btree/btreebuilder.cpp",
                     "util/logfile.cpp",
                     "util/alignedbuilder.cpp",
                     "util/elapsed_tracker.cpp",
                     "util/touch_pages.cpp",
-                    "db/mongommf.cpp",
+                    "db/storage/durable_mapped_file.cpp",
                     "db/dur.cpp",
                     "db/durop.cpp",
                     "db/dur_writetodatafiles.cpp",
@@ -372,11 +554,13 @@ serverOnlyFiles = [ "db/curop.cpp",
                     "db/dur_recover.cpp",
                     "db/dur_journal.cpp",
                     "db/introspect.cpp",
-                    "db/btree.cpp",
-                    "db/btree_stats.cpp",
+                    "db/structure/btree/btree.cpp",
+                    "db/structure/btree/btree_stats.cpp",
                     "db/clientcursor.cpp",
                     "db/tests.cpp",
-                    "db/repl.cpp",
+                    "db/range_deleter_db_env.cpp",
+                    "db/range_deleter_service.cpp",
+                    "db/repl/repl_start.cpp",
                     "db/repl/rs.cpp",
                     "db/repl/consensus.cpp",
                     "db/repl/rs_initiate.cpp",
@@ -389,64 +573,128 @@ serverOnlyFiles = [ "db/curop.cpp",
                     "db/repl/rs_sync.cpp",
                     "db/repl/rs_initialsync.cpp",
                     "db/repl/bgsync.cpp",
-                    "db/oplog.cpp",
+                    "db/repl/master_slave.cpp",
+                    "db/repl/sync.cpp",
+                    "db/repl/sync_source_feedback.cpp",
+                    "db/repl/oplogreader.cpp",
+                    "db/repl/replication_server_status.cpp",
+                    "db/repl/repl_reads_ok.cpp",
+                    "db/repl/resync.cpp",
+                    "db/repl/oplog.cpp",
                     "db/prefetch.cpp",
-                    "db/repl_block.cpp",
-                    "db/btreecursor.cpp",
-                    "db/intervalbtreecursor.cpp",
-                    "db/btreeposition.cpp",
+                    "db/repl/write_concern.cpp",
+                    "db/index_legacy.cpp",
+                    "db/index/2d_access_method.cpp",
+                    "db/index/btree_access_method.cpp",
+                    "db/index/btree_based_access_method.cpp",
+                    "db/index/btree_index_cursor.cpp",
+                    "db/index/btree_interface.cpp",
+                    "db/index/index_descriptor.cpp",
+                    "db/index/fts_access_method.cpp",
+                    "db/index/hash_access_method.cpp",
+                    "db/index/haystack_access_method.cpp",
+                    "db/index/s2_access_method.cpp",
                     "db/cloner.cpp",
-                    "db/namespace_details.cpp",
-                    "db/cap.cpp",
-                    "db/matcher_covered.cpp",
+                    "db/structure/catalog/namespace_details.cpp",
+                    "db/structure/catalog/namespace_index.cpp",
+                    "db/structure/catalog/cap.cpp",
                     "db/dbeval.cpp",
-                    "db/restapi.cpp",
                     "db/dbhelpers.cpp",
                     "db/instance.cpp",
                     "db/client.cpp",
-                    "db/database.cpp",
+                    "db/catalog/database.cpp",
+                    "db/catalog/index_catalog.cpp",
+                    "db/catalog/index_catalog_entry.cpp",
+                    "db/catalog/index_create.cpp",
+                    "db/catalog/index_pregen.cpp",
+                    "db/catalog/collection.cpp",
+                    "db/structure/collection_compact.cpp",
+                    "db/catalog/collection_cursor_cache.cpp",
+                    "db/catalog/collection_info_cache.cpp",
+                    "db/structure/collection_iterator.cpp",
+                    "db/catalog/database_holder.cpp",
+                    "db/background.cpp",
                     "db/pdfile.cpp",
-                    "db/record.cpp",
-                    "db/cursor.cpp",
-                    "db/queryoptimizer.cpp",
-                    "db/queryoptimizercursorimpl.cpp",
+                    "db/repair_database.cpp",
+                    "db/storage/data_file.cpp",
+                    "db/storage/extent.cpp",
+                    "db/storage/extent_manager.cpp",
+                    "db/structure/catalog/index_details.cpp",
+                    "db/structure/record_store.cpp",
                     "db/extsort.cpp",
-                    "db/index.cpp",
-                    "db/index_update.cpp",
+                    "db/index_builder.cpp",
                     "db/index_rebuilder.cpp",
-                    "db/scanandorder.cpp",
-                    "db/explain.cpp",
-                    "db/geo/2d.cpp",
-                    "db/geo/geonear.cpp",
+                    "db/storage/record.cpp",
+                    "db/commands/geonear.cpp",
                     "db/geo/haystack.cpp",
                     "db/geo/s2common.cpp",
-                    "db/geo/s2cursor.cpp",
-                    "db/geo/s2index.cpp",
-                    "db/geo/s2nearcursor.cpp",
-                    "db/hashindex.cpp",
                     "db/ops/count.cpp",
                     "db/ops/delete.cpp",
-                    "db/ops/query.cpp",
+                    "db/ops/delete_executor.cpp",
+                    "db/ops/insert.cpp",
                     "db/ops/update.cpp",
-                    "db/ops/update_internal.cpp",
+                    "db/ops/update_executor.cpp",
                     "db/dbcommands.cpp",
                     "db/dbcommands_admin.cpp",
+                    "db/write_concern.cpp",
+                    "db/startup_warnings.cpp",
+                    "db/storage_options.cpp",
+                    "db/ops/update_lifecycle_impl.cpp",
 
                     # most commands are only for mongod
+                    "db/stats/top.cpp",
+                    "db/commands/apply_ops.cpp",
+                    "db/commands/compact.cpp",
+                    "db/commands/auth_schema_upgrade_d.cpp",
+                    "db/commands/create_indexes.cpp",
+                    "db/commands/dbhash.cpp",
+                    "db/commands/merge_chunks_cmd.cpp",
+                    "db/commands/cleanup_orphaned_cmd.cpp",
+                    "db/commands/collection_to_capped.cpp",
+                    "db/commands/drop_indexes.cpp",
                     "db/commands/fsync.cpp",
+                    "db/commands/get_last_error.cpp",
+                    "db/commands/write_commands/write_commands.cpp",
+                    "db/commands/write_commands/batch_executor.cpp",
                     "db/commands/distinct.cpp",
                     "db/commands/find_and_modify.cpp",
                     "db/commands/group.cpp",
+                    "db/commands/index_filter_commands.cpp",
                     "db/commands/index_stats.cpp",
                     "db/commands/mr.cpp",
+                    "db/commands/oplog_note.cpp",
                     "db/commands/pipeline_command.cpp",
+                    "db/commands/parallel_collection_scan.cpp",
+                    "db/commands/plan_cache_commands.cpp",
+                    "db/commands/rename_collection.cpp",
                     "db/commands/storage_details.cpp",
+                    "db/commands/test_commands.cpp",
+                    "db/commands/validate.cpp",
                     "db/pipeline/pipeline_d.cpp",
                     "db/pipeline/document_source_cursor.cpp",
                     "db/driverHelpers.cpp" ]
 
-env.Library( "dbcmdline", "db/cmdline.cpp", LIBDEPS=['bson', 'server_parameters'] )
-env.CppUnitTest('cmdline_test', 'db/cmdline_test.cpp', LIBDEPS=['dbcmdline'])
+# This library exists because some libraries, such as our networking library, need access to server
+# options, but not to the helpers to set them from the command line.  libserver_options_core.a just
+# has the structure for storing the server options, while libserver_options.a has the code to set
+# them via the command line.
+env.Library("server_options_core", ["db/server_options.cpp"],
+            LIBDEPS=['bson'])
+
+env.Library("server_options", [
+                    "db/server_options_helpers.cpp"
+                    ],
+            LIBDEPS=['bson',
+                     'network', # temporary crutch that should go away once the networking
+                                # library has separate options
+                     'server_options_core',
+                     'server_parameters',
+                     '$BUILD_DIR/mongo/util/cmdline_utils/cmdline_utils',
+                     '$BUILD_DIR/mongo/util/options_parser/options_parser',
+                    ])
+
+env.CppUnitTest('server_options_test', 'db/server_options_test.cpp',
+                LIBDEPS=['server_options'])
 
 env.CppUnitTest('diskloc_test', 'db/diskloc_test.cpp', LIBDEPS=[])
 
@@ -454,70 +702,72 @@ env.CppUnitTest('v8_deadline_monitor_test', 'scripting/v8_deadline_monitor_test.
 
 env.Library('stacktrace', 'util/stacktrace.cpp')
 
-env.Program('lame_stacktrace_test', 'util/lame_stacktrace_test.cpp',
-            LIBDEPS=['stacktrace',
-                     '$BUILD_DIR/mongo/base/base'])
-
 serverOnlyFiles += mmapFiles
 
 serverOnlyFiles += [ "db/stats/snapshots.cpp" ]
 
-env.Library('coreshard', ['client/distlock.cpp',
+env.Library('coreshard', [# This is only here temporarily for auto-split logic in chunk.cpp.
+                          's/balancer_policy.cpp',
+                          's/distlock.cpp',
                           's/config.cpp',
                           's/grid.cpp',
                           's/chunk.cpp',
+                          # No good reason to be here other than chunk.cpp needs this.
+                          's/config_server_checker_service.cpp',
                           's/shard.cpp',
-                          's/shardkey.cpp'],
-            LIBDEPS=['s/base']);
+                          's/shardkey.cpp',
+                          's/shard_key_pattern.cpp'],
+            LIBDEPS=['s/base',
+                     's/cluster_ops_impl']);
     
 mongosLibraryFiles = [
     "s/interrupt_status_mongos.cpp",
     "s/strategy.cpp",
-    "s/strategy_shard.cpp",
-    "s/strategy_single.cpp",
     "s/commands_admin.cpp",
     "s/commands_public.cpp",
+    "s/commands/auth_schema_upgrade_s.cpp",
+    "s/commands/cluster_index_filter_cmd.cpp",
+    "s/commands/cluster_merge_chunks_cmd.cpp",
+    "s/commands/cluster_plan_cache_cmd.cpp",
+    "s/commands/cluster_write_cmd.cpp",
     "s/request.cpp",
     "s/client_info.cpp",
-    "s/config_server_checker_service.cpp",
     "s/cursors.cpp",
     "s/s_only.cpp",
     "s/balance.cpp",
-    "s/balancer_policy.cpp",
     "s/writeback_listener.cpp",
     "s/version_manager.cpp",
+    "s/version_mongos.cpp",
+    "s/mongos_persistence_stubs.cpp",
     ]
 
 env.Library( "mongoscore",
              mongosLibraryFiles,
              LIBDEPS=['db/auth/authmongos',
-                      'db/fts/ftsmongos'
-                      ] )
+                      'db/fts/ftsmongos',
+                      'db/query/lite_parsed_query',
+                      's/cluster_ops',
+                      's/cluster_write_op_conversion',
+                      's/upgrade',
+                     ] )
 
 env.CppUnitTest( "balancer_policy_test" , [ "s/balancer_policy_tests.cpp" ] ,
-                 LIBDEPS=["mongoscore", "coreshard", "mongocommon","coreserver","coredb","dbcmdline","mongodandmongos"] ,
-                 NO_CRUTCH=True)
+                LIBDEPS=["mongoscore",
+                         "coreshard",
+                         "mongocommon",
+                         "coreserver",
+                         "coredb",
+                         "message_server_port"])
 
 env.CppUnitTest("dbclient_rs_test", [ "client/dbclient_rs_test.cpp" ],
-                 LIBDEPS=[
-                    "coredb",
-                    "coreserver",
-                    "coreshard",
-                    "dbcmdline",
-                    "mocklib",
-                    "mongocommon",
-                    "mongodandmongos",
-                    "mongoscore"],
-                 NO_CRUTCH=True)
-
+                 LIBDEPS=['clientdriver', 'mocklib'])
 env.CppUnitTest("scoped_db_conn_test", [ "client/scoped_db_conn_test.cpp" ],
                  LIBDEPS=[
                     "coredb",
                     "coreserver",
                     "coreshard",
-                    "dbcmdline",
                     "mongocommon",
-                    "mongodandmongos",
+                    "message_server_port",
                     "mongoscore"],
                  NO_CRUTCH=True)
 
@@ -528,10 +778,9 @@ env.CppUnitTest("shard_conn_test", [ "s/shard_conn_test.cpp" ],
                     "mongocommon",
                     "coreserver",
                     "coredb",
-                    "dbcmdline",
-                    "mongodandmongos",
-                    "mocklib"],
-                 NO_CRUTCH=True)
+                    "message_server_port",
+                    "mocklib",
+                    "$BUILD_DIR/mongo/db/auth/authmocks"])
 
 env.CppUnitTest("shard_test", [ "s/shard_test.cpp" ],
                 LIBDEPS=[ "mongoscore",
@@ -539,10 +788,17 @@ env.CppUnitTest("shard_test", [ "s/shard_test.cpp" ],
                           "mongocommon",
                           "coreserver",
                           "coredb",
-                          "dbcmdline",
-                          "mongodandmongos",
-                          "mocklib"],
-                NO_CRUTCH=True)
+                          "message_server_port",
+                          "mocklib"])
+
+env.CppUnitTest('config_server_tests', [ 's/config_server_tests.cpp' ],
+                LIBDEPS=[ "mongoscore",
+                          "coreshard",
+                          "mongocommon",
+                          "coreserver",
+                          "coredb",
+                          "message_server_port",
+                          "mocklib"])
 
 
 # Should only need stuff from util, unittest and platform
@@ -554,63 +810,151 @@ serverOnlyFiles += [ "s/d_logic.cpp",
                      "s/d_migrate.cpp",
                      "s/d_state.cpp",
                      "s/d_split.cpp",
-                     "client/distlock_test.cpp",
-                     "s/d_chunk_manager.cpp",
-                     "db/module.cpp" ]
+                     "s/d_merge.cpp",
+                     "s/distlock_test.cpp" ]
 
-env.StaticLibrary("defaultversion", "s/default_version.cpp")
+env.Library("defaultversion", "s/default_version.cpp")
 
-env.StaticLibrary("geometry", [ "db/geo/hash.cpp", "db/geo/shapes.cpp", ], LIBDEPS = [ "bson" ])
-env.StaticLibrary("geoparser", [ "db/geo/geoparser.cpp", ],
-                  LIBDEPS = [ "bson",
-                              "geometry",
-                              '$BUILD_DIR/third_party/s2/s2' ])
-env.StaticLibrary("geoquery", [ "db/geo/geoquery.cpp", ],
-                  LIBDEPS = [ "bson",
-                              "geometry",
-                              '$BUILD_DIR/third_party/s2/s2' ])
+# Geo
+env.Library("geometry", [ "db/geo/hash.cpp", "db/geo/shapes.cpp", ], LIBDEPS = [ "bson" ])
+env.Library("geoparser", [ "db/geo/geoparser.cpp", ],
+            LIBDEPS = [ "bson",
+                        "geometry",
+                        '$BUILD_DIR/third_party/s2/s2' ])
+env.Library("geoquery", [ "db/geo/geoquery.cpp", ],
+            LIBDEPS = [ "bson",
+                        "geometry",
+                        '$BUILD_DIR/third_party/s2/s2' ])
 
 env.CppUnitTest("hash_test", [ "db/geo/hash_test.cpp" ], LIBDEPS = ["geometry" ])
 env.CppUnitTest("geoparser_test", [ "db/geo/geoparser_test.cpp" ], LIBDEPS = ["geoparser"])
 
-env.StaticLibrary("serveronly", serverOnlyFiles,
-                  LIBDEPS=["coreshard",
-                           "db/auth/authmongod",
-                           "db/fts/ftsmongod",
-                           "db/common",
-                           "dbcmdline",
-                           "defaultversion",
-                           "geoparser",
-                           "geoquery",
-                           "index_set",
-                           '$BUILD_DIR/third_party/shim_snappy'])
+
+env.CppUnitTest(
+    target="index_filter_commands_test",
+    source=[
+        "db/commands/index_filter_commands_test.cpp",
+    ],
+    LIBDEPS=[
+        "$BUILD_DIR/mongo/serveronly",
+        "$BUILD_DIR/mongo/coreserver",
+        "$BUILD_DIR/mongo/coredb",
+    ],
+    NO_CRUTCH = True,
+)
+
+env.CppUnitTest(
+    target="plan_cache_commands_test",
+    source=[
+        "db/commands/plan_cache_commands_test.cpp",
+    ],
+    LIBDEPS=[
+        "$BUILD_DIR/mongo/serveronly",
+        "$BUILD_DIR/mongo/coreserver",
+        "$BUILD_DIR/mongo/coredb",
+    ],
+    NO_CRUTCH = True,
+)
+
+env.Library('range_deleter',
+            [ 'db/range_deleter.cpp',
+              'db/range_deleter_mock_env.cpp',
+              'db/range_deleter_stats.cpp'
+            ],
+            LIBDEPS = [
+                '$BUILD_DIR/mongo/s/base', # range_arithmetic.cpp
+                'base/base',
+                'bson',
+                'synchronization'
+            ])
+
+env.CppUnitTest('range_deleter_test',
+                [ 'db/range_deleter_test.cpp' ],
+                LIBDEPS = [ 'range_deleter', 'db/common' ]);
+
+env.CppUnitTest('range_deleter_stat_test',
+                [ 'db/range_deleter_stat_test.cpp' ],
+                LIBDEPS = [ 'range_deleter', 'db/common' ]);
+
+env.Library(
+    target='storage_engine_metadata',
+    source=[
+        'db/storage/storage_engine_metadata.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/bson',
+    ]
+)
+
+env.CppUnitTest(
+    target= 'storage_engine_metadata_test',
+    source = 'db/storage/storage_engine_metadata_test.cpp',
+    LIBDEPS=[
+        'storage_engine_metadata',
+    ],
+)
+
+env.Library("serveronly", serverOnlyFiles,
+            LIBDEPS=["coreshard",
+                     "db/auth/authmongod",
+                     "db/fts/ftsmongod",
+                     "db/common",
+                     "db/ops/update_driver",
+                     "defaultversion",
+                     "geoparser",
+                     "geoquery",
+                     "index_key_validate",
+                     'range_deleter',
+                     "update_index_data",
+                     's/metadata',
+                     's/batch_write_types',
+                     "db/exec/working_set",
+                     "db/exec/exec",
+                     "db/query/query",
+                     '$BUILD_DIR/third_party/shim_snappy'])
+
+
+env.Library("message_server_port", "util/net/message_server_port.cpp")
 
 # These files go into mongos and mongod only, not into the shell or any tools.
 mongodAndMongosFiles = [
-    "db/connection_factory.cpp",
     "db/initialize_server_global_state.cpp",
     "db/server_extra_log_context.cpp",
-    "util/net/message_server_port.cpp",
+    "db/dbwebserver.cpp",
+    "util/signal_handlers.cpp",
     ]
-env.StaticLibrary("mongodandmongos", mongodAndMongosFiles)
+env.Library("mongodandmongos", mongodAndMongosFiles,
+            LIBDEPS=["message_server_port"])
 
-# These files go into the tools, tests, shell, etc. but not mongod or mongos
-everythingButMongodAndMongosFiles = [
-    "client/connection_factory.cpp",
-    ]
-env.StaticLibrary("notmongodormongos", everythingButMongodAndMongosFiles)
+env.Library("mongodwebserver",
+            [
+             "db/clientlistplugin.cpp",
+             "db/repl/replset_web_handler.cpp",
+             "db/restapi.cpp",
+             "db/stats/snapshots_webplugins.cpp",
+             ],
+            LIBDEPS=["coredb", "mongodandmongos"])
 
-mongodOnlyFiles = [ "db/db.cpp", "db/compact.cpp", "db/commands/touch.cpp" ]
+mongodOnlyFiles = [ "db/db.cpp", "db/commands/touch.cpp", "db/mongod_options_init.cpp" ]
 
 # ----- TARGETS ------
 
-env.StaticLibrary("gridfs", "client/gridfs.cpp")
+env.Library("gridfs", "client/gridfs.cpp")
 
 if has_option( 'use-cpu-profiler' ):
     coreServerFiles.append( 'db/commands/cpuprofile.cpp' )
     env.Append(LIBS=['unwind'])
 
-env.StaticLibrary("coreserver", coreServerFiles, LIBDEPS=["mongocommon", "scripting"])
+env.Library("coreserver", coreServerFiles, LIBDEPS=["mongocommon", "scripting"])
+
+# mongod options
+env.Library("mongod_options", ["db/mongod_options.cpp"],
+            LIBDEPS=['server_options',
+                     'mongocommon',
+                     'serveronly',
+                     'coreserver',
+                     'coredb',
+                     '$BUILD_DIR/mongo/util/options_parser/options_parser_init'])
 
 # main db target
 mongod = env.Install(
@@ -618,79 +962,130 @@ mongod = env.Install(
                        LIBDEPS=["coredb",
                                 "coreserver",
                                 "mongodandmongos",
+                                "mongodwebserver",
                                 "ntservice",
                                 "serveronly",
-                                ] + env['MODULE_LIBDEPS_MONGOD'] ) )
+                                "mongod_options",
+                                "storage_engine_metadata",
+                                ] ) )
 Default( mongod )
 
 # tools
-allToolFiles = [ "tools/tool.cpp", "tools/stat_util.cpp" ]
-env.StaticLibrary("alltools", allToolFiles, LIBDEPS=["serveronly", "coreserver", "coredb",
-                                                     "notmongodormongos"])
+allToolFiles = ["tools/tool.cpp",
+                "tools/stat_util.cpp",
+                "tools/tool_logger.cpp"]
+env.Library("tool_options", "tools/tool_options.cpp",
+            LIBDEPS=["server_options",
+                     "$BUILD_DIR/mongo/util/options_parser/options_parser_init",
+                     "serveronly",
+                     "coreserver",
+                     "coredb",
+                     ])
+env.Library("alltools",
+            allToolFiles,
+            LIBDEPS=["serveronly",
+                     "coreserver",
+                     "coredb",
+                     "$BUILD_DIR/mongo/util/options_parser/options_parser",
+                     "$BUILD_DIR/mongo/db/auth/authmocks",
+                     "$BUILD_DIR/mongo/db/auth/authmongod"])
 
 normalTools = [ "dump", "restore", "export", "import", "stat", "top", "oplog" ]
-env.Alias( "tools", [ "#/${PROGPREFIX}mongo" + x + "${PROGSUFFIX}" for x in normalTools ] )
-for x in normalTools:
-    env.Install( '#/', env.Program( "mongo" + x, [ "tools/" + x + ".cpp" ],
-                                    LIBDEPS=["alltools"]) )
-
-env.StaticLibrary("docgenerator", "tools/docgenerator.cpp")
+env.Alias( "tools", [ "#/${PROGPREFIX}mongo" + name + "${PROGSUFFIX}" for name in normalTools ] )
+for name in normalTools:
+    env.Install( '#/', env.Program("mongo" + name,
+                                   ["tools/" + name + ".cpp", "tools/mongo" + name + "_options_init.cpp"],
+                                   LIBDEPS=["alltools", "mongo" + name + "_options"]) )
+    env.Library("mongo" + name + "_options", ["tools/mongo" + name + "_options.cpp"],
+                LIBDEPS=['tool_options'])
 
 #some special tools
+env.Library("mongofiles_options", ["tools/mongofiles_options.cpp"],
+            LIBDEPS=['tool_options'])
+env.Library("bsondump_options", ["tools/bsondump_options.cpp"],
+            LIBDEPS=['tool_options'])
+env.Library("mongobridge_options", ["tools/mongobridge_options.cpp"],
+            LIBDEPS=['tool_options'])
+
 env.Install( '#/', [
-        env.Program( "mongofiles", "tools/files.cpp", LIBDEPS=["alltools", "gridfs"] ),
-        env.Program( "docgen", "tools/docgeneratormain.cpp", LIBDEPS=["alltools", "docgenerator"] ),
-        env.Program( "loadgen", "tools/loadgenerator.cpp", LIBDEPS=["alltools", "docgenerator"] ),
-        env.Program( "bsondump", "tools/bsondump.cpp", LIBDEPS=["alltools"]),
-        env.Program( "mongobridge", "tools/bridge.cpp", LIBDEPS=["alltools"]),
-        env.Program( "mongoperf", "client/examples/mongoperf.cpp", LIBDEPS=["alltools"] ),
+        env.Program( "mongofiles", ["tools/files.cpp", "tools/mongofiles_options_init.cpp"],
+                     LIBDEPS=["alltools", "gridfs", "mongofiles_options"] ),
+        env.Program( "bsondump", ["tools/bsondump.cpp", "tools/bsondump_options_init.cpp"],
+                     LIBDEPS=["alltools", "bsondump_options"]),
+        env.Program( "mongobridge", ["tools/bridge.cpp", "tools/mongobridge_options_init.cpp"],
+                     LIBDEPS=["serveronly", "coreserver", "coredb", "mongobridge_options"] ),
+        env.Program( "mongoperf", "client/examples/mongoperf.cpp",
+                     LIBDEPS=["serveronly", "coreserver", "coredb"] ),
         ] )
+
+# mongos options
+env.Library("mongos_options", ["s/mongos_options.cpp"],
+            LIBDEPS=['mongoscore',
+                     'coreshard',
+                     'mongocommon',
+                     'coreserver',
+                     'coredb',
+                     '$BUILD_DIR/mongo/util/options_parser/options_parser_init'])
 
 # mongos
 mongos = env.Program(
-    "mongos", [ "s/server.cpp"] ,
-    LIBDEPS=["mongoscore", "coreserver", "coredb", "mongocommon", "coreshard", "dbcmdline", "ntservice",
-             "mongodandmongos", "s/upgrade"] + env['MODULE_LIBDEPS_MONGOS'])
+    "mongos", [ "s/server.cpp", "s/mongos_options_init.cpp" ] ,
+    LIBDEPS=["mongoscore", "coreserver", "coredb", "mongocommon", "coreshard", "ntservice",
+             "mongodandmongos", "s/upgrade", "mongos_options" ])
 env.Install( '#/', mongos )
 
 env.Library("clientandshell", ["client/clientAndShell.cpp"],
                               LIBDEPS=["mongocommon",
                                        "defaultversion",
-                                       "gridfs",
-                                       "notmongodormongos"])
+                                       "gridfs"])
 env.Library("allclient", "client/clientOnly.cpp", LIBDEPS=["clientandshell"])
 
-# dbtests test binary
-env.StaticLibrary('testframework', ['dbtests/framework.cpp'], LIBDEPS=['unittest/unittest'])
+# dbtests test binary options
+env.Library("framework_options", ["dbtests/framework_options.cpp"],
+            LIBDEPS=['$BUILD_DIR/mongo/util/options_parser/options_parser_init'])
 
-env.StaticLibrary('mocklib', [
+# dbtests test binary
+env.Library('testframework', ['dbtests/framework.cpp', 'dbtests/framework_options_init.cpp'],
+            LIBDEPS=['unittest/unittest',
+            'framework_options',
+            ])
+
+env.Library('mocklib', [
         'dbtests/mock/mock_conn_registry.cpp',
         'dbtests/mock/mock_dbclient_connection.cpp',
         'dbtests/mock/mock_dbclient_cursor.cpp',
         'dbtests/mock/mock_remote_db_server.cpp',
         'dbtests/mock/mock_replica_set.cpp'
     ],
-    LIBDEPS=['mongocommon'])
+    LIBDEPS=['clientdriver'])
 
 test = testEnv.Install(
     '#/',
     testEnv.Program("test",
-                    [ f for f in Glob("dbtests/*.cpp") if not str(f).endswith('framework.cpp') ],
+                    [ f for f in Glob("dbtests/*.cpp")
+                      if not str(f).endswith('framework.cpp') and
+                         not str(f).endswith('framework_options.cpp') and
+                         not str(f).endswith('framework_options_init.cpp') ],
                     LIBDEPS = [
+                       "mutable_bson_test_utils",
                        "mongocommon",
                        "serveronly",
                        "coreserver",
                        "coredb",
                        "testframework",
                        "gridfs",
-                       "notmongodormongos",
                        "s/upgrade",
-                       "mocklib"]))
+                       "s/cluster_ops",
+                       "s/cluster_ops_impl",
+                       "mocklib",
+                       "db/exec/mock_stage",
+                       "$BUILD_DIR/mongo/db/auth/authmocks",
+                       "$BUILD_DIR/mongo/db/query/query"]))
 
 if len(testEnv.subst('$PROGSUFFIX')):
     testEnv.Alias( "test", "#/${PROGPREFIX}test${PROGSUFFIX}" )
 
-env.Install( '#/', testEnv.Program( "perftest", [ "dbtests/perf/perftest.cpp" ], LIBDEPS=["serveronly", "coreserver", "coredb", "testframework", "notmongodormongos" ] ) )
+env.Install( '#/', testEnv.Program( "perftest", [ "dbtests/perf/perftest.cpp" ], LIBDEPS=["serveronly", "coreserver", "coredb", "testframework" ] ) )
 
 # --- sniffer ---
 mongosniff_built = False
@@ -705,36 +1100,58 @@ if darwin or env["_HAVEPCAP"]:
         sniffEnv.Append( LIBS=[ "wpcap" ] )
 
     sniffEnv.Install( '#/', sniffEnv.Program( "mongosniff", "tools/sniffer.cpp",
-                                              LIBDEPS=["gridfs", "serveronly", "coreserver", "coredb", "notmongodormongos"]))
+                                              LIBDEPS=["gridfs", "serveronly", "coreserver", "coredb"]))
 
 # --- shell ---
 
 # if you add a file here, you need to add it in scripting/engine.cpp and shell/createCPPfromJavaScriptFiles.js as well
 env.JSHeader("shell/mongo.cpp",
-             ["shell/assert.js", "shell/types.js", "shell/utils.js", "shell/utils_sh.js",
-              "shell/db.js", "shell/mongo.js", "shell/mr.js", "shell/query.js",
-              "shell/collection.js"])
+             [
+                 "shell/assert.js",
+                 "shell/bulk_api.js",
+                 "shell/collection.js",
+                 "shell/db.js",
+                 "shell/mongo.js",
+                 "shell/mr.js",
+                 "shell/query.js",
+                 "shell/types.js",
+                 "shell/upgrade_check.js",
+                 "shell/utils.js",
+                 "shell/utils_sh.js",
+              ])
 
 # if you add a file here, you need to add it in shell/shell_utils.cpp and shell/createCPPfromJavaScriptFiles.js as well
 env.JSHeader("shell/mongo-server.cpp",
              ["shell/servers.js", "shell/shardingtest.js",
               "shell/servers_misc.js", "shell/replsettest.js", "shell/replsetbridge.js"])
 
-coreShellFiles = [ "shell/dbshell.cpp",
-                   "shell/shell_utils.cpp",
+coreShellFiles = [ "shell/shell_utils.cpp",
                    "shell/shell_utils_extended.cpp",
                    "shell/shell_utils_launcher.cpp",
                    "shell/mongo-server.cpp",
                    "shell/linenoise.cpp",
                    "shell/linenoise_utf8.cpp",
-                   "shell/mk_wcwidth.cpp"]
+                   "shell/mk_wcwidth.cpp",
+                   "shell/shell_options_init.cpp" ]
 
 if shellEnv is not None:
+    env.Library("shell_core", coreShellFiles,
+                LIBDEPS=['clientandshell',
+                         'db/index/external_key_generator',
+                         'index_key_validate',
+                         'scripting',
+                         'mongocommon'])
+    # mongo shell options
+    env.Library("shell_options", ["shell/shell_options.cpp"],
+                LIBDEPS=['$BUILD_DIR/mongo/util/options_parser/options_parser_init'])
+
     mongo_shell = shellEnv.Program(
         "mongo",
-        coreShellFiles,
-        LIBDEPS=[ "clientandshell", "mongocommon", "scripting", 
-                 "$BUILD_DIR/third_party/pcrecpp"] + env['MODULE_LIBDEPS_MONGOSHELL'] )
+        "shell/dbshell.cpp",
+        LIBDEPS=["$BUILD_DIR/third_party/shim_pcrecpp",
+                 "shell_options",
+                 "shell_core",
+                 ])
 
     shellEnv.Install( '#/', mongo_shell )
 
@@ -771,10 +1188,6 @@ def installBinary( e, name ):
         e.AddPostAction(name, 'strip $TARGET')
 
     distBinaries.append(name)
-
-    if not installSetup.binaries:
-        return
-
     inst = e.Install( "$INSTALL_DIR/bin", name )
 
     if nix:
@@ -822,20 +1235,21 @@ if not len(module_banner_filenames) == len(env['MODULE_BANNERS']):
 module_banner_dirs = set([Dir('#').rel_path(f.get_dir()) for f in env['MODULE_BANNERS']])
 module_banner_transforms = ["--transform %s=$SERVER_DIST_BASENAME" % d for d in module_banner_dirs]
 
+# Allow modules to map original file name directories to subdirectories 
+# within the archive (e.g. { "src/mongo/db/modules/enterprise/docs": "snmp"})
+archive_addition_transforms = []
+for full_dir, archive_dir in env["ARCHIVE_ADDITION_DIR_MAP"].items():
+  archive_addition_transforms.append("--transform \"%s=$SERVER_DIST_BASENAME/%s\"" %
+                                     (full_dir, archive_dir))
+
 env.Command(
     '#/${SERVER_ARCHIVE}',
-    ['#buildscripts/make_archive.py'] + env["MODULE_BANNERS"] + distBinaries,
-    ' '.join(['$PYTHON ${SOURCES[0]} -o $TARGET'] + module_banner_transforms + [
+    ['#buildscripts/make_archive.py'] + env["MODULE_BANNERS"] + env["ARCHIVE_ADDITIONS"] + 
+    distBinaries, ' '.join(['$PYTHON ${SOURCES[0]} -o $TARGET'] + archive_addition_transforms + 
+    module_banner_transforms + [
             '--transform ${str(Dir(BUILD_DIR))}/mongo/stripped=$SERVER_DIST_BASENAME/bin',
             '--transform ${str(Dir(BUILD_DIR))}/mongo=$SERVER_DIST_BASENAME/bin',
             '${TEMPFILE(SOURCES[1:])}']))
 
 #final alias
 env.Alias( "install", "$INSTALL_DIR" )
-
-env.Alias("clientBuild", ['#buildscripts/build_and_test_client.py',
-                          '#/${PROGPREFIX}mongod${PROGSUFFIX}',
-                          '#$CLIENT_ARCHIVE'],
-          '$PYTHON ${SOURCES[0]} ${SOURCES[2]} ${EXTRAPATH and "--extrapath"} $EXTRAPATH'
-          )
-env.AlwaysBuild("clientBuild")

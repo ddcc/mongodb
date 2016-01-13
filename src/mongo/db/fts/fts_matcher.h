@@ -14,6 +14,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #pragma once
@@ -40,7 +52,6 @@ namespace mongo {
              *         so all full phrases and no negated
              */
             bool phrasesMatch( const BSONObj& obj ) const;
-
             bool phraseMatch( const string& phrase, const BSONObj& obj ) const;
 
             bool matchesNonTerm( const BSONObj& obj ) const {
@@ -48,19 +59,18 @@ namespace mongo {
             }
 
         private:
-            bool _hasNegativeTerm_recurse(const BSONObj& obj ) const;
-
             /**
              * @return true if raw has a negated term
              */
-            bool _hasNegativeTerm_string( const string& raw ) const;
+            bool _hasNegativeTerm_string( const FTSLanguage* language, const string& raw ) const;
 
-            bool _phraseRecurse( const string& phrase, const BSONObj& obj ) const;
-            bool _phraseMatches( const string& phrase, const string& haystack ) const;
+            /**
+             * @return true if raw has a phrase
+             */
+            bool _phraseMatches( const string& phrase, const string& raw ) const;
 
             FTSQuery _query;
-            FTSSpec _spec;
-            Stemmer _stemmer;
+            FTSSpec  _spec;
         };
 
     }

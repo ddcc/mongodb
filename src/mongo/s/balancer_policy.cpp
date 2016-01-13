@@ -13,18 +13,81 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
-#include "pch.h"
-
-#include "mongo/s/balancer_policy.h"
-#include "mongo/s/config.h"
-#include "mongo/util/stringutils.h"
-#include "mongo/util/text.h"
+#include "mongo/pch.h"
 
 #include <algorithm>
 
+#include "mongo/s/balancer_policy.h"
+#include "mongo/s/chunk.h"
+#include "mongo/s/config.h"
+#include "mongo/s/type_shard.h"
+#include "mongo/s/type_tags.h"
+#include "mongo/util/log.h"
+#include "mongo/util/stringutils.h"
+#include "mongo/util/text.h"
+
+
 namespace mongo {
+
+    namespace {
+
+        Status extractShardInfo(const std::string& shardHost,
+                                std::string* version,
+                                bool* hasOpsQueued,
+                                long long* mappedMB) {
+            BSONObj serverStatus;
+
+            try {
+                ScopedDbConnection conn(shardHost);
+
+                bool ok = conn->runCommand("admin", BSON("serverStatus" << 1), serverStatus);
+                conn.done();
+
+                uassert(28598,
+                        str::stream() << "call to serverStatus on " << shardHost
+                                      << " failed: " << serverStatus,
+                        ok);
+            }
+            catch (const DBException& ex) {
+                return ex.toStatus();
+            }
+
+            BSONElement versionElement = serverStatus["version"];
+            if (versionElement.type() != String) {
+                return Status(ErrorCodes::UnsupportedFormat,
+                              "supports only string type for version field in serverStatus");
+            }
+
+            *version = serverStatus["version"].String();
+
+            *hasOpsQueued = serverStatus["writeBacksQueued"].booleanSafe();
+
+            BSONElement memMappedElement = serverStatus.getFieldDotted("mem.mapped");
+
+            if (!memMappedElement.isNumber()) {
+                return Status(ErrorCodes::UnsupportedFormat,
+                              "supports only numeric type for mem.mapped field in serverStatus");
+            }
+
+            *mappedMB = memMappedElement.numberLong();
+
+            return Status::OK();
+        }
+    }
 
     string TagRange::toString() const {
         return str::stream() << min << " -->> " << max << "  on  " << tag;
@@ -47,27 +110,37 @@ namespace mongo {
 
     unsigned DistributionStatus::totalChunks() const {
         unsigned total = 0;
-        for ( ShardToChunksMap::const_iterator i = _shardChunks.begin(); i != _shardChunks.end(); ++i )
-            total += i->second.size();
+
+        for (ShardToChunksMap::const_iterator i = _shardChunks.begin();
+                i != _shardChunks.end(); ++i) {
+            total += i->second->size();
+        }
+
         return total;
     }
 
     unsigned DistributionStatus::numberOfChunksInShard( const string& shard ) const {
-        ShardToChunksMap::const_iterator i = _shardChunks.find( shard );
-        if ( i == _shardChunks.end() )
+        ShardToChunksMap::const_iterator i = _shardChunks.find(shard);
+        if (i == _shardChunks.end()) {
             return 0;
-        return i->second.size();
+        }
+
+        return i->second->size();
     }
 
     unsigned DistributionStatus::numberOfChunksInShardWithTag( const string& shard , const string& tag ) const {
-        ShardToChunksMap::const_iterator i = _shardChunks.find( shard );
-        if ( i == _shardChunks.end() )
+        ShardToChunksMap::const_iterator i = _shardChunks.find(shard);
+        if (i == _shardChunks.end()) {
             return 0;
+        }
 
         unsigned total = 0;
-        for ( unsigned j=0; j<i->second.size(); j++ )
-            if ( tag == getTagForChunk( i->second[j] ) )
+        const vector<ChunkType*>& chunkList = i->second->vector();
+        for (unsigned j = 0; j < i->second->size(); j++) {
+            if (tag == getTagForChunk(*chunkList[j])) {
                 total++;
+            }
+        }
 
         return total;
     }
@@ -132,10 +205,12 @@ namespace mongo {
         return worst;
     }
 
-    const vector<BSONObj>& DistributionStatus::getChunks( const string& shard ) const {
+    const vector<ChunkType*>& DistributionStatus::getChunks(
+            const string& shard) const {
         ShardToChunksMap::const_iterator i = _shardChunks.find(shard);
-        verify( i != _shardChunks.end() );
-        return i->second;
+        verify(i != _shardChunks.end());
+
+        return i->second->vector();
     }
 
     bool DistributionStatus::addTagRange( const TagRange& range ) {
@@ -172,11 +247,11 @@ namespace mongo {
         return true;
     }
 
-    string DistributionStatus::getTagForChunk( const BSONObj& chunk ) const {
+    string DistributionStatus::getTagForChunk( const ChunkType& chunk ) const {
         if ( _tagRanges.size() == 0 )
             return "";
 
-        BSONObj min = chunk[ChunkType::min()].Obj();
+        const BSONObj min(chunk.getMin());
 
         map<BSONObj,TagRange>::const_iterator i = _tagRanges.upper_bound( min );
         if ( i == _tagRanges.end() )
@@ -194,11 +269,13 @@ namespace mongo {
         log() << "  shards" << endl;
         for ( ShardInfoMap::const_iterator i = _shardInfo.begin(); i != _shardInfo.end(); ++i ) {
             log() << "      " << i->first << "\t" << i->second.toString() << endl;
-            ShardToChunksMap::const_iterator j = _shardChunks.find( i->first );
-            verify( j != _shardChunks.end() );
-            const vector<BSONObj>& v = j->second;
+
+            ShardToChunksMap::const_iterator j = _shardChunks.find(i->first);
+            verify(j != _shardChunks.end());
+
+            const OwnedPointerVector<ChunkType>& v = *j->second;
             for ( unsigned x = 0; x < v.size(); x++ )
-                log() << "          " << v[x] << endl;
+                log() << "          " << *v[x] << endl;
         }
 
         if ( _tagRanges.size() > 0 ) {
@@ -211,13 +288,131 @@ namespace mongo {
         }
     }
 
-    bool BalancerPolicy::_isJumbo( const BSONObj& chunk ) {
-        if ( chunk[ChunkType::jumbo()].trueValue() ) {
-            LOG(1) << "chunk: " << chunk << "is marked as jumbo" << endl;
-            return true;
+    Status DistributionStatus::populateShardInfoMap(ShardInfoMap* shardInfo) {
+        try {
+            ScopedDbConnection conn(configServer.getPrimary().getConnString(), 30);
+
+            auto_ptr<DBClientCursor> cursor(conn->query(ShardType::ConfigNS , Query()));
+            uassert(28597, "Failed to load shard config", cursor.get() != NULL);
+
+            while (cursor->more()) {
+                ShardType shard;
+                std::string errMsg;
+                bool parseOk = shard.parseBSON(cursor->next(), &errMsg);
+
+                if (!parseOk) {
+                    return Status(ErrorCodes::UnsupportedFormat,
+                                  errMsg);
+                }
+
+                std::string mongoShardVersion;
+                bool hasWriteBacksQueued = false;
+                long long mMappedMB = 0;
+                Status shardStatus = extractShardInfo(shard.getHost(),
+                                                      &mongoShardVersion,
+                                                      &hasWriteBacksQueued,
+                                                      &mMappedMB);
+
+                if (!shardStatus.isOK()) {
+                    return shardStatus;
+                }
+
+                std::set<std::string> dummy;
+                ShardInfo newShardEntry(shard.getMaxSize(),
+                                        mMappedMB,
+                                        shard.getDraining(),
+                                        hasWriteBacksQueued,
+                                        dummy,
+                                        mongoShardVersion);
+
+                if (shard.isTagsSet()) {
+                    BSONArrayIteratorSorted tagIter(shard.getTags());
+                    while (tagIter.more()) {
+                        BSONElement tagElement = tagIter.next();
+                        if (tagElement.type() != String) {
+                            return Status(ErrorCodes::UnsupportedFormat,
+                                          str::stream() << "shard tags only supports strings, "
+                                              << "found " << typeName(tagElement.type()));
+                        }
+
+                        newShardEntry.addTag(tagElement.String());
+                    }
+                }
+
+                shardInfo->insert(make_pair(shard.getName(), newShardEntry));
+            }
+
+            conn.done();
         }
-        return false;
+        catch (const DBException& ex) {
+            return ex.toStatus();
+        }
+
+        return Status::OK();
     }
+
+    void DistributionStatus::populateShardToChunksMap(const ShardInfoMap& allShards,
+                                                      const ChunkManager& chunkMgr,
+                                                      ShardToChunksMap* shardToChunksMap) {
+        // Makes sure there is an entry in shardToChunksMap for every shard.
+        for (ShardInfoMap::const_iterator it = allShards.begin();
+                it != allShards.end(); ++it) {
+
+            OwnedPointerVector<ChunkType>*& chunkList =
+                    (*shardToChunksMap)[it->first];
+
+            if (chunkList == NULL) {
+                chunkList = new OwnedPointerVector<ChunkType>();
+            }
+        }
+
+        const ChunkMap& chunkMap = chunkMgr.getChunkMap();
+        for (ChunkMap::const_iterator it = chunkMap.begin(); it != chunkMap.end(); ++it) {
+            const ChunkPtr chunkPtr = it->second;
+
+            auto_ptr<ChunkType> chunk(new ChunkType());
+            chunk->setNS(chunkPtr->getns());
+            chunk->setMin(chunkPtr->getMin().getOwned());
+            chunk->setMax(chunkPtr->getMax().getOwned());
+            chunk->setJumbo(chunkPtr->isJumbo()); // TODO: is this reliable?
+            const string shardName(chunkPtr->getShard().getName());
+            chunk->setShard(shardName);
+
+            (*shardToChunksMap)[shardName]->push_back(chunk.release());
+        }
+    }
+
+    StatusWith<string> DistributionStatus::getTagForSingleChunk(const string& configServer,
+                                                                const string& ns,
+                                                                const ChunkType& chunk) {
+        BSONObj tagRangeDoc;
+
+        try {
+            ScopedDbConnection conn(configServer, 30);
+
+            Query query(QUERY(TagsType::ns(ns)
+                              << TagsType::min() << BSON("$lte" << chunk.getMin())
+                              << TagsType::max() << BSON("$gte" << chunk.getMax())));
+            tagRangeDoc = conn->findOne(TagsType::ConfigNS, query);
+            conn.done();
+        }
+        catch (const DBException& excep) {
+            return StatusWith<string>(excep.toStatus());
+        }
+
+        if (tagRangeDoc.isEmpty()) {
+            return StatusWith<string>("");
+        }
+
+        TagsType tagRange;
+        string errMsg;
+        if (!tagRange.parseBSON(tagRangeDoc, &errMsg)) {
+            return StatusWith<string>(ErrorCodes::FailedToParse, errMsg);
+        }
+
+        return StatusWith<string>(tagRange.getTag());
+    }
+
     MigrateInfo* BalancerPolicy::balance( const string& ns,
                                           const DistributionStatus& distribution,
                                           int balancedLastTime ) {
@@ -251,13 +446,13 @@ namespace mongo {
                     continue;
                 }
 
-                const vector<BSONObj>& chunks = distribution.getChunks( shard );
+                const vector<ChunkType* >& chunks = distribution.getChunks( shard );
                 unsigned numJumboChunks = 0;
 
                 // since we have to move all chunks, lets just do in order
                 for ( unsigned i=0; i<chunks.size(); i++ ) {
-                    BSONObj chunkToMove = chunks[i];
-                    if ( _isJumbo( chunkToMove ) ) {
+                    const ChunkType& chunkToMove = *chunks[i];
+                    if (chunkToMove.isJumboSet() && chunkToMove.getJumbo()) {
                         numJumboChunks++;
                         continue;
                     }
@@ -266,14 +461,19 @@ namespace mongo {
                     string to = distribution.getBestReceieverShard( tag );
 
                     if ( to.size() == 0 ) {
-                        warning() << "want to move chunk: " << chunkToMove << "(" << tag << ") "
-                                  << "from " << shard << " but can't find anywhere to put it" << endl;
+                        warning() << "want to move chunk: " << chunkToMove
+                                  << "(" << tag << ") "
+                                  << "from " << shard
+                                  << " but can't find anywhere to put it" << endl;
                         continue;
                     }
 
-                    log() << "going to move " << chunkToMove << " from " << shard << "(" << tag << ")" << " to " << to << endl;
+                    log() << "going to move " << chunkToMove
+                          << " from " << shard
+                          << "(" << tag << ")"
+                          << " to " << to << endl;
 
-                    return new MigrateInfo( ns, to, shard, chunkToMove.getOwned() );
+                    return new MigrateInfo(ns, to, shard, chunkToMove.toBSON());
                 }
 
                 warning() << "can't find any chunk to move from: " << shard
@@ -291,20 +491,21 @@ namespace mongo {
                 string shard = *i;
                 const ShardInfo& info = distribution.shardInfo( shard );
 
-                const vector<BSONObj>& chunks = distribution.getChunks( shard );
+                const vector<ChunkType *>& chunks = distribution.getChunks(shard);
                 for ( unsigned j = 0; j < chunks.size(); j++ ) {
-                    string tag = distribution.getTagForChunk( chunks[j] );
+                    const ChunkType& chunk = *chunks[j];
+                    string tag = distribution.getTagForChunk(chunk);
 
                     if ( info.hasTag( tag ) )
                         continue;
 
                     // uh oh, this chunk is in the wrong place
-                    log() << "chunk " << chunks[j]
+                    log() << "chunk " << chunk
                           << " is not on a shard with the right tag: "
                           << tag << endl;
 
-                    if ( _isJumbo( chunks[j] ) ) {
-                        warning() << "chunk " << chunks[j] << " is jumbo, so cannot be moved" << endl;
+                    if (chunk.isJumboSet() && chunk.getJumbo()) {
+                        warning() << "chunk " << chunk << " is jumbo, so cannot be moved" << endl;
                         continue;
                     }
 
@@ -315,7 +516,7 @@ namespace mongo {
                     }
                     verify( to != shard );
                     log() << " going to move to: " << to << endl;
-                    return new MigrateInfo( ns, to, shard, chunks[j].getOwned() );
+                    return new MigrateInfo(ns, to, shard, chunk.toBSON());
                 }
             }
         }
@@ -369,21 +570,22 @@ namespace mongo {
             if ( imbalance < threshold )
                 continue;
 
-            const vector<BSONObj>& chunks = distribution.getChunks( from );
+            const vector<ChunkType *>& chunks = distribution.getChunks(from);
             unsigned numJumboChunks = 0;
             for ( unsigned j = 0; j < chunks.size(); j++ ) {
-                if ( distribution.getTagForChunk( chunks[j] ) != tag )
+                const ChunkType& chunk = *chunks[j];
+                if (distribution.getTagForChunk(chunk) != tag)
                     continue;
 
-                if ( _isJumbo( chunks[j] ) ) {
+                if (chunk.isJumboSet() && chunk.getJumbo()) {
                     numJumboChunks++;
                     continue;
                 }
 
-                log() << " ns: " << ns << " going to move " << chunks[j]
+                log() << " ns: " << ns << " going to move " << chunk
                       << " from: " << from << " to: " << to << " tag [" << tag << "]"
                       << endl;
-                return new MigrateInfo( ns, to, from, chunks[j] );
+                return new MigrateInfo(ns, to, from, chunk.toBSON());
             }
 
             if ( numJumboChunks ) {

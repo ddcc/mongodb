@@ -14,14 +14,27 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
-#include "pch.h"
-#include "../db/mongommf.h"
-#include "../util/timer.h"
-#include "dbtests.h"
+#include "mongo/pch.h"
 
 #include <boost/filesystem/operations.hpp>
+
+#include "mongo/db/storage/durable_mapped_file.h"
+#include "mongo/util/timer.h"
+#include "mongo/dbtests/dbtests.h"
 
 namespace MMapTests {
 
@@ -30,12 +43,13 @@ namespace MMapTests {
         const int optOld;
     public:
         LeakTest() :
-            fn( (boost::filesystem::path(dbpath) / "testfile.map").string() ), optOld(cmdLine.durOptions)
+            fn((boost::filesystem::path(storageGlobalParams.dbpath) / "testfile.map").string()),
+               optOld(storageGlobalParams.durOptions)
         { 
-            cmdLine.durOptions = 0; // DurParanoid doesn't make sense with this test
+            storageGlobalParams.durOptions = 0; // DurParanoid doesn't make sense with this test
         }
         ~LeakTest() {
-            cmdLine.durOptions = optOld;
+            storageGlobalParams.durOptions = optOld;
             try { boost::filesystem::remove(fn); }
             catch(...) { }
         }
@@ -47,18 +61,18 @@ namespace MMapTests {
             Lock::GlobalWrite lk;
 
             {
-                MongoMMF f;
+                DurableMappedFile f;
                 unsigned long long len = 256 * 1024 * 1024;
                 verify( f.create(fn, len, /*sequential*/false) );
                 {
                     char *p = (char *) f.getView();
                     verify(p);
                     // write something to the private view as a test
-                    if( cmdLine.dur ) 
+                    if (storageGlobalParams.dur)
                         MemoryMappedFile::makeWritable(p, 6);
                     strcpy(p, "hello");
                 }
-                if( cmdLine.dur ) {
+                if (storageGlobalParams.dur) {
                     char *w = (char *) f.view_write();
                     strcpy(w + 6, "world");
                 }
@@ -80,16 +94,16 @@ namespace MMapTests {
             // we make a lot here -- if we were leaking, presumably it would fail doing this many.
             Timer t;
             for( int i = 0; i < N; i++ ) {
-                MongoMMF f;
+                DurableMappedFile f;
                 verify( f.open(fn, i%4==1) );
                 {
                     char *p = (char *) f.getView();
                     verify(p);
-                    if( cmdLine.dur ) 
+                    if (storageGlobalParams.dur)
                         MemoryMappedFile::makeWritable(p, 4);
                     strcpy(p, "zzz");
                 }
-                if( cmdLine.dur ) {
+                if (storageGlobalParams.dur) {
                     char *w = (char *) f.view_write();
                     if( i % 2 == 0 )
                         ++(*w);
@@ -97,7 +111,8 @@ namespace MMapTests {
                 }
             }
             if( t.millis() > 10000 ) {
-                log() << "warning: MMap LeakTest is unusually slow N:" << N << ' ' << t.millis() << "ms" << endl;
+                mongo::unittest::log() << "warning: MMap LeakTest is unusually slow N:" << N <<
+                    ' ' << t.millis() << "ms" << endl;
             }
 
         }

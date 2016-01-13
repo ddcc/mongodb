@@ -17,48 +17,59 @@
 
 #include <iostream>
 
-#include "mongo/base/init.h"
 #include "mongo/client/dbclient.h"
-#include "util/net/httpclient.h"
+#include "mongo/util/net/httpclient.h"
 
-using namespace mongo;
+#ifndef verify
+#  define verify(x) MONGO_verify(x)
+#endif
 
-void play( string url ) {
-    cout << "[" << url << "]" << endl;
+void play( std::string url ) {
+    using mongo::HttpClient;
+
+    std::cout << "[" << url << "]" << std::endl;
 
     HttpClient c;
     HttpClient::Result r;
-    MONGO_verify( c.get( url , &r ) == 200 );
+    verify( c.get( url , &r ) == 200 );
 
     HttpClient::Headers h = r.getHeaders();
-    MONGO_verify( h["Content-Type"].find( "text/html" ) == 0 );
+    verify( h["Content-Type"].find( "text/html" ) == 0 );
 
-    cout << "\tHeaders" << endl;
+    std::cout << "\tHeaders" << std::endl;
     for ( HttpClient::Headers::iterator i = h.begin() ; i != h.end(); ++i ) {
-        cout << "\t\t" << i->first << "\t" << i->second << endl;
+        std::cout << "\t\t" << i->first << "\t" << i->second << std::endl;
     }
-    
+
 }
 
 int main( int argc, const char **argv, char **envp) {
 
 #ifdef MONGO_SSL
-    cmdLine.sslOnNormalPorts = true;
-    runGlobalInitializersOrDie(argc, argv, envp);
+    mongo::sslGlobalParams.sslMode.store(mongo::SSLGlobalParams::SSLMode_requireSSL);
 #endif
+
+    mongo::Status status = mongo::client::initialize();
+    if (!status.isOK()) {
+        std::cout << "Failed to initialize mongodb client. " << status << std::endl;
+        return EXIT_FAILURE;
+    }
 
     int port = 27017;
     if ( argc != 1 ) {
-        if ( argc != 3 )
-            throw -12;
+        if ( argc != 3 ) {
+            std::cout << "need to pass port as second param" << std::endl;
+            return EXIT_FAILURE;
+        }
         port = atoi( argv[ 2 ] );
     }
     port += 1000;
 
-    play( str::stream() << "http://localhost:" << port << "/" );
-    
+    play( mongo::str::stream() << "http://localhost:" << port << "/" );
+
 #ifdef MONGO_SSL
-    play( "https://www.10gen.com/" );
+    play( "https://www.mongodb.com/" );
 #endif
-    
+
+    return EXIT_SUCCESS;
 }

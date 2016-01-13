@@ -12,6 +12,18 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 #include "mongo/s/cluster_client_internal.h"
@@ -20,7 +32,9 @@
 #include <vector>
 
 #include "mongo/client/connpool.h"
-#include "mongo/s/field_parser.h"
+#include "mongo/db/field_parser.h"
+#include "mongo/db/write_concern.h"
+#include "mongo/s/cluster_write.h"
 #include "mongo/s/type_changelog.h"
 #include "mongo/s/type_mongos.h"
 #include "mongo/s/type_shard.h"
@@ -42,7 +56,7 @@ namespace mongo {
         //
 
         try {
-            connPtr.reset(ScopedDbConnection::getInternalScopedDbConnection(configLoc, 30));
+            connPtr.reset(new ScopedDbConnection(configLoc, 30));
             ScopedDbConnection& conn = *connPtr;
             scoped_ptr<DBClientCursor> cursor(_safeCursor(conn->query(MongosType::ConfigNS,
                                                                       Query())));
@@ -85,10 +99,11 @@ namespace mongo {
                 else {
                     if (versionCmp(mongoVersion, minMongoVersion) < 0) {
                         return Status(ErrorCodes::RemoteValidationError,
-                                      stream() << "version " << mongoVersion << " of mongos at "
+                                      stream() << "version " << mongoVersion
+                                               << " detected on mongos at "
                                                << ping.getName()
-                                               << " is not compatible with the config update, "
-                                               << "you must wait 5 minutes "
+                                               << ", but version >= " << minMongoVersion
+                                               << " required; you must wait 5 minutes "
                                                << "after shutting down a pre-" << minMongoVersion
                                                << " mongos");
                     }
@@ -103,7 +118,7 @@ namespace mongo {
         // Load shards from config server
         //
 
-        vector<ConnectionString> shardLocs;
+        vector<HostAndPort> servers;
 
         try {
             ScopedDbConnection& conn = *connPtr;
@@ -131,7 +146,8 @@ namespace mongo {
                                            << " read from the config server" << causedBy(errMsg));
                 }
 
-                shardLocs.push_back(shardLoc);
+                vector<HostAndPort> shardServers = shardLoc.getServers();
+                servers.insert(servers.end(), shardServers.begin(), shardServers.end());
             }
         }
         catch (const DBException& e) {
@@ -140,65 +156,65 @@ namespace mongo {
 
         connPtr->done();
 
+        // Add config servers to list of servers to check version against
+        vector<HostAndPort> configServers = configLoc.getServers();
+        servers.insert(servers.end(), configServers.begin(), configServers.end());
+
         //
         // We've now got all the shard info from the config server, start contacting the shards
-        // and verifying their versions.
+        // and config servers and verifying their versions.
         //
 
-        for (vector<ConnectionString>::iterator it = shardLocs.begin(); it != shardLocs.end(); ++it)
+
+        for (vector<HostAndPort>::iterator serverIt = servers.begin();
+                serverIt != servers.end(); ++serverIt)
         {
-            ConnectionString& shardLoc = *it;
+            // Note: This will *always* be a single-host connection
+            ConnectionString serverLoc(*serverIt);
+            dassert(serverLoc.type() == ConnectionString::MASTER || 
+                    serverLoc.type() == ConnectionString::CUSTOM); // for dbtests
 
-            vector<HostAndPort> servers = shardLoc.getServers();
+            log() << "checking that version of host " << serverLoc << " is compatible with "
+                  << minMongoVersion << endl;
 
-            for (vector<HostAndPort>::iterator serverIt = servers.begin();
-                    serverIt != servers.end(); ++serverIt)
-            {
-                // Note: This will *always* be a single-host connection
-                ConnectionString serverLoc(*serverIt);
+            scoped_ptr<ScopedDbConnection> serverConnPtr;
 
-                log() << "checking that version of host " << serverLoc << " is compatible with " 
-                      << minMongoVersion << endl;
+            bool resultOk;
+            BSONObj buildInfo;
 
-                scoped_ptr<ScopedDbConnection> serverConnPtr;
+            try {
+                serverConnPtr.reset(new ScopedDbConnection(serverLoc, 30));
+                ScopedDbConnection& serverConn = *serverConnPtr;
 
-                bool resultOk;
-                BSONObj serverStatus;
+                resultOk = serverConn->runCommand("admin",
+                                                  BSON("buildInfo" << 1),
+                                                  buildInfo);
+            }
+            catch (const DBException& e) {
+                warning() << "could not run buildInfo command on " << serverLoc.toString() << " "
+                          << causedBy(e) << ". Please ensure that this server is up and at a "
+                                  "version >= "
+                          << minMongoVersion;
+                continue;
+            }
 
-                try {
-                    serverConnPtr.reset(ScopedDbConnection::getInternalScopedDbConnection(serverLoc,
-                                                                                          30));
-                    ScopedDbConnection& serverConn = *serverConnPtr;
+            // TODO: Make running commands saner such that we can consolidate error handling
+            if (!resultOk) {
+                return Status(ErrorCodes::UnknownError,
+                              stream() << DBClientConnection::getLastErrorString(buildInfo)
+                                       << causedBy(buildInfo.toString()));
+            }
 
-                    resultOk = serverConn->runCommand("admin",
-                                                      BSON("serverStatus" << 1),
-                                                      serverStatus);
-                }
-                catch (const DBException& e) {
-                    warning() << "could not run server status command on " << serverLoc.toString()
-                              << causedBy(e) << ", you must manually verify this mongo server is "
-                              << "offline (for at least 5 minutes) or of a version >= 2.2" << endl;
-                    continue;
-                }
+            serverConnPtr->done();
 
-                // TODO: Make running commands saner such that we can consolidate error handling
-                if (!resultOk) {
-                    return Status(ErrorCodes::UnknownError,
-                                  stream() << DBClientConnection::getLastErrorString(serverStatus)
-                                           << causedBy(serverStatus.toString()));
-                }
+            verify(buildInfo["version"].type() == String);
+            string mongoVersion = buildInfo["version"].String();
 
-                serverConnPtr->done();
-
-                verify(serverStatus["version"].type() == String);
-                string mongoVersion = serverStatus["version"].String();
-
-                if (versionCmp(mongoVersion, minMongoVersion) < 0) {
-                    return Status(ErrorCodes::RemoteValidationError,
-                                  stream() << "version " << mongoVersion << " of mongo server at "
-                                           << serverLoc.toString()
-                                           << " is not compatible with the config update");
-                }
+            if (versionCmp(mongoVersion, minMongoVersion) < 0) {
+                return Status(ErrorCodes::RemoteValidationError,
+                              stream() << "version " << mongoVersion << " detected on mongo "
+                              "server at " << serverLoc.toString() <<
+                              ", but version >= " << minMongoVersion << " required");
             }
         }
 
@@ -212,7 +228,7 @@ namespace mongo {
         scoped_ptr<ScopedDbConnection> connPtr;
 
         try {
-            connPtr.reset(ScopedDbConnection::getInternalScopedDbConnection(configLoc, 30));
+            connPtr.reset(new ScopedDbConnection(configLoc, 30));
 
             ScopedDbConnection& conn = *connPtr;
             scoped_ptr<DBClientCursor> cursor(_safeCursor(conn->query(CollectionType::ConfigNS,
@@ -225,7 +241,7 @@ namespace mongo {
                 // Replace with unique_ptr (also owned ptr map goes away)
                 auto_ptr<CollectionType> coll(new CollectionType());
                 string errMsg;
-                coll->parseBSON(collDoc, &errMsg);
+                bool parseOk = coll->parseBSON(collDoc, &errMsg);
 
                 // Needed for the v3 to v4 upgrade
                 bool epochNotSet = !coll->isEpochSet() || !coll->getEpoch().isSet();
@@ -234,7 +250,7 @@ namespace mongo {
                     coll->setEpoch(OID::gen());
                 }
 
-                if (errMsg != "" || !coll->isValid(&errMsg)) {
+                if (!parseOk || !coll->isValid(&errMsg)) {
                     return Status(ErrorCodes::UnsupportedFormat,
                                   stream() << "invalid collection " << collDoc
                                            << " read from the config server" << causedBy(errMsg));
@@ -281,7 +297,7 @@ namespace mongo {
         scoped_ptr<DBClientCursor> cursor;
 
         try {
-            connPtr.reset(ScopedDbConnection::getInternalScopedDbConnection(configLoc, 30));
+            connPtr.reset(new ScopedDbConnection(configLoc, 30));
             ScopedDbConnection& conn = *connPtr;
             scoped_ptr<DBClientCursor> cursor(_safeCursor(conn->query(ChunkType::ConfigNS,
                                                                       BSON(ChunkType::ns(ns)))));
@@ -340,7 +356,7 @@ namespace mongo {
         scoped_ptr<ScopedDbConnection> connPtr;
 
         try {
-            connPtr.reset(ScopedDbConnection::getInternalScopedDbConnection(configLoc, 30));
+            connPtr.reset(new ScopedDbConnection(configLoc, 30));
             ScopedDbConnection& conn = *connPtr;
 
             // TODO: better way here
@@ -358,9 +374,7 @@ namespace mongo {
 
                 createdCapped = true;
             }
-
-            conn->insert(ChangelogType::ConfigNS, changelog.toBSON());
-            _checkGLE(conn);
+            connPtr->done();
         }
         catch (const DBException& e) {
             // if we got here, it means the config change is only in the log,
@@ -369,8 +383,17 @@ namespace mongo {
             return e.toStatus();
         }
 
-        connPtr->done();
-        return Status::OK();
+        Status result = clusterInsert( ChangelogType::ConfigNS,
+                                       changelog.toBSON(),
+                                       WriteConcernOptions::AllConfigs,
+                                       NULL );
+
+        if ( !result.isOK() ) {
+            return Status( result.code(), str::stream() << "failed to write to changelog: "
+                                                        << result.reason() );
+        }
+
+        return result;
     }
 
     // Helper function for safe writes to non-SCC config servers

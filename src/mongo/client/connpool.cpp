@@ -18,11 +18,12 @@
 
 // _ todo: reconnect?
 
-#include "pch.h"
-#include "connpool.h"
-#include "syncclusterconnection.h"
-#include "../s/shard.h"
-#include "mongo/client/dbclient_rs.h"
+#include "mongo/pch.h"
+
+#include "mongo/client/connpool.h"
+#include "mongo/client/replica_set_monitor.h"
+#include "mongo/client/syncclusterconnection.h"
+#include "mongo/s/shard.h"
 
 namespace mongo {
 
@@ -40,18 +41,23 @@ namespace mongo {
         }
     }
 
-    void PoolForHost::done( DBConnectionPool * pool, DBClientBase * c ) {
-        if (c->isFailed()) {
-            reportBadConnectionAt(c->getSockCreationMicroSec());
-            pool->onDestroy(c);
-            delete c;
-        }
-        else if (_pool.size() >= _maxPerHost ||
-                c->getSockCreationMicroSec() < _minValidCreationTimeMicroSec) {
+    void PoolForHost::done(DBConnectionPool* pool, DBClientBase* c) {
+
+        bool isFailed = c->isFailed();
+
+        // Remember that this host had a broken connection for later
+        if (isFailed) reportBadConnectionAt(c->getSockCreationMicroSec());
+
+        if (isFailed ||
+            // Another (later) connection was reported as broken to this host
+            (c->getSockCreationMicroSec() < _minValidCreationTimeMicroSec) ||
+            // We have a pool size that we need to enforce
+            (_maxPoolSize >= 0 && static_cast<int>(_pool.size()) >= _maxPoolSize)) {
             pool->onDestroy(c);
             delete c;
         }
         else {
+            // The connection is probably fine, save for later
             _pool.push(c);
         }
     }
@@ -61,7 +67,8 @@ namespace mongo {
                 microSec > _minValidCreationTimeMicroSec) {
             _minValidCreationTimeMicroSec = microSec;
             log() << "Detected bad connection created at " << _minValidCreationTimeMicroSec
-                    << " microSec, clearing pool for " << _hostName << endl;
+                    << " microSec, clearing pool for " << _hostName
+                    << " of " << _pool.size() << " connections" << endl;
             clear();
         }
     }
@@ -95,30 +102,10 @@ namespace mongo {
     }
 
     void PoolForHost::flush() {
-        vector<StoredConnection> all;
-        while ( ! _pool.empty() ) {
+        while (!_pool.empty()) {
             StoredConnection c = _pool.top();
             _pool.pop();
-            bool res;
-            bool alive = false;
-            try {
-                c.conn->isMaster( res );
-                alive = true;
-            } catch ( const DBException e ) {
-                // There's something wrong with this connection, swallow the exception and do not
-                // put the connection back in the pool.
-                LOG(1) << "Exception thrown when checking pooled connection to " <<
-                    c.conn->getServerAddress() << ": " << causedBy(e) << endl;
-                delete c.conn;
-                c.conn = NULL;
-            }
-            if ( alive ) {
-                all.push_back( c );
-            }
-        }
-
-        for ( vector<StoredConnection>::iterator i=all.begin(); i != all.end(); ++i ) {
-            _pool.push( *i );
+            delete c.conn;
         }
     }
 
@@ -148,8 +135,8 @@ namespace mongo {
     }
 
     bool PoolForHost::StoredConnection::ok( time_t now ) {
-        // if connection has been idle for 30 minutes, kill it
-        return ( now - when ) < 1800;
+        // Poke the connection to see if we're still ok
+        return conn->isStillConnected();
     }
 
     void PoolForHost::createdOne( DBClientBase * base) {
@@ -164,22 +151,25 @@ namespace mongo {
         }
     }
 
-    unsigned PoolForHost::_maxPerHost = 50;
-
     // ------ DBConnectionPool ------
 
     DBConnectionPool pool;
 
-    DBConnectionPool::DBConnectionPool() 
+    const int PoolForHost::kPoolSizeUnlimited(-1);
+
+    DBConnectionPool::DBConnectionPool()
         : _mutex("DBConnectionPool") , 
           _name( "dbconnectionpool" ) , 
-          _hooks( new list<DBConnectionHook*>() ) { 
+          _maxPoolSize(PoolForHost::kPoolSizeUnlimited) ,
+          _hooks( new list<DBConnectionHook*>() ) {
     }
 
     DBClientBase* DBConnectionPool::_get(const string& ident , double socketTimeout ) {
-        verify( ! inShutdown() );
+        uassert(17382, "Can't use connection pool during shutdown",
+                !inShutdown());
         scoped_lock L(_mutex);
         PoolForHost& p = _pools[PoolKey(ident,socketTimeout)];
+        p.setMaxPoolSize(_maxPoolSize);
         p.initializeHostName(ident);
         return p.get( this , socketTimeout );
     }
@@ -188,6 +178,7 @@ namespace mongo {
         {
             scoped_lock L(_mutex);
             PoolForHost& p = _pools[PoolKey(host,socketTimeout)];
+            p.setMaxPoolSize(_maxPoolSize);
             p.initializeHostName(host);
             p.createdOne( conn );
         }
@@ -323,8 +314,6 @@ namespace mongo {
 
 
         map<ConnectionString::ConnectionType,long long> createdByType;
-
-        set<string> replicaSets;
         
         BSONObjBuilder bb( b.subobjStart( "hosts" ) );
         {
@@ -350,7 +339,7 @@ namespace mongo {
         bb.done();
         
         // Always report all replica sets being tracked
-        ReplicaSetMonitor::getAllTrackedSets(&replicaSets);
+        set<string> replicaSets = ReplicaSetMonitor::getAllTrackedSets();
         
         BSONObjBuilder setBuilder( b.subobjStart( "replicaSets" ) );
         for ( set<string>::iterator i=replicaSets.begin(); i!=replicaSets.end(); ++i ) {

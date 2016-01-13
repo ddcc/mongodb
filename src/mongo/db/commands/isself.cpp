@@ -14,24 +14,38 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
+#include <boost/algorithm/string.hpp>
 #include <string>
 #include <vector>
 
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/auth/security_key.h"
+#include "mongo/db/commands.h"
 #include "mongo/db/jsobj.h"
-#include "../../util/net/listen.h"
-#include "../commands.h"
+#include "mongo/db/server_options.h"
+#include "mongo/util/net/listen.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/client/dbclientinterface.h"
-
-#include <boost/algorithm/string.hpp>
 
 #ifndef _WIN32
 # ifndef __sunos__
@@ -64,8 +78,8 @@ namespace mongo {
         vector<string> out;
         ifaddrs * addrs;
         
-        if ( ! cmdLine.bind_ip.empty() ) {
-            boost::split( out, cmdLine.bind_ip, boost::is_any_of( ", " ) );
+        if (!serverGlobalParams.bind_ip.empty()) {
+            boost::split(out, serverGlobalParams.bind_ip, boost::is_any_of(", "));
             return out;
         }
 
@@ -96,12 +110,15 @@ namespace mongo {
         freeifaddrs( addrs );
         addrs = NULL;
 
-        if (logLevel >= 1) {
-            LOG(1) << "getMyAddrs():";
+        if (logger::globalLogDomain()->shouldLog(logger::LogSeverity::Debug(1))) {
+            LogstreamBuilder builder(logger::globalLogDomain(),
+                                     getThreadName(),
+                                     logger::LogSeverity::Debug(1));
+            builder << "getMyAddrs():";
             for (vector<string>::const_iterator it=out.begin(), end=out.end(); it!=end; ++it) {
-                LOG(1) << " [" << *it << ']';
+                builder << " [" << *it << ']';
             }
-            LOG(1) << endl;
+            builder << endl;
         }
 
         return out;
@@ -114,7 +131,7 @@ namespace mongo {
         hints.ai_socktype = SOCK_STREAM;
         hints.ai_family = (IPv6Enabled() ? AF_UNSPEC : AF_INET);
 
-        static string portNum = BSONObjBuilder::numStr(cmdLine.port);
+        static string portNum = BSONObjBuilder::numStr(serverGlobalParams.port);
 
         vector<string> out;
 
@@ -140,12 +157,15 @@ namespace mongo {
 
         freeaddrinfo(addrs);
 
-        if (logLevel >= 1) {
-            LOG(1) << "getallIPs(\"" << iporhost << "\"):";
+        if (logger::globalLogDomain()->shouldLog(logger::LogSeverity::Debug(1))) {
+            LogstreamBuilder builder(logger::globalLogDomain(),
+                                     getThreadName(),
+                                     logger::LogSeverity::Debug(1));
+            builder << "getallIPs(\"" << iporhost << "\"):";
             for (vector<string>::const_iterator it=out.begin(), end=out.end(); it!=end; ++it) {
-                LOG(1) << " [" << *it << ']';
+                builder << " [" << *it << ']';
             }
-            LOG(1) << endl;
+            builder << endl;
         }
 
         return out;
@@ -185,12 +205,7 @@ namespace mongo {
     bool HostAndPort::isSelf() const {
 
         int _p = port();
-        int p = _p == -1 ? CmdLine::DefaultDBPort : _p;
-
-        if( p != cmdLine.port ) {
-            // shortcut - ports have to match at the very least
-            return false;
-        }
+        int p = _p == -1 ? ServerGlobalParams::DefaultDBPort : _p;
 
         string host = str::stream() << this->host() << ":" << p;
 
@@ -206,22 +221,27 @@ namespace mongo {
 #if !defined(_WIN32) && !defined(__sunos__)
         // on linux and os x we can do a quick check for an ip match
 
-        const vector<string> myaddrs = getMyAddrs();
-        const vector<string> addrs = getAllIPs(_host);
+        // no need for ip match if the ports do not match
+        if (p == serverGlobalParams.port) {
+            const vector<string> myaddrs = getMyAddrs();
+            const vector<string> addrs = getAllIPs(_host);
 
-        for (vector<string>::const_iterator i=myaddrs.begin(), iend=myaddrs.end(); i!=iend; ++i) {
-            for (vector<string>::const_iterator j=addrs.begin(), jend=addrs.end(); j!=jend; ++j) {
-                string a = *i;
-                string b = *j;
+            for (vector<string>::const_iterator i=myaddrs.begin(), iend=myaddrs.end();
+                 i!=iend; ++i) {
+                for (vector<string>::const_iterator j=addrs.begin(), jend=addrs.end();
+                     j!=jend; ++j) {
+                    string a = *i;
+                    string b = *j;
 
-                if ( a == b ||
-                        ( str::startsWith( a , "127." ) && str::startsWith( b , "127." ) )  // 127. is all loopback
-                   ) {
+                    if ( a == b || ( str::startsWith( a , "127." ) &&
+                                     str::startsWith( b , "127." ) )  // 127. is all loopback
+                       ) {
 
-                    // add to cache
-                    scoped_lock lk( isSelfCommand._cacheLock );
-                    isSelfCommand._cache[host] = true;
-                    return true;
+                        // add to cache
+                        scoped_lock lk( isSelfCommand._cacheLock );
+                        isSelfCommand._cache[host] = true;
+                        return true;
+                    }
                 }
             }
         }
@@ -243,8 +263,8 @@ namespace mongo {
                 return false;
             }
 
-            if (!noauth && !cmdLine.keyFile.empty() ) {
-                if (!conn.auth("local", internalSecurity.user, internalSecurity.pwd, errmsg, false)) {
+            if (getGlobalAuthorizationManager()->isAuthEnabled() && isInternalAuthSet()) {
+                if (!authenticateInternalUser(&conn)) {
                     return false;
                 }
             }

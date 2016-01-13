@@ -208,7 +208,7 @@ dodouble:
     inline NOINLINE_DECL void BSONObj::_assertInvalid() const {
         StringBuilder ss;
         int os = objsize();
-        ss << "BSONObj size: " << os << " (0x" << toHex( &os, 4 ) << ") is invalid. "
+        ss << "BSONObj size: " << os << " (0x" << integerToHex( os ) << ") is invalid. "
            << "Size must be between 0 and " << BSONObjMaxInternalSize
            << "(" << ( BSONObjMaxInternalSize/(1024*1024) ) << "MB)";
         try {
@@ -272,29 +272,27 @@ dodouble:
         return BSONElement();
     }
 
-    inline int BSONObj::getIntField(const char *name) const {
+    inline int BSONObj::getIntField(const StringData& name) const {
         BSONElement e = getField(name);
         return e.isNumber() ? (int) e.number() : std::numeric_limits< int >::min();
     }
 
-    inline bool BSONObj::getBoolField(const char *name) const {
+    inline bool BSONObj::getBoolField(const StringData& name) const {
         BSONElement e = getField(name);
         return e.type() == Bool ? e.boolean() : false;
     }
 
-    inline const char * BSONObj::getStringField(const char *name) const {
+    inline const char * BSONObj::getStringField(const StringData& name) const {
         BSONElement e = getField(name);
         return e.type() == String ? e.valuestr() : "";
     }
 
     /* add all the fields from the object specified to this object */
     inline BSONObjBuilder& BSONObjBuilder::appendElements(BSONObj x) {
-        BSONObjIterator it(x);
-        while ( it.moreWithEOO() ) {
-            BSONElement e = it.next();
-            if ( e.eoo() ) break;
-            append(e);
-        }
+        if (!x.isEmpty())
+            _b.appendBuf(
+                x.objdata() + 4,   // skip over leading length
+                x.objsize() - 5);  // ignore leading length and trailing \0
         return *this;
     }
 
@@ -369,8 +367,8 @@ dodouble:
         if ( haveSubobj() ) {
             verify( _fieldName.rawData() );
             _builder->append( _fieldName, subobj()->done() );
+            _subobj.reset();
         }
-        _subobj.reset();
         _fieldName = nextFieldName;
     }
 
@@ -454,14 +452,14 @@ dodouble:
     }
 
     inline std::string BSONObj::toString( bool isArray, bool full ) const {
-        if ( isEmpty() ) return "{}";
+        if ( isEmpty() ) return (isArray ? "[]" : "{}");
         StringBuilder s;
         toString(s, isArray, full);
         return s.str();
     }
     inline void BSONObj::toString( StringBuilder& s,  bool isArray, bool full, int depth ) const {
         if ( isEmpty() ) {
-            s << "{}";
+            s << (isArray ? "[]" : "{}");
             return;
         }
 
@@ -476,7 +474,6 @@ dodouble:
             int offset = (int) (e.rawdata() - this->objdata());
             massert( 10330 ,  "Element extends past end of object",
                      e.size() + offset <= this->objsize() );
-            e.validate();
             bool end = ( e.size() + offset == this->objsize() );
             if ( e.eoo() ) {
                 massert( 10331 ,  "EOO Before end of object", end );
@@ -489,45 +486,6 @@ dodouble:
             e.toString( s, !isArray, full, depth );
         }
         s << ( isArray ? " ]" : " }" );
-    }
-
-    inline void BSONElement::validate() const {
-        const BSONType t = type();
-
-        switch( t ) {
-        case DBRef:
-        case Code:
-        case Symbol:
-        case mongo::String: {
-            unsigned x = (unsigned) valuestrsize();
-            bool lenOk = x > 0 && x < (unsigned) BSONObjMaxInternalSize;
-            if( lenOk && valuestr()[x-1] == 0 )
-                return;
-            StringBuilder buf;
-            buf <<  "Invalid dbref/code/string/symbol size: " << x;
-            if( lenOk )
-                buf << " strnlen:" << mongo::strnlen( valuestr() , x );
-            msgasserted( 10321 , buf.str() );
-            break;
-        }
-        case CodeWScope: {
-            int totalSize = *( int * )( value() );
-            massert( 10322 ,  "Invalid CodeWScope size", totalSize >= 8 );
-            int strSizeWNull = *( int * )( value() + 4 );
-            massert( 10323 ,  "Invalid CodeWScope string size", totalSize >= strSizeWNull + 4 + 4 );
-            massert( 10324 ,  "Invalid CodeWScope string size",
-                     strSizeWNull > 0 &&
-                     (strSizeWNull - 1) == mongo::strnlen( codeWScopeCode(), strSizeWNull ) );
-            massert( 10325 ,  "Invalid CodeWScope size", totalSize >= strSizeWNull + 4 + 4 + 4 );
-            int objSize = *( int * )( value() + 4 + 4 + strSizeWNull );
-            massert( 10326 ,  "Invalid CodeWScope object size", totalSize == 4 + 4 + strSizeWNull + objSize );
-            // Subobject validation handled elsewhere.
-        }
-        case Object:
-            // We expect Object size validation to be handled elsewhere.
-        default:
-            break;
-        }
     }
 
     inline int BSONElement::size( int maxLen ) const {
@@ -779,11 +737,16 @@ dodouble:
             s << __oid() << "')";
             break;
         case BinData:
-            s << "BinData";
-            if (full) {
+            s << "BinData(" << binDataType() << ", ";
+            {
                 int len;
-                const char* data = binDataClean(len);
-                s << '(' << binDataType() << ", " << toHex(data, len) << ')';
+                const char *data = binDataClean(len);
+                if ( !full && len > 80 ) {
+                    s << toHex(data, 70) << "...)";
+                }
+                else {
+                    s << toHex(data, len) << ")";
+                }
             }
             break;
         case Timestamp:
@@ -798,21 +761,22 @@ dodouble:
     /* return has eoo() true if no match
        supports "." notation to reach into embedded objects
     */
-    inline BSONElement BSONObj::getFieldDotted(const char *name) const {
-        BSONElement e = getField( name );
-        if ( e.eoo() ) {
-            const char *p = strchr(name, '.');
-            if ( p ) {
-                std::string left(name, p-name);
-                BSONObj sub = getObjectField(left.c_str());
-                return sub.isEmpty() ? BSONElement() : sub.getFieldDotted(p+1);
+    inline BSONElement BSONObj::getFieldDotted(const StringData& name) const {
+        BSONElement e = getField(name);
+        if (e.eoo()) {
+            size_t dot_offset = name.find('.');
+            if (dot_offset != string::npos) {
+                StringData left = name.substr(0, dot_offset);
+                StringData right = name.substr(dot_offset + 1);
+                BSONObj sub = getObjectField(left);
+                return sub.isEmpty() ? BSONElement() : sub.getFieldDotted(right);
             }
         }
 
         return e;
     }
 
-    inline BSONObj BSONObj::getObjectField(const char *name) const {
+    inline BSONObj BSONObj::getObjectField(const StringData& name) const {
         BSONElement e = getField(name);
         BSONType t = e.type();
         return t == Object || t == Array ? e.embeddedObject() : BSONObj();
@@ -1036,6 +1000,13 @@ dodouble:
         if ( !isNumber() )
             return false;
         *out = numberInt();
+        return true;
+    }
+
+    template<> inline bool BSONElement::coerce<long long>( long long* out ) const {
+        if ( !isNumber() )
+            return false;
+        *out = numberLong();
         return true;
     }
 

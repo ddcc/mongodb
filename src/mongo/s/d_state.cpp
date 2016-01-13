@@ -14,6 +14,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
 
@@ -22,23 +34,29 @@
    mostly around shard management and checking
  */
 
-#include "pch.h"
+#include "mongo/pch.h"
+
 #include <map>
 #include <string>
 #include <vector>
 
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/db.h"
-#include "mongo/db/replutil.h"
+#include "mongo/db/wire_version.h"
+#include "mongo/db/repl/is_master.h"
 #include "mongo/client/connpool.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/config.h"
 #include "mongo/s/d_logic.h"
+#include "mongo/s/metadata_loader.h"
 #include "mongo/s/shard.h"
+#include "mongo/s/stale_exception.h"
 #include "mongo/util/queue.h"
 #include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/concurrency/ticketholder.h"
@@ -55,6 +73,8 @@ namespace mongo {
     }
 
     void ShardingState::enable( const string& server ) {
+        scoped_lock lk(_mutex);
+
         _enabled = true;
         verify( server.size() );
         if ( _configServer.size() == 0 )
@@ -70,45 +90,57 @@ namespace mongo {
         configServer.init(server);
     }
 
-    void ShardingState::gotShardName( const string& name ) {
+    // TODO: Consolidate and eliminate these various ways of setting / validating shard names
+    bool ShardingState::setShardName( const string& name ) {
+        return setShardNameAndHost( name, "" );
+    }
+
+    bool ShardingState::setShardNameAndHost( const string& name, const string& host ) {
         scoped_lock lk(_mutex);
         if ( _shardName.size() == 0 ) {
-            // TODO SERVER-2299 verify the name is sound w.r.t IPs
+            // TODO SERVER-2299 remotely verify the name is sound w.r.t IPs
             _shardName = name;
-            return;
+
+            string clientAddr = cc().clientAddress(true);
+
+            log() << "remote client " << clientAddr << " initialized this host "
+                  << ( host.empty() ? string( "" ) : string( "(" ) + host + ") " )
+                  << "as shard " << name;
+
+            return true;
         }
 
         if ( _shardName == name )
-            return;
+            return true;
 
-        stringstream ss;
-        ss << "gotShardName different than what i had before "
-           << " before [" << _shardName << "] "
-           << " got [" << name << "] "
-           ;
-        msgasserted( 13298 , ss.str() );
+        string clientAddr = cc().clientAddress(true);
+
+        warning() << "remote client " << clientAddr << " tried to initialize this host "
+                  << ( host.empty() ? string( "" ) : string( "(" ) + host + ") " )
+                  << "as shard " << name
+                  << ", but shard name was previously initialized as " << _shardName;
+
+        return false;
     }
 
-    void ShardingState::gotShardHost( string host ) {
-        scoped_lock lk(_mutex);
-        size_t slash = host.find( '/' );
-        if ( slash != string::npos )
-            host = host.substr( 0 , slash );
+    void ShardingState::gotShardName( const string& name ) {
+        gotShardNameAndHost( name, "" );
+    }
 
-        if ( _shardHost.size() == 0 ) {
-            _shardHost = host;
-            return;
-        }
-
-        if ( _shardHost == host )
+    void ShardingState::gotShardNameAndHost( const string& name, const string& host ) {
+        if ( setShardNameAndHost( name, host ) )
             return;
 
+        string clientAddr = cc().clientAddress(true);
         stringstream ss;
-        ss << "gotShardHost different than what i had before "
-           << " before [" << _shardHost << "] "
-           << " got [" << host << "] "
-           ;
-        msgasserted( 13299 , ss.str() );
+
+        // Same error as above, to match for reporting
+        ss << "remote client " << clientAddr << " tried to initialize this host "
+           << ( host.empty() ? string( "" ) : string( "(" ) + host + ") " )
+           << "as shard " << name
+           << ", but shard name was previously initialized as " << _shardName;
+
+        msgasserted( 13298 , ss.str() );
     }
 
     void ShardingState::resetShardingState() {
@@ -117,181 +149,563 @@ namespace mongo {
         _enabled = false;
         _configServer.clear();
         _shardName.clear();
-        _shardHost.clear();
-        _chunks.clear();
+        _collMetadata.clear();
     }
 
     // TODO we shouldn't need three ways for checking the version. Fix this.
     bool ShardingState::hasVersion( const string& ns ) {
         scoped_lock lk(_mutex);
 
-        ChunkManagersMap::const_iterator it = _chunks.find(ns);
-        return it != _chunks.end();
+        CollectionMetadataMap::const_iterator it = _collMetadata.find(ns);
+        return it != _collMetadata.end();
     }
 
-    bool ShardingState::hasVersion( const string& ns , ConfigVersion& version ) {
+    bool ShardingState::hasVersion( const string& ns , ChunkVersion& version ) {
         scoped_lock lk(_mutex);
 
-        ChunkManagersMap::const_iterator it = _chunks.find(ns);
-        if ( it == _chunks.end() )
+        CollectionMetadataMap::const_iterator it = _collMetadata.find(ns);
+        if ( it == _collMetadata.end() )
             return false;
 
-        ShardChunkManagerPtr p = it->second;
-        version = p->getVersion();
+        CollectionMetadataPtr p = it->second;
+        version = p->getShardVersion();
         return true;
     }
 
-    const ConfigVersion ShardingState::getVersion( const string& ns ) const {
+    const ChunkVersion ShardingState::getVersion( const string& ns ) const {
         scoped_lock lk(_mutex);
 
-        ChunkManagersMap::const_iterator it = _chunks.find( ns );
-        if ( it != _chunks.end() ) {
-            ShardChunkManagerPtr p = it->second;
-            return p->getVersion();
+        CollectionMetadataMap::const_iterator it = _collMetadata.find( ns );
+        if ( it != _collMetadata.end() ) {
+            CollectionMetadataPtr p = it->second;
+            return p->getShardVersion();
         }
         else {
-            return ConfigVersion( 0, OID() );
+            return ChunkVersion( 0, OID() );
         }
     }
 
     void ShardingState::donateChunk( const string& ns , const BSONObj& min , const BSONObj& max , ChunkVersion version ) {
+        
+        Lock::assertWriteLocked( ns );
         scoped_lock lk( _mutex );
 
-        ChunkManagersMap::const_iterator it = _chunks.find( ns );
-        verify( it != _chunks.end() ) ;
-        ShardChunkManagerPtr p = it->second;
+        CollectionMetadataMap::const_iterator it = _collMetadata.find( ns );
+        verify( it != _collMetadata.end() ) ;
+        CollectionMetadataPtr p = it->second;
 
         // empty shards should have version 0
-        version = ( p->getNumChunks() > 1 ) ? version : ChunkVersion( 0 , OID() );
+        version =
+                ( p->getNumChunks() > 1 ) ?
+                        version : ChunkVersion( 0, 0, p->getCollVersion().epoch() );
 
-        ShardChunkManagerPtr cloned( p->cloneMinus( min , max , version ) );
-        // TODO: a bit dangerous to have two different zero-version states - no-manager and
+        ChunkType chunk;
+        chunk.setMin( min );
+        chunk.setMax( max );
+        string errMsg;
+
+        CollectionMetadataPtr cloned( p->cloneMigrate( chunk, version, &errMsg ) );
+        // uassert to match old behavior, TODO: report errors w/o throwing
+        uassert( 16855, errMsg, NULL != cloned.get() );
+
+        // TODO: a bit dangerous to have two different zero-version states - no-metadata and
         // no-version
-        _chunks[ns] = cloned;
+        _collMetadata[ns] = cloned;
     }
 
-    void ShardingState::undoDonateChunk( const string& ns , const BSONObj& min , const BSONObj& max , ChunkVersion version ) {
+    void ShardingState::undoDonateChunk( const string& ns, CollectionMetadataPtr prevMetadata ) {
+        
+        Lock::assertWriteLocked( ns );        
         scoped_lock lk( _mutex );
+        
         log() << "ShardingState::undoDonateChunk acquired _mutex" << endl;
 
-        ChunkManagersMap::const_iterator it = _chunks.find( ns );
-        verify( it != _chunks.end() ) ;
-        ShardChunkManagerPtr p( it->second->clonePlus( min , max , version ) );
-        _chunks[ns] = p;
+        CollectionMetadataMap::iterator it = _collMetadata.find( ns );
+        verify( it != _collMetadata.end() );
+        it->second = prevMetadata;
     }
 
-    void ShardingState::splitChunk( const string& ns , const BSONObj& min , const BSONObj& max , const vector<BSONObj>& splitKeys ,
-                                    ChunkVersion version ) {
+    bool ShardingState::notePending( const string& ns,
+                                     const BSONObj& min,
+                                     const BSONObj& max,
+                                     const OID& epoch,
+                                     string* errMsg ) {
+        
+        Lock::assertWriteLocked( ns );
         scoped_lock lk( _mutex );
 
-        ChunkManagersMap::const_iterator it = _chunks.find( ns );
-        verify( it != _chunks.end() ) ;
-        ShardChunkManagerPtr p( it->second->cloneSplit( min , max , splitKeys , version ) );
-        _chunks[ns] = p;
-    }
+        CollectionMetadataMap::const_iterator it = _collMetadata.find( ns );
+        if ( it == _collMetadata.end() ) {
 
-    void ShardingState::resetVersion( const string& ns ) {
-        scoped_lock lk( _mutex );
+            *errMsg = str::stream() << "could not note chunk " << "[" << min << "," << max << ")"
+                                    << " as pending because the local metadata for " << ns
+                                    << " has changed";
 
-        _chunks.erase( ns );
-    }
-
-    bool ShardingState::trySetVersion( const string& ns , ConfigVersion& version /* IN-OUT */ ) {
-
-        // Currently this function is called after a getVersion(), which is the first "check", and the assumption here
-        // is that we don't do anything nearly as long as a remote query in a thread between then and now.
-        // Otherwise it may be worth adding an additional check without the _configServerMutex below, since then it
-        // would be likely that the version may have changed in the meantime without waiting for or fetching config results.
-
-        // TODO:  Mutex-per-namespace?
-        
-        LOG( 2 ) << "trying to set shard version of " << version.toString() << " for '" << ns << "'" << endl;
-        
-        _configServerTickets.waitForTicket();
-        TicketHolderReleaser needTicketFrom( &_configServerTickets );
-
-        // fast path - double-check if requested version is at the same version as this chunk manager before verifying
-        // against config server
-        //
-        // This path will short-circuit the version set if another thread already managed to update the version in the
-        // meantime.  First check is from getVersion().
-        //
-        // cases:
-        //   + this shard updated the version for a migrate's commit (FROM side)
-        //     a client reloaded chunk state from config and picked the newest version
-        //   + two clients reloaded
-        //     one triggered the 'slow path' (below)
-        //     when the second's request gets here, the version is already current
-        ConfigVersion storedVersion;
-        ShardChunkManagerPtr currManager;
-        {
-            scoped_lock lk( _mutex );
-            ChunkManagersMap::const_iterator it = _chunks.find( ns );
-            if( it == _chunks.end() ){
-
-                // TODO: We need better semantic distinction between *no manager found* and
-                // *manager of version zero found*
-                log() << "no current chunk manager found for this shard, will initialize" << endl;
-            }
-            else{
-                currManager = it->second;
-                if( ( storedVersion = it->second->getVersion() ).isEquivalentTo( version ) )
-                    return true;
-            }
-        }
-        
-        LOG( 2 ) << "verifying cached version " << storedVersion.toString() << " and new version " << version.toString() << " for '" << ns << "'" << endl;
-
-        // slow path - requested version is different than the current chunk manager's, if one exists, so must check for
-        // newest version in the config server
-        //
-        // cases:
-        //   + a chunk moved TO here
-        //     (we don't bump up the version on the TO side but the commit to config does use higher version)
-        //     a client reloads from config an issued the request
-        //   + there was a take over from a secondary
-        //     the secondary had no state (managers) at all, so every client request will fall here
-        //   + a stale client request a version that's not current anymore
-
-        // Can't lock default mutex while creating ShardChunkManager, b/c may have to create a new connection to myself
-        const string c = (_configServer == _shardHost) ? "" /* local */ : _configServer;
-
-        // If our epochs aren't compatible, it's not useful to use the old manager for chunk diffs
-        if( currManager && ! currManager->getCollVersion().hasCompatibleEpoch( version ) ){
-
-            warning() << "detected incompatible version epoch in new version " << version
-                      << ", old version was " << currManager->getCollVersion() << endl;
-
-            currManager.reset();
-        }
-
-        ShardChunkManagerPtr p( ShardChunkManager::make( c , ns , _shardName, currManager ) );
-
-        // Handle the case where the collection isn't sharded more gracefully
-        if( p->getKey().isEmpty() ){
-            version = ConfigVersion( 0, OID() );
-            // There was an error getting any data for this collection, return false
             return false;
         }
 
-        {
-            // NOTE: This lock prevents the ns version from changing while a write operation occurs.
-            Lock::DBRead readLk(ns);
-            
-            // This lock prevents simultaneous metadata changes using the same map
-            scoped_lock lk( _mutex );
+        CollectionMetadataPtr metadata = it->second;
 
-            // since we loaded the chunk manager unlocked, other thread may have done the same
-            // make sure we keep the freshest config info only
-            ChunkManagersMap::const_iterator it = _chunks.find( ns );
-            if ( it == _chunks.end() || p->getVersion() >= it->second->getVersion() ) {
-                _chunks[ns] = p;
+        // This can currently happen because drops aren't synchronized with in-migrations
+        // The idea for checking this here is that in the future we shouldn't have this problem
+        if ( metadata->getCollVersion().epoch() != epoch ) {
+
+            *errMsg = str::stream() << "could not note chunk " << "[" << min << "," << max << ")"
+                                    << " as pending because the epoch for " << ns
+                                    << " has changed from "
+                                    << epoch << " to " << metadata->getCollVersion().epoch();
+
+            return false;
+        }
+
+        ChunkType chunk;
+        chunk.setMin( min );
+        chunk.setMax( max );
+
+        CollectionMetadataPtr cloned( metadata->clonePlusPending( chunk, errMsg ) );
+        if ( !cloned ) return false;
+
+        _collMetadata[ns] = cloned;
+        return true;
+    }
+
+    bool ShardingState::forgetPending( const string& ns,
+                                       const BSONObj& min,
+                                       const BSONObj& max,
+                                       const OID& epoch,
+                                       string* errMsg ) {
+        
+        Lock::assertWriteLocked( ns );
+        scoped_lock lk( _mutex );
+
+        CollectionMetadataMap::const_iterator it = _collMetadata.find( ns );
+        if ( it == _collMetadata.end() ) {
+
+            *errMsg = str::stream() << "no need to forget pending chunk "
+                                    << "[" << min << "," << max << ")"
+                                    << " because the local metadata for " << ns << " has changed";
+
+            return false;
+        }
+
+        CollectionMetadataPtr metadata = it->second;
+
+        // This can currently happen because drops aren't synchronized with in-migrations
+        // The idea for checking this here is that in the future we shouldn't have this problem
+        if ( metadata->getCollVersion().epoch() != epoch ) {
+
+            *errMsg = str::stream() << "no need to forget pending chunk "
+                                    << "[" << min << "," << max << ")"
+                                    << " because the epoch for " << ns << " has changed from "
+                                    << epoch << " to " << metadata->getCollVersion().epoch();
+
+            return false;
+        }
+
+        ChunkType chunk;
+        chunk.setMin( min );
+        chunk.setMax( max );
+
+        CollectionMetadataPtr cloned( metadata->cloneMinusPending( chunk, errMsg ) );
+        if ( !cloned ) return false;
+
+        _collMetadata[ns] = cloned;
+        return true;
+    }
+
+    void ShardingState::splitChunk( const string& ns,
+                                    const BSONObj& min,
+                                    const BSONObj& max,
+                                    const vector<BSONObj>& splitKeys,
+                                    ChunkVersion version ) {
+        
+        Lock::assertWriteLocked( ns );
+        scoped_lock lk( _mutex );
+
+        CollectionMetadataMap::const_iterator it = _collMetadata.find( ns );
+        verify( it != _collMetadata.end() ) ;
+
+        ChunkType chunk;
+        chunk.setMin( min );
+        chunk.setMax( max );
+        string errMsg;
+
+        CollectionMetadataPtr cloned( it->second->cloneSplit( chunk, splitKeys, version, &errMsg ) );
+        // uassert to match old behavior, TODO: report errors w/o throwing
+        uassert( 16857, errMsg, NULL != cloned.get() );
+
+        _collMetadata[ns] = cloned;
+    }
+
+    void ShardingState::mergeChunks( const string& ns,
+                                     const BSONObj& minKey,
+                                     const BSONObj& maxKey,
+                                     ChunkVersion mergedVersion ) {
+
+        Lock::assertWriteLocked( ns );
+        scoped_lock lk( _mutex );
+
+        CollectionMetadataMap::const_iterator it = _collMetadata.find( ns );
+        verify( it != _collMetadata.end() );
+
+        string errMsg;
+
+        CollectionMetadataPtr cloned( it->second->cloneMerge( minKey,
+                                                              maxKey,
+                                                              mergedVersion,
+                                                              &errMsg ) );
+        // uassert to match old behavior, TODO: report errors w/o throwing
+        uassert( 17004, errMsg, NULL != cloned.get() );
+
+        _collMetadata[ns] = cloned;
+    }
+
+    void ShardingState::resetMetadata( const string& ns ) {
+        scoped_lock lk( _mutex );
+
+        warning() << "resetting metadata for " << ns << ", this should only be used in testing"
+                  << endl;
+
+        _collMetadata.erase( ns );
+    }
+
+    Status ShardingState::refreshMetadataIfNeeded( const string& ns,
+                                                   const ChunkVersion& reqShardVersion,
+                                                   ChunkVersion* latestShardVersion )
+    {
+        // The _configServerTickets serializes this process such that only a small number of threads
+        // can try to refresh at the same time.
+
+        LOG( 2 ) << "metadata refresh requested for " << ns << " at shard version "
+                 << reqShardVersion << endl;
+
+        //
+        // Queuing of refresh requests starts here when remote reload is needed. This may take time.
+        // TODO: Explicitly expose the queuing discipline.
+        //
+
+        _configServerTickets.waitForTicket();
+        TicketHolderReleaser needTicketFrom( &_configServerTickets );
+
+        //
+        // Fast path - check if the requested version is at a higher version than the current
+        // metadata version or a different epoch before verifying against config server.
+        //
+
+        CollectionMetadataPtr storedMetadata;
+        {
+            scoped_lock lk( _mutex );
+            CollectionMetadataMap::iterator it = _collMetadata.find( ns );
+            if ( it != _collMetadata.end() ) storedMetadata = it->second;
+        }
+        ChunkVersion storedShardVersion;
+        if ( storedMetadata ) storedShardVersion = storedMetadata->getShardVersion();
+        *latestShardVersion = storedShardVersion;
+
+        if ( storedShardVersion >= reqShardVersion &&
+             storedShardVersion.epoch() == reqShardVersion.epoch() ) {
+
+            // Don't need to remotely reload if we're in the same epoch with a >= version
+            return Status::OK();
+        }
+
+        //
+        // Slow path - remotely reload
+        //
+        // Cases:
+        // A) Initial config load and/or secondary take-over.
+        // B) Migration TO this shard finished, notified by mongos.
+        // C) Dropping a collection, notified (currently) by mongos.
+        // D) Stale client wants to reload metadata with a different *epoch*, so we aren't sure.
+
+        if ( storedShardVersion.epoch() != reqShardVersion.epoch() ) {
+            // Need to remotely reload if our epochs aren't the same, to verify
+            LOG( 1 ) << "metadata change requested for " << ns << ", from shard version "
+                     << storedShardVersion << " to " << reqShardVersion
+                     << ", need to verify with config server" << endl;
+        }
+        else {
+            // Need to remotely reload since our epochs aren't the same but our version is greater
+            LOG( 1 ) << "metadata version update requested for " << ns
+                     << ", from shard version " << storedShardVersion << " to " << reqShardVersion
+                     << ", need to verify with config server" << endl;
+        }
+
+        return doRefreshMetadata( ns, reqShardVersion, true, latestShardVersion );
+    }
+
+    Status ShardingState::refreshMetadataNow( const string& ns, ChunkVersion* latestShardVersion )
+    {
+        return doRefreshMetadata( ns, ChunkVersion( 0, 0, OID() ), false, latestShardVersion );
+    }
+
+    Status ShardingState::doRefreshMetadata( const string& ns,
+                                             const ChunkVersion& reqShardVersion,
+                                             bool useRequestedVersion,
+                                             ChunkVersion* latestShardVersion )
+    {
+        // The idea here is that we're going to reload the metadata from the config server, but
+        // we need to do so outside any locks.  When we get our result back, if the current metadata
+        // has changed, we may not be able to install the new metadata.
+
+        //
+        // Get the initial metadata
+        // No DBLock is needed since the metadata is expected to change during reload.
+        //
+
+        CollectionMetadataPtr beforeMetadata;
+        string shardName;
+        {
+            scoped_lock lk( _mutex );
+            CollectionMetadataMap::iterator it = _collMetadata.find( ns );
+            if ( it != _collMetadata.end() ) beforeMetadata = it->second;
+            shardName = _shardName;
+        }
+
+        ChunkVersion beforeShardVersion;
+        ChunkVersion beforeCollVersion;
+        if ( beforeMetadata ) {
+            beforeShardVersion = beforeMetadata->getShardVersion();
+            beforeCollVersion = beforeMetadata->getCollVersion();
+        }
+
+        *latestShardVersion = beforeShardVersion;
+
+        // We can't reload without a shard name.  Must check here before loading, since shard name
+        // may have changed if we checked it earlier and released the _mutex.
+        if ( shardName.empty() ) {
+
+            string errMsg = str::stream() << "cannot refresh metadata for " << ns
+                                          << " before shard name has been set";
+
+            LOG( 0 ) << errMsg << endl;
+            return Status( ErrorCodes::IllegalOperation, errMsg );
+        }
+
+        //
+        // Determine whether we need to diff or fully reload
+        //
+
+        bool fullReload = false;
+        if ( !beforeMetadata ) {
+            // We don't have any metadata to reload from
+            fullReload = true;
+        }
+        else if ( useRequestedVersion && reqShardVersion.epoch() != beforeShardVersion.epoch() ) {
+            // It's not useful to use the metadata as a base because we think the epoch will differ
+            fullReload = true;
+        }
+
+        //
+        // Load the metadata from the remote server, start construction
+        //
+
+        LOG( 0 ) << "remotely refreshing metadata for " << ns
+                 << ( useRequestedVersion ?
+                      string( " with requested shard version " ) + reqShardVersion.toString() : "" )
+                 << ( fullReload ?
+                      ", current shard version is " : " based on current shard version " )
+                 << beforeShardVersion
+                 << ", current metadata version is " << beforeCollVersion << endl;
+
+        string errMsg;
+        ConnectionString configServerLoc = ConnectionString::parse( _configServer, errMsg );
+        MetadataLoader mdLoader( configServerLoc );
+        CollectionMetadata* remoteMetadataRaw = new CollectionMetadata();
+        CollectionMetadataPtr remoteMetadata( remoteMetadataRaw );
+
+        Timer refreshTimer;
+        Status status =
+                mdLoader.makeCollectionMetadata( ns,
+                                                 shardName,
+                                                 ( fullReload ? NULL : beforeMetadata.get() ),
+                                                 remoteMetadataRaw );
+        long long refreshMillis = refreshTimer.millis();
+
+        if ( status.code() == ErrorCodes::NamespaceNotFound ) {
+            remoteMetadata.reset();
+            remoteMetadataRaw = NULL;
+        }
+        else if ( !status.isOK() ) {
+
+            warning() << "could not remotely refresh metadata for " << ns
+                      << causedBy( status.reason() ) << endl;
+
+            return status;
+        }
+
+        ChunkVersion remoteShardVersion;
+        ChunkVersion remoteCollVersion;
+        if ( remoteMetadata ) {
+            remoteShardVersion = remoteMetadata->getShardVersion();
+            remoteCollVersion = remoteMetadata->getCollVersion();
+        }
+
+        //
+        // Get ready to install loaded metadata if needed
+        //
+
+        CollectionMetadataPtr afterMetadata;
+        ChunkVersion afterShardVersion;
+        ChunkVersion afterCollVersion;
+        ChunkVersion::VersionChoice choice;
+
+        // If we choose to install the new metadata, this describes the kind of install
+        enum InstallType {
+            InstallType_New, InstallType_Update, InstallType_Replace, InstallType_Drop,
+            InstallType_None
+        } installType = InstallType_None; // compiler complains otherwise
+
+        {
+            // DBLock needed since we're now potentially changing the metadata, and don't want
+            // reads/writes to be ongoing.
+            Lock::DBWrite writeLk( ns );
+
+            //
+            // Get the metadata now that the load has completed
+            //
+
+            scoped_lock lk( _mutex );
+            CollectionMetadataMap::iterator it = _collMetadata.find( ns );
+            if ( it != _collMetadata.end() ) afterMetadata = it->second;
+
+            if ( afterMetadata ) {
+                afterShardVersion = afterMetadata->getShardVersion();
+                afterCollVersion = afterMetadata->getCollVersion();
             }
 
-            ChunkVersion oldVersion = version;
-            version = p->getVersion();
-            return oldVersion.isEquivalentTo( version );
+            *latestShardVersion = afterShardVersion;
+            //
+            // Resolve newer pending chunks with the remote metadata, finish construction
+            //
+
+            status = mdLoader.promotePendingChunks( afterMetadata.get(), remoteMetadataRaw );
+
+            if ( !status.isOK() ) {
+
+                warning() << "remote metadata for " << ns
+                          << " is inconsistent with current pending chunks"
+                          << causedBy( status.reason() ) << endl;
+
+                return status;
+            }
+
+            //
+            // Compare the 'before', 'after', and 'remote' versions/epochs and choose newest
+            // Zero-epochs (sentinel value for "dropped" collections), are tested by
+            // !epoch.isSet().
+            //
+
+            choice = ChunkVersion::chooseNewestVersion( beforeCollVersion,
+                                                        afterCollVersion,
+                                                        remoteCollVersion );
+
+            if ( choice == ChunkVersion::VersionChoice_Remote ) {
+                dassert(!remoteCollVersion.epoch().isSet() ||
+                        remoteShardVersion >= beforeShardVersion);
+
+                if ( !afterCollVersion.epoch().isSet() ) {
+
+                    // First metadata load
+                    installType = InstallType_New;
+                    dassert( it == _collMetadata.end() );
+                    _collMetadata.insert( make_pair( ns, remoteMetadata ) );
+                }
+                else if ( remoteCollVersion.epoch().isSet() &&
+                          remoteCollVersion.epoch() == afterCollVersion.epoch() ) {
+
+                    // Update to existing metadata
+                    installType = InstallType_Update;
+
+                    // Invariant: If CollMetadata was not found, version should be have been 0.
+                    dassert( it != _collMetadata.end() );
+                    it->second = remoteMetadata;
+                }
+                else if ( remoteCollVersion.epoch().isSet() ) {
+
+                    // New epoch detected, replacing metadata
+                    installType = InstallType_Replace;
+
+                    // Invariant: If CollMetadata was not found, version should be have been 0.
+                    dassert( it != _collMetadata.end() );
+                    it->second = remoteMetadata;
+                }
+                else {
+                    dassert( !remoteCollVersion.epoch().isSet() );
+
+                    // Drop detected
+                    installType = InstallType_Drop;
+                    _collMetadata.erase( it );
+                }
+
+                *latestShardVersion = remoteShardVersion;
+            }
         }
+        // End _mutex
+        // End DBWrite
+
+        //
+        // Do messaging based on what happened above
+        //
+        string localShardVersionMsg =
+                beforeShardVersion.epoch() == afterShardVersion.epoch() ?
+                        afterShardVersion.toString() :
+                        beforeShardVersion.toString() + " / " + afterShardVersion.toString();
+
+        if ( choice == ChunkVersion::VersionChoice_Unknown ) {
+
+            string errMsg = str::stream()
+                << "need to retry loading metadata for " << ns
+                << ", collection may have been dropped or recreated during load"
+                << " (loaded shard version : " << remoteShardVersion.toString()
+                << ", stored shard versions : " << localShardVersionMsg
+                << ", took " << refreshMillis << "ms)";
+
+            warning() << errMsg << endl;
+            return Status( ErrorCodes::RemoteChangeDetected, errMsg );
+        }
+
+        if ( choice == ChunkVersion::VersionChoice_Local ) {
+
+            LOG( 0 ) << "metadata of collection " << ns << " already up to date (shard version : "
+                     << afterShardVersion.toString() << ", took " << refreshMillis << "ms)"
+                     << endl;
+            return Status::OK();
+        }
+
+        dassert( choice == ChunkVersion::VersionChoice_Remote );
+
+        switch( installType ) {
+        case InstallType_New:
+            LOG( 0 ) << "collection " << ns << " was previously unsharded"
+                     << ", new metadata loaded with shard version " << remoteShardVersion
+                     << endl;
+            break;
+        case InstallType_Update:
+            LOG( 0 ) << "updating metadata for " << ns << " from shard version "
+                     << localShardVersionMsg << " to shard version " << remoteShardVersion
+                     << endl;
+            break;
+        case InstallType_Replace:
+            LOG( 0 ) << "replacing metadata for " << ns << " at shard version "
+                     << localShardVersionMsg << " with a new epoch (shard version "
+                     << remoteShardVersion << ")" << endl;
+            break;
+        case InstallType_Drop:
+            LOG( 0 ) << "dropping metadata for " << ns << " at shard version "
+                     << localShardVersionMsg << ", took " << refreshMillis << "ms" << endl;
+            break;
+        default:
+            verify( false );
+            break;
+        }
+
+        if ( installType != InstallType_Drop ) {
+            LOG( 0 ) << "collection version was loaded at version " << remoteCollVersion
+                     << ", took " << refreshMillis << "ms" << endl;
+        }
+
+        return Status::OK();
     }
 
     void ShardingState::appendInfo( BSONObjBuilder& b ) {
@@ -301,23 +715,22 @@ namespace mongo {
 
         b.append( "configServer" , _configServer );
         b.append( "shardName" , _shardName );
-        b.append( "shardHost" , _shardHost );
 
         {
             BSONObjBuilder bb( b.subobjStart( "versions" ) );
 
             scoped_lock lk(_mutex);
 
-            for ( ChunkManagersMap::iterator it = _chunks.begin(); it != _chunks.end(); ++it ) {
-                ShardChunkManagerPtr p = it->second;
-                bb.appendTimestamp( it->first , p->getVersion().toLong() );
+            for ( CollectionMetadataMap::iterator it = _collMetadata.begin(); it != _collMetadata.end(); ++it ) {
+                CollectionMetadataPtr p = it->second;
+                bb.appendTimestamp( it->first , p->getShardVersion().toLong() );
             }
             bb.done();
         }
 
     }
 
-    bool ShardingState::needShardChunkManager( const string& ns ) const {
+    bool ShardingState::needCollectionMetadata( const string& ns ) const {
         if ( ! _enabled )
             return false;
 
@@ -327,12 +740,12 @@ namespace mongo {
         return true;
     }
 
-    ShardChunkManagerPtr ShardingState::getShardChunkManager( const string& ns ) {
+    CollectionMetadataPtr ShardingState::getCollectionMetadata( const string& ns ) {
         scoped_lock lk( _mutex );
 
-        ChunkManagersMap::const_iterator it = _chunks.find( ns );
-        if ( it == _chunks.end() ) {
-            return ShardChunkManagerPtr();
+        CollectionMetadataMap::const_iterator it = _collMetadata.find( ns );
+        if ( it == _collMetadata.end() ) {
+            return CollectionMetadataPtr();
         }
         else {
             return it->second;
@@ -366,17 +779,17 @@ namespace mongo {
         _tl.reset();
     }
 
-    const ConfigVersion ShardedConnectionInfo::getVersion( const string& ns ) const {
+    const ChunkVersion ShardedConnectionInfo::getVersion( const string& ns ) const {
         NSVersionMap::const_iterator it = _versions.find( ns );
         if ( it != _versions.end() ) {
             return it->second;
         }
         else {
-            return ConfigVersion( 0, OID() );
+            return ChunkVersion( 0, OID() );
         }
     }
 
-    void ShardedConnectionInfo::setVersion( const string& ns , const ConfigVersion& version ) {
+    void ShardedConnectionInfo::setVersion( const string& ns , const ChunkVersion& version ) {
         _versions[ns] = version;
     }
 
@@ -426,7 +839,7 @@ namespace mongo {
         UnsetShardingCommand() : MongodShardCommand("unsetSharding") {}
 
         virtual void help( stringstream& help ) const {
-            help << " example: { unsetSharding : 1 } ";
+            help << "internal";
         }
 
         virtual LockType locktype() const { return NONE; }
@@ -437,8 +850,8 @@ namespace mongo {
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::unsetSharding);
-            out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+            actions.addAction(ActionType::internal);
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
 
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
@@ -453,7 +866,7 @@ namespace mongo {
         SetShardVersion() : MongodShardCommand("setShardVersion") {}
 
         virtual void help( stringstream& help ) const {
-            help << " example: { setShardVersion : 'alleyinsider.foo' , version : 1 , configdb : '' } ";
+            help << "internal";
         }
 
         virtual bool slaveOk() const { return true; }
@@ -463,8 +876,8 @@ namespace mongo {
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::setShardVersion);
-            out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+            actions.addAction(ActionType::internal);
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
 
         bool checkConfigOrInit( const string& configdb , bool authoritative , string& errmsg , BSONObjBuilder& result , bool locked=false ) const {
@@ -504,7 +917,8 @@ namespace mongo {
         bool checkMongosID( ShardedConnectionInfo* info, const BSONElement& id, string& errmsg ) {
             if ( id.type() != jstOID ) {
                 if ( ! info->hasID() ) {
-                    warning() << "bad serverID set in setShardVersion and none in info: " << id << endl;
+                    // this is only for connections using the WBL (<= v2.4)
+                    LOG(1) << "warning: bad serverID set in setShardVersion and none in info: " << id << endl;
                 }
                 // TODO: fix this
                 //errmsg = "need serverID to be an OID";
@@ -549,16 +963,23 @@ namespace mongo {
             if ( ! checkConfigOrInit( cmdObj["configdb"].valuestrsafe() , authoritative , errmsg , result ) )
                 return false;
 
-            // check shard name/hosts are correct
+            // check shard name is correct
             if ( cmdObj["shard"].type() == String ) {
-                shardingState.gotShardName( cmdObj["shard"].String() );
-                shardingState.gotShardHost( cmdObj["shardHost"].String() );
+                // The shard host is also sent when using setShardVersion, report this host if there
+                // is an error.
+                shardingState.gotShardNameAndHost( cmdObj["shard"].String(),
+                                                   cmdObj["shardHost"].str() );
             }
             
-
             // Handle initial shard connection
             if( cmdObj["version"].eoo() && cmdObj["init"].trueValue() ){
+
                 result.append( "initialized", true );
+
+                // Send back wire version to let mongos know what protocol we can speak
+                result.append( "minWireVersion", minWireVersion );
+                result.append( "maxWireVersion", maxWireVersion );
+
                 return true;
             }
 
@@ -577,17 +998,17 @@ namespace mongo {
                 return false;
             }
 
-            if( ! ConfigVersion::canParseBSON( cmdObj, "version" ) ){
+            if( ! ChunkVersion::canParseBSON( cmdObj, "version" ) ){
                 errmsg = "need to specify version";
                 return false;
             }
 
-            const ConfigVersion version = ConfigVersion::fromBSON( cmdObj, "version" );
+            const ChunkVersion version = ChunkVersion::fromBSON( cmdObj, "version" );
             
             // step 3
 
-            const ConfigVersion oldVersion = info->getVersion(ns);
-            const ConfigVersion globalVersion = shardingState.getVersion(ns);
+            const ChunkVersion oldVersion = info->getVersion(ns);
+            const ChunkVersion globalVersion = shardingState.getVersion(ns);
 
             oldVersion.addToBSON( result, "oldVersion" );
             
@@ -624,8 +1045,6 @@ namespace mongo {
             // this is because of a weird segfault I saw and I can't see why this should ever be set
             massert( 13647 , str::stream() << "context should be empty here, is: " << cc().getContext()->ns() , cc().getContext() == 0 ); 
         
-            Lock::GlobalWrite setShardVersionLock; // TODO: can we get rid of this??
-            
             if ( oldVersion.isSet() && ! globalVersion.isSet() ) {
                 // this had been reset
                 info->setVersion( ns , ChunkVersion( 0, OID() ) );
@@ -637,7 +1056,55 @@ namespace mongo {
                 return true;
             }
 
-            if ( ! version.isSet() && globalVersion.isSet() ) {
+            // Cases below all either return OR fall-through to remote metadata reload.
+            if ( version.isSet() || !globalVersion.isSet() ) {
+
+                // Not Dropping
+
+                // TODO: Refactor all of this
+                if ( version < oldVersion && version.hasCompatibleEpoch( oldVersion ) ) {
+                    errmsg = "this connection already had a newer version of collection '" + ns + "'";
+                    result.append( "ns" , ns );
+                    version.addToBSON( result, "newVersion" );
+                    globalVersion.addToBSON( result, "globalVersion" );
+                    return false;
+                }
+
+                // TODO: Refactor all of this
+                if ( version < globalVersion && version.hasCompatibleEpoch( globalVersion ) ) {
+                    while ( shardingState.inCriticalMigrateSection() ) {
+                        log() << "waiting till out of critical section" << endl;
+                        shardingState.waitTillNotInCriticalSection( 10 );
+                    }
+                    errmsg = "shard global version for collection is higher than trying to set to '" + ns + "'";
+                    result.append( "ns" , ns );
+                    version.addToBSON( result, "version" );
+                    globalVersion.addToBSON( result, "globalVersion" );
+                    result.appendBool( "reloadConfig" , true );
+                    return false;
+                }
+
+                if ( ! globalVersion.isSet() && ! authoritative ) {
+                    // Needed b/c when the last chunk is moved off a shard, the version gets reset to zero, which
+                    // should require a reload.
+                    while ( shardingState.inCriticalMigrateSection() ) {
+                        log() << "waiting till out of critical section" << endl;
+                        shardingState.waitTillNotInCriticalSection( 10 );
+                    }
+
+                    // need authoritative for first look
+                    result.append( "ns" , ns );
+                    result.appendBool( "need_authoritative" , true );
+                    errmsg = "first time for collection '" + ns + "'";
+                    return false;
+                }
+
+                // Fall through to metadata reload below
+            }
+            else {
+
+                // Dropping
+
                 if ( ! authoritative ) {
                     result.appendBool( "need_authoritative" , true );
                     result.append( "ns" , ns );
@@ -645,81 +1112,66 @@ namespace mongo {
                     errmsg = "dropping needs to be authoritative";
                     return false;
                 }
-                log() << "wiping data for: " << ns << endl;
-                globalVersion.addToBSON( result, "beforeDrop" );
-                // only setting global version on purpose
-                // need clients to re-find meta-data
-                shardingState.resetVersion( ns );
-                info->setVersion( ns , ChunkVersion( 0, OID() ) );
-                return true;
+
+                // Fall through to metadata reload below
             }
 
-            // TODO: Refactor all of this
-            if ( version < oldVersion && version.hasCompatibleEpoch( oldVersion ) ) {
-                errmsg = "this connection already had a newer version of collection '" + ns + "'";
-                result.append( "ns" , ns );
-                version.addToBSON( result, "newVersion" );
-                globalVersion.addToBSON( result, "globalVersion" );
-                return false;
-            }
+            ChunkVersion currVersion;
+            Status status = shardingState.refreshMetadataIfNeeded( ns, version, &currVersion );
 
-            // TODO: Refactor all of this
-            if ( version < globalVersion && version.hasCompatibleEpoch( globalVersion ) ) {
-                while ( shardingState.inCriticalMigrateSection() ) {
-                    log() << "waiting till out of critical section" << endl;
-                    dbtemprelease r;
-                    shardingState.waitTillNotInCriticalSection( 10 );
-                }
-                errmsg = "shard global version for collection is higher than trying to set to '" + ns + "'";
+            if (!status.isOK()) {
+
+                // The reload itself was interrupted or confused here
+
+                errmsg = str::stream() << "could not refresh metadata for " << ns
+                                       << " with requested shard version " << version.toString()
+                                       << ", stored shard version is " << currVersion.toString()
+                                       << causedBy( status.reason() );
+
+                warning() << errmsg << endl;
+
                 result.append( "ns" , ns );
                 version.addToBSON( result, "version" );
-                globalVersion.addToBSON( result, "globalVersion" );
-                result.appendBool( "reloadConfig" , true );
+                currVersion.addToBSON( result, "globalVersion" );
+                result.appendBool( "reloadConfig", true );
+
                 return false;
             }
+            else if ( !version.isWriteCompatibleWith( currVersion ) ) {
 
-            if ( ! globalVersion.isSet() && ! authoritative ) {
-                // Needed b/c when the last chunk is moved off a shard, the version gets reset to zero, which
-                // should require a reload.
-                while ( shardingState.inCriticalMigrateSection() ) {
-                    log() << "waiting till out of critical section" << endl;
-                    dbtemprelease r;
-                    shardingState.waitTillNotInCriticalSection( 10 );
-                }
+                // We reloaded a version that doesn't match the version mongos was trying to
+                // set.
 
-                // need authoritative for first look
+                errmsg = str::stream() << "requested shard version differs from"
+                                       << " config shard version for " << ns
+                                       << ", requested version is " << version.toString()
+                                       << " but found version " << currVersion.toString();
+
+                OCCASIONALLY warning() << errmsg << endl;
+
+                // WARNING: the exact fields below are important for compatibility with mongos
+                // version reload.
+
                 result.append( "ns" , ns );
-                result.appendBool( "need_authoritative" , true );
-                errmsg = "first time for collection '" + ns + "'";
+                currVersion.addToBSON( result, "globalVersion" );
+
+                // If this was a reset of a collection or the last chunk moved out, inform mongos to
+                // do a full reload.
+                if (currVersion.epoch() != version.epoch() || !currVersion.isSet() ) {
+                    result.appendBool( "reloadConfig", true );
+                    // Zero-version also needed to trigger full mongos reload, sadly
+                    // TODO: Make this saner, and less impactful (full reload on last chunk is bad)
+                    ChunkVersion( 0, 0, OID() ).addToBSON( result, "version" );
+                    // For debugging
+                    version.addToBSON( result, "origVersion" );
+                }
+                else {
+                    version.addToBSON( result, "version" );
+                }
+
                 return false;
             }
 
-            Timer relockTime;
-            {
-                dbtemprelease unlock;
-
-                ChunkVersion currVersion = version;
-                if ( ! shardingState.trySetVersion( ns , currVersion ) ) {
-                    errmsg = str::stream() << "client version differs from config's for collection '" << ns << "'";
-                    result.append( "ns" , ns );
-
-                    // If this was a reset of a collection, inform mongos to do a full reload
-                    if( ! currVersion.isSet()  ){
-                        ConfigVersion( 0, OID() ).addToBSON( result, "version" );
-                        result.appendBool( "reloadConfig", true );
-                    }
-                    else{
-                        version.addToBSON( result, "version" );
-                    }
-
-                    globalVersion.addToBSON( result, "globalVersion" );
-                    return false;
-                }
-            }
-            if ( relockTime.millis() >= ( cmdLine.slowMS - 10 ) ) {
-                log() << "setShardVersion - relocking slow: " << relockTime.millis() << endl;
-            }
-            
             info->setVersion( ns , version );
             return true;
         }
@@ -736,12 +1188,18 @@ namespace mongo {
 
         virtual LockType locktype() const { return NONE; }
 
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {
-            ActionSet actions;
-            actions.addAction(ActionType::getShardVersion);
-            out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+        virtual Status checkAuthForCommand(ClientBasic* client,
+                                           const std::string& dbname,
+                                           const BSONObj& cmdObj) {
+            if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
+                    ResourcePattern::forExactNamespace(NamespaceString(parseNs(dbname, cmdObj))),
+                    ActionType::getShardVersion)) {
+                return Status(ErrorCodes::Unauthorized, "Unauthorized");
+            }
+            return Status::OK();
+        }
+        virtual std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const {
+            return parseNsFullyQualified(dbname, cmdObj);
         }
 
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
@@ -762,6 +1220,12 @@ namespace mongo {
             else
                 result.appendTimestamp( "mine" , 0 );
 
+            if ( cmdObj["fullMetadata"].trueValue() ) {
+                CollectionMetadataPtr metadata = shardingState.getCollectionMetadata( ns );
+                if ( metadata ) result.append( "metadata", metadata->toBSON() );
+                else result.append( "metadata", BSONObj() );
+            }
+
             return true;
         }
 
@@ -778,7 +1242,7 @@ namespace mongo {
                                            std::vector<Privilege>* out) {
             ActionSet actions;
             actions.addAction(ActionType::shardingState);
-            out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
 
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
@@ -792,7 +1256,7 @@ namespace mongo {
      * @ return true if not in sharded mode
                      or if version for this client is ok
      */
-    bool shardVersionOk( const string& ns , string& errmsg, ConfigVersion& received, ConfigVersion& wanted ) {
+    bool shardVersionOk( const string& ns , string& errmsg, ChunkVersion& received, ChunkVersion& wanted ) {
 
         if ( ! shardingState.enabled() )
             return true;
@@ -816,8 +1280,13 @@ namespace mongo {
         }
 
         // TODO : all collections at some point, be sharded or not, will have a version
-        //  (and a ShardChunkManager)
+        //  (and a CollectionMetadata)
         received = info->getVersion( ns );
+
+        if (ChunkVersion::isIgnoredVersion(received)) {
+            return true;
+        }
+
         wanted = shardingState.getVersion( ns );
 
         if( received.isWriteCompatibleWith( wanted ) ) return true;
@@ -868,6 +1337,17 @@ namespace mongo {
     }
 
     void usingAShardConnection( const string& addr ) {
+    }
+
+    void ensureShardVersionOKOrThrow(const std::string& ns) {
+        string errmsg;
+        ChunkVersion received;
+        ChunkVersion wanted;
+        if (!shardVersionOk(ns, errmsg, received, wanted)) {
+            StringBuilder sb;
+            sb << "[" << ns << "] shard version not ok: " << errmsg;
+            throw SendStaleConfigException(ns, sb.str(), received, wanted);
+        }
     }
 
 }

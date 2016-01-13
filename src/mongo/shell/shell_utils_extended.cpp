@@ -15,7 +15,7 @@
  *    limitations under the License.
  */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include <boost/filesystem/convenience.hpp>
 #include <fstream>
@@ -25,7 +25,9 @@
 #include "mongo/shell/shell_utils_launcher.h"
 #include "mongo/util/file.h"
 #include "mongo/util/md5.hpp"
+#include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/sock.h"
+#include "mongo/util/scopeguard.h"
 #include "mongo/util/text.h"
 
 namespace mongo {
@@ -59,6 +61,7 @@ namespace mongo {
                 boost::filesystem::path p = *i;
                 BSONObjBuilder b;
                 b << "name" << p.generic_string();
+                b << "baseName" << p.filename().generic_string();
                 b.appendBool( "isDirectory", is_directory( p ) );
                 if ( ! boost::filesystem::is_directory( p ) ) {
                     try {
@@ -97,16 +100,27 @@ namespace mongo {
 
         /** Set process wide current working directory. */
         BSONObj cd(const BSONObj& args, void* data) {
+            uassert(16830,
+                    "cd requires one argument -- cd(directory)",
+                    args.nFields() == 1);
+            uassert(16831,
+                    "cd requires a string argument -- cd(directory)",
+                    args.firstElement().type() == String);
 #if defined(_WIN32)
-            std::wstring dir = toWideString( args.firstElement().String().c_str() );
-            if( SetCurrentDirectory(dir.c_str()) )
+            std::wstring dir = toWideString(args.firstElement().String().c_str());
+            if (SetCurrentDirectoryW(dir.c_str())) {
                 return BSONObj();
+            }
 #else
-            string dir = args.firstElement().String();
-            if( chdir( dir.c_str() ) == 0 )
+            std::string dir = args.firstElement().String();
+            if (chdir(dir.c_str()) == 0) {
                 return BSONObj();
+            }
 #endif
-            return BSON( "" << "change directory failed" );
+            uasserted(16832,
+                      mongoutils::str::stream() << "cd command failed: "
+                                                << errnoWithDescription());
+            return BSONObj();
         }
 
         BSONObj pwd(const BSONObj&, void* data) {
@@ -144,6 +158,7 @@ namespace mongo {
             stringstream ss;
             FILE* f = fopen(e.valuestrsafe(), "rb");
             uassert(CANT_OPEN_FILE, "couldn't open file", f );
+            ON_BLOCK_EXIT(fclose, f);
 
             md5digest d;
             md5_state_t st;
@@ -161,6 +176,12 @@ namespace mongo {
         }
 
         BSONObj mkdir(const BSONObj& args, void* data) {
+            uassert(16833,
+                    "mkdir requires one argument -- mkdir(directory)",
+                    args.nFields() == 1);
+            uassert(16834,
+                    "mkdir requires a string argument -- mkdir(directory)",
+                    args.firstElement().type() == String);
             boost::filesystem::create_directories(args.firstElement().String());
             return BSON( "" << true );
         }
@@ -181,22 +202,19 @@ namespace mongo {
         }
 
         /**
-         * @param args - [ name, byte index ]
-         * In this initial implementation, all bits in the specified byte are flipped.
+         * @param args - [ source, destination ]
+         * copies file 'source' to 'destination'. Errors if the 'destination' file already exists.
          */
-        BSONObj fuzzFile(const BSONObj& args, void* data) {
-            uassert( 13619, "fuzzFile takes 2 arguments", args.nFields() == 2 );
-            scoped_ptr< File > f( new File() );
-            f->open( args.getStringField( "0" ) );
-            uassert( 13620, "couldn't open file to fuzz", !f->bad() && f->is_open() );
+        BSONObj copyFile(const BSONObj& args, void* data) {
+            uassert(13619, "copyFile takes 2 arguments", args.nFields() == 2);
 
-            char c;
-            f->read( args.getIntField( "1" ), &c, 1 );
-            c = ~c;
-            f->write( args.getIntField( "1" ), &c, 1 );
+            BSONObjIterator it(args);
+            const std::string source = it.next().str();
+            const std::string destination = it.next().str();
+
+            boost::filesystem::copy_file(source, destination);
 
             return undefinedReturn;
-            // f close is implicit
         }
 
         BSONObj getHostName(const BSONObj& a, void* data) {
@@ -210,7 +228,7 @@ namespace mongo {
         void installShellUtilsExtended( Scope& scope ) {
             scope.injectNative( "getHostName" , getHostName );
             scope.injectNative( "removeFile" , removeFile );
-            scope.injectNative( "fuzzFile" , fuzzFile );
+            scope.injectNative( "copyFile" , copyFile );
             scope.injectNative( "listFiles" , listFiles );
             scope.injectNative( "ls" , ls );
             scope.injectNative( "pwd", pwd );

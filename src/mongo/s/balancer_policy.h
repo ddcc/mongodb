@@ -14,16 +14,32 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
 #ifndef S_BALANCER_POLICY_HEADER
 #define S_BALANCER_POLICY_HEADER
 
+#include "mongo/base/status_with.h"
+#include "mongo/base/owned_pointer_vector.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/s/shard.h"
 #include "mongo/s/type_chunk.h"
 
 namespace mongo {
 
+    class ChunkManager;
 
     struct ChunkInfo {
         const BSONObj min;
@@ -112,8 +128,8 @@ namespace mongo {
 
     };
 
-    typedef map< string,ShardInfo > ShardInfoMap;
-    typedef map< string,vector<BSONObj> > ShardToChunksMap;
+    typedef std::map< std::string,ShardInfo > ShardInfoMap;
+    typedef std::map<std::string, OwnedPointerVector<ChunkType>* > ShardToChunksMap;
 
     class DistributionStatus : boost::noncopyable {
     public:
@@ -154,13 +170,13 @@ namespace mongo {
         unsigned numberOfChunksInShardWithTag( const string& shard, const string& tag ) const;
 
         /** @return chunks for the shard */
-        const vector<BSONObj>& getChunks( const string& shard ) const;
+        const std::vector<ChunkType*>& getChunks(const std::string& shard) const;
 
         /** @return all tags we know about, not include "" */
         const set<string>& tags() const { return _allTags; }
 
         /** @return the right tag for chunk, possibly "" */
-        string getTagForChunk( const BSONObj& chunk ) const;
+        std::string getTagForChunk(const ChunkType& chunk) const;
         
         /** @return all shards we know about */
         const set<string>& shards() const { return _shards; }
@@ -171,6 +187,24 @@ namespace mongo {
         /** writes all state to log() */
         void dump() const;
         
+        static Status populateShardInfoMap(ShardInfoMap* shardInfo);
+
+        /**
+         * Note: jumbo and versions are not set.
+         */
+        static void populateShardToChunksMap(const ShardInfoMap& allShards,
+                                             const ChunkManager& chunkMgr,
+                                             ShardToChunksMap* shardToChunksMap);
+
+        /**
+         * Returns the tag of the given chunk by querying the config server.
+         *
+         * TODO: add a way to incrementally update chunk tags metadata so this is not needed.
+         */
+        static StatusWith<std::string> getTagForSingleChunk(const std::string& configServer,
+                                                            const std::string& ns,
+                                                            const ChunkType& chunk);
+
     private:
         const ShardInfoMap& _shardInfo;
         const ShardToChunksMap& _shardChunks;
@@ -196,9 +230,6 @@ namespace mongo {
         static MigrateInfo* balance( const string& ns,
                                      const DistributionStatus& distribution,
                                      int balancedLastTime );
-
-    private:
-        static bool _isJumbo( const BSONObj& chunk );
     };
 
 

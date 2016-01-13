@@ -14,20 +14,38 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include "mongo/s/chunk.h"
 
+#include "mongo/base/owned_pointer_map.h"
 #include "mongo/client/connpool.h"
 #include "mongo/client/dbclientcursor.h"
+#include "mongo/db/query/lite_parsed_query.h"
 #include "mongo/db/queryutil.h"
+#include "mongo/db/write_concern.h"
 #include "mongo/platform/random.h"
+#include "mongo/s/balancer_policy.h"
 #include "mongo/s/chunk_diff.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/client_info.h"
+#include "mongo/s/cluster_write.h"
 #include "mongo/s/config.h"
+#include "mongo/s/config_server_checker_service.h"
 #include "mongo/s/cursors.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/strategy.h"
@@ -55,6 +73,84 @@ namespace mongo {
 
     // Can be overridden from command line
     bool Chunk::ShouldAutoSplit = true;
+
+    /**
+     * Attempts to move the given chunk to another shard.
+     *
+     * Returns true if the chunk was actually moved.
+     */
+    static bool tryMoveToOtherShard(const ChunkManager& manager, const ChunkType& chunk) {
+        // reload sharding metadata before starting migration
+        ChunkManagerPtr chunkMgr = manager.reload(false /* just reloaded in mulitsplit */);
+
+        ShardInfoMap shardInfo;
+        Status loadStatus = DistributionStatus::populateShardInfoMap(&shardInfo);
+
+        if (!loadStatus.isOK()) {
+            warning() << "failed to load shard metadata while trying to moveChunk after "
+                      << "auto-splitting" << causedBy(loadStatus);
+            return false;
+        }
+
+        if (shardInfo.size() < 2) {
+            LOG(0) << "no need to move top chunk since there's only 1 shard" << endl;
+            return false;
+        }
+
+        OwnedPointerMap<string, OwnedPointerVector<ChunkType> > shardToChunkMap;
+        DistributionStatus::populateShardToChunksMap(shardInfo,
+                                                     *chunkMgr,
+                                                     &shardToChunkMap.mutableMap());
+
+        DistributionStatus chunkDistribution(shardInfo, shardToChunkMap.map());
+
+        const string configServerStr = configServer.getConnectionString().toString();
+        StatusWith<string> tagStatus =
+                DistributionStatus::getTagForSingleChunk(configServerStr,
+                                                         manager.getns(),
+                                                         chunk);
+        if (!tagStatus.isOK()) {
+            warning() << "Not auto-moving chunk because of an error encountered while "
+                      << "checking tag for chunk: " << tagStatus.toString() << endl;
+            return false;
+        }
+
+        const string newLocation(
+                chunkDistribution.getBestReceieverShard(tagStatus.getValue()));
+
+        if (chunk.getShard() == newLocation) {
+            // if this is the best shard, then we shouldn't do anything.
+            LOG(1) << "recently split chunk: " << chunk
+                   << " already in the best shard: " << endl;
+            return false; // we did split even if we didn't migrate
+        }
+
+        ChunkPtr toMove = chunkMgr->findIntersectingChunk(chunk.getMin());
+
+        if (!(toMove->getMin() == chunk.getMin() && toMove->getMax() == chunk.getMax())) {
+            LOG(1) << "recently split chunk: " << chunk
+                   << " modified before we could migrate " << toMove->toString() << endl;
+            return false;
+        }
+
+        log() << "moving chunk (auto): " << toMove->toString() << " to: " << newLocation << endl;
+
+        BSONObj res;
+
+        massert(10412,
+                str::stream() << "moveAndCommit failed: " << res,
+                toMove->moveAndCommit(newLocation,
+                                      Chunk::MaxChunkSize,
+                                      false, /* secondaryThrottle */
+                                      false, /* waitForDelete - small chunk, no need */
+                                      0, /* maxTimeMS - don't time out */
+                                      res));
+
+        // update our config
+        manager.reload();
+
+        return true;
+    }
 
     Chunk::Chunk(const ChunkManager * manager, BSONObj from)
         : _manager(manager), _lastmod(0, OID()), _dataWritten(mkDataWritten())
@@ -132,10 +228,9 @@ namespace mongo {
             q.sort( r.obj() );
         }
         // find the extreme key
-        scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getInternalScopedDbConnection(getShard().getConnString()));
-        BSONObj end = conn->get()->findOne(_manager->getns(), q);
-        conn->done();
+        ScopedDbConnection conn(getShard().getConnString());
+        BSONObj end = conn->findOne(_manager->getns(), q);
+        conn.done();
         if ( end.isEmpty() )
             return BSONObj();
         return _manager->getShardKey().extractKey( end );
@@ -143,8 +238,7 @@ namespace mongo {
 
     void Chunk::pickMedianKey( BSONObj& medianKey ) const {
         // Ask the mongod holding this chunk to figure out the split points.
-        scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getInternalScopedDbConnection( getShard().getConnString() ) );
+        ScopedDbConnection conn(getShard().getConnString());
         BSONObj result;
         BSONObjBuilder cmd;
         cmd.append( "splitVector" , _manager->getns() );
@@ -154,8 +248,8 @@ namespace mongo {
         cmd.appendBool( "force" , true );
         BSONObj cmdObj = cmd.obj();
 
-        if ( ! conn->get()->runCommand( "admin" , cmdObj , result )) {
-            conn->done();
+        if ( ! conn->runCommand( "admin" , cmdObj , result )) {
+            conn.done();
             ostringstream os;
             os << "splitVector command (median key) failed: " << result;
             uassert( 13503 , os.str() , 0 );
@@ -166,13 +260,12 @@ namespace mongo {
             medianKey = it.next().Obj().getOwned();
         }
 
-        conn->done();
+        conn.done();
     }
 
     void Chunk::pickSplitVector( vector<BSONObj>& splitPoints , int chunkSize /* bytes */, int maxPoints, int maxObjs ) const {
         // Ask the mongod holding this chunk to figure out the split points.
-        scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getInternalScopedDbConnection( getShard().getConnString() ) );
+        ScopedDbConnection conn(getShard().getConnString());
         BSONObj result;
         BSONObjBuilder cmd;
         cmd.append( "splitVector" , _manager->getns() );
@@ -184,8 +277,8 @@ namespace mongo {
         cmd.append( "maxChunkObjects" , maxObjs );
         BSONObj cmdObj = cmd.obj();
 
-        if ( ! conn->get()->runCommand( "admin" , cmdObj , result )) {
-            conn->done();
+        if ( ! conn->runCommand( "admin" , cmdObj , result )) {
+            conn.done();
             ostringstream os;
             os << "splitVector command failed: " << result;
             uassert( 13345 , os.str() , 0 );
@@ -195,7 +288,7 @@ namespace mongo {
         while ( it.more() ) {
             splitPoints.push_back( it.next().Obj().getOwned() );
         }
-        conn->done();
+        conn.done();
     }
 
     BSONObj Chunk::singleSplit( bool force , BSONObj& res ) const {
@@ -273,8 +366,7 @@ namespace mongo {
         uassert( 13333 , "can't split a chunk in that many parts", m.size() < maxSplitPoints );
         uassert( 13003 , "can't split a chunk with only one distinct value" , _min.woCompare(_max) );
 
-        scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getInternalScopedDbConnection( getShard().getConnString() ) );
+        ScopedDbConnection conn(getShard().getConnString());
 
         BSONObjBuilder cmd;
         cmd.append( "splitChunk" , _manager->getns() );
@@ -287,9 +379,9 @@ namespace mongo {
         cmd.append( "configdb" , configServer.modelServer() );
         BSONObj cmdObj = cmd.obj();
 
-        if ( ! conn->get()->runCommand( "admin" , cmdObj , res )) {
+        if ( ! conn->runCommand( "admin" , cmdObj , res )) {
             warning() << "splitChunk failed - cmd: " << cmdObj << " result: " << res << endl;
-            conn->done();
+            conn.done();
 
             // Mark the minor version for *eventual* reload
             _manager->markMinorForReload( this->_lastmod );
@@ -297,7 +389,7 @@ namespace mongo {
             return false;
         }
 
-        conn->done();
+        conn.done();
         
         // force reload of config
         _manager->reload();
@@ -309,6 +401,7 @@ namespace mongo {
                               long long chunkSize /* bytes */,
                               bool secondaryThrottle,
                               bool waitForDelete,
+                              int maxTimeMS,
                               BSONObj& res) const
     {
         uassert( 10167 ,  "can't move shard to its current location!" , getShard() != to );
@@ -317,28 +410,27 @@ namespace mongo {
 
         Shard from = _shard;
 
-        scoped_ptr<ScopedDbConnection> fromconn(
-                ScopedDbConnection::getInternalScopedDbConnection( from.getConnString() ) );
+        ScopedDbConnection fromconn(from.getConnString());
 
-        bool worked = fromconn->get()->runCommand( "admin" ,
-                                                   BSON( "moveChunk" << _manager->getns() <<
-                                                         "from" << from.getAddress().toString() <<
-                                                         "to" << to.getAddress().toString() <<
-                                                         // NEEDED FOR 2.0 COMPATIBILITY
-                                                         "fromShard" << from.getName() <<
-                                                         "toShard" << to.getName() <<
-                                                         ///////////////////////////////
-                                                         "min" << _min <<
-                                                         "max" << _max <<
-                                                         "maxChunkSizeBytes" << chunkSize <<
-                                                         "shardId" << genID() <<
-                                                         "configdb" << configServer.modelServer() <<
-                                                         "secondaryThrottle" << secondaryThrottle <<
-                                                         "waitForDelete" << waitForDelete
-                                                         ) ,
-                                                   res
-                                                   );
-        fromconn->done();
+        bool worked = fromconn->runCommand( "admin" ,
+                                            BSON( "moveChunk" << _manager->getns() <<
+                                                  "from" << from.getAddress().toString() <<
+                                                  "to" << to.getAddress().toString() <<
+                                                  // NEEDED FOR 2.0 COMPATIBILITY
+                                                  "fromShard" << from.getName() <<
+                                                  "toShard" << to.getName() <<
+                                                  ///////////////////////////////
+                                                  "min" << _min <<
+                                                  "max" << _max <<
+                                                  "maxChunkSizeBytes" << chunkSize <<
+                                                  "shardId" << genID() <<
+                                                  "configdb" << configServer.modelServer() <<
+                                                  "secondaryThrottle" << secondaryThrottle <<
+                                                  "waitForDelete" << waitForDelete <<
+                                                  LiteParsedQuery::cmdOptionMaxTimeMS << maxTimeMS
+                                                   ) ,
+                                            res);
+        fromconn.done();
 
         LOG( worked ? 1 : 0 ) << "moveChunk result: " << res << endl;
 
@@ -351,6 +443,7 @@ namespace mongo {
     }
 
     bool Chunk::splitIfShould( long dataWritten ) const {
+        dassert( ShouldAutoSplit );
         LastError::Disabled d( lastError.get() );
 
         try {
@@ -375,6 +468,12 @@ namespace mongo {
             // since it nots 100% tcp queue bound
             // this was implicit before since we did a splitVector on the same socket
             ShardConnection::sync();
+
+            if ( !isConfigServerConsistent() ) {
+                 RARELY warning() << "will not perform auto-split because "
+                                  << "config servers are inconsistent" << endl;
+                return false;
+            }
 
             LOG(1) << "about to initiate autosplit: " << *this << " dataWritten: " << _dataWritten << " splitThreshold: " << splitThreshold << endl;
 
@@ -403,43 +502,19 @@ namespace mongo {
                   << ( res["shouldMigrate"].eoo() ? "" : (string)" (migrate suggested" +
                      ( shouldBalance ? ")" : ", but no migrations allowed)" ) ) << endl;
 
+            // Top chunk optimization - try to move the top chunk out of this shard
+            // to prevent the hot spot from staying on a single shard. This is based on
+            // the assumption that succeeding inserts will fall on the top chunk.
             BSONElement shouldMigrate = res["shouldMigrate"]; // not in mongod < 1.9.1 but that is ok
             if ( ! shouldMigrate.eoo() && shouldBalance ){
                 BSONObj range = shouldMigrate.embeddedObject();
-                BSONObj min = range["min"].embeddedObject();
-                BSONObj max = range["max"].embeddedObject();
-                
-                // reload sharding metadata before starting migration
-                Shard::reloadShardInfo();
 
-                Shard newLocation = Shard::pick( getShard() );
-                if ( getShard() == newLocation ) {
-                    // if this is the best shard, then we shouldn't do anything (Shard::pick already logged our shard).
-                    LOG(1) << "recently split chunk: " << range << " already in the best shard: " << getShard() << endl;
-                    return true; // we did split even if we didn't migrate
-                }
+                ChunkType chunkToMove;
+                chunkToMove.setShard(getShard().toString());
+                chunkToMove.setMin(range["min"].embeddedObject());
+                chunkToMove.setMax(range["max"].embeddedObject());
 
-                ChunkManagerPtr cm = _manager->reload(false/*just reloaded in mulitsplit*/);
-                ChunkPtr toMove = cm->findIntersectingChunk(min);
-
-                if ( ! (toMove->getMin() == min && toMove->getMax() == max) ){
-                    LOG(1) << "recently split chunk: " << range << " modified before we could migrate " << toMove << endl;
-                    return true;
-                }
-
-                log() << "moving chunk (auto): " << toMove << " to: " << newLocation.toString() << endl;
-
-                BSONObj res;
-                massert( 10412 ,
-                         str::stream() << "moveAndCommit failed: " << res ,
-                         toMove->moveAndCommit( newLocation , 
-                                                MaxChunkSize , 
-                                                false , /* secondaryThrottle - small chunk, no need */
-                                                false, /* waitForDelete - small chunk, no need */
-                                                res ) );
-                
-                // update our config
-                _manager->reload();
+                tryMoveToOtherShard(*_manager, chunkToMove);
             }
 
             return true;
@@ -458,11 +533,10 @@ namespace mongo {
     }
 
     long Chunk::getPhysicalSize() const {
-        scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getInternalScopedDbConnection( getShard().getConnString() ) );
+        ScopedDbConnection conn(getShard().getConnString());
 
         BSONObj result;
-        uassert( 10169 ,  "datasize failed!" , conn->get()->runCommand( "admin" ,
+        uassert( 10169 ,  "datasize failed!" , conn->runCommand( "admin" ,
                  BSON( "datasize" << _manager->getns()
                        << "keyPattern" << _manager->getShardKey().key()
                        << "min" << getMin()
@@ -471,7 +545,7 @@ namespace mongo {
                        << "estimate" << true
                      ) , result ) );
 
-        conn->done();
+        conn.done();
         return (long)result["size"].number();
     }
 
@@ -521,11 +595,11 @@ namespace mongo {
 
     string Chunk::toString() const {
         stringstream ss;
-        ss << ChunkType::ns() << ":" << _manager->getns() <<
-              ChunkType::shard()   << ": " << _shard.toString() <<
-              ChunkType::DEPRECATED_lastmod() << ": " << _lastmod.toString() <<
-              ChunkType::min()     << ": " << _min <<
-              ChunkType::max()     << ": " << _max;
+        ss << ChunkType::ns()                 << ": " << _manager->getns()   << ", "
+           << ChunkType::shard()              << ": " << _shard.toString()   << ", "
+           << ChunkType::DEPRECATED_lastmod() << ": " << _lastmod.toString() << ", "
+           << ChunkType::min()                << ": " << _min                << ", "
+           << ChunkType::max()                << ": " << _max;
         return ss.str();
     }
 
@@ -539,18 +613,17 @@ namespace mongo {
         // at least this mongos won't try and keep moving
         _jumbo = true;
 
-        try {
-            scoped_ptr<ScopedDbConnection> conn(
-                    ScopedDbConnection::getInternalScopedDbConnection(
-                            configServer.modelServer(), 30));
+        Status result = clusterUpdate( ChunkType::ConfigNS,
+                                       BSON(ChunkType::name(genID())),
+                                       BSON("$set" << BSON(ChunkType::jumbo(true))),
+                                       false, // upsert
+                                       false, // multi
+                                       WriteConcernOptions::AllConfigs,
+                                       NULL );
 
-            conn->get()->update(ChunkType::ConfigNS,
-                                BSON(ChunkType::name(genID())),
-                                BSON("$set" << BSON(ChunkType::jumbo(true))));
-            conn->done();
-        }
-        catch ( DBException& e ) {
-            warning() << "couldn't set jumbo for chunk: " << genID() << causedBy( e ) << endl;
+        if ( !result.isOK() ) {
+            warning() << "couldn't set jumbo for chunk: "
+                      << genID() << result.reason() << endl;
         }
     }
 
@@ -570,7 +643,7 @@ namespace mongo {
             return;
         }
 
-        LOG(1) << "Refreshing MaxChunkSize: " << csize << endl;
+        LOG(1) << "Refreshing MaxChunkSize: " << csize << "MB" << endl;
 
         if (csize != Chunk::MaxChunkSize/(1024*1024)) {
             log() << "MaxChunkSize changing from " << Chunk::MaxChunkSize/(1024*1024) << "MB"
@@ -920,6 +993,7 @@ namespace mongo {
             ChunkMap::const_iterator last = boost::prior(it);
 
             if (!(it->second->getMin() == last->second->getMax())) {
+                PRINT(last->second->toString());
                 PRINT(it->second->toString());
                 PRINT(it->second->getMin());
                 PRINT(last->second->getMax());
@@ -938,8 +1012,12 @@ namespace mongo {
         }
     }
 
-    bool ChunkManager::hasShardKey( const BSONObj& obj ) const {
-        return _key.hasShardKey( obj );
+    bool ChunkManager::hasShardKey(const BSONObj& doc) const {
+        return _key.hasShardKey(doc);
+    }
+
+    bool ChunkManager::hasTargetableShardKey(const BSONObj& doc) const {
+        return _key.hasTargetableShardKey(doc);
     }
 
     void ChunkManager::calcInitSplitsAndShards( const Shard& primary,
@@ -957,12 +1035,10 @@ namespace mongo {
             // discover split points
             {
                 // get stats to see if there is any data
-                scoped_ptr<ScopedDbConnection> shardConn(
-                        ScopedDbConnection::getInternalScopedDbConnection( primary
-                                                                           .getConnString() ) );
+                ScopedDbConnection shardConn(primary.getConnString());
 
-                numObjects = shardConn->get()->count( getns() );
-                shardConn->done();
+                numObjects = shardConn->count( getns() );
+                shardConn.done();
             }
 
             if ( numObjects > 0 )
@@ -1014,15 +1090,15 @@ namespace mongo {
         log() << "going to create " << splitPoints.size() + 1 << " chunk(s) for: " << _ns
               << " using new epoch " << version.epoch() << endl;
         
-        scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getInternalScopedDbConnection(config, 30));
+        ScopedDbConnection conn(config, 30);
 
         // Make sure we don't have any chunks that already exist here
         unsigned long long existingChunks =
-            conn->get()->count(ChunkType::ConfigNS, BSON(ChunkType::ns(_ns)));
+            conn->count(ChunkType::ConfigNS, BSON(ChunkType::ns(_ns)));
 
         uassert( 13449 , str::stream() << "collection " << _ns << " already sharded with "
                                        << existingChunks << " chunks", existingChunks == 0 );
+        conn.done();
 
         for ( unsigned i=0; i<=splitPoints.size(); i++ ) {
             BSONObj min = i == 0 ? _key.globalMin() : splitPoints[i-1];
@@ -1034,23 +1110,23 @@ namespace mongo {
             temp.serialize( chunkBuilder );
             BSONObj chunkObj = chunkBuilder.obj();
 
-            conn->get()->update(ChunkType::ConfigNS,
-                                QUERY(ChunkType::name(temp.genID())),
-                                chunkObj,
-                                true,
-                                false );
+            Status result = clusterUpdate( ChunkType::ConfigNS,
+                                           BSON(ChunkType::name(temp.genID())),
+                                           chunkObj,
+                                           true, // upsert
+                                           false, // multi
+                                           WriteConcernOptions::AllConfigs,
+                                           NULL );
 
             version.incMinor();
-        }
 
-        string errmsg = conn->get()->getLastError();
-        if ( errmsg.size() ) {
-            string ss = str::stream() << "creating first chunks failed. result: " << errmsg;
-            error() << ss << endl;
-            msgasserted( 15903 , ss );
+            if ( !result.isOK() ) {
+                string ss = str::stream() << "creating first chunks failed. result: "
+                                          << result.reason();
+                error() << ss << endl;
+                msgasserted( 15903 , ss );
+            }
         }
-        
-        conn->done();
 
         _version = ChunkVersion( 0, version.epoch() );
     }
@@ -1083,7 +1159,10 @@ namespace mongo {
         }
 
         msgasserted( 8070 ,
-                     str::stream() << "couldn't find a chunk which should be impossible: " << point );
+                     str::stream() << "couldn't find a chunk intersecting: " << point
+                                   << " for ns: " << _ns
+                                   << " at version: " << _version.toString()
+                                   << ", number of chunks: " << _chunkMap.size() );
     }
 
     ChunkPtr ChunkManager::findChunkForDoc( const BSONObj& doc ) const {
@@ -1124,7 +1203,6 @@ namespace mongo {
             // special case if most-significant field isn't in query
             FieldRange range = frsp->shardKeyRange(_key.key().firstElementFieldName());
             if ( range.universal() ) {
-                DEV PRINT(range.universal());
                 getShardsForRange( shards, _key.globalMin(), _key.globalMax() );
                 return;
             }
@@ -1235,13 +1313,12 @@ namespace mongo {
         map<string,BSONObj> errors;
         // delete data from mongod
         for ( set<Shard>::iterator i=seen.begin(); i!=seen.end(); i++ ) {
-            scoped_ptr<ScopedDbConnection> conn(
-                    ScopedDbConnection::getScopedDbConnection( i->getConnString() ));
+            ScopedDbConnection conn(i->getConnString());
             BSONObj info;
-            if ( !conn->get()->dropCollection( _ns, &info ) ) {
+            if ( !conn->dropCollection( _ns, &info ) ) {
                 errors[ i->getConnString() ] = info;
             }
-            conn->done();
+            conn.done();
         }
         if ( !errors.empty() ) {
             stringstream ss;
@@ -1259,22 +1336,29 @@ namespace mongo {
         LOG(1) << "ChunkManager::drop : " << _ns << "\t removed shard data" << endl;
 
         // remove chunk data
-        scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getInternalScopedDbConnection( configServer.modelServer() ) );
-        conn->get()->remove(ChunkType::ConfigNS, BSON(ChunkType::ns(_ns)));
-        conn->done();
+        Status result = clusterDelete( ChunkType::ConfigNS,
+                                       BSON(ChunkType::ns(_ns)),
+                                       0 /* limit */,
+                                       WriteConcernOptions::AllConfigs,
+                                       NULL );
+        
+        // Make sure we're dropped on the config
+        if ( !result.isOK() ) {
+            uasserted( 17001, str::stream() << "could not drop chunks for " << _ns
+                                            << ": " << result.reason() );
+        }
+
         LOG(1) << "ChunkManager::drop : " << _ns << "\t removed chunk data" << endl;
 
         for ( set<Shard>::iterator i=seen.begin(); i!=seen.end(); i++ ) {
-            scoped_ptr<ScopedDbConnection> conn(
-                    ScopedDbConnection::getInternalScopedDbConnection( i->getConnString() ) );
+            ScopedDbConnection conn(i->getConnString());
             BSONObj res;
 
             // this is horrible
             // we need a special command for dropping on the d side
             // this hack works for the moment
 
-            if ( ! setShardVersion( conn->conn(),
+            if ( ! setShardVersion( conn.conn(),
                                     _ns,
                                     ChunkVersion( 0, OID() ),
                                     ChunkManagerPtr(),
@@ -1283,18 +1367,28 @@ namespace mongo {
                 throw UserException( 8071 , str::stream() << "cleaning up after drop failed: " << res );
             }
 
-            conn->get()->simpleCommand( "admin", 0, "unsetSharding" );
-            conn->done();
+            conn->simpleCommand( "admin", 0, "unsetSharding" );
+            conn.done();
         }
 
         LOG(1) << "ChunkManager::drop : " << _ns << "\t DONE" << endl;
         configServer.logChange( "dropCollection" , _ns , BSONObj() );
     }
 
+    ChunkVersion ChunkManager::getVersion( const StringData& shardName ) const {
+        // NOTE: The empty-address Shard constructor is needed to avoid triggering a reload
+        return getVersion( Shard( shardName.toString(), "" ) );
+    }
+
     ChunkVersion ChunkManager::getVersion( const Shard& shard ) const {
         ShardVersionMap::const_iterator i = _shardVersions.find( shard );
-        if ( i == _shardVersions.end() )
-            return ChunkVersion( 0, OID() );
+        if ( i == _shardVersions.end() ) {
+            // Shards without explicitly tracked shard versions (meaning they have
+            // no chunks) always have a version of (0, 0, epoch).  Note this is
+            // *different* from the dropped chunk version of (0, 0, OID(000...)).
+            // See s/chunk_version.h.
+            return ChunkVersion( 0, 0, _version.epoch() );
+        }
         return i->second;
     }
 
@@ -1361,7 +1455,7 @@ namespace mongo {
 
         }
         catch (...) {
-            LOG( LL_ERROR ) << "\t invalid ChunkRangeMap! printing ranges:" << endl;
+            error() << "\t invalid ChunkRangeMap! printing ranges:" << endl;
 
             for (ChunkRangeMap::const_iterator it=_ranges.begin(), end=_ranges.end(); it != end; ++it)
                 cout << it->first << ": " << *it->second << endl;
@@ -1471,7 +1565,8 @@ namespace mongo {
         cmdBuilder.append( "shardHost" , s.getConnString() );
         BSONObj cmd = cmdBuilder.obj();
 
-        LOG(1) << "    setShardVersion  " << s.getName()
+        LOG(1).stream()
+               << "    setShardVersion  " << s.getName()
                << " " << conn.getServerAddress()
                << "  " << ns
                << "  " << cmd

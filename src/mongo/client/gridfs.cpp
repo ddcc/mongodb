@@ -15,29 +15,30 @@
  *    limitations under the License.
  */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
+#include "mongo/client/gridfs.h"
+
+#include <boost/filesystem/operations.hpp>
 #include <boost/smart_ptr.hpp>
 #include <fcntl.h>
 #include <fstream>
 #include <utility>
 
-#include "mongo/client/gridfs.h"
-#include "mongo/client/dbclientcursor.h"
-
 #if defined(_WIN32)
 #include <io.h>
 #endif
+
+#include "mongo/client/dbclientcursor.h"
 
 #ifndef MIN
 #define MIN(a,b) ( (a) < (b) ? (a) : (b) )
 #endif
 
-#include <boost/filesystem/operations.hpp>
 
 namespace mongo {
 
-    const unsigned DEFAULT_CHUNK_SIZE = 256 * 1024;
+    const unsigned DEFAULT_CHUNK_SIZE = 255 * 1024;
 
     GridFSChunk::GridFSChunk( BSONObj o ) {
         _data = o;

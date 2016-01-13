@@ -15,21 +15,38 @@
 
 #include "mongo/db/auth/privilege.h"
 
-#include <string>
-
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
-#include "mongo/db/auth/principal.h"
 
 namespace mongo {
 
-    Privilege::Privilege(const std::string& resource, const ActionType& action) :
+    void Privilege::addPrivilegeToPrivilegeVector(PrivilegeVector* privileges,
+                                                  const Privilege& privilegeToAdd) {
+        for (PrivilegeVector::iterator it = privileges->begin(); it != privileges->end(); ++it) {
+            if (it->getResourcePattern() == privilegeToAdd.getResourcePattern()) {
+                it->addActions(privilegeToAdd.getActions());
+                return;
+            }
+        }
+        // No privilege exists yet for this resource
+        privileges->push_back(privilegeToAdd);
+    }
+
+    Privilege::Privilege(const ResourcePattern& resource, const ActionType& action) :
         _resource(resource) {
 
         _actions.addAction(action);
     }
-    Privilege::Privilege(const std::string& resource, const ActionSet& actions) :
+    Privilege::Privilege(const ResourcePattern& resource, const ActionSet& actions) :
             _resource(resource), _actions(actions) {}
+
+    void Privilege::addActions(const ActionSet& actionsToAdd) {
+        _actions.addAllActionsFromSet(actionsToAdd);
+    }
+
+    void Privilege::removeActions(const ActionSet& actionsToRemove) {
+        _actions.removeAllActionsFromSet(actionsToRemove);
+    }
 
     bool Privilege::includesAction(const ActionType& action) const {
         return _actions.contains(action);

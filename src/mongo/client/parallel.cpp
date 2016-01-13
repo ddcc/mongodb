@@ -16,12 +16,16 @@
  */
 
 
-#include "pch.h"
+#include "mongo/pch.h"
+
+#include "mongo/client/parallel.h"
 
 #include "mongo/client/connpool.h"
 #include "mongo/client/dbclientcursor.h"
-#include "mongo/client/parallel.h"
+#include "mongo/client/dbclient_rs.h"
+#include "mongo/client/replica_set_monitor.h"
 #include "mongo/db/dbmessage.h"
+#include "mongo/db/query/lite_parsed_query.h"
 #include "mongo/s/chunk.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/config.h"
@@ -33,65 +37,27 @@ namespace mongo {
 
     LabeledLevel pc( "pcursor", 2 );
 
-    // --------  ClusteredCursor -----------
-
-    ClusteredCursor::ClusteredCursor( const QuerySpec& q ) {
-        _ns = q.ns();
-        _query = q.filter().copy();
-        _hint = q.hint();
-        _sort = q.sort();
-        _options = q.options();
-        _fields = q.fields().copy();
-        _batchSize = q.ntoreturn();
-        if ( _batchSize == 1 )
-            _batchSize = 2;
-        
-        _done = false;
-        _didInit = false;
-    }
-
-    ClusteredCursor::ClusteredCursor( QueryMessage& q ) {
-        _ns = q.ns;
-        _query = q.query.copy();
-        _options = q.queryOptions;
-        _fields = q.fields.copy();
-        _batchSize = q.ntoreturn;
-        if ( _batchSize == 1 )
-            _batchSize = 2;
-
-        _done = false;
-        _didInit = false;
-    }
-
-    ClusteredCursor::ClusteredCursor( const string& ns , const BSONObj& q , int options , const BSONObj& fields ) {
-        _ns = ns;
-        _query = q.getOwned();
-        _options = options;
-        _fields = fields.getOwned();
-        _batchSize = 0;
-
-        _done = false;
-        _didInit = false;
-    }
-
-    ClusteredCursor::~ClusteredCursor() {
-        _done = true; // just in case
-    }
-
-    void ClusteredCursor::init() {
+    void ParallelSortClusteredCursor::init() {
         if ( _didInit )
             return;
         _didInit = true;
-        _init();
+
+        if( ! _qSpec.isEmpty() ) fullInit();
+        else _oldInit();
     }
 
-    void ClusteredCursor::_checkCursor( DBClientCursor * cursor ) {
+    string ParallelSortClusteredCursor::getNS() {
+        if( ! _qSpec.isEmpty() ) return _qSpec.ns();
+        return _ns;
+    }
+
+    static void _checkCursor( DBClientCursor * cursor ) {
         verify( cursor );
         
         if ( cursor->hasResultFlag( ResultFlag_ShardConfigStale ) ) {
             BSONObj error;
             cursor->peekError( &error );
-            throw RecvStaleConfigException( "ClusteredCursor::_checkCursor", error );
+            throw RecvStaleConfigException( "_checkCursor", error );
         }
         
         if ( cursor->hasResultFlag( ResultFlag_ErrSet ) ) {
@@ -107,105 +73,9 @@ namespace mongo {
             // running with a 2.0 mongod.
             BSONObj res = cursor->peekFirst();
             if ( res.hasField( "code" ) && res["code"].Number() == SendStaleConfigCode ) {
-                throw RecvStaleConfigException( "ClusteredCursor::_checkCursor", res );
+                throw RecvStaleConfigException( "_checkCursor", res );
             }
         }
-    }
-
-    auto_ptr<DBClientCursor> ClusteredCursor::query( const string& server , int num , BSONObj extra , int skipLeft , bool lazy ) {
-        uassert( 10017 ,  "cursor already done" , ! _done );
-        verify( _didInit );
-
-        BSONObj q = _query;
-        if ( ! extra.isEmpty() ) {
-            q = concatQuery( q , extra );
-        }
-
-        try {
-            ShardConnection conn( server , _ns );
-            
-            if ( conn.setVersion() ) {
-                conn.done();
-                // Deprecated, so we don't care about versions here
-                throw RecvStaleConfigException( _ns , "ClusteredCursor::query" , ChunkVersion( 0, OID() ), ChunkVersion( 0, OID() ), true );
-            }
-            
-            LOG(5) << "ClusteredCursor::query (" << type() << ") server:" << server
-                   << " ns:" << _ns << " query:" << q << " num:" << num
-                   << " _fields:" << _fields << " options: " << _options << endl;
-        
-            auto_ptr<DBClientCursor> cursor =
-                conn->query( _ns , q , num , 0 , ( _fields.isEmpty() ? 0 : &_fields ) , _options , _batchSize == 0 ? 0 : _batchSize + skipLeft );
-            
-            if ( ! cursor.get() && _options & QueryOption_PartialResults ) {
-                _done = true;
-                conn.done();
-                return cursor;
-            }
-            
-            massert( 13633 , str::stream() << "error querying server: " << server  , cursor.get() );
-            
-            cursor->attach( &conn ); // this calls done on conn
-            verify( ! conn.ok() );
-            _checkCursor( cursor.get() );
-            return cursor;
-        }
-        catch ( SocketException& e ) {
-            if ( ! ( _options & QueryOption_PartialResults ) )
-                throw e;
-            _done = true;
-            return auto_ptr<DBClientCursor>();
-        }
-    }
-
-    BSONObj ClusteredCursor::explain( const string& server , BSONObj extra ) {
-        BSONObj q = _query;
-        if ( ! extra.isEmpty() ) {
-            q = concatQuery( q , extra );
-        }
-        
-        Query qu( q );
-        qu.explain();
-        if ( ! _hint.isEmpty() )
-            qu.hint( _hint );
-        if ( ! _sort.isEmpty() )
-            qu.sort( _sort );
-
-        BSONObj o;
-
-        ShardConnection conn( server , _ns );
-        auto_ptr<DBClientCursor> cursor = conn->query( _ns , qu , abs( _batchSize ) * -1 , 0 , _fields.isEmpty() ? 0 : &_fields );
-        if ( cursor.get() && cursor->more() )
-            o = cursor->next().getOwned();
-        conn.done();
-        return o;
-    }
-
-    BSONObj ClusteredCursor::concatQuery( const BSONObj& query , const BSONObj& extraFilter ) {
-        if ( ! query.hasField( "query" ) )
-            return _concatFilter( query , extraFilter );
-
-        BSONObjBuilder b;
-        BSONObjIterator i( query );
-        while ( i.more() ) {
-            BSONElement e = i.next();
-
-            if ( strcmp( e.fieldName() , "query" ) ) {
-                b.append( e );
-                continue;
-            }
-
-            b.append( "query" , _concatFilter( e.embeddedObjectUserCheck() , extraFilter ) );
-        }
-        return b.obj();
-    }
-
-    BSONObj ClusteredCursor::_concatFilter( const BSONObj& filter , const BSONObj& extra ) {
-        BSONObjBuilder b;
-        b.appendElements( filter );
-        b.appendElements( extra );
-        return b.obj();
-        // TODO: should do some simplification here if possibl ideally
     }
 
     void ParallelSortClusteredCursor::explain(BSONObjBuilder& b) {
@@ -237,7 +107,7 @@ namespace mongo {
         double numExplains = 0;
 
         map<string,long long> counters;
-        
+
         map<string,list<BSONObj> > out;
         {
             _explain( out );
@@ -249,6 +119,17 @@ namespace mongo {
                 BSONArrayBuilder y( x.subarrayStart( shard ) );
                 for ( list<BSONObj>::iterator j=l.begin(); j!=l.end(); ++j ) {
                     BSONObj temp = *j;
+
+                    // If appending the next output from the shard is going to make the BSON
+                    // too large, then don't add it. We make sure the BSON doesn't get bigger
+                    // than the allowable "user size" for a BSONObj. This leaves a little bit
+                    // of extra space which mongos can use to add extra data.
+                    if ((x.len() + temp.objsize()) > BSONObjMaxUserSize) {
+                        y.append(BSON("warning" <<
+                            "shard output omitted due to nearing 16 MB limit"));
+                        break;
+                    }
+
                     y.append( temp );
 
                     BSONObjIterator k( temp );
@@ -358,7 +239,6 @@ namespace mongo {
 
         BSONObj ret = _next;
         _next = BSONObj();
-        _advance();
         return ret;
     }
 
@@ -385,90 +265,35 @@ namespace mongo {
         _done = true;
     }
 
-    // --------  SerialServerClusteredCursor -----------
-
-    SerialServerClusteredCursor::SerialServerClusteredCursor( const set<ServerAndQuery>& servers , QueryMessage& q , int sortOrder) : ClusteredCursor( q ) {
-        for ( set<ServerAndQuery>::const_iterator i = servers.begin(); i!=servers.end(); i++ )
-            _servers.push_back( *i );
-
-        if ( sortOrder > 0 )
-            sort( _servers.begin() , _servers.end() );
-        else if ( sortOrder < 0 )
-            sort( _servers.rbegin() , _servers.rend() );
-
-        _serverIndex = 0;
-
-        _needToSkip = q.ntoskip;
-    }
-
-    bool SerialServerClusteredCursor::more() {
-
-        // TODO: optimize this by sending on first query and then back counting
-        //       tricky in case where 1st server doesn't have any after
-        //       need it to send n skipped
-        while ( _needToSkip > 0 && _current.more() ) {
-            _current.next();
-            _needToSkip--;
-        }
-
-        if ( _current.more() )
-            return true;
-
-        if ( _serverIndex >= _servers.size() ) {
-            return false;
-        }
-
-        ServerAndQuery& sq = _servers[_serverIndex++];
-
-        _current.reset( query( sq._server , 0 , sq._extra ) );
-        return more();
-    }
-
-    BSONObj SerialServerClusteredCursor::next() {
-        uassert( 10018 ,  "no more items" , more() );
-        return _current.next();
-    }
-
-    void SerialServerClusteredCursor::_explain( map< string,list<BSONObj> >& out ) {
-        for ( unsigned i=0; i<_servers.size(); i++ ) {
-            ServerAndQuery& sq = _servers[i];
-            list<BSONObj> & l = out[sq._server];
-            l.push_back( explain( sq._server , sq._extra ) );
-        }
-    }
-
     // --------  ParallelSortClusteredCursor -----------
 
-    ParallelSortClusteredCursor::ParallelSortClusteredCursor( const set<ServerAndQuery>& servers , QueryMessage& q ,
-            const BSONObj& sortKey )
-        : ClusteredCursor( q ) , _servers( servers ) {
-        _sortKey = sortKey.getOwned();
-        _needToSkip = q.ntoskip;
+    ParallelSortClusteredCursor::ParallelSortClusteredCursor( const QuerySpec& qSpec, const CommandInfo& cInfo )
+        : _qSpec( qSpec ), _cInfo( cInfo ), _totalTries( 0 )
+    {
+        _done = false;
+        _didInit = false;
+
         _finishCons();
     }
 
+    // LEGACY Constructor
     ParallelSortClusteredCursor::ParallelSortClusteredCursor( const set<ServerAndQuery>& servers , const string& ns ,
             const Query& q ,
             int options , const BSONObj& fields  )
-        : ClusteredCursor( ns , q.obj , options , fields ) , _servers( servers ) {
+        : _servers( servers ) {
+
         _sortKey = q.getSort().copy();
         _needToSkip = 0;
-        _finishCons();
-    }
 
-    ParallelSortClusteredCursor::ParallelSortClusteredCursor( const QuerySpec& qSpec, const CommandInfo& cInfo )
-        : ClusteredCursor( qSpec ),
-          _qSpec( qSpec ), _cInfo( cInfo ), _totalTries( 0 )
-    {
-        _finishCons();
-    }
+        _done = false;
+        _didInit = false;
 
-    ParallelSortClusteredCursor::ParallelSortClusteredCursor( const set<Shard>& qShards, const QuerySpec& qSpec )
-        : ClusteredCursor( qSpec ),
-          _qSpec( qSpec ), _totalTries( 0 )
-    {
-        for( set<Shard>::const_iterator i = qShards.begin(), end = qShards.end(); i != end; ++i )
-            _qShards.insert( *i );
+        // Populate legacy fields
+        _ns = ns;
+        _query = q.obj.getOwned();
+        _options = options;
+        _fields = fields.getOwned();
+        _batchSize = 0;
 
         _finishCons();
     }
@@ -488,11 +313,32 @@ namespace mongo {
             if( ! isVersioned() ) verify( _cInfo.isEmpty() );
         }
 
-        if ( ! _sortKey.isEmpty() && ! _fields.isEmpty() ) {
-            // we need to make sure the sort key is in the projection
+        // Partition sort key fields into (a) text meta fields and (b) all other fields.
+        set<string> textMetaSortKeyFields;
+        set<string> normalSortKeyFields;
 
-            set<string> sortKeyFields;
-            _sortKey.getFieldNames(sortKeyFields);
+        // Transform _sortKey fields {a:{$meta:"textScore"}} into {a:-1}, in order to apply the
+        // merge sort for text metadata in the correct direction.
+        BSONObjBuilder transformedSortKeyBuilder;
+
+        BSONObjIterator sortKeyIt( _sortKey );
+        while ( sortKeyIt.more() ) {
+            BSONElement e = sortKeyIt.next();
+            if ( LiteParsedQuery::isTextScoreMeta( e ) ) {
+                textMetaSortKeyFields.insert( e.fieldName() );
+                transformedSortKeyBuilder.append( e.fieldName(), -1 );
+            }
+            else {
+                normalSortKeyFields.insert( e.fieldName() );
+                transformedSortKeyBuilder.append( e );
+            }
+        }
+        _sortKey = transformedSortKeyBuilder.obj();
+
+        // Verify that that all text metadata sort fields are in the projection.  For all other sort
+        // fields, copy them into the projection if they are missing (and if projection is
+        // negative).
+        if ( ! _sortKey.isEmpty() && ! _fields.isEmpty() ) {
 
             BSONObjBuilder b;
             bool isNegative = false;
@@ -504,26 +350,38 @@ namespace mongo {
 
                     string fieldName = e.fieldName();
 
-                    // exact field
-                    bool found = sortKeyFields.erase(fieldName);
-
-                    // subfields
-                    set<string>::const_iterator begin = sortKeyFields.lower_bound(fieldName + ".\x00");
-                    set<string>::const_iterator end   = sortKeyFields.lower_bound(fieldName + ".\xFF");
-                    sortKeyFields.erase(begin, end);
-
-                    if ( ! e.trueValue() ) {
-                        uassert( 13431 , "have to have sort key in projection and removing it" , !found && begin == end );
+                    if ( LiteParsedQuery::isTextScoreMeta( e ) ) {
+                        textMetaSortKeyFields.erase( fieldName );
                     }
-                    else if (!e.isABSONObj()) {
-                        isNegative = true;
+                    else {
+                        // exact field
+                        bool found = normalSortKeyFields.erase( fieldName );
+
+                        // subfields
+                        set<string>::const_iterator begin =
+                            normalSortKeyFields.lower_bound( fieldName + ".\x00" );
+                        set<string>::const_iterator end =
+                            normalSortKeyFields.lower_bound( fieldName + ".\xFF" );
+                        normalSortKeyFields.erase( begin, end );
+
+                        if ( ! e.trueValue() ) {
+                            uassert( 13431,
+                                     "have to have sort key in projection and removing it",
+                                     !found && begin == end );
+                        }
+                        else if ( !e.isABSONObj() ) {
+                            isNegative = true;
+                        }
                     }
                 }
             }
 
-            if (isNegative) {
-                for (set<string>::const_iterator it(sortKeyFields.begin()), end(sortKeyFields.end()); it != end; ++it) {
-                    b.append(*it, 1);
+            if ( isNegative ) {
+                for ( set<string>::const_iterator it( normalSortKeyFields.begin() ),
+                                                  end( normalSortKeyFields.end() );
+                      it != end;
+                      ++it ) {
+                    b.append( *it, 1 );
                 }
             }
 
@@ -533,6 +391,10 @@ namespace mongo {
         if( ! _qSpec.isEmpty() ){
             _qSpec.setFields( _fields );
         }
+
+        uassert( 17306,
+                 "have to have all text meta sort keys in projection",
+                 textMetaSortKeyFields.empty() );
     }
 
     void ParallelConnectionMetadata::cleanup( bool full ){
@@ -540,14 +402,7 @@ namespace mongo {
         if( full || errored ) retryNext = false;
 
         if( ! retryNext && pcState ){
-
-            if( errored && pcState->conn ){
-                // Don't return this conn to the pool if it's bad
-                pcState->conn->kill();
-                pcState->conn.reset();
-            }
-            else if( initialized ){
-
+            if (initialized && !errored) {
                 verify( pcState->cursor );
                 verify( pcState->conn );
 
@@ -673,7 +528,7 @@ namespace mongo {
 
     void ParallelSortClusteredCursor::_handleStaleNS( const NamespaceString& staleNS, bool forceReload, bool fullReload ){
 
-        DBConfigPtr config = grid.getDBConfig( staleNS.db );
+        DBConfigPtr config = grid.getDBConfig( staleNS.db() );
 
         // Reload db if needed, make sure it works
         if( config && fullReload && ! config->reload() ){
@@ -715,26 +570,40 @@ namespace mongo {
         }
 
         const DBClientBase* rawConn = state->conn->getRawConn();
-        if (( _options & QueryOption_SlaveOk ) &&
-                rawConn->type() == ConnectionString::SET &&
-                rawConn->isFailed() ) {
-            /* A side effect of this short circuiting is this will not be
-             * able figure out that the primary is now up on it's own and
-             * has to rely on other threads to refresh the node states.
-             */
+        bool allowShardVersionFailure =
+            rawConn->type() == ConnectionString::SET &&
+            DBClientReplicaSet::isSecondaryQuery( _qSpec.ns(), _qSpec.query(), _qSpec.options() );
+        bool connIsDown = rawConn->isFailed();
+        if (allowShardVersionFailure && !connIsDown) {
+            // If the replica set connection believes that it has a valid primary that is up,
+            // confirm that the replica set monitor agrees that the suspected primary is indeed up.
+            const DBClientReplicaSet* replConn = dynamic_cast<const DBClientReplicaSet*>(rawConn);
+            ReplicaSetMonitorPtr rsMonitor = ReplicaSetMonitor::get(replConn->getSetName());
+            if (!rsMonitor->isHostUp(replConn->getSuspectedPrimaryHostAndPort())) {
+                connIsDown = true;
+            }
+        }
+
+        if (allowShardVersionFailure && connIsDown) {
+            // If we're doing a secondary-allowed query and the primary is down, don't attempt to
+            // set the shard version.
+
+            state->conn->donotCheckVersion();
+
+            // A side effect of this short circuiting is the mongos will not be able figure out that
+            // the primary is now up on it's own and has to rely on other threads to refresh node
+            // states.
 
             OCCASIONALLY {
-                const DBClientReplicaSet* repl =
-                    dynamic_cast<const DBClientReplicaSet*>( rawConn );
+                const DBClientReplicaSet* repl = dynamic_cast<const DBClientReplicaSet*>( rawConn );
+                dassert(repl);
                 warning() << "Primary for " << repl->getServerAddress()
                           << " was down before, bypassing setShardVersion."
-                          << " Local config view can be stale." << endl;
+                          << " The local replica set view and targeting may be stale." << endl;
             }
-        } else {
+        }
+        else {
             try {
-                /* TODO: Undo SERVER-5797. This try-catch is a temporary hack until
-                 * secondaries can properly handle shard versioning
-                 */
                 if ( state->conn->setVersion() ) {
                     // It's actually okay if we set the version here, since either the
                     // manager will be verified as compatible, or if the manager doesn't
@@ -742,19 +611,20 @@ namespace mongo {
                     LOG( pc ) << "needed to set remote version on connection to value "
                               << "compatible with " << vinfo << endl;
                 }
-            } catch ( const DBException& dbEx ) {
-                if ( (dbEx.getCode() == 10009 /* no master */ &&
-                        ( _options & QueryOption_SlaveOk )) ) {
+            }
+            catch ( const DBException& ) {
+                if ( allowShardVersionFailure ) {
+
+                    // It's okay if we don't set the version when talking to a secondary, we can
+                    // be stale in any case.
 
                     OCCASIONALLY {
                         const DBClientReplicaSet* repl =
-                            dynamic_cast<const DBClientReplicaSet*>(
-                                    state->conn->getRawConn() );
-
-                        warning() << "Cannot contact primary for "
-                                  << repl->getServerAddress()
-                                  << " to check shard version. "
-                                  << "SlaveOk query can be sent to the wrong shard."
+                            dynamic_cast<const DBClientReplicaSet*>( state->conn->getRawConn() );
+                        dassert(repl);
+                        warning() << "Cannot contact primary for " << repl->getServerAddress()
+                                  << " to check shard version."
+                                  << " The local replica set view and targeting may be stale."
                                   << endl;
                     }
                 }
@@ -767,16 +637,14 @@ namespace mongo {
     
     void ParallelSortClusteredCursor::startInit() {
 
-        bool returnPartial = ( _qSpec.options() & QueryOption_PartialResults );
-        bool specialVersion = _cInfo.versionedNS.size() > 0;
-        bool specialFilter = ! _cInfo.cmdFilter.isEmpty();
-        NamespaceString ns = specialVersion ? _cInfo.versionedNS : _qSpec.ns();
+        const bool returnPartial = ( _qSpec.options() & QueryOption_PartialResults );
+        NamespaceString ns( !_cInfo.isEmpty() ? _cInfo.versionedNS : _qSpec.ns() );
 
         ChunkManagerPtr manager;
         ShardPtr primary;
 
         string prefix;
-        if (MONGO_unlikely(logLevel >= pc)) {
+        if (MONGO_unlikely(logger::globalLogDomain()->shouldLog(pc))) {
             if( _totalTries > 0 ) {
                 prefix = str::stream() << "retrying (" << _totalTries << " tries)";
             }
@@ -792,13 +660,13 @@ namespace mongo {
 
         if( isVersioned() ){
 
-            DBConfigPtr config = grid.getDBConfig( ns.db ); // Gets or loads the config
+            DBConfigPtr config = grid.getDBConfig( ns.db() ); // Gets or loads the config
             uassert( 15989, "database not found for parallel cursor request", config );
 
             // Try to get either the chunk manager or the primary shard
             config->getChunkManagerOrPrimary( ns, manager, primary );
 
-            if (MONGO_unlikely(logLevel >= pc)) {
+            if (MONGO_unlikely(logger::globalLogDomain()->shouldLog(pc))) {
                 if (manager) {
                     vinfo = str::stream() << "[" << manager->getns() << " @ "
                         << manager->getVersion().toString() << "]";
@@ -809,7 +677,7 @@ namespace mongo {
                 }
             }
 
-            if( manager ) manager->getShardsForQuery( todo, specialFilter ? _cInfo.cmdFilter : _qSpec.filter() );
+            if( manager ) manager->getShardsForQuery( todo, !_cInfo.isEmpty() ? _cInfo.cmdFilter : _qSpec.filter() );
             else if( primary ) todo.insert( *primary );
 
             // Close all cursors on extra shards first, as these will be invalid
@@ -826,7 +694,7 @@ namespace mongo {
 
             // Don't use version to get shards here
             todo = _qShards;
-            if (MONGO_unlikely(logLevel >= pc)) {
+            if (MONGO_unlikely(logger::globalLogDomain()->shouldLog(pc))) {
                 vinfo = str::stream() << "[" << _qShards.size() << " shards specified]";
             }
         }
@@ -978,7 +846,7 @@ namespace mongo {
             catch( StaleConfigException& e ){
 
                 // Our version isn't compatible with the current version anymore on at least one shard, need to retry immediately
-                NamespaceString staleNS = e.getns();
+                NamespaceString staleNS( e.getns() );
 
                 // For legacy reasons, this may not be set in the exception :-(
                 if( staleNS.size() == 0 ) staleNS = ns; // ns is the *versioned* namespace, be careful of this
@@ -1195,7 +1063,7 @@ namespace mongo {
             if( staleNSExceptions.size() ){
                 for( map<string,StaleConfigException>::iterator i = staleNSExceptions.begin(), end = staleNSExceptions.end(); i != end; ++i ){
 
-                    const string& staleNS = i->first;
+                    NamespaceString staleNS( i->first );
                     const StaleConfigException& exception = i->second;
 
                     bool forceReload, fullReload;
@@ -1306,16 +1174,34 @@ namespace mongo {
         else return i->second.pcState->cursor;
     }
 
-    void ParallelSortClusteredCursor::_init() {
-        if( ! _qSpec.isEmpty() ) fullInit();
-        else _oldInit();
+    static BSONObj _concatFilter( const BSONObj& filter , const BSONObj& extra ) {
+        BSONObjBuilder b;
+        b.appendElements( filter );
+        b.appendElements( extra );
+        return b.obj();
+        // TODO: should do some simplification here if possibl ideally
     }
 
+    static BSONObj concatQuery( const BSONObj& query , const BSONObj& extraFilter ) {
+        if ( ! query.hasField( "query" ) )
+            return _concatFilter( query , extraFilter );
+
+        BSONObjBuilder b;
+        BSONObjIterator i( query );
+        while ( i.more() ) {
+            BSONElement e = i.next();
+
+            if ( strcmp( e.fieldName() , "query" ) ) {
+                b.append( e );
+                continue;
+            }
+
+            b.append( "query" , _concatFilter( e.embeddedObjectUserCheck() , extraFilter ) );
+        }
+        return b.obj();
+    }
 
     // DEPRECATED
-
-
-    // TODO:  Merge with futures API?  We do a lot of error checking here that would be useful elsewhere.
     void ParallelSortClusteredCursor::_oldInit() {
 
         // log() << "Starting parallel search..." << endl;
@@ -1579,6 +1465,15 @@ namespace mongo {
 
         // Clear out our metadata after removing legacy cursor data
         _cursorMap.clear();
+
+        // Just to be sure
+        _done = true;
+    }
+
+    void ParallelSortClusteredCursor::setBatchSize(int newBatchSize) {
+        for ( int i=0; i<_numServers; i++ ) {
+            _cursors[i].setBatchSize(newBatchSize);
+        }
     }
 
     bool ParallelSortClusteredCursor::more() {
@@ -1673,7 +1568,7 @@ namespace mongo {
     void Future::CommandResult::init(){
         try {
             if ( ! _conn ){
-                _connHolder.reset( ScopedDbConnection::getScopedDbConnection( _server ) );
+                _connHolder.reset( new ScopedDbConnection( _server ) );
                 _conn = _connHolder->get();
             }
 

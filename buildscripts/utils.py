@@ -36,7 +36,7 @@ def getAllSourceFiles( arr=None , prefix="." ):
 
 
 def getGitBranch():
-    if not os.path.exists( ".git" ):
+    if not os.path.exists( ".git" ) or not os.path.isdir(".git"):
         return None
 
     version = open( ".git/HEAD" ,'r' ).read().strip()
@@ -63,7 +63,7 @@ def getGitBranchString( prefix="" , postfix="" ):
     return prefix + b + postfix
 
 def getGitVersion():
-    if not os.path.exists( ".git" ):
+    if not os.path.exists( ".git" ) or not os.path.isdir(".git"):
         return "nogitversion"
 
     version = open( ".git/HEAD" ,'r' ).read().strip()
@@ -87,7 +87,7 @@ def execsys( args ):
 def getprocesslist():
     raw = ""
     try:
-        raw = execsys( "/bin/ps -ax" )[0]
+        raw = execsys( "/bin/ps axww" )[0]
     except Exception,e:
         print( "can't get processlist: " + str( e ) )
 

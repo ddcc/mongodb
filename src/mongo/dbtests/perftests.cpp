@@ -20,40 +20,50 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
-#include <boost/thread/thread.hpp>
-
-#include <fstream>
-#include "../db/db.h"
-#include "../db/instance.h"
-#include "../db/json.h"
-#include "../db/lasterror.h"
-#include "../db/taskqueue.h"
-#include "../util/timer.h"
-#include "dbtests.h"
-#include "../db/dur_stats.h"
-#include "../util/checksum.h"
-#include "../util/version.h"
-#include "../db/key.h"
-#include "../util/compress.h"
-#include "../util/concurrency/qlock.h"
-#include "../util/fail_point.h"
 #include <boost/filesystem/operations.hpp>
+#include <boost/thread/thread.hpp>
+#include <fstream>
+
+#include "mongo/db/db.h"
+#include "mongo/db/dur_stats.h"
+#include "mongo/db/instance.h"
+#include "mongo/db/json.h"
+#include "mongo/db/structure/btree/key.h"
+#include "mongo/db/lasterror.h"
+#include "mongo/db/taskqueue.h"
+#include "mongo/dbtests/dbtests.h"
+#include "mongo/dbtests/framework_options.h"
+#include "mongo/util/checksum.h"
+#include "mongo/util/compress.h"
+#include "mongo/util/concurrency/qlock.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/timer.h"
+#include "mongo/util/version.h"
+#include "mongo/util/version_reporting.h"
+
+#if (__cplusplus >= 201103L)
+#include <mutex>
+#endif
 
 using namespace bson;
 
-namespace mongo {
-    namespace dbtests {
-        extern unsigned perfHist;
-    }
-}
-
 namespace PerfTests {
-
-    using mongo::dbtests::perfHist;
 
     const bool profiling = false;
 
@@ -215,23 +225,25 @@ namespace PerfTests {
     public:
         virtual unsigned batchSize() { return 50; }
 
-        void say(unsigned long long n, int ms, string s) {
-            unsigned long long rps = n*1000/ms;
-            cout << "stats " << setw(42) << left << s << ' ' << right << setw(9) << rps << ' ' << right << setw(5) << ms << "ms ";
+        void say(unsigned long long n, int us, string s) {
+            unsigned long long rps = (n*1000*1000)/(us > 0 ? us : 1);
+            cout << "stats " << setw(42) << left << s << ' ' << right << setw(9) << rps << ' ' << right << setw(5) << us/1000 << "ms ";
             if( showDurStats() )
                 cout << dur::stats.curr->_asCSV();
             cout << endl;
 
             if( conn && !conn->isFailed() ) {
                 const char *ns = "perf.pstats";
-                if( perfHist ) {
+                if(frameworkGlobalParams.perfHist) {
                     static bool needver = true;
                     try {
                         // try to report rps from last time */
                         Query q;
                         {
                             BSONObjBuilder b;
-                            b.append("host",_perfhostname).append("test",s).append("dur",cmdLine.dur);
+                            b.append("host", _perfhostname);
+                            b.append("test", s);
+                            b.append("dur", storageGlobalParams.dur);
                             DEV { b.append("info.DEBUG",true); }
                             else b.appendNull("info.DEBUG");
                             if( sizeof(int*) == 4 )
@@ -242,7 +254,7 @@ namespace PerfTests {
                         }
                         BSONObj fields = BSON( "rps" << 1 << "info" << 1 );
                         vector<BSONObj> v;
-                        conn->findN(v, ns, q, perfHist, 0, &fields);
+                        conn->findN(v, ns, q, frameworkGlobalParams.perfHist, 0, &fields);
                         for( vector<BSONObj>::iterator i = v.begin(); i != v.end(); i++ ) {
                             BSONObj o = *i;
                             double lastrps = o["rps"].Number();
@@ -265,9 +277,9 @@ namespace PerfTests {
                     b.appendTimeT("when", time(0));
                     b.append("test", s);
                     b.append("rps", (int) rps);
-                    b.append("millis", ms);
-                    b.appendBool("dur", cmdLine.dur);
-                    if( showDurStats() && cmdLine.dur )
+                    b.append("millis", us/1000);
+                    b.appendBool("dur", storageGlobalParams.dur);
+                    if (showDurStats() && storageGlobalParams.dur)
                         b.append("durStats", dur::stats.curr->_asObj());
                     {
                         bob inf;
@@ -278,6 +290,9 @@ namespace PerfTests {
                         inf.append("os", "win");
 #endif
                         inf.append("git", gitVersion());
+#ifdef MONGO_SSL
+                        inf.append("OpenSSL", openSSLVersion());
+#endif
                         inf.append("boost", BOOST_VERSION);
                         b.append("info", inf.obj());
                     }
@@ -334,9 +349,8 @@ namespace PerfTests {
             }
 
             client().getLastError(); // block until all ops are finished
-            int ms = t.millis();
 
-            say(n, ms, name());
+            say(n, t.micros(), name());
 
             post();
 
@@ -354,8 +368,7 @@ namespace PerfTests {
                         if( t.millis() > hlm )
                             break;
                     }
-                    int ms = t.millis();
-                    say(n, ms, test2name);
+                    say(n, t.micros(), test2name);
                 }
             }
 
@@ -364,8 +377,7 @@ namespace PerfTests {
                 //cout << "testThreaded nThreads:" << nThreads << endl;
                 mongo::Timer t;
                 const unsigned long long result = launchThreads(nThreads);
-                const int ms = t.millis();
-                say(result/nThreads, ms, test2name+"-threaded");
+                say(result/nThreads, t.micros(), test2name+"-threaded");
             }
         }
 
@@ -528,6 +540,12 @@ namespace PerfTests {
     RWLock lk("testrw");
     SimpleMutex m("simptst");
     mongo::mutex mtest("mtest");
+    boost::mutex mboost;
+    boost::timed_mutex mboost_timed;
+#if (__cplusplus >= 201103L)
+    std::mutex mstd;
+    std::timed_mutex mstd_timed;
+#endif
     SpinLock s;
     boost::condition c;
 
@@ -549,6 +567,24 @@ namespace PerfTests {
             mongo::mutex::scoped_lock lk(mtest);
         }
     };
+    class boostmutexspeed : public B {
+    public:
+        string name() { return "boost::mutex"; }
+        virtual int howLongMillis() { return 500; }
+        virtual bool showDurStats() { return false; }
+        void timed() {
+            boost::mutex::scoped_lock lk(mboost);
+        }
+    };
+    class boosttimed_mutexspeed : public B {
+    public:
+        string name() { return "boost::timed_mutex"; }
+        virtual int howLongMillis() { return 500; }
+        virtual bool showDurStats() { return false; }
+        void timed() {
+            boost::timed_mutex::scoped_lock lk(mboost_timed);
+        }
+    };
     class simplemutexspeed : public B {
     public:
         string name() { return "simplemutex"; }
@@ -558,6 +594,26 @@ namespace PerfTests {
             SimpleMutex::scoped_lock lk(m);
         }
     };
+#if (__cplusplus >= 201103L)
+    class stdmutexspeed : public B {
+    public:
+        string name() { return "std::mutex"; }
+        virtual int howLongMillis() { return 500; }
+        virtual bool showDurStats() { return false; }
+        void timed() {
+            std::lock_guard<std::mutex> lk(mstd);
+        }
+    };
+    class stdtimed_mutexspeed : public B {
+    public:
+        string name() { return "std::timed_mutex"; }
+        virtual int howLongMillis() { return 500; }
+        virtual bool showDurStats() { return false; }
+        void timed() {
+            std::lock_guard<std::timed_mutex> lk(mstd_timed);
+        }
+    };
+#endif
     class spinlockspeed : public B {
     public:
         string name() { return "spinlock"; }
@@ -777,14 +833,14 @@ namespace PerfTests {
         if( dontOptimizeOutHopefully ) { 
             throw TestException();
         }
-        log() << "hmmm" << endl;
+        mongo::unittest::log() << "hmmm" << endl;
     }
     void thr2(int n) { 
         if( --n <= 0 ) {
             if( dontOptimizeOutHopefully ) { 
                 throw TestException();
             }
-            log() << "hmmm" << endl;
+            mongo::unittest::log() << "hmmm" << endl;
         }
         Z z;
         try { 
@@ -798,7 +854,7 @@ namespace PerfTests {
             if( dontOptimizeOutHopefully ) { 
                 throw TestException();
             }
-            log() << "hmmm" << endl;
+            mongo::unittest::log() << "hmmm" << endl;
         }
         try { 
             Z z;
@@ -812,7 +868,7 @@ namespace PerfTests {
             if( dontOptimizeOutHopefully ) { 
                 throw TestException();
             }
-            log() << "hmmm" << endl;
+            mongo::unittest::log() << "hmmm" << endl;
         }
         Z z;
         thr4(n-1);
@@ -1012,8 +1068,14 @@ namespace PerfTests {
     class InsertBig : public B {
         BSONObj x;
         virtual int howLongMillis() {
-            if( sizeof(void*) == 4 )
-                return 1000;  // could exceed mmapping if run too long, as this function adds a lot fasta
+            if (sizeof(void*) == 4) {
+                // See SERVER-12556 - Running this test for some time causes occasional failures
+                // on Windows 32-bit, because the virtual address space is used up and remapping 
+                // starts to fail. Value of zero means that only one iteration of the test
+                // will run.
+                //
+                return 0;
+            }
             return 5000;
         }
     public:
@@ -1165,7 +1227,7 @@ namespace PerfTests {
         for( int i = 0; i < 20; i++ ) {
             sleepmillis(21);
             string fn = "/tmp/t1";
-            MongoMMF f;
+            DurableMappedFile f;
             unsigned long long len = 1 * 1024 * 1024;
             verify( f.create(fn, len, /*sequential*/rand()%2==0) );
             {
@@ -1174,7 +1236,7 @@ namespace PerfTests {
                 // write something to the private view as a test
                 strcpy(p, "hello");
             }
-            if( cmdLine.dur ) {
+            if (storageGlobalParams.dur) {
                 char *w = (char *) f.view_write();
                 strcpy(w + 6, "world");
             }
@@ -1182,6 +1244,108 @@ namespace PerfTests {
             ASSERT( ff.findByPath(fn) );
         }
     }
+
+    class StatusTestBase : public B {
+    public:
+        StatusTestBase()
+            : _message("Some string data that should not fit in a short string optimization") {
+        }
+
+        virtual int howLongMillis() { return 2000; }
+        virtual bool showDurStats() { return false; }
+    protected:
+        NOINLINE_DECL Status doThingOK() const {
+            return Status::OK();
+        }
+
+        NOINLINE_DECL Status doThingNotOK() const{
+            return Status(
+                ErrorCodes::InternalError,
+                _message,
+                42);
+        }
+    private:
+        const std::string _message;
+    };
+
+    class ReturnOKStatus : public StatusTestBase {
+    public:
+        string name() { return "return-ok-status"; }
+        void timed() {
+            doThingOK();
+        }
+    };
+
+    class ReturnNotOKStatus : public StatusTestBase {
+    public:
+        string name() { return "return-not-ok-status"; }
+        void timed() {
+            doThingNotOK();
+        }
+    };
+
+    class CopyOKStatus : public StatusTestBase {
+    public:
+        CopyOKStatus()
+            : _status(doThingOK()) {}
+
+        string name() { return "copy-ok-status"; }
+        void timed() {
+            const Status copy = _status;
+        }
+
+    private:
+        const Status _status;
+    };
+
+    class CopyNotOKStatus : public StatusTestBase {
+    public:
+        CopyNotOKStatus()
+            : _status(doThingNotOK()) {}
+
+        string name() { return "copy-not-ok-status"; }
+        void timed() {
+            const Status copy = _status;
+        }
+
+    private:
+        const Status _status;
+    };
+
+#if __cplusplus >= 201103L
+    class StatusMoveTestBase : public StatusTestBase {
+    public:
+        StatusMoveTestBase(bool ok)
+            : StatusTestBase()
+            , _a(ok ? doThingOK() : doThingNotOK())
+            , _b(_a.isOK() ? Status::OK() : Status(_a.code(), _a.reason().c_str(), _a.location())) {
+        }
+
+        void timed() {
+            Status temp(std::move(_a));
+            _a = std::move(_b);
+            _b = std::move(temp);
+        }
+
+    protected:
+        Status _a;
+        Status _b;
+    };
+
+    class MoveOKStatus : public StatusMoveTestBase  {
+    public:
+        MoveOKStatus()
+            : StatusMoveTestBase(true) {}
+        string name() { return "move-ok-status"; }
+    };
+
+    class MoveNotOKStatus : public StatusMoveTestBase {
+    public:
+        MoveNotOKStatus()
+            : StatusMoveTestBase(false) {}
+        string name() { return "move-not-ok-status"; }
+    };
+#endif
 
     class All : public Suite {
     public:
@@ -1215,7 +1379,23 @@ namespace PerfTests {
                 add< Throw< thr1 > >();
                 add< Throw< thr2 > >();
                 add< Throw< thr3 > >();
+
+#if !defined(__clang__) || !defined(MONGO_OPTIMIZED_BUILD)
+                // clang-3.2 (and earlier?) miscompiles this test when optimization is on (see
+                // SERVER-9767 and SERVER-11183 for additional details, including a link to the
+                // LLVM ticket and LLVM fix).
+                //
+                // Ideally, the test above would also say
+                // || (__clang_major__ > 3) || ((__clang_major__ == 3) && (__clang_minor__ > 2))
+                // so that the test would still run on known good vesrions of clang; see
+                // comments in SERVER-11183 for why that doesn't work.
+                //
+                // TODO: Remove this when we no longer need to support clang-3.2. We should
+                // also consider requiring clang > 3.2 in our configure tests once XCode 5 is
+                // ubiquitious.
                 add< Throw< thr4 > >();
+#endif
+
                 add< Timer >();
                 add< Sleep0Ms >();
 #if defined(__USE_XOPEN2K)
@@ -1228,6 +1408,12 @@ namespace PerfTests {
                 add< NotifyOne >();
                 add< mutexspeed >();
                 add< simplemutexspeed >();
+                add< boostmutexspeed >();
+                add< boosttimed_mutexspeed >();
+#if (__cplusplus >= 201103L)
+                add< stdmutexspeed >();
+                add< stdtimed_mutexspeed >();
+#endif
                 add< spinlockspeed >();
 #ifdef RUNCOMPARESWAP
                 add< casspeed >();
@@ -1251,6 +1437,15 @@ namespace PerfTests {
                 add< FailPointTest<false, false> >();
                 add< FailPointTest<true, false> >();
                 add< FailPointTest<true, true> >();
+
+                add< ReturnOKStatus >();
+                add< ReturnNotOKStatus >();
+                add< CopyOKStatus >();
+                add< CopyNotOKStatus >();
+#if __cplusplus >= 201103L
+                add< MoveOKStatus >();
+                add< MoveNotOKStatus >();
+#endif
             }
         }
     } myall;

@@ -14,24 +14,38 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
-#include "pch.h"
-#include "d_concurrency.h"
-#include "../util/concurrency/qlock.h"
-#include "../util/concurrency/threadlocal.h"
-#include "../util/concurrency/rwlock.h"
-#include "../util/concurrency/mapsf.h"
-#include "../util/assert_util.h"
-#include "../util/stacktrace.h"
-#include "client.h"
-#include "curop.h"
-#include "namespacestring.h"
-#include "d_globals.h"
-#include "server.h"
-#include "dur.h"
-#include "lockstat.h"
+#include "mongo/pch.h"
+
+#include "mongo/db/d_concurrency.h"
+
+#include "mongo/db/client.h"
 #include "mongo/db/commands/server_status.h"
+#include "mongo/db/curop.h"
+#include "mongo/db/d_globals.h"
+#include "mongo/db/dur.h"
+#include "mongo/db/lockstat.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/server.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/mapsf.h"
+#include "mongo/util/concurrency/qlock.h"
+#include "mongo/util/concurrency/rwlock.h"
+#include "mongo/util/concurrency/threadlocal.h"
+#include "mongo/util/stacktrace.h"
 
 // oplog locking
 // no top level read locks
@@ -69,11 +83,6 @@ namespace mongo {
         void assertNothingSpooled();
         void releasingWriteLock();
     }
-
-    // e.g. externalobjsortmutex uses hlmutex as it can be locked for very long times
-    // todo : report HLMutex status in db.currentOp() output
-    // perhaps move this elsewhere as this could be used in mongos and this file is for mongod
-    HLMutex::HLMutex(const char *name) : SimpleMutex(name) { }
 
     /* dbname->lock
        Currently these are never deleted - will linger if db was closed. (that should be fine.)
@@ -300,7 +309,10 @@ namespace mongo {
         long long acquisitionTime = _timer.micros();
         _timer.reset();
         _stat = stat;
+
+        // increment the operation level statistics
         cc().curop()->lockStat().recordAcquireTimeMicros( _type , acquisitionTime );
+
         return acquisitionTime;
     }
 
@@ -327,11 +339,9 @@ namespace mongo {
     
     void Lock::ScopedLock::relock() {
         _pbws_lk.relock();
-        _relock();
         resetTime();
+        _relock();
     }
-
-
 
     Lock::TempRelease::TempRelease() : cant( Lock::nested() )
     {

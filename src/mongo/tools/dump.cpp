@@ -1,5 +1,3 @@
-// dump.cpp
-
 /**
 *    Copyright (C) 2008 10gen Inc.
 *
@@ -14,26 +12,41 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
 #include "mongo/pch.h"
 
-#include <fcntl.h>
-#include <map>
-#include <fstream>
-
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/convenience.hpp>
+#include <fcntl.h>
+#include <fstream>
+#include <map>
 
-#include "mongo/base/initializer.h"
+#include "mongo/base/status.h"
+#include "mongo/client/auth_helpers.h"
 #include "mongo/client/dbclientcursor.h"
+#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/db.h"
-#include "mongo/db/namespacestring.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/tools/mongodump_options.h"
 #include "mongo/tools/tool.h"
+#include "mongo/util/options_parser/option_section.h"
+#include "mongo/util/mongoutils/str.h"
 
 using namespace mongo;
-
-namespace po = boost::program_options;
 
 class Dump : public Tool {
     class FilePtr : boost::noncopyable {
@@ -45,27 +58,10 @@ class Dump : public Tool {
         FILE* _f;
     };
 public:
-    Dump() : Tool( "dump" , ALL , "" , "" , true ) {
-        add_options()
-        ("out,o", po::value<string>()->default_value("dump"), "output directory or \"-\" for stdout")
-        ("query,q", po::value<string>() , "json query" )
-        ("oplog", "Use oplog for point-in-time snapshotting" )
-        ("repair", "try to recover a crashed database" )
-        ("forceTableScan", "force a table scan (do not use $snapshot)" )
-        ;
-    }
+    Dump() : Tool() { }
 
-    virtual void preSetup() {
-        string out = getParam("out");
-        if ( out == "-" ) {
-                // write output to standard error to avoid mangling output
-                // must happen early to avoid sending junk to stdout
-                useStandardOutput(false);
-        }
-    }
-
-    virtual void printExtraHelp(ostream& out) {
-        out << "Export MongoDB data to BSON files.\n" << endl;
+    virtual void printHelp(ostream& out) {
+        printMongoDumpHelp(&out);
     }
 
     // This is a functor that writes a BSONObj to a file
@@ -93,13 +89,12 @@ public:
         ProgressMeter* _m;
     };
 
-    void doCollection( const string coll , FILE* out , ProgressMeter *m ) {
-        Query q = _query;
-
+    void doCollection( const string coll , Query q, FILE* out , ProgressMeter *m,
+                       bool usingMongos ) {
         int queryOptions = QueryOption_SlaveOk | QueryOption_NoCursorTimeout;
-        if (startsWith(coll.c_str(), "local.oplog."))
+        if (startsWith(coll.c_str(), "local.oplog.") && q.obj.hasField("ts"))
             queryOptions |= QueryOption_OplogReplay;
-        else if ( _query.isEmpty() && !hasParam("dbpath") && !hasParam("forceTableScan") ) {
+        else if (mongoDumpGlobalParams.snapShotQuery) {
             q.snapshot();
         }
         
@@ -107,7 +102,7 @@ public:
         Writer writer(out, m);
 
         // use low-latency "exhaust" mode if going over the network
-        if (!_usingMongos && typeid(connBase) == typeid(DBClientConnection&)) {
+        if (!usingMongos && typeid(connBase) == typeid(DBClientConnection&)) {
             DBClientConnection& conn = static_cast<DBClientConnection&>(connBase);
             boost::function<void(const BSONObj&)> castedWriter(writer); // needed for overload resolution
             conn.query( castedWriter, coll.c_str() , q , NULL, queryOptions | QueryOption_Exhaust);
@@ -121,24 +116,25 @@ public:
         }
     }
 
-    void writeCollectionFile( const string coll , boost::filesystem::path outputFile ) {
-        log() << "\t" << coll << " to " << outputFile.string() << endl;
+    void writeCollectionFile( const string coll , Query q, boost::filesystem::path outputFile,
+                              bool usingMongos ) {
+        toolInfoLog() << "\t" << coll << " to " << outputFile.string() << std::endl;
 
         FilePtr f (fopen(outputFile.string().c_str(), "wb"));
         uassert(10262, errnoWithPrefix("couldn't open file"), f);
 
         ProgressMeter m(conn(true).count(coll.c_str(), BSONObj(), QueryOption_SlaveOk));
         m.setName("Collection File Writing Progress");
-        m.setUnits("objects");
+        m.setUnits("documents");
 
-        doCollection(coll, f, &m);
+        doCollection(coll, q, f, &m, usingMongos);
 
-        log() << "\t\t " << m.done() << " objects" << endl;
+        toolInfoLog() << "\t\t " << m.done() << " documents" << std::endl;
     }
 
     void writeMetadataFile( const string coll, boost::filesystem::path outputFile, 
                             map<string, BSONObj> options, multimap<string, BSONObj> indexes ) {
-        log() << "\tMetadata for " << coll << " to " << outputFile.string() << endl;
+        toolInfoLog() << "\tMetadata for " << coll << " to " << outputFile.string() << std::endl;
 
         bool hasOptions = options.count(coll) > 0;
         bool hasIndexes = indexes.count(coll) > 0;
@@ -170,13 +166,18 @@ public:
 
 
 
-    void writeCollectionStdout( const string coll ) {
-        doCollection(coll, stdout, NULL);
+    void writeCollectionStdout( const string coll, const BSONObj& dumpQuery, bool usingMongos ) {
+        doCollection(coll, dumpQuery, stdout, NULL, usingMongos);
     }
 
-    void go( const string db , const boost::filesystem::path outdir ) {
-        log() << "DATABASE: " << db << "\t to \t" << outdir.string() << endl;
-
+    void go(const string& db,
+            const string& coll,
+            const Query& query,
+            const boost::filesystem::path& outdir,
+            const string& outFilename,
+            bool usingMongos) {
+        // Can only provide outFilename if db and coll are provided
+        fassert(17368, outFilename.empty() || (!coll.empty() && !db.empty()));
         boost::filesystem::create_directories( outdir );
 
         map <string, BSONObj> collectionOptions;
@@ -202,81 +203,74 @@ public:
             }
 
             // skip namespaces with $ in them only if we don't specify a collection to dump
-            if ( _coll == "" && name.find( ".$" ) != string::npos ) {
-                LOG(1) << "\tskipping collection: " << name << endl;
+            if (coll == "" && name.find(".$") != string::npos) {
+                if (logger::globalLogDomain()->shouldLog(logger::LogSeverity::Debug(1))) {
+                    toolInfoLog() << "\tskipping collection: " << name << std::endl;
+                }
                 continue;
             }
 
             const string filename = name.substr( db.size() + 1 );
 
             //if a particular collections is specified, and it's not this one, skip it
-            if ( _coll != "" && db + "." + _coll != name && _coll != name )
+            if (coll != "" && db + "." + coll != name && coll != name) {
                 continue;
+            }
 
             // raise error before writing collection with non-permitted filename chars in the name
             size_t hasBadChars = name.find_first_of("/\0");
             if (hasBadChars != string::npos){
-              error() << "Cannot dump "  << name << ". Collection has '/' or null in the collection name." << endl;
-              continue;
+                toolError() << "Cannot dump "  << name
+                          << ". Collection has '/' or null in the collection name." << std::endl;
+                continue;
             }
 
-            if (NamespaceString(name).coll == "system.indexes") {
+            if (nsToCollectionSubstring(name) == "system.indexes") {
               // Create system.indexes.bson for compatibility with pre 2.2 mongorestore
               const string filename = name.substr( db.size() + 1 );
-              writeCollectionFile( name.c_str() , outdir / ( filename + ".bson" ) );
+              writeCollectionFile( name.c_str(), query, outdir / ( filename + ".bson" ),
+                                   usingMongos );
               // Don't dump indexes as *.metadata.json
               continue;
             }
-            
-            if ( _coll != "" && db + "." + _coll != name && _coll != name )
-              continue;
-            
+
+            if (nsToCollectionSubstring(name) == "system.users" &&
+                    !mongoDumpGlobalParams.dumpUsersAndRoles) {
+                continue;
+            }
+
             collections.push_back(name);
         }
         
         for (vector<string>::iterator it = collections.begin(); it != collections.end(); ++it) {
             string name = *it;
-            const string filename = name.substr( db.size() + 1 );
-            writeCollectionFile( name , outdir / ( filename + ".bson" ) );
+            const string filename = outFilename != "" ? outFilename : name.substr( db.size() + 1 );
+            writeCollectionFile( name , query, outdir / ( filename + ".bson" ), usingMongos );
             writeMetadataFile( name, outdir / (filename + ".metadata.json"), collectionOptions, indexes);
         }
 
     }
 
     int repair() {
-        if ( ! hasParam( "dbpath" ) ){
-            log() << "repair mode only works with --dbpath" << endl;
-            return -1;
-        }
-        
-        if ( ! hasParam( "db" ) ){
-            log() << "repair mode only works on 1 db at a time right now" << endl;
-            return -1;
-        }
-
-        string dbname = getParam( "db" );
-        log() << "going to try and recover data from: " << dbname << endl;
-
-        return _repair( dbname  );
+        toolInfoLog() << "going to try and recover data from: " << toolGlobalParams.db << std::endl;
+        return _repair(toolGlobalParams.db);
     }
     
     DiskLoc _repairExtent( Database* db , string ns, bool forward , DiskLoc eLoc , Writer& w ){
         LogIndentLevel lil;
         
         if ( eLoc.getOfs() <= 0 ){
-            error() << "invalid extent ofs: " << eLoc.getOfs() << endl;
+            toolError() << "invalid extent ofs: " << eLoc.getOfs() << std::endl;
             return DiskLoc();
         }
-        
 
-        MongoDataFile * mdf = db->getFile( eLoc.a() );
-
-        Extent * e = mdf->debug_getExtent( eLoc );
+        Extent * e = db->getExtentManager().getExtent( eLoc, false );
         if ( ! e->isOk() ){
-            warning() << "Extent not ok magic: " << e->magic << " going to try to continue" << endl;
+            toolError() << "Extent not ok magic: " << e->magic << " going to try to continue"
+                      << std::endl;
         }
-        
-        log() << "length:" << e->length << endl;
+
+        toolInfoLog() << "length:" << e->length << std::endl;
         
         LogIndentLevel lil2;
         
@@ -286,34 +280,38 @@ public:
         while ( ! loc.isNull() ){
             
             if ( ! seen.insert( loc ).second ) {
-                error() << "infinite loop in extent, seen: " << loc << " before" << endl;
+                toolError() << "infinite loop in extent, seen: " << loc << " before" << std::endl;
                 break;
             }
 
             if ( loc.getOfs() <= 0 ){
-                error() << "offset is 0 for record which should be impossible" << endl;
+                toolError() << "offset is 0 for record which should be impossible" << std::endl;
                 break;
             }
-            LOG(1) << loc << endl;
+            if (logger::globalLogDomain()->shouldLog(logger::LogSeverity::Debug(1))) {
+                toolInfoLog() << loc << std::endl;
+            }
             Record* rec = loc.rec();
             BSONObj obj;
             try {
                 obj = loc.obj();
                 verify( obj.valid() );
-                LOG(1) << obj << endl;
+                if (logger::globalLogDomain()->shouldLog(logger::LogSeverity::Debug(1))) {
+                    toolInfoLog() << obj << std::endl;
+                }
                 w( obj );
             }
             catch ( std::exception& e ) {
-                log() << "found invalid document @ " << loc << " " << e.what() << endl;
+                toolError() << "found invalid document @ " << loc << " " << e.what() << std::endl;
                 if ( ! obj.isEmpty() ) {
                     try {
                         BSONElement e = obj.firstElement();
                         stringstream ss;
                         ss << "first element: " << e;
-                        log() << ss.str();
+                        toolError() << ss.str() << std::endl;
                     }
                     catch ( std::exception& ) {
-                        log() << "unable to log invalid document @ " << loc << endl;
+                        toolError() << "unable to log invalid document @ " << loc << std::endl;
                     }
                 }
             }
@@ -326,76 +324,81 @@ public:
                 break;
             }
         }
-        log() << "wrote " << seen.size() << " documents" << endl;
+        toolInfoLog() << "wrote " << seen.size() << " documents" << std::endl;
         return forward ? e->xnext : e->xprev;
     }
 
+    /*
+     * NOTE: The "outfile" parameter passed in should actually represent a directory, but it is
+     * called "outfile" because we append the filename and use it as our output file.
+     */
     void _repair( Database* db , string ns , boost::filesystem::path outfile ){
-        NamespaceDetails * nsd = nsdetails( ns );
-        log() << "nrecords: " << nsd->stats.nrecords 
-              << " datasize: " << nsd->stats.datasize 
-              << " firstExtent: " << nsd->firstExtent 
-              << endl;
-        
-        if ( nsd->firstExtent.isNull() ){
-            log() << " ERROR fisrtExtent is null" << endl;
+        Collection* collection = db->getCollection( ns );
+        const NamespaceDetails * nsd = collection->details();
+        toolInfoLog() << "nrecords: " << nsd->numRecords()
+                      << " datasize: " << nsd->dataSize()
+                      << " firstExtent: " << nsd->firstExtent()
+                      << std::endl;
+
+        if ( nsd->firstExtent().isNull() ){
+            toolError() << " ERROR fisrtExtent is null" << std::endl;
             return;
         }
-        
-        if ( ! nsd->firstExtent.isValid() ){
-            log() << " ERROR fisrtExtent is not valid" << endl;
+
+        if ( ! nsd->firstExtent().isValid() ){
+            toolError() << " ERROR fisrtExtent is not valid" << std::endl;
             return;
         }
 
         outfile /= ( ns.substr( ns.find( "." ) + 1 ) + ".bson" );
-        log() << "writing to: " << outfile.string() << endl;
-        
+        toolInfoLog() << "writing to: " << outfile.string() << std::endl;
+
         FilePtr f (fopen(outfile.string().c_str(), "wb"));
 
         // init with double the docs count because we make two passes 
-        ProgressMeter m( nsd->stats.nrecords * 2 );
+        ProgressMeter m( nsd->numRecords() * 2 );
         m.setName("Repair Progress");
-        m.setUnits("objects");
-        
+        m.setUnits("documents");
+
         Writer w( f , &m );
 
         try {
-            log() << "forward extent pass" << endl;
+            toolInfoLog() << "forward extent pass" << std::endl;
             LogIndentLevel lil;
-            DiskLoc eLoc = nsd->firstExtent;
+            DiskLoc eLoc = nsd->firstExtent();
             while ( ! eLoc.isNull() ){
-                log() << "extent loc: " << eLoc << endl;
+                toolInfoLog() << "extent loc: " << eLoc << std::endl;
                 eLoc = _repairExtent( db , ns , true , eLoc , w );
             }
         }
         catch ( DBException& e ){
-            error() << "forward extent pass failed:" << e.toString() << endl;
+            toolError() << "forward extent pass failed:" << e.toString() << std::endl;
         }
         
         try {
-            log() << "backwards extent pass" << endl;
+            toolInfoLog() << "backwards extent pass" << std::endl;
             LogIndentLevel lil;
-            DiskLoc eLoc = nsd->lastExtent;
+            DiskLoc eLoc = nsd->lastExtent();
             while ( ! eLoc.isNull() ){
-                log() << "extent loc: " << eLoc << endl;
+                toolInfoLog() << "extent loc: " << eLoc << std::endl;
                 eLoc = _repairExtent( db , ns , false , eLoc , w );
             }
         }
         catch ( DBException& e ){
-            error() << "ERROR: backwards extent pass failed:" << e.toString() << endl;
+            toolError() << "ERROR: backwards extent pass failed:" << e.toString() << std::endl;
         }
 
-        log() << "\t\t " << m.done() << " objects" << endl;
+        toolInfoLog() << "\t\t " << m.done() << " documents" << std::endl;
     }
     
     int _repair( string dbname ) {
         Client::WriteContext cx( dbname );
         Database * db = cx.ctx().db();
-        
+
         list<string> namespaces;
-        db->namespaceIndex.getNamespaces( namespaces );
-        
-        boost::filesystem::path root = getParam( "out" );
+        db->namespaceIndex().getNamespaces( namespaces );
+
+        boost::filesystem::path root = mongoDumpGlobalParams.outputDirectory;
         root /= dbname;
         boost::filesystem::create_directories( root );
 
@@ -409,17 +412,19 @@ public:
             if ( str::contains( ns , ".tmp.mr." ) )
                 continue;
             
-            if ( _coll != "" && ! str::endsWith( ns , _coll ) )
+            if (toolGlobalParams.coll != "" &&
+                !str::endsWith(ns, toolGlobalParams.coll)) {
                 continue;
+            }
 
-            log() << "trying to recover: " << ns << endl;
+            toolInfoLog() << "trying to recover: " << ns << std::endl;
             
             LogIndentLevel lil2;
             try {
                 _repair( db , ns , root );
             }
             catch ( DBException& e ){
-                log() << "ERROR recovering: " << ns << " " << e.toString() << endl;
+                toolError() << "ERROR recovering: " << ns << " " << e.toString() << std::endl;
             }
         }
    
@@ -427,26 +432,34 @@ public:
     }
 
     int run() {
-        
-        if ( hasParam( "repair" ) ){
-            warning() << "repair is a work in progress" << endl;
+        bool usingMongos = isMongos();
+        int serverAuthzVersion = 0;
+        BSONObj dumpQuery;
+
+        if (mongoDumpGlobalParams.repair){
             return repair();
         }
 
         {
-            string q = getParam("query");
-            if ( q.size() )
-                _query = fromjson( q );
+            if (mongoDumpGlobalParams.query.size()) {
+                dumpQuery = fromjson(mongoDumpGlobalParams.query);
+            }
+        }
+
+        if (mongoDumpGlobalParams.dumpUsersAndRoles) {
+            uassertStatusOK(auth::getRemoteStoredAuthorizationVersion(&conn(true),
+                                                                      &serverAuthzVersion));
+            uassert(17369,
+                    mongoutils::str::stream() << "Backing up users and roles is only supported for "
+                            "clusters with auth schema versions 1 or 3, found: " <<
+                            serverAuthzVersion,
+                    serverAuthzVersion == AuthorizationManager::schemaVersion24 ||
+                    serverAuthzVersion == AuthorizationManager::schemaVersion26Final);
         }
 
         string opLogName = "";
         unsigned long long opLogStart = 0;
-        if (hasParam("oplog")) {
-            if (hasParam("query") || hasParam("db") || hasParam("collection")) {
-                log() << "oplog mode is only supported on full dumps" << endl;
-                return -1;
-            }
-
+        if (mongoDumpGlobalParams.useOplog) {
 
             BSONObj isMaster;
             conn("true").simpleCommand("admin", &isMaster, "isMaster");
@@ -457,14 +470,16 @@ public:
             else {
                 opLogName = "local.oplog.$main";
                 if ( ! isMaster["ismaster"].trueValue() ) {
-                    log() << "oplog mode is only supported on master or replica set member" << endl;
+                    toolError() << "oplog mode is only supported on master or replica set member"
+                              << std::endl;
                     return -1;
                 }
             }
 
             BSONObj op = conn(true).findOne(opLogName, Query().sort("$natural", -1), 0, QueryOption_SlaveOk);
             if (op.isEmpty()) {
-                log() << "No operations in oplog. Please ensure you are connecting to a master." << endl;
+                toolError() << "No operations in oplog. Please ensure you are connecting to a "
+                            << "master." << std::endl;
                 return -1;
             }
 
@@ -473,34 +488,33 @@ public:
         }
 
         // check if we're outputting to stdout
-        string out = getParam("out");
-        if ( out == "-" ) {
-            if ( _db != "" && _coll != "" ) {
-                writeCollectionStdout( _db+"."+_coll );
+        if (mongoDumpGlobalParams.outputDirectory == "-") {
+            if (toolGlobalParams.db != "" && toolGlobalParams.coll != "") {
+                writeCollectionStdout(toolGlobalParams.db + "." + toolGlobalParams.coll, dumpQuery,
+                                      usingMongos);
                 return 0;
             }
             else {
-                log() << "You must specify database and collection to print to stdout" << endl;
+                toolError() << "You must specify database and collection to print to stdout"
+                          << std::endl;
                 return -1;
             }
         }
 
-        _usingMongos = isMongos();
+        boost::filesystem::path root(mongoDumpGlobalParams.outputDirectory);
 
-        boost::filesystem::path root( out );
-        string db = _db;
-
-        if ( db == "" ) {
-            if ( _coll != "" ) {
-                error() << "--db must be specified with --collection" << endl;
+        if (toolGlobalParams.db == "") {
+            if (toolGlobalParams.coll != "") {
+                toolError() << "--db must be specified with --collection" << std::endl;
                 return -1;
             }
 
-            log() << "all dbs" << endl;
+            toolInfoLog() << "all dbs" << std::endl;
 
             BSONObj res = conn( true ).findOne( "admin.$cmd" , BSON( "listDatabases" << 1 ) );
             if ( ! res["databases"].isABSONObj() ) {
-                error() << "output of listDatabases isn't what we expected, no 'databases' field:\n" << res << endl;
+                toolError() << "output of listDatabases isn't what we expected, no 'databases' "
+                          << "field:\n" << res << std::endl;
                 return -2;
             }
             BSONObj dbs = res["databases"].embeddedObjectUserCheck();
@@ -510,7 +524,8 @@ public:
                 string key = *i;
                 
                 if ( ! dbs[key].isABSONObj() ) {
-                    error() << "database field not an object key: " << key << " value: " << dbs[key] << endl;
+                    toolError() << "database field not an document key: " << key << " value: "
+                              << dbs[key] << std::endl;
                     return -3;
                 }
 
@@ -520,31 +535,39 @@ public:
                 if ( (string)dbName == "local" )
                     continue;
 
-                go ( dbName , root / dbName );
+                boost::filesystem::path outdir = root / dbName;
+                toolInfoLog() << "DATABASE: " << dbName << "\t to \t" << outdir.string()
+                        << std::endl;
+                go ( dbName , "", dumpQuery, outdir, "", usingMongos );
             }
         }
         else {
-            go( db , root / db );
+            boost::filesystem::path outdir = root / toolGlobalParams.db;
+            toolInfoLog() << "DATABASE: " << toolGlobalParams.db << "\t to \t" << outdir.string()
+                    << std::endl;
+            go(toolGlobalParams.db, toolGlobalParams.coll, dumpQuery, outdir, "", usingMongos);
+            if (mongoDumpGlobalParams.dumpUsersAndRoles &&
+                    serverAuthzVersion == AuthorizationManager::schemaVersion26Final &&
+                    toolGlobalParams.db != "admin") {
+                toolInfoLog() << "Backing up user and role data for the " << toolGlobalParams.db <<
+                        " database";
+                Query query = Query(BSON("db" << toolGlobalParams.db));
+                go("admin", "system.users", query, outdir, "$admin.system.users", usingMongos);
+                go("admin", "system.roles", query, outdir, "$admin.system.roles", usingMongos);
+            }
         }
 
         if (!opLogName.empty()) {
             BSONObjBuilder b;
             b.appendTimestamp("$gt", opLogStart);
 
-            _query = BSON("ts" << b.obj());
+            dumpQuery = BSON("ts" << b.obj());
 
-            writeCollectionFile( opLogName , root / "oplog.bson" );
+            writeCollectionFile( opLogName , dumpQuery, root / "oplog.bson", usingMongos );
         }
 
         return 0;
     }
-
-    bool _usingMongos;
-    BSONObj _query;
 };
 
-int main( int argc , char ** argv, char ** envp ) {
-    mongo::runGlobalInitializersOrDie(argc, argv, envp);
-    Dump d;
-    return d.main( argc , argv );
-}
+REGISTER_MONGO_TOOL(Dump);

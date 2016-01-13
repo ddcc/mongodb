@@ -12,6 +12,18 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/pch.h"
@@ -20,13 +32,19 @@
 #include "mongo/db/commands/fsync.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/repl/bgsync.h"
+#include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/rs_sync.h"
+#include "mongo/db/repl/rs.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/base/counter.h"
 #include "mongo/db/stats/timer_stats.h"
 
 namespace mongo {
 namespace replset {
+
+    int SleepToAllowBatchingMillis = 2;
+    const int BatchIsSmallish = 40000; // bytes
+
     MONGO_FP_DECLARE(rsBgSyncProduce);
 
     BackgroundSync* BackgroundSync::s_instance = 0;
@@ -74,8 +92,6 @@ namespace replset {
                                        _appliedBuffer(true),
                                        _assumingPrimary(false),
                                        _currentSyncTarget(NULL),
-                                       _oplogMarkerTarget(NULL),
-                                       _oplogMarker(true /* doHandshake */),
                                        _consumedOpTime(0, 0) {
     }
 
@@ -119,9 +135,9 @@ namespace replset {
         Client::initThread("rsSyncNotifier");
         replLocalAuth();
 
-        while (!inShutdown()) {
-            bool clearTarget = false;
+        theReplSet->syncSourceFeedback.go();
 
+        while (!inShutdown()) {
             if (!theReplSet) {
                 sleepsecs(5);
                 continue;
@@ -144,19 +160,12 @@ namespace replset {
                 markOplog();
             }
             catch (DBException &e) {
-                clearTarget = true;
                 log() << "replset tracking exception: " << e.getInfo() << rsLog;
                 sleepsecs(1);
             }
             catch (std::exception &e2) {
-                clearTarget = true;
                 log() << "replset tracking error" << e2.what() << rsLog;
                 sleepsecs(1);
-            }
-
-            if (clearTarget) {
-                boost::unique_lock<boost::mutex> lock(_mutex);
-                _oplogMarkerTarget = NULL;
             }
         }
 
@@ -164,67 +173,52 @@ namespace replset {
     }
 
     void BackgroundSync::markOplog() {
-        LOG(3) << "replset markOplog: " << _consumedOpTime << " " << theReplSet->lastOpTimeWritten << rsLog;
+        LOG(3) << "replset markOplog: " << _consumedOpTime << " "
+               << theReplSet->lastOpTimeWritten << rsLog;
 
-        if (!hasCursor()) {
-            sleepsecs(1);
-            return;
+        boost::unique_lock<boost::mutex> oplogLockSSF(theReplSet->syncSourceFeedback.oplock);
+        if (theReplSet->syncSourceFeedback.supportsUpdater()) {
+            oplogLockSSF.unlock();
+            _consumedOpTime = theReplSet->lastOpTimeWritten;
+            theReplSet->syncSourceFeedback.updateSelfInMap(theReplSet->lastOpTimeWritten);
         }
+        else {
+            if (!hasCursor()) {
+                oplogLockSSF.unlock();
+                sleepmillis(500);
+                return;
+            }
 
-        if (!_oplogMarker.moreInCurrentBatch()) {
-            _oplogMarker.more();
+            if (!theReplSet->syncSourceFeedback.moreInCurrentBatch()) {
+                theReplSet->syncSourceFeedback.more();
+            }
+
+            if (!theReplSet->syncSourceFeedback.more()) {
+                theReplSet->syncSourceFeedback.tailCheck();
+                return;
+            }
+
+            // if this member has written the op at optime T
+            // we want to nextSafe up to and including T
+            while (_consumedOpTime < theReplSet->lastOpTimeWritten
+                   && theReplSet->syncSourceFeedback.more()) {
+                BSONObj temp = theReplSet->syncSourceFeedback.nextSafe();
+                _consumedOpTime = temp["ts"]._opTime();
+            }
+
+            // call more() to signal the sync target that we've synced T
+            theReplSet->syncSourceFeedback.more();
         }
-
-        if (!_oplogMarker.more()) {
-            _oplogMarker.tailCheck();
-            sleepsecs(1);
-            return;
-        }
-
-        // if this member has written the op at optime T, we want to nextSafe up to and including T
-        while (_consumedOpTime < theReplSet->lastOpTimeWritten && _oplogMarker.more()) {
-            BSONObj temp = _oplogMarker.nextSafe();
-            _consumedOpTime = temp["ts"]._opTime();
-        }
-
-        // call more() to signal the sync target that we've synced T
-        _oplogMarker.more();
     }
 
     bool BackgroundSync::hasCursor() {
-        {
-            // prevent writers from blocking readers during fsync
-            SimpleMutex::scoped_lock fsynclk(filesLockedFsync); 
-            // we don't need the local write lock yet, but it's needed by OplogReader::connect
-            // so we take it preemptively to avoid deadlocking.
-            Lock::DBWrite lk("local");
-
-            boost::unique_lock<boost::mutex> lock(_mutex);
-
-            if (!_oplogMarkerTarget || _currentSyncTarget != _oplogMarkerTarget) {
-                if (!_currentSyncTarget) {
-                    return false;
-                }
-
-                log() << "replset setting oplog notifier to " << _currentSyncTarget->fullName() << rsLog;
-                _oplogMarkerTarget = _currentSyncTarget;
-
-                _oplogMarker.resetConnection();
-
-                if (!_oplogMarker.connect(_oplogMarkerTarget->fullName())) {
-                    LOG(1) << "replset could not connect to " << _oplogMarkerTarget->fullName() << rsLog;
-                    _oplogMarkerTarget = NULL;
-                    return false;
-                }
-            }
-        }
-
-        if (!_oplogMarker.haveCursor()) {
+        if (!theReplSet->syncSourceFeedback.haveCursor()) {
             BSONObj fields = BSON("ts" << 1);
-            _oplogMarker.tailingQueryGTE(rsoplog, theReplSet->lastOpTimeWritten, &fields);
+            theReplSet->syncSourceFeedback.tailingQueryGTE(rsoplog,
+                                                theReplSet->lastOpTimeWritten, &fields);
         }
 
-        return _oplogMarker.haveCursor();
+        return theReplSet->syncSourceFeedback.haveCursor();
     }
 
     void BackgroundSync::producerThread() {
@@ -287,7 +281,7 @@ namespace replset {
     void BackgroundSync::produce() {
         // this oplog reader does not do a handshake because we don't want the server it's syncing
         // from to track how far it has synced
-        OplogReader r(false /* doHandshake */);
+        OplogReader r;
         OpTime lastOpTimeFetched;
         // find a target to sync from the last op time written
         getOplogReader(r);
@@ -321,12 +315,25 @@ namespace replset {
         }
 
         while (!inShutdown()) {
-
             if (!r.moreInCurrentBatch()) {
                 // Check some things periodically
                 // (whenever we run out of items in the
                 // current cursor batch)
 
+                int bs = r.currentBatchMessageSize();
+                if( bs > 0 && bs < BatchIsSmallish ) {
+                    // on a very low latency network, if we don't wait a little, we'll be 
+                    // getting ops to write almost one at a time.  this will both be expensive
+                    // for the upstream server as well as potentially defeating our parallel 
+                    // application of batches on the secondary.
+                    //
+                    // the inference here is basically if the batch is really small, we are 
+                    // "caught up".
+                    //
+                    dassert( !Lock::isLocked() );
+                    sleepmillis(SleepToAllowBatchingMillis);
+                }
+  
                 if (theReplSet->gotForceSync()) {
                     return;
                 }
@@ -396,6 +403,8 @@ namespace replset {
                 boost::unique_lock<boost::mutex> lock(_mutex);
                 _lastH = o["h"].numberLong();
                 _lastOpTimeFetched = o["ts"]._opTime();
+                LOG(3) << "replSet lastOpTimeFetched: "
+                       << _lastOpTimeFetched.toStringPretty() << rsLog;
             }
         }
     }
@@ -415,14 +424,6 @@ namespace replset {
 
 
     bool BackgroundSync::peek(BSONObj* op) {
-        {
-            boost::unique_lock<boost::mutex> lock(_mutex);
-
-            if (_currentSyncTarget != _oplogMarkerTarget &&
-                _currentSyncTarget != NULL) {
-                _oplogMarkerTarget = NULL;
-            }
-        }
         return _buffer.peek(*op);
     }
 
@@ -448,7 +449,6 @@ namespace replset {
             log() << "replSet remoteOldestOp:    " << remoteTs.toStringLong() << rsLog;
             log() << "replSet lastOpTimeFetched: " << _lastOpTimeFetched.toStringLong() << rsLog;
         }
-        LOG(3) << "replSet remoteOldestOp: " << remoteTs.toStringLong() << rsLog;
 
         {
             boost::unique_lock<boost::mutex> lock(_mutex);
@@ -492,6 +492,7 @@ namespace replset {
                 LOG(2) << "replSet can't connect to " << current << " to read operations" << rsLog;
                 r.resetConnection();
                 theReplSet->veto(current);
+                sleepsecs(1);
                 continue;
             }
 
@@ -507,6 +508,9 @@ namespace replset {
                 boost::unique_lock<boost::mutex> lock(_mutex);
                 _currentSyncTarget = target;
             }
+
+            boost::unique_lock<boost::mutex> oplogLockSSF(theReplSet->syncSourceFeedback.oplock);
+            theReplSet->syncSourceFeedback.connect(target);
 
             return;
         }

@@ -17,32 +17,49 @@
 
 #pragma once
 
+#include <string>
 #include <vector>
 
-#include "mongo/db/auth/action_set.h"
-#include "mongo/db/auth/action_type.h"
-#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/base/status.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/client_basic.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
     class BSONObj;
     class BSONObjBuilder;
     class Client;
+    class Database;
     class Timer;
+
+namespace mutablebson {
+    class Document;
+}  // namespace mutablebson
 
     /** mongodb "commands" (sent via db.$cmd.findOne(...))
         subclass to make a command.  define a singleton object for it.
         */
     class Command {
     protected:
+        // The type of the first field in 'cmdObj' must be mongo::String. The first field is
+        // interpreted as a collection name.
         string parseNsFullyQualified(const string& dbname, const BSONObj& cmdObj) const;
     public:
-        // only makes sense for commands where 1st parm is the collection.
+
+        // Return the namespace for the command. If the first field in 'cmdObj' is of type
+        // mongo::String, then that field is interpreted as the collection name, and is
+        // appended to 'dbname' after a '.' character. If the first field is not of type
+        // mongo::String, then 'dbname' is returned unmodified.
         virtual string parseNs(const string& dbname, const BSONObj& cmdObj) const;
+
+        // Utility that returns a ResourcePattern for the namespace returned from
+        // parseNs(dbname, cmdObj).  This will be either an exact namespace resource pattern
+        // or a database resource pattern, depending on whether parseNs returns a fully qualifed
+        // collection name or just a database name.
+        ResourcePattern parseResourcePattern(const std::string& dbname,
+                                             const BSONObj& cmdObj) const;
 
         // warning: isAuthorized uses the lockType() return values, and values are being passed 
         // around as ints so be careful as it isn't really typesafe and will need cleanup later
@@ -106,20 +123,28 @@ namespace mongo {
         */
         virtual bool logTheOp() { return false; }
 
+        /**
+         * Override and return fales if the command opcounters should not be incremented on
+         * behalf of this command.
+         */
+        virtual bool shouldAffectCommandCounter() const { return true; }
+
         virtual void help( stringstream& help ) const;
 
-        /* Return true if authentication and security applies to the commands.  Some commands
-           (e.g., getnonce, authenticate) can be done by anyone even unauthorized.
-        */
-        virtual bool requiresAuth() { return true; }
+        /**
+         * Checks if the given client is authorized to run this command on database "dbname"
+         * with the invocation described by "cmdObj".
+         */
+        virtual Status checkAuthForCommand(ClientBasic* client,
+                                           const std::string& dbname,
+                                           const BSONObj& cmdObj);
 
         /**
-         * Appends to "*out" the privileges required to run this command on database "dbname" with
-         * the invocation described by "cmdObj".
+         * Redacts "cmdObj" in-place to a form suitable for writing to logs.
+         *
+         * The default implementation does nothing.
          */
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) = 0;
+        virtual void redactForLogging(mutablebson::Document* cmdObj);
 
         /* Return true if a replica set secondary should go into "recovering"
            (unreadable) state while running this command.
@@ -134,11 +159,24 @@ namespace mongo {
         /** @param webUI expose the command in the web ui as localhost:28017/<name>
             @param oldName an optional old, deprecated name for the command
         */
-        Command(const char *_name, bool webUI = false, const char *oldName = 0);
+        Command(StringData _name, bool webUI = false, StringData oldName = StringData());
 
         virtual ~Command() {}
 
     protected:
+
+        /**
+         * Appends to "*out" the privileges required to run this command on database "dbname" with
+         * the invocation described by "cmdObj".  New commands shouldn't implement this, they should
+         * implement checkAuthForCommand instead.
+         */
+        virtual void addRequiredPrivileges(const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+            // The default implementation of addRequiredPrivileges should never be hit.
+            fassertFailed(16940);
+        }
+
         BSONObj getQuery( const BSONObj& cmdObj ) {
             if ( cmdObj["query"].type() == Object )
                 return cmdObj["query"].embeddedObject();
@@ -154,6 +192,10 @@ namespace mongo {
         static map<string,Command*> * _webCommands;
 
     public:
+        // Stops all index builds required to run this command and returns index builds killed.
+        virtual std::vector<BSONObj> stopIndexBuilds(Database* db, 
+                                                     const BSONObj& cmdObj);
+
         static const map<string,Command*>* commandsByBestName() { return _commandsByBestName; }
         static const map<string,Command*>* webCommands() { return _webCommands; }
         /** @return if command was found */
@@ -183,34 +225,35 @@ namespace mongo {
         // Helper for setting errmsg and ok field in command result object.
         static void appendCommandStatus(BSONObjBuilder& result, bool ok, const std::string& errmsg);
 
+        // @return s.isOK()
+        static bool appendCommandStatus(BSONObjBuilder& result, const Status& status);
+
+        // Converts "result" into a Status object.  The input is expected to be the object returned
+        // by running a command.  Returns ErrorCodes::CommandResultSchemaViolation if "result" does
+        // not look like the result of a command.
+        static Status getStatusFromCommandResult(const BSONObj& result);
+
         // Set by command line.  Controls whether or not testing-only commands should be available.
         static int testCommandsEnabled;
-    };
 
-    class CmdShutdown : public Command {
-    public:
-        virtual bool requiresAuth() { return true; }
-        virtual bool adminOnly() const { return true; }
-        virtual bool localHostOnlyIfNoAuth(const BSONObj& cmdObj) { return true; }
-        virtual bool logTheOp() {
-            return false;
-        }
-        virtual bool slaveOk() const {
-            return true;
-        }
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {
-            ActionSet actions;
-            actions.addAction(ActionType::shutdown);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
-        }
-        virtual LockType locktype() const { return NONE; }
-        virtual void help( stringstream& help ) const;
-        CmdShutdown() : Command("shutdown") {}
-        bool run(const string& dbname, BSONObj& cmdObj, int options, string& errmsg, BSONObjBuilder& result, bool fromRepl);
     private:
-        bool shutdownHelper();
+        /**
+         * Checks to see if the client is authorized to run the given command with the given
+         * parameters on the given named database.
+         *
+         * fromRepl is true if this command is running as part of oplog application, which for
+         * historic reasons has slightly different authorization semantics.  TODO(schwerin): Check
+         * to see if this oddity can now be eliminated.
+         *
+         * Returns Status::OK() if the command is authorized.  Most likely returns
+         * ErrorCodes::Unauthorized otherwise, but any return other than Status::OK implies not
+         * authorized.
+         */
+        static Status _checkAuthorization(Command* c,
+                                          ClientBasic* client,
+                                          const std::string& dbname,
+                                          const BSONObj& cmdObj,
+                                          bool fromRepl);
     };
 
     bool _runCommands(const char *ns, BSONObj& jsobj, BufBuilder &b, BSONObjBuilder& anObjBuilder, bool fromRepl, int queryOptions);

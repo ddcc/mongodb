@@ -15,17 +15,16 @@
  *    limitations under the License.
  */
 
-#include "pch.h"
+#include "mongo/pch.h"
+
+#include "mongo/client/clientOnly-private.h"
+#include "mongo/db/client_basic.h"
+#include "mongo/db/server_options.h"
+#include "mongo/s/shard.h"
 #include "mongo/util/assert_util.h"
-#include "../db/cmdline.h"
-#include "../db/client_basic.h"
-#include "../s/shard.h"
-#include "../util/timer.h"
-#include "clientOnly-private.h"
+#include "mongo/util/timer.h"
 
 namespace mongo {
-
-    CmdLine cmdLine;
 
     const char * curNs = "in client mode";
 
