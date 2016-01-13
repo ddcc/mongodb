@@ -3,9 +3,8 @@
 //
 // Sets up a cluster with three shards, the first shard of which has an unsharded collection and
 // half a sharded collection.  The second shard has the second half of the sharded collection, and
-// the third shard has nothing.  The primary of the unsharded database is on the first shard, and
-// the primary of the sharded database is on the second shard.  Progressively shuts down the shards
-// to test the impact on the cluster with user authentication.
+// the third shard has nothing.  Progressively shuts down the primary of each shard to see the
+// impact on the cluster.
 //
 // Three different connection states are tested - active (connection is active through whole
 // sequence), idle (connection is connected but not used before a shard change), and new
@@ -25,8 +24,6 @@ var admin = mongos.getDB( "admin" );
 var shards = mongos.getDB( "config" ).shards.find().toArray();
 
 assert.commandWorked( admin.runCommand({ setParameter : 1, traceExceptions : true }) );
-assert.commandWorked( admin.runCommand({ setParameter : 1, ignoreInitialVersionFailure : true }) );
-assert.commandWorked( admin.runCommand({ setParameter : 1, authOnPrimaryOnly : false }) );
 
 var collSharded = mongos.getCollection( "fooSharded.barSharded" );
 var collUnsharded = mongos.getCollection( "fooUnsharded.barUnsharded" );
@@ -36,12 +33,13 @@ collUnsharded.insert({ some : "doc" });
 assert.eq( null, collUnsharded.getDB().getLastError() );
 collUnsharded.remove({});
 assert.eq( null, collUnsharded.getDB().getLastError() );
-printjson( admin.runCommand({ movePrimary : collUnsharded.getDB().toString(), to : shards[0]._id }) );
+printjson( admin.runCommand({ movePrimary : collUnsharded.getDB().toString(),
+                              to : shards[0]._id }) );
 
 // Create the sharded database with shard1 primary
 assert.commandWorked( admin.runCommand({ enableSharding : collSharded.getDB().toString() }) );
 printjson( admin.runCommand({ movePrimary : collSharded.getDB().toString(), to : shards[1]._id }) );
-assert.commandWorked( admin.runCommand({ shardCollection : collSharded.toString(), 
+assert.commandWorked( admin.runCommand({ shardCollection : collSharded.toString(),
                                          key : { _id : 1 } }) );
 assert.commandWorked( admin.runCommand({ split : collSharded.toString(), middle : { _id : 0 } }) );
 assert.commandWorked( admin.runCommand({ moveChunk : collSharded.toString(),
@@ -58,8 +56,7 @@ var password = "password";
 jsTest.log("Setting up initial admin user...");
 
 // Create a user
-admin.addUser({ user : adminUser, pwd : password, roles: [ "userAdminAnyDatabase" ] });
-
+admin.createUser({ user : adminUser, pwd : password, roles: [ "userAdminAnyDatabase" ] });
 // There's an admin user now, so we need to login to do anything
 
 // Login as admin user
@@ -68,20 +65,15 @@ admin.auth(adminUser, password);
 jsTest.log("Setting up database users...");
 
 // Create db users
-collSharded.getDB().addUser({ user : shardedDBUser,
-                              pwd : password, roles : [ "readWrite" ] });
-collUnsharded.getDB().addUser({ user : unshardedDBUser,
-                                pwd : password, roles : [ "readWrite" ] });
+collSharded.getDB().createUser({ user : shardedDBUser,
+                                 pwd : password, roles : [ "readWrite" ] });
+collUnsharded.getDB().createUser({ user : unshardedDBUser,
+                                   pwd : password, roles : [ "readWrite" ] });
 
 admin.logout();
 
 function authDBUsers( conn ) {
     conn.getDB( collSharded.getDB().toString() ).auth(shardedDBUser, password);
-    conn.getDB( collUnsharded.getDB().toString() ).auth(unshardedDBUser, password);
-    return conn;
-}
-
-function authUnshardedUser( conn ) {
     conn.getDB( collUnsharded.getDB().toString() ).auth(unshardedDBUser, password);
     return conn;
 }
@@ -304,20 +296,20 @@ jsTest.log("Testing active connection with second shard down...");
 assert.neq(null, mongosConnActive.getCollection( collSharded.toString() ).findOne({ _id : -1 }));
 assert.neq(null, mongosConnActive.getCollection( collUnsharded.toString() ).findOne({ _id : 1 }));
 
-mongosConnActive.getCollection( collSharded.toString() ).insert({ _id : -8 });
+mongosConnActive.getCollection( collSharded.toString() ).insert({ _id : -11 });
 gleErrorOrThrow(mongosConnActive.getCollection( collSharded.toString() ).getDB());
-mongosConnActive.getCollection( collSharded.toString() ).insert({ _id : 8 });
+mongosConnActive.getCollection( collSharded.toString() ).insert({ _id : 11 });
 gleErrorOrThrow(mongosConnActive.getCollection( collSharded.toString() ).getDB());
-mongosConnActive.getCollection( collUnsharded.toString() ).insert({ _id : 8 });
+mongosConnActive.getCollection( collUnsharded.toString() ).insert({ _id : 11 });
 gleErrorOrThrow(mongosConnActive.getCollection( collUnsharded.toString() ).getDB());
 
 jsTest.log("Testing idle connection with second shard down...");
 
-mongosConnIdle.getCollection( collSharded.toString() ).insert({ _id : -9 });
+mongosConnIdle.getCollection( collSharded.toString() ).insert({ _id : -12 });
 gleErrorOrThrow(mongosConnIdle.getCollection( collSharded.toString() ).getDB());
-mongosConnIdle.getCollection( collSharded.toString() ).insert({ _id : 9 });
+mongosConnIdle.getCollection( collSharded.toString() ).insert({ _id : 12 });
 gleErrorOrThrow(mongosConnIdle.getCollection( collSharded.toString() ).getDB());
-mongosConnIdle.getCollection( collUnsharded.toString() ).insert({ _id : 9 });
+mongosConnIdle.getCollection( collUnsharded.toString() ).insert({ _id : 12 });
 gleErrorOrThrow(mongosConnIdle.getCollection( collUnsharded.toString() ).getDB());
 
 assert.neq(null, mongosConnIdle.getCollection( collSharded.toString() ).findOne({ _id : -1 }) );
@@ -325,17 +317,29 @@ assert.neq(null, mongosConnIdle.getCollection( collUnsharded.toString() ).findOn
 
 jsTest.log("Testing new connections with second shard down...");
 
-// Note that this would fail for the sharded database with a primary on the second shard
-
-mongosConnNew = authUnshardedUser( new Mongo( mongos.host ) );
+mongosConnNew = authDBUsers( new Mongo( mongos.host ) );
+mongosConnNew.setSlaveOk();
+assert.neq(null, mongosConnNew.getCollection( collSharded.toString() ).findOne({ _id : -1 }) );
+mongosConnNew = authDBUsers( new Mongo( mongos.host ) );
 mongosConnNew.setSlaveOk();
 assert.neq(null, mongosConnNew.getCollection( collUnsharded.toString() ).findOne({ _id : 1 }) );
 
-mongosConnNew = authUnshardedUser( new Mongo( mongos.host ) );
-mongosConnNew.getCollection( collUnsharded.toString() ).insert({ _id : 10 });
+mongosConnNew = authDBUsers( new Mongo( mongos.host ) );
+mongosConnNew.getCollection( collSharded.toString() ).insert({ _id : -13 });
+gleErrorOrThrow(mongosConnNew.getCollection( collSharded.toString() ).getDB());
+mongosConnNew = authDBUsers( new Mongo( mongos.host ) );
+mongosConnNew.getCollection( collSharded.toString() ).insert({ _id : 13 });
+gleErrorOrThrow(mongosConnNew.getCollection( collSharded.toString() ).getDB());
+mongosConnNew = authDBUsers( new Mongo( mongos.host ) );
+mongosConnNew.getCollection( collUnsharded.toString() ).insert({ _id : 13 });
 gleErrorOrThrow(mongosConnNew.getCollection( collUnsharded.toString() ).getDB());
 
 gc(); // Clean up new connections
 
 jsTest.log("DONE!");
 st.stop();
+
+
+
+
+

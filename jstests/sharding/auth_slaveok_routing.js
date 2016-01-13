@@ -1,4 +1,4 @@
-1/**
+/**
  * This tests whether slaveOk reads are properly routed through mongos in
  * an authenticated environment. This test also includes restarting the
  * entire set, then querying afterwards.
@@ -38,10 +38,11 @@ var nodeCount = replTest.nodes.length;
  * is no admin user.
  */
 var adminDB = mongos.getDB( 'admin' )
-adminDB.addUser('user', 'password', false);
+adminDB.createUser({user: 'user', pwd: 'password', roles: jsTest.adminUserRoles});
 adminDB.auth( 'user', 'password' );
 var priAdminDB = replTest.getPrimary().getDB( 'admin' );
-priAdminDB.addUser( 'user', 'password', false, 3 );
+priAdminDB.createUser({user:  'user', pwd: 'password', roles: jsTest.adminUserRoles},
+                      {w: 3, wtimeout: 30000});
 
 coll.drop();
 coll.setSlaveOk( true );
@@ -98,7 +99,7 @@ assert( doesRouteToSec( coll, { v: vToFind++ }));
 // Cleanup auth so Windows will be able to shutdown gracefully
 priAdminDB = replTest.getPrimary().getDB( 'admin' );
 priAdminDB.auth( 'user', 'password' );
-priAdminDB.removeUser( 'user' );
+priAdminDB.dropUser( 'user' );
 
 st.stop();
 

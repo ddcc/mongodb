@@ -15,24 +15,37 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include <vector>
 
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/privilege.h"
-#include "../cmdline.h"
-#include "../commands.h"
-#include "../../util/mmap.h"
-#include "../../util/mongoutils/str.h"
-#include "health.h"
-#include "rs.h"
-#include "rs_config.h"
-#include "../dbhelpers.h"
-#include "../oplog.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/dbhelpers.h"
+#include "mongo/db/repl/health.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/replication_server_status.h"  // replSettings
+#include "mongo/db/repl/rs.h"
+#include "mongo/db/repl/rs_config.h"
+#include "mongo/util/mmap.h"
+#include "mongo/util/mongoutils/str.h"
 
 using namespace bson;
 using namespace mongoutils;
@@ -65,7 +78,7 @@ namespace mongo {
         if( me != 1 ) {
             stringstream ss;
             ss << "can't find self in the replset config";
-            if( !cmdLine.isDefaultPort() ) ss << " my port: " << cmdLine.port;
+            if (!serverGlobalParams.isDefaultPort()) ss << " my port: " << serverGlobalParams.port;
             if( me != 0 ) ss << " found: " << me;
             uasserted(13279, ss.str());
         }
@@ -160,8 +173,8 @@ namespace mongo {
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::replSetInitiate);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+            actions.addAction(ActionType::replSetConfigure);
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         virtual bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             log() << "replSet replSetInitiate admin command received from client" << rsLog;
@@ -205,7 +218,7 @@ namespace mongo {
             if( ReplSet::startupStatus != ReplSet::EMPTYCONFIG ) {
                 result.append("startupStatus", ReplSet::startupStatus);
                 errmsg = "all members and seeds must be reachable to initiate set";
-                result.append("info", cmdLine._replSet);
+                result.append("info", replSettings.replSet);
                 return false;
             }
 
@@ -218,7 +231,7 @@ namespace mongo {
                 string name;
                 vector<HostAndPort> seeds;
                 set<HostAndPort> seedSet;
-                parseReplsetCmdLine(cmdLine._replSet, name, seeds, seedSet); // may throw...
+                parseReplsetCmdLine(replSettings.replSet, name, seeds, seedSet); // may throw...
 
                 bob b;
                 b.append("_id", name);

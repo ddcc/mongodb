@@ -12,230 +12,275 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
+
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/auth/authorization_manager.h"
 
+#include <boost/thread/mutex.hpp>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "mongo/base/init.h"
 #include "mongo/base/status.h"
+#include "mongo/bson/mutable/document.h"
+#include "mongo/bson/mutable/element.h"
+#include "mongo/bson/util/bson_extract.h"
+#include "mongo/client/auth_helpers.h"
 #include "mongo/db/auth/action_set.h"
-#include "mongo/db/auth/action_type.h"
-#include "mongo/db/auth/auth_external_state.h"
-#include "mongo/db/auth/principal.h"
-#include "mongo/db/auth/principal_set.h"
+#include "mongo/db/auth/authz_documents_update_guard.h"
+#include "mongo/db/auth/authz_manager_external_state.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/auth/privilege_set.h"
-#include "mongo/db/client.h"
+#include "mongo/db/auth/role_graph.h"
+#include "mongo/db/auth/user.h"
+#include "mongo/db/auth/user_document_parser.h"
+#include "mongo/db/auth/user_name.h"
+#include "mongo/db/auth/user_name_hash.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/namespacestring.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/platform/unordered_map.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
+#include "mongo/util/map_util.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-    // this is a config setting, set at startup and not changing after initialization.
-    bool noauth = true;
-
-    AuthInfo::AuthInfo() {
-        user = "__system";
-    }
     AuthInfo internalSecurity;
 
-    const std::string AuthorizationManager::SERVER_RESOURCE_NAME = "$SERVER";
-    const std::string AuthorizationManager::CLUSTER_RESOURCE_NAME = "$CLUSTER";
+    MONGO_INITIALIZER_WITH_PREREQUISITES(SetupInternalSecurityUser, MONGO_NO_PREREQUISITES)(
+            InitializerContext* context) {
+
+        User* user = new User(UserName("__system", "local"));
+
+        user->incrementRefCount(); // Pin this user so the ref count never drops below 1.
+        ActionSet allActions;
+        allActions.addAllActions();
+        PrivilegeVector privileges;
+        RoleGraph::generateUniversalPrivileges(&privileges);
+        user->addPrivileges(privileges);
+        internalSecurity.user = user;
+
+        return Status::OK();
+    }
+
     const std::string AuthorizationManager::USER_NAME_FIELD_NAME = "user";
-    const std::string AuthorizationManager::USER_SOURCE_FIELD_NAME = "userSource";
+    const std::string AuthorizationManager::USER_DB_FIELD_NAME = "db";
+    const std::string AuthorizationManager::ROLE_NAME_FIELD_NAME = "role";
+    const std::string AuthorizationManager::ROLE_SOURCE_FIELD_NAME = "db";
     const std::string AuthorizationManager::PASSWORD_FIELD_NAME = "pwd";
+    const std::string AuthorizationManager::V1_USER_NAME_FIELD_NAME = "user";
+    const std::string AuthorizationManager::V1_USER_SOURCE_FIELD_NAME = "userSource";
+
+    const NamespaceString AuthorizationManager::adminCommandNamespace("admin.$cmd");
+    const NamespaceString AuthorizationManager::rolesCollectionNamespace("admin.system.roles");
+    const NamespaceString AuthorizationManager::usersAltCollectionNamespace(
+            "admin.system.new_users");
+    const NamespaceString AuthorizationManager::usersBackupCollectionNamespace(
+            "admin.system.backup_users");
+    const NamespaceString AuthorizationManager::usersCollectionNamespace("admin.system.users");
+    const NamespaceString AuthorizationManager::versionCollectionNamespace("admin.system.version");
+    const NamespaceString AuthorizationManager::defaultTempUsersCollectionNamespace(
+            "admin.tempusers");
+    const NamespaceString AuthorizationManager::defaultTempRolesCollectionNamespace(
+            "admin.temproles");
+
+    const BSONObj AuthorizationManager::versionDocumentQuery = BSON("_id" << "authSchema");
+
+    const std::string AuthorizationManager::schemaVersionFieldName = "currentVersion";
+
+#ifndef _MSC_EXTENSIONS
+    const int AuthorizationManager::schemaVersion24;
+    const int AuthorizationManager::schemaVersion26Upgrade;
+    const int AuthorizationManager::schemaVersion26Final;
+#endif
 
     bool AuthorizationManager::_doesSupportOldStylePrivileges = true;
 
-namespace {
-    const std::string ADMIN_DBNAME = "admin";
-    const std::string LOCAL_DBNAME = "local";
+    /**
+     * Guard object for synchronizing accesses to data cached in AuthorizationManager instances.
+     * This guard allows one thread to access the cache at a time, and provides an exception-safe
+     * mechanism for a thread to release the cache mutex while performing network or disk operations
+     * while allowing other readers to proceed.
+     *
+     * There are two ways to use this guard.  One may simply instantiate the guard like a
+     * std::lock_guard, and perform reads or writes of the cache.
+     *
+     * Alternatively, one may instantiate the guard, examine the cache, and then enter into an
+     * update mode by first wait()ing until otherUpdateInFetchPhase() is false, and then
+     * calling beginFetchPhase().  At this point, other threads may acquire the guard in the simple
+     * manner and do reads, but other threads may not enter into a fetch phase.  During the fetch
+     * phase, the thread should perform required network or disk activity to determine what update
+     * it will make to the cache.  Then, it should call endFetchPhase(), to reacquire the user cache
+     * mutex.  At that point, the thread can make its modifications to the cache and let the guard
+     * go out of scope.
+     *
+     * All updates by guards using a fetch-phase are totally ordered with respect to one another,
+     * and all guards using no fetch phase are totally ordered with respect to one another, but
+     * there is not a total ordering among all guard objects.
+     *
+     * The cached data has an associated counter, called the cache generation.  If the cache
+     * generation changes while a guard is in fetch phase, the fetched data should not be stored
+     * into the cache, because some invalidation event occurred during the fetch phase.
+     *
+     * NOTE: It is not safe to enter fetch phase while holding a database lock.  Fetch phase
+     * operations are allowed to acquire database locks themselves, so entering fetch while holding
+     * a database lock may lead to deadlock.
+     */
+    class AuthorizationManager::CacheGuard {
+        MONGO_DISALLOW_COPYING(CacheGuard);
+    public:
+        enum FetchSynchronization {
+            fetchSynchronizationAutomatic,
+            fetchSynchronizationManual
+        };
 
-    const std::string ROLES_FIELD_NAME = "roles";
-    const std::string OTHER_DB_ROLES_FIELD_NAME = "otherDBRoles";
-    const std::string READONLY_FIELD_NAME = "readOnly";
+        /**
+         * Constructs a cache guard, locking the mutex that synchronizes user cache accesses.
+         */
+        CacheGuard(AuthorizationManager* authzManager,
+                   const FetchSynchronization sync = fetchSynchronizationAutomatic) :
+            _isThisGuardInFetchPhase(false),
+            _authzManager(authzManager),
+            _lock(authzManager->_cacheMutex) {
 
-    const std::string SYSTEM_ROLE_READ = "read";
-    const std::string SYSTEM_ROLE_READ_WRITE = "readWrite";
-    const std::string SYSTEM_ROLE_USER_ADMIN = "userAdmin";
-    const std::string SYSTEM_ROLE_DB_ADMIN = "dbAdmin";
-    const std::string SYSTEM_ROLE_CLUSTER_ADMIN = "clusterAdmin";
-    const std::string SYSTEM_ROLE_READ_ANY_DB = "readAnyDatabase";
-    const std::string SYSTEM_ROLE_READ_WRITE_ANY_DB = "readWriteAnyDatabase";
-    const std::string SYSTEM_ROLE_USER_ADMIN_ANY_DB = "userAdminAnyDatabase";
-    const std::string SYSTEM_ROLE_DB_ADMIN_ANY_DB = "dbAdminAnyDatabase";
+            if (fetchSynchronizationAutomatic == sync) {
+                synchronizeWithFetchPhase();
+            }
+        }
 
-}  // namespace
+        /**
+         * Releases the mutex that synchronizes user cache access, if held, and notifies
+         * any threads waiting for their own opportunity to update the user cache.
+         */
+        ~CacheGuard() {
+            if (!_lock.owns_lock()) {
+                _lock.lock();
+            }
+            if (_isThisGuardInFetchPhase) {
+                fassert(17190, _authzManager->_isFetchPhaseBusy);
+                _authzManager->_isFetchPhaseBusy = false;
+                _authzManager->_fetchPhaseIsReady.notify_all();
+            }
+        }
 
-    // ActionSets for the various system roles.  These ActionSets contain all the actions that
-    // a user of each system role is granted.
-    ActionSet readRoleActions;
-    ActionSet readWriteRoleActions;
-    ActionSet userAdminRoleActions;
-    ActionSet dbAdminRoleActions;
-    ActionSet clusterAdminRoleActions;
-    // Can only be performed by internal connections.  Nothing ever explicitly grants these actions,
-    // but they're included when calling addAllActions on an ActionSet, which is how internal
-    // connections are granted their privileges.
-    ActionSet internalActions;
-    // Old-style user roles
-    ActionSet compatibilityReadOnlyActions;
-    ActionSet compatibilityReadWriteActions;
-    ActionSet compatibilityReadOnlyAdminActions;
-    ActionSet compatibilityReadWriteAdminActions;
+        /**
+         * Returns true of the authzManager reports that it is in fetch phase.
+         */
+        bool otherUpdateInFetchPhase() { return _authzManager->_isFetchPhaseBusy; }
 
-    // This sets up the system role ActionSets.  This is what determines what actions each role
-    // is authorized to perform
-    MONGO_INITIALIZER(AuthorizationSystemRoles)(InitializerContext* context) {
-        // Read role
-        readRoleActions.addAction(ActionType::cloneCollectionLocalSource);
-        readRoleActions.addAction(ActionType::collStats);
-        readRoleActions.addAction(ActionType::dbHash);
-        readRoleActions.addAction(ActionType::dbStats);
-        readRoleActions.addAction(ActionType::find);
-        readRoleActions.addAction(ActionType::indexRead);
-        readRoleActions.addAction(ActionType::killCursors);
+        /**
+         * Waits on the _authzManager->_fetchPhaseIsReady condition.
+         */
+        void wait() {
+            fassert(17222, !_isThisGuardInFetchPhase);
+            _authzManager->_fetchPhaseIsReady.wait(_lock);
+        }
 
-        // Read-write role
-        readWriteRoleActions.addAllActionsFromSet(readRoleActions);
-        readWriteRoleActions.addAction(ActionType::cloneCollectionTarget);
-        readWriteRoleActions.addAction(ActionType::convertToCapped);
-        readWriteRoleActions.addAction(ActionType::createCollection); // db admin gets this also
-        readWriteRoleActions.addAction(ActionType::dropCollection);
-        readWriteRoleActions.addAction(ActionType::dropIndexes);
-        readWriteRoleActions.addAction(ActionType::emptycapped);
-        readWriteRoleActions.addAction(ActionType::ensureIndex);
-        readWriteRoleActions.addAction(ActionType::insert);
-        readWriteRoleActions.addAction(ActionType::remove);
-        readWriteRoleActions.addAction(ActionType::renameCollectionSameDB); // db admin gets this also
-        readWriteRoleActions.addAction(ActionType::update);
+        /**
+         * Enters fetch phase, releasing the _authzManager->_cacheMutex after recording the current
+         * cache generation.
+         */
+        void beginFetchPhase() {
+            fassert(17191, !_authzManager->_isFetchPhaseBusy);
+            _isThisGuardInFetchPhase = true;
+            _authzManager->_isFetchPhaseBusy = true;
+            _startGeneration = _authzManager->_cacheGeneration;
+            _lock.unlock();
+        }
 
-        // User admin role
-        userAdminRoleActions.addAction(ActionType::userAdmin);
+        /**
+         * Exits the fetch phase, reacquiring the _authzManager->_cacheMutex.
+         */
+        void endFetchPhase() {
+            _lock.lock();
+            // We do not clear _authzManager->_isFetchPhaseBusy or notify waiters until
+            // ~CacheGuard(), for two reasons.  First, there's no value to notifying the waiters
+            // before you're ready to release the mutex, because they'll just go to sleep on the
+            // mutex.  Second, in order to meaningfully check the preconditions of
+            // isSameCacheGeneration(), we need a state that means "fetch phase was entered and now
+            // has been exited."  That state is _isThisGuardInFetchPhase == true and
+            // _lock.owns_lock() == true.
+        }
 
-        // DB admin role
-        dbAdminRoleActions.addAction(ActionType::clean);
-        dbAdminRoleActions.addAction(ActionType::cloneCollectionLocalSource);
-        dbAdminRoleActions.addAction(ActionType::collMod);
-        dbAdminRoleActions.addAction(ActionType::collStats);
-        dbAdminRoleActions.addAction(ActionType::compact);
-        dbAdminRoleActions.addAction(ActionType::convertToCapped);
-        dbAdminRoleActions.addAction(ActionType::createCollection); // read_write gets this also
-        dbAdminRoleActions.addAction(ActionType::dbStats);
-        dbAdminRoleActions.addAction(ActionType::dropCollection);
-        dbAdminRoleActions.addAction(ActionType::dropIndexes);
-        dbAdminRoleActions.addAction(ActionType::ensureIndex);
-        dbAdminRoleActions.addAction(ActionType::indexRead);
-        dbAdminRoleActions.addAction(ActionType::indexStats);
-        dbAdminRoleActions.addAction(ActionType::profileEnable);
-        dbAdminRoleActions.addAction(ActionType::profileRead);
-        dbAdminRoleActions.addAction(ActionType::reIndex);
-        dbAdminRoleActions.addAction(ActionType::renameCollectionSameDB); // read_write gets this also
-        dbAdminRoleActions.addAction(ActionType::storageDetails);
-        dbAdminRoleActions.addAction(ActionType::validate);
+        /**
+         * Returns true if _authzManager->_cacheGeneration remained the same while this guard was
+         * in fetch phase.  Behavior is undefined if this guard never entered fetch phase.
+         *
+         * If this returns true, do not update the cached data with this
+         */
+        bool isSameCacheGeneration() const {
+            fassert(17223, _isThisGuardInFetchPhase);
+            fassert(17231, _lock.owns_lock());
+            return _startGeneration == _authzManager->_cacheGeneration;
+        }
 
-        // We separate clusterAdmin read-only and read-write actions for backwards
-        // compatibility with old-style read-only admin users.  This separation is not exposed to
-        // the user, and could go away once we stop supporting old-style privilege documents.
-        ActionSet clusterAdminRoleReadActions;
-        ActionSet clusterAdminRoleWriteActions;
+    private:
+        void synchronizeWithFetchPhase() {
+            while (otherUpdateInFetchPhase())
+                wait();
+            fassert(17192, !_authzManager->_isFetchPhaseBusy);
+            _isThisGuardInFetchPhase = true;
+            _authzManager->_isFetchPhaseBusy = true;
+        }
 
-        // Cluster admin role
-        clusterAdminRoleReadActions.addAction(ActionType::connPoolStats);
-        clusterAdminRoleReadActions.addAction(ActionType::connPoolSync);
-        clusterAdminRoleReadActions.addAction(ActionType::getCmdLineOpts);
-        clusterAdminRoleReadActions.addAction(ActionType::getLog);
-        clusterAdminRoleReadActions.addAction(ActionType::getParameter);
-        clusterAdminRoleReadActions.addAction(ActionType::getShardMap);
-        clusterAdminRoleReadActions.addAction(ActionType::getShardVersion);
-        clusterAdminRoleReadActions.addAction(ActionType::hostInfo);
-        clusterAdminRoleReadActions.addAction(ActionType::listDatabases);
-        clusterAdminRoleReadActions.addAction(ActionType::listShards);
-        clusterAdminRoleReadActions.addAction(ActionType::logRotate);
-        clusterAdminRoleReadActions.addAction(ActionType::netstat);
-        clusterAdminRoleReadActions.addAction(ActionType::replSetFreeze);
-        clusterAdminRoleReadActions.addAction(ActionType::replSetGetStatus);
-        clusterAdminRoleReadActions.addAction(ActionType::replSetMaintenance);
-        clusterAdminRoleReadActions.addAction(ActionType::replSetStepDown);
-        clusterAdminRoleReadActions.addAction(ActionType::replSetSyncFrom);
-        clusterAdminRoleReadActions.addAction(ActionType::setParameter);
-        clusterAdminRoleReadActions.addAction(ActionType::setShardVersion); // TODO: should this be internal?
-        clusterAdminRoleReadActions.addAction(ActionType::serverStatus);
-        clusterAdminRoleReadActions.addAction(ActionType::splitVector);
-        clusterAdminRoleReadActions.addAction(ActionType::shutdown);
-        clusterAdminRoleReadActions.addAction(ActionType::top);
-        clusterAdminRoleReadActions.addAction(ActionType::touch);
-        clusterAdminRoleReadActions.addAction(ActionType::unlock);
-        clusterAdminRoleReadActions.addAction(ActionType::unsetSharding);
-        clusterAdminRoleReadActions.addAction(ActionType::writeBacksQueued);
+        OID _startGeneration;
+        bool _isThisGuardInFetchPhase;
+        AuthorizationManager* _authzManager;
+        boost::unique_lock<boost::mutex> _lock;
+    };
 
-        clusterAdminRoleWriteActions.addAction(ActionType::addShard);
-        clusterAdminRoleWriteActions.addAction(ActionType::closeAllDatabases);
-        clusterAdminRoleWriteActions.addAction(ActionType::cpuProfiler);
-        clusterAdminRoleWriteActions.addAction(ActionType::cursorInfo);
-        clusterAdminRoleWriteActions.addAction(ActionType::diagLogging);
-        clusterAdminRoleWriteActions.addAction(ActionType::dropDatabase); // TODO: Should there be a CREATE_DATABASE also?
-        clusterAdminRoleWriteActions.addAction(ActionType::enableSharding);
-        clusterAdminRoleWriteActions.addAction(ActionType::flushRouterConfig);
-        clusterAdminRoleWriteActions.addAction(ActionType::fsync);
-        clusterAdminRoleWriteActions.addAction(ActionType::inprog);
-        clusterAdminRoleWriteActions.addAction(ActionType::killop);
-        clusterAdminRoleWriteActions.addAction(ActionType::moveChunk);
-        clusterAdminRoleWriteActions.addAction(ActionType::movePrimary);
-        clusterAdminRoleWriteActions.addAction(ActionType::removeShard);
-        clusterAdminRoleWriteActions.addAction(ActionType::repairDatabase);
-        clusterAdminRoleWriteActions.addAction(ActionType::replSetInitiate);
-        clusterAdminRoleWriteActions.addAction(ActionType::replSetReconfig);
-        clusterAdminRoleWriteActions.addAction(ActionType::resync);
-        clusterAdminRoleWriteActions.addAction(ActionType::shardCollection);
-        clusterAdminRoleWriteActions.addAction(ActionType::shardingState);
-        clusterAdminRoleWriteActions.addAction(ActionType::split);
-        clusterAdminRoleWriteActions.addAction(ActionType::splitChunk);
+    AuthorizationManager::AuthorizationManager(AuthzManagerExternalState* externalState) :
+            _authEnabled(false),
+            _externalState(externalState),
+            _version(schemaVersionInvalid),
+            _isFetchPhaseBusy(false) {
+        _updateCacheGeneration_inlock();
+    }
 
-        clusterAdminRoleActions.addAllActionsFromSet(clusterAdminRoleReadActions);
-        clusterAdminRoleActions.addAllActionsFromSet(clusterAdminRoleWriteActions);
-        clusterAdminRoleActions.addAction(ActionType::killCursors);
+    AuthorizationManager::~AuthorizationManager() {
+        for (unordered_map<UserName, User*>::iterator it = _userCache.begin();
+                it != _userCache.end(); ++it) {
+            fassert(17265, it->second != internalSecurity.user);
+            delete it->second ;
+        }
+    }
 
-        // Old-style user actions, for backwards compatibility
-        compatibilityReadOnlyActions.addAllActionsFromSet(readRoleActions);
+    Status AuthorizationManager::getAuthorizationVersion(int* version) {
+        CacheGuard guard(this, CacheGuard::fetchSynchronizationManual);
+        int newVersion = _version;
+        if (schemaVersionInvalid == newVersion) {
+            while (guard.otherUpdateInFetchPhase())
+                guard.wait();
+            guard.beginFetchPhase();
+            Status status = _externalState->getStoredAuthorizationVersion(&newVersion);
+            guard.endFetchPhase();
+            if (!status.isOK()) {
+                warning() << "Problem fetching the stored schema version of authorization data: "
+                          << status;
+                *version = schemaVersionInvalid;
+                return status;
+            }
 
-        compatibilityReadWriteActions.addAllActionsFromSet(readWriteRoleActions);
-        compatibilityReadWriteActions.addAllActionsFromSet(dbAdminRoleActions);
-        compatibilityReadWriteActions.addAllActionsFromSet(userAdminRoleActions);
-        compatibilityReadWriteActions.addAction(ActionType::clone);
-        compatibilityReadWriteActions.addAction(ActionType::copyDBTarget);
-        compatibilityReadWriteActions.addAction(ActionType::dropDatabase);
-        compatibilityReadWriteActions.addAction(ActionType::repairDatabase);
-
-        compatibilityReadOnlyAdminActions.addAllActionsFromSet(compatibilityReadOnlyActions);
-        compatibilityReadOnlyAdminActions.addAllActionsFromSet(clusterAdminRoleReadActions);
-
-        compatibilityReadWriteAdminActions.addAllActionsFromSet(compatibilityReadWriteActions);
-        compatibilityReadWriteAdminActions.addAllActionsFromSet(compatibilityReadOnlyAdminActions);
-        compatibilityReadWriteAdminActions.addAllActionsFromSet(clusterAdminRoleWriteActions);
-
-        // Internal commands
-        internalActions.addAction(ActionType::clone);
-        internalActions.addAction(ActionType::handshake);
-        internalActions.addAction(ActionType::mapReduceShardedFinish);
-        internalActions.addAction(ActionType::replSetElect);
-        internalActions.addAction(ActionType::replSetFresh);
-        internalActions.addAction(ActionType::replSetGetRBID);
-        internalActions.addAction(ActionType::replSetHeartbeat);
-        internalActions.addAction(ActionType::writebacklisten);
-        internalActions.addAction(ActionType::_migrateClone);
-        internalActions.addAction(ActionType::_recvChunkAbort);
-        internalActions.addAction(ActionType::_recvChunkCommit);
-        internalActions.addAction(ActionType::_recvChunkStart);
-        internalActions.addAction(ActionType::_recvChunkStatus);
-        internalActions.addAction(ActionType::_transferMods);
-
+            if (guard.isSameCacheGeneration()) {
+                _version = newVersion;
+            }
+        }
+        *version = newVersion;
         return Status::OK();
     }
 
@@ -243,595 +288,1149 @@ namespace {
         _doesSupportOldStylePrivileges = enabled;
     }
 
-    static inline Status _oldPrivilegeFormatNotSupported() {
-        return Status(ErrorCodes::UnsupportedFormat,
-                      "Support for compatibility-form privilege documents disabled; "
-                      "All system.users entries must contain a 'roles' field");
+    bool AuthorizationManager::getSupportOldStylePrivilegeDocuments() {
+        return _doesSupportOldStylePrivileges;
     }
 
-    static inline Status _badValue(const char* reason, int location) {
-        return Status(ErrorCodes::BadValue, reason, location);
+    OID AuthorizationManager::getCacheGeneration() {
+        CacheGuard guard(this, CacheGuard::fetchSynchronizationManual);
+        return _cacheGeneration;
     }
 
-    static inline Status _badValue(const std::string& reason, int location) {
-        return Status(ErrorCodes::BadValue, reason, location);
+    void AuthorizationManager::setAuthEnabled(bool enabled) {
+        _authEnabled = enabled;
     }
 
-    static inline StringData makeStringDataFromBSONElement(const BSONElement& element) {
-        return StringData(element.valuestr(), element.valuestrsize() - 1);
+    bool AuthorizationManager::isAuthEnabled() const {
+        return _authEnabled;
     }
 
-    static Status _checkRolesArray(const BSONElement& rolesElement) {
-        if (rolesElement.type() != Array) {
-            return _badValue("Role fields must be an array when present in system.users entries",
-                             0);
-        }
-        for (BSONObjIterator iter(rolesElement.embeddedObject()); iter.more(); iter.next()) {
-            BSONElement element = *iter;
-            if (element.type() != String || makeStringDataFromBSONElement(element).empty()) {
-                return _badValue("Roles must be non-empty strings.", 0);
-            }
-        }
-        return Status::OK();
+    bool AuthorizationManager::hasAnyPrivilegeDocuments() const {
+        return _externalState->hasAnyPrivilegeDocuments();
     }
 
-    Status AuthorizationManager::checkValidPrivilegeDocument(const StringData& dbname,
-                                                             const BSONObj& doc) {
-        BSONElement userElement = doc[USER_NAME_FIELD_NAME];
-        BSONElement userSourceElement = doc[USER_SOURCE_FIELD_NAME];
-        BSONElement passwordElement = doc[PASSWORD_FIELD_NAME];
-        BSONElement rolesElement = doc[ROLES_FIELD_NAME];
-        BSONElement otherDBRolesElement = doc[OTHER_DB_ROLES_FIELD_NAME];
-        BSONElement readOnlyElement = doc[READONLY_FIELD_NAME];
-
-        // Validate the "user" element.
-        if (userElement.type() != String)
-            return _badValue("system.users entry needs 'user' field to be a string", 14051);
-        if (makeStringDataFromBSONElement(userElement).empty())
-            return _badValue("system.users entry needs 'user' field to be non-empty", 14053);
-
-        // Must set exactly one of "userSource" and "pwd" fields.
-        if (userSourceElement.eoo() == passwordElement.eoo()) {
-            return _badValue("system.users entry must have either a 'pwd' field or a 'userSource' "
-                             "field, but not both", 0);
+    Status AuthorizationManager::writeAuthSchemaVersionIfNeeded() {
+        Status status =  _externalState->updateOne(
+                AuthorizationManager::versionCollectionNamespace,
+                AuthorizationManager::versionDocumentQuery,
+                BSON("$set" << BSON(AuthorizationManager::schemaVersionFieldName <<
+                                    AuthorizationManager::schemaVersion26Final)),
+                true,  // upsert
+                BSONObj());  // write concern
+        if (status == ErrorCodes::NoMatchingDocument) {    // SERVER-11492
+            status = Status::OK();
         }
-
-        if (!_doesSupportOldStylePrivileges && rolesElement.eoo()) {
-            return _oldPrivilegeFormatNotSupported();
-        }
-
-        // Cannot have both "roles" and "readOnly" elements.
-        if (!rolesElement.eoo() && !readOnlyElement.eoo()) {
-            return _badValue("system.users entry must not have both 'roles' and 'readOnly' fields",
-                             0);
-        }
-
-        // Validate the "pwd" element, if present.
-        if (!passwordElement.eoo()) {
-            if (passwordElement.type() != String)
-                return _badValue("system.users entry needs 'pwd' field to be a string", 14052);
-            if (makeStringDataFromBSONElement(passwordElement).empty())
-                return _badValue("system.users entry needs 'pwd' field to be non-empty", 14054);
-        }
-
-        // Validate the "userSource" element, if present.
-        if (!userSourceElement.eoo()) {
-            if (userSourceElement.type() != String ||
-                makeStringDataFromBSONElement(userSourceElement).empty()) {
-
-                return _badValue("system.users entry needs 'userSource' field to be a non-empty "
-                                 "string, if present", 0);
-            }
-            if (userSourceElement.str() == dbname) {
-                return _badValue(mongoutils::str::stream() << "'" << dbname <<
-                                 "' is not a valid value for the userSource field in " <<
-                                 dbname << ".system.users entries",
-                                 0);
-            }
-            if (rolesElement.eoo()) {
-                return _badValue("system.users entry needs 'roles' field if 'userSource' field "
-                                 "is present.", 0);
-            }
-        }
-
-        // Validate the "roles" element.
-        if (!rolesElement.eoo()) {
-            Status status = _checkRolesArray(rolesElement);
-            if (!status.isOK())
-                return status;
-        }
-
-        if (!otherDBRolesElement.eoo()) {
-            if (dbname != ADMIN_DBNAME) {
-                return _badValue("Only admin.system.users entries may contain 'otherDBRoles' "
-                                 "fields", 0);
-            }
-            if (rolesElement.eoo()) {
-                return _badValue("system.users entries with 'otherDBRoles' fields must contain "
-                                 "'roles' fields", 0);
-            }
-            if (otherDBRolesElement.type() != Object) {
-                return _badValue("'otherDBRoles' field must be an object when present in "
-                                 "system.users entries", 0);
-            }
-            for (BSONObjIterator iter(otherDBRolesElement.embeddedObject());
-                 iter.more(); iter.next()) {
-
-                Status status = _checkRolesArray(*iter);
-                if (!status.isOK())
-                    return status;
-            }
-        }
-
-        return Status::OK();
+        return status;
     }
 
-    AuthorizationManager::AuthorizationManager(AuthExternalState* externalState) {
-        _externalState.reset(externalState);
+    Status AuthorizationManager::insertPrivilegeDocument(const std::string& dbname,
+                                                         const BSONObj& userObj,
+                                                         const BSONObj& writeConcern) const {
+        return _externalState->insertPrivilegeDocument(dbname, userObj, writeConcern);
     }
 
-    AuthorizationManager::~AuthorizationManager(){}
-
-    ActionSet AuthorizationManager::getAllUserActions() {
-        ActionSet allActions;
-        allActions.addAllActionsFromSet(readRoleActions);
-        allActions.addAllActionsFromSet(readWriteRoleActions);
-        allActions.addAllActionsFromSet(userAdminRoleActions);
-        allActions.addAllActionsFromSet(dbAdminRoleActions);
-        allActions.addAllActionsFromSet(clusterAdminRoleActions);
-        return allActions;
+    Status AuthorizationManager::updatePrivilegeDocument(const UserName& user,
+                                                         const BSONObj& updateObj,
+                                                         const BSONObj& writeConcern) const {
+        return _externalState->updatePrivilegeDocument(user, updateObj, writeConcern);
     }
 
-    void AuthorizationManager::startRequest() {
-        _externalState->startRequest();
+    Status AuthorizationManager::removePrivilegeDocuments(const BSONObj& query,
+                                                          const BSONObj& writeConcern,
+                                                          int* numRemoved) const {
+        return _externalState->removePrivilegeDocuments(query, writeConcern, numRemoved);
     }
 
-    void AuthorizationManager::addAuthorizedPrincipal(Principal* principal) {
-
-        // Log out any already-logged-in user on the same database as "principal".
-        logoutDatabase(principal->getName().getDB().toString());  // See SERVER-8144.
-
-        _authenticatedPrincipals.add(principal);
-        if (!principal->isImplicitPrivilegeAcquisitionEnabled())
-            return;
-
-        const std::string dbname = principal->getName().getDB().toString();
-        if (dbname == StringData("local", StringData::LiteralTag()) &&
-            principal->getName().getUser() == internalSecurity.user) {
-
-            // Grant full access to internal user
-            ActionSet allActions;
-            allActions.addAllActions();
-            acquirePrivilege(Privilege(PrivilegeSet::WILDCARD_RESOURCE, allActions),
-                             principal->getName());
-            return;
+    Status AuthorizationManager::removeRoleDocuments(const BSONObj& query,
+                                                     const BSONObj& writeConcern,
+                                                     int* numRemoved) const {
+        Status status = _externalState->remove(rolesCollectionNamespace,
+                                               query,
+                                               writeConcern,
+                                               numRemoved);
+        if (status.code() == ErrorCodes::UnknownError) {
+            return Status(ErrorCodes::RoleModificationFailed, status.reason());
         }
-
-        _acquirePrivilegesForPrincipalFromDatabase(ADMIN_DBNAME, principal->getName());
-        principal->markDatabaseAsProbed(ADMIN_DBNAME);
-        _acquirePrivilegesForPrincipalFromDatabase(dbname, principal->getName());
-        principal->markDatabaseAsProbed(dbname);
+        return status;
     }
 
-    void AuthorizationManager::_acquirePrivilegesForPrincipalFromDatabase(
-            const std::string& dbname, const PrincipalName& principal) {
-
-        BSONObj privilegeDocument;
-        Status status = getPrivilegeDocument(dbname, principal, &privilegeDocument);
+    Status AuthorizationManager::insertRoleDocument(const BSONObj& roleObj,
+                                                    const BSONObj& writeConcern) const {
+        Status status = _externalState->insert(rolesCollectionNamespace,
+                                               roleObj,
+                                               writeConcern);
         if (status.isOK()) {
-            status = acquirePrivilegesFromPrivilegeDocument(dbname, principal, privilegeDocument);
+            return status;
         }
-        if (!status.isOK() && status != ErrorCodes::UserNotFound) {
-            log() << "Privilege acquisition failed for " << principal << " in database " <<
-                dbname << ": " << status.reason() << " (" << status.codeString() << ")" << endl;
+        if (status.code() == ErrorCodes::DuplicateKey) {
+            std::string name = roleObj[AuthorizationManager::ROLE_NAME_FIELD_NAME].String();
+            std::string source = roleObj[AuthorizationManager::ROLE_SOURCE_FIELD_NAME].String();
+            return Status(ErrorCodes::DuplicateKey,
+                          mongoutils::str::stream() << "Role \"" << name << "@" << source <<
+                                  "\" already exists");
         }
-    }
-
-    Principal* AuthorizationManager::lookupPrincipal(const PrincipalName& name) {
-        return _authenticatedPrincipals.lookup(name);
-    }
-
-    void AuthorizationManager::logoutDatabase(const std::string& dbname) {
-        Principal* principal = _authenticatedPrincipals.lookupByDBName(dbname);
-        if (!principal)
-            return;
-        _acquiredPrivileges.revokePrivilegesFromPrincipal(principal->getName());
-        _authenticatedPrincipals.removeByDBName(dbname);
-    }
-
-    PrincipalSet::NameIterator AuthorizationManager::getAuthenticatedPrincipalNames() {
-        return _authenticatedPrincipals.getNames();
-    }
-
-    std::string AuthorizationManager::getAuthenticatedPrincipalNamesToken() {
-        std::string ret;
-        for (PrincipalSet::NameIterator nameIter = getAuthenticatedPrincipalNames();
-                nameIter.more();
-                nameIter.next()) {
-            ret += '\0'; // Using a NUL byte which isn't valid in usernames to separate them.
-            ret += nameIter->getFullName();
+        if (status.code() == ErrorCodes::UnknownError) {
+            return Status(ErrorCodes::RoleModificationFailed, status.reason());
         }
-
-        return ret;
+        return status;
     }
 
-    Status AuthorizationManager::acquirePrivilege(const Privilege& privilege,
-                                                  const PrincipalName& authorizingPrincipal) {
-        if (!_authenticatedPrincipals.lookup(authorizingPrincipal)) {
-            return Status(ErrorCodes::UserNotFound,
-                          mongoutils::str::stream()
-                                  << "No authenticated principle found with name: "
-                                  << authorizingPrincipal.getUser()
-                                  << " from database "
-                                  << authorizingPrincipal.getDB(),
-                          0);
+    Status AuthorizationManager::updateRoleDocument(const RoleName& role,
+                                                    const BSONObj& updateObj,
+                                                    const BSONObj& writeConcern) const {
+        Status status = _externalState->updateOne(
+                rolesCollectionNamespace,
+                BSON(AuthorizationManager::ROLE_NAME_FIELD_NAME << role.getRole() <<
+                     AuthorizationManager::ROLE_SOURCE_FIELD_NAME << role.getDB()),
+                updateObj,
+                false,
+                writeConcern);
+        if (status.isOK()) {
+            return status;
         }
-        _acquiredPrivileges.grantPrivilege(privilege, authorizingPrincipal);
+        if (status.code() == ErrorCodes::NoMatchingDocument) {
+            return Status(ErrorCodes::RoleNotFound,
+                          mongoutils::str::stream() << "Role " << role.getFullName() <<
+                                  " not found");
+        }
+        if (status.code() == ErrorCodes::UnknownError) {
+            return Status(ErrorCodes::RoleModificationFailed, status.reason());
+        }
+        return status;
+    }
+
+    Status AuthorizationManager::queryAuthzDocument(
+            const NamespaceString& collectionName,
+            const BSONObj& query,
+            const BSONObj& projection,
+            const boost::function<void(const BSONObj&)>& resultProcessor) {
+        return _externalState->query(collectionName, query, projection, resultProcessor);
+    }
+
+    Status AuthorizationManager::updateAuthzDocuments(const NamespaceString& collectionName,
+                                                      const BSONObj& query,
+                                                      const BSONObj& updatePattern,
+                                                      bool upsert,
+                                                      bool multi,
+                                                      const BSONObj& writeConcern,
+                                                      int* nMatched) const {
+        return _externalState->update(collectionName,
+                                      query,
+                                      updatePattern,
+                                      upsert,
+                                      multi,
+                                      writeConcern,
+                                      nMatched);
+    }
+
+    Status AuthorizationManager::getBSONForPrivileges(const PrivilegeVector& privileges,
+                                                      mutablebson::Element resultArray) {
+        for (PrivilegeVector::const_iterator it = privileges.begin();
+                it != privileges.end(); ++it) {
+            std::string errmsg;
+            ParsedPrivilege privilege;
+            if (!ParsedPrivilege::privilegeToParsedPrivilege(*it, &privilege, &errmsg)) {
+                return Status(ErrorCodes::BadValue, errmsg);
+            }
+            resultArray.appendObject("privileges", privilege.toBSON());
+        }
         return Status::OK();
     }
 
-    void AuthorizationManager::grantInternalAuthorization(const std::string& principalName) {
-        Principal* principal = new Principal(PrincipalName(principalName, "local"));
-        ActionSet actions;
-        actions.addAllActions();
+    Status AuthorizationManager::getBSONForRole(RoleGraph* graph,
+                                                const RoleName& roleName,
+                                                mutablebson::Element result) {
+        if (!graph->roleExists(roleName)) {
+            return Status(ErrorCodes::RoleNotFound,
+                          mongoutils::str::stream() << roleName.getFullName() <<
+                                  "does not name an existing role");
+        }
+        std::string id = mongoutils::str::stream() << roleName.getDB() << "." << roleName.getRole();
+        result.appendString("_id", id);
+        result.appendString(ROLE_NAME_FIELD_NAME, roleName.getRole());
+        result.appendString(ROLE_SOURCE_FIELD_NAME, roleName.getDB());
 
-        addAuthorizedPrincipal(principal);
-        fassert(16581, acquirePrivilege(Privilege(PrivilegeSet::WILDCARD_RESOURCE, actions),
-                                    principal->getName()).isOK());
+        // Build privileges array
+        mutablebson::Element privilegesArrayElement =
+                result.getDocument().makeElementArray("privileges");
+        result.pushBack(privilegesArrayElement);
+        const PrivilegeVector& privileges = graph->getDirectPrivileges(roleName);
+        Status status = getBSONForPrivileges(privileges, privilegesArrayElement);
+        if (!status.isOK()) {
+            return status;
+        }
+
+        // Build roles array
+        mutablebson::Element rolesArrayElement = result.getDocument().makeElementArray("roles");
+        result.pushBack(rolesArrayElement);
+        for (RoleNameIterator roles = graph->getDirectSubordinates(roleName);
+             roles.more();
+             roles.next()) {
+
+            const RoleName& subRole = roles.get();
+            mutablebson::Element roleObj = result.getDocument().makeElementObject("");
+            roleObj.appendString(ROLE_NAME_FIELD_NAME, subRole.getRole());
+            roleObj.appendString(ROLE_SOURCE_FIELD_NAME, subRole.getDB());
+            rolesArrayElement.pushBack(roleObj);
+        }
+
+        return Status::OK();
     }
 
-    bool AuthorizationManager::hasInternalAuthorization() {
-        ActionSet allActions;
-        allActions.addAllActions();
-        return _acquiredPrivileges.hasPrivilege(Privilege(PrivilegeSet::WILDCARD_RESOURCE,
-                                                          allActions));
-    }
-
-    ActionSet AuthorizationManager::getActionsForOldStyleUser(const std::string& dbname,
-                                                              bool readOnly) {
-        if (dbname == ADMIN_DBNAME || dbname == LOCAL_DBNAME) {
-            if (readOnly) {
-                return compatibilityReadOnlyAdminActions;
-            } else {
-                return compatibilityReadWriteAdminActions;
+    static const RoleName userAdminAnyDatabase("userAdminAnyDatabase", "admin");
+    static void _initializeUserPrivilegesFromRolesV1(User* user) {
+        PrivilegeVector privileges;
+        for (RoleNameIterator roles = user->getRoles(); roles.more(); roles.next()) {
+            RoleGraph::addPrivilegesForBuiltinRole(roles.get(), &privileges);
+            if (roles.get() == userAdminAnyDatabase) {
+                // Giving schemaVersion24 users with userAdminAnyDatabase these privileges allows
+                // them to conduct a manual upgrade from schemaVersion24 to schemaVersion26Final.
+                ActionSet actions;
+                actions.addAction(ActionType::find);
+                actions.addAction(ActionType::insert);
+                actions.addAction(ActionType::update);
+                actions.addAction(ActionType::remove);
+                actions.addAction(ActionType::createIndex);
+                actions.addAction(ActionType::dropIndex);
+                Privilege::addPrivilegeToPrivilegeVector(
+                        &privileges,
+                        Privilege(ResourcePattern::forExactNamespace(
+                                          AuthorizationManager::versionCollectionNamespace),
+                                  actions));
+                Privilege::addPrivilegeToPrivilegeVector(
+                        &privileges,
+                        Privilege(ResourcePattern::forExactNamespace(
+                                          AuthorizationManager::usersAltCollectionNamespace),
+                                  actions));
+                Privilege::addPrivilegeToPrivilegeVector(
+                        &privileges,
+                        Privilege(ResourcePattern::forExactNamespace(
+                                          AuthorizationManager::usersBackupCollectionNamespace),
+                                  actions));
             }
-        } else {
-            if (readOnly) {
-                return compatibilityReadOnlyActions;
-            } else {
-                return compatibilityReadWriteActions;
-            }
         }
+        user->addPrivileges(privileges);
     }
 
-    Status AuthorizationManager::acquirePrivilegesFromPrivilegeDocument(
-            const std::string& dbname, const PrincipalName& principal, const BSONObj& privilegeDocument) {
-        if (!_authenticatedPrincipals.lookup(principal)) {
-            return Status(ErrorCodes::UserNotFound,
-                          mongoutils::str::stream()
-                                  << "No authenticated principle found with name: "
-                                  << principal.getUser()
-                                  << " from database "
-                                  << principal.getDB(),
-                          0);
-        }
-        return buildPrivilegeSet(dbname, principal, privilegeDocument, &_acquiredPrivileges);
-    }
-
-    Status AuthorizationManager::buildPrivilegeSet(const std::string& dbname,
-                                                   const PrincipalName& principal,
-                                                   const BSONObj& privilegeDocument,
-                                                   PrivilegeSet* result) {
-        if (!privilegeDocument.hasField(ROLES_FIELD_NAME)) {
-            // Old-style (v2.2 and prior) privilege document
-            if (_doesSupportOldStylePrivileges) {
-                return _buildPrivilegeSetFromOldStylePrivilegeDocument(dbname,
-                                                                       principal,
-                                                                       privilegeDocument,
-                                                                       result);
-            }
-            else {
-                return _oldPrivilegeFormatNotSupported();
-            }
-        }
-        else {
-            return _buildPrivilegeSetFromExtendedPrivilegeDocument(
-                    dbname, principal, privilegeDocument, result);
-        }
-    }
-
-    Status AuthorizationManager::_buildPrivilegeSetFromOldStylePrivilegeDocument(
-            const std::string& dbname,
-            const PrincipalName& principal,
-            const BSONObj& privilegeDocument,
-            PrivilegeSet* result) {
-        if (!(privilegeDocument.hasField(USER_NAME_FIELD_NAME) &&
-              privilegeDocument.hasField(PASSWORD_FIELD_NAME))) {
-
-            return Status(ErrorCodes::UnsupportedFormat,
-                          mongoutils::str::stream() << "Invalid old-style privilege document "
-                                  "received when trying to extract privileges: "
-                                   << privilegeDocument,
-                          0);
-        }
-        if (privilegeDocument[USER_NAME_FIELD_NAME].str() != principal.getUser()) {
+    Status AuthorizationManager::_initializeUserFromPrivilegeDocument(
+            User* user, const BSONObj& privDoc) {
+        V2UserDocumentParser parser;
+        std::string userName = parser.extractUserNameFromUserDocument(privDoc);
+        if (userName != user->getName().getUser()) {
             return Status(ErrorCodes::BadValue,
-                          mongoutils::str::stream() << "Principal name from privilege document \""
-                                  << privilegeDocument[USER_NAME_FIELD_NAME].str()
-                                  << "\" doesn't match name of provided Principal \""
-                                  << principal.getUser()
+                          mongoutils::str::stream() << "User name from privilege document \""
+                                  << userName
+                                  << "\" doesn't match name of provided User \""
+                                  << user->getName().getUser()
                                   << "\"",
                           0);
         }
 
-        bool readOnly = privilegeDocument[READONLY_FIELD_NAME].trueValue();
-        ActionSet actions = getActionsForOldStyleUser(dbname, readOnly);
-        std::string resourceName = (dbname == ADMIN_DBNAME || dbname == LOCAL_DBNAME) ?
-            PrivilegeSet::WILDCARD_RESOURCE : dbname;
-        result->grantPrivilege(Privilege(resourceName, actions), principal);
-
+        Status status = parser.initializeUserCredentialsFromUserDocument(user, privDoc);
+        if (!status.isOK()) {
+            return status;
+        }
+        status = parser.initializeUserRolesFromUserDocument(privDoc, user);
+        if (!status.isOK()) {
+            return status;
+        }
+        status = parser.initializeUserIndirectRolesFromUserDocument(privDoc, user);
+        if (!status.isOK()) {
+            return status;
+        }
+        status = parser.initializeUserPrivilegesFromUserDocument(privDoc, user);
         return Status::OK();
     }
 
-    /**
-     * Adds to "outPrivileges" the privileges associated with having the named "role" on "dbname".
-     *
-     * Returns non-OK status if "role" is not a defined role in "dbname".
-     */
-    static void _addPrivilegesForSystemRole(const std::string& dbname,
-                                            const std::string& role,
-                                            std::vector<Privilege>* outPrivileges) {
-        const bool isAdminDB = (dbname == ADMIN_DBNAME);
-
-        if (role == SYSTEM_ROLE_READ) {
-            outPrivileges->push_back(Privilege(dbname, readRoleActions));
-        }
-        else if (role == SYSTEM_ROLE_READ_WRITE) {
-            outPrivileges->push_back(Privilege(dbname, readWriteRoleActions));
-        }
-        else if (role == SYSTEM_ROLE_USER_ADMIN) {
-            outPrivileges->push_back(Privilege(dbname, userAdminRoleActions));
-        }
-        else if (role == SYSTEM_ROLE_DB_ADMIN) {
-            outPrivileges->push_back(Privilege(dbname, dbAdminRoleActions));
-        }
-        else if (isAdminDB && role == SYSTEM_ROLE_READ_ANY_DB) {
-            outPrivileges->push_back(Privilege(PrivilegeSet::WILDCARD_RESOURCE, readRoleActions));
-        }
-        else if (isAdminDB && role == SYSTEM_ROLE_READ_WRITE_ANY_DB) {
-            outPrivileges->push_back(
-                    Privilege(PrivilegeSet::WILDCARD_RESOURCE, readWriteRoleActions));
-        }
-        else if (isAdminDB && role == SYSTEM_ROLE_USER_ADMIN_ANY_DB) {
-            outPrivileges->push_back(
-                    Privilege(PrivilegeSet::WILDCARD_RESOURCE, userAdminRoleActions));
-        }
-        else if (isAdminDB && role == SYSTEM_ROLE_DB_ADMIN_ANY_DB) {
-            outPrivileges->push_back(
-                    Privilege(PrivilegeSet::WILDCARD_RESOURCE, dbAdminRoleActions));
-        }
-        else if (isAdminDB && role == SYSTEM_ROLE_CLUSTER_ADMIN) {
-            outPrivileges->push_back(
-                    Privilege(PrivilegeSet::WILDCARD_RESOURCE, clusterAdminRoleActions));
-        }
-        else {
-            warning() << "No such role, \"" << role << "\", in database " << dbname <<
-                    ". No privileges will be acquired from this role" << endl;
-        }
+    Status AuthorizationManager::getUserDescription(const UserName& userName, BSONObj* result) {
+        return _externalState->getUserDescription(userName, result);
     }
 
-    /**
-     * Given a database name and a BSONElement representing an array of roles, populates
-     * "outPrivileges" with the privileges associated with the given roles on the named database.
-     *
-     * Returns Status::OK() on success.
-     */
-    static Status _getPrivilegesFromRoles(const std::string& dbname,
-                                          const BSONElement& rolesElement,
-                                          std::vector<Privilege>* outPrivileges) {
-
-        static const char privilegesTypeMismatchMessage[] =
-            "Roles must be enumerated in an array of strings.";
-
-        if (dbname == PrivilegeSet::WILDCARD_RESOURCE) {
-            return Status(ErrorCodes::BadValue,
-                          PrivilegeSet::WILDCARD_RESOURCE + " is an invalid database name.");
-        }
-
-        if (rolesElement.type() != Array)
-            return Status(ErrorCodes::TypeMismatch, privilegesTypeMismatchMessage);
-
-        for (BSONObjIterator iter(rolesElement.embeddedObject()); iter.more(); iter.next()) {
-            BSONElement roleElement = *iter;
-            if (roleElement.type() != String)
-                return Status(ErrorCodes::TypeMismatch, privilegesTypeMismatchMessage);
-            _addPrivilegesForSystemRole(dbname, roleElement.str(), outPrivileges);
-        }
-        return Status::OK();
+    Status AuthorizationManager::getRoleDescription(const RoleName& roleName,
+                                                    bool showPrivileges,
+                                                    BSONObj* result) {
+        return _externalState->getRoleDescription(roleName, showPrivileges, result);
     }
 
-    Status AuthorizationManager::_buildPrivilegeSetFromExtendedPrivilegeDocument(
-            const std::string& dbname,
-            const PrincipalName& principal,
-            const BSONObj& privilegeDocument,
-            PrivilegeSet* result) {
+    Status AuthorizationManager::getRoleDescriptionsForDB(const std::string dbname,
+                                                          bool showPrivileges,
+                                                          bool showBuiltinRoles,
+                                                          vector<BSONObj>* result) {
+        return _externalState->getRoleDescriptionsForDB(dbname,
+                                                        showPrivileges,
+                                                        showBuiltinRoles,
+                                                        result);
+    }
 
-        if (!privilegeDocument[READONLY_FIELD_NAME].eoo()) {
-            return Status(ErrorCodes::UnsupportedFormat,
-                          "Privilege documents may not contain both \"readonly\" and "
-                          "\"roles\" fields");
+    Status AuthorizationManager::acquireUser(const UserName& userName, User** acquiredUser) {
+        if (userName == internalSecurity.user->getName()) {
+            *acquiredUser = internalSecurity.user;
+            return Status::OK();
         }
 
-        std::vector<Privilege> acquiredPrivileges;
+        unordered_map<UserName, User*>::iterator it;
 
-        // Acquire privileges on "dbname".
-        Status status = _getPrivilegesFromRoles(
-                dbname, privilegeDocument[ROLES_FIELD_NAME], &acquiredPrivileges);
+        CacheGuard guard(this, CacheGuard::fetchSynchronizationManual);
+        while ((_userCache.end() == (it = _userCache.find(userName))) &&
+               guard.otherUpdateInFetchPhase()) {
+
+            guard.wait();
+        }
+
+        if (it != _userCache.end()) {
+            fassert(16914, it->second);
+            fassert(17003, it->second->isValid());
+            fassert(17008, it->second->getRefCount() > 0);
+            it->second->incrementRefCount();
+            *acquiredUser = it->second;
+            return Status::OK();
+        }
+
+        std::auto_ptr<User> user;
+
+        int authzVersion = _version;
+        guard.beginFetchPhase();
+
+        // Number of times to retry a user document that fetches due to transient
+        // AuthSchemaIncompatible errors.  These errors should only ever occur during and shortly
+        // after schema upgrades.
+        static const int maxAcquireRetries = 2;
+        Status status = Status::OK();
+        for (int i = 0; i < maxAcquireRetries; ++i) {
+            if (authzVersion == schemaVersionInvalid) {
+                Status status = _externalState->getStoredAuthorizationVersion(&authzVersion);
+                if (!status.isOK())
+                    return status;
+            }
+
+            switch (authzVersion) {
+            default:
+                status = Status(ErrorCodes::BadValue, mongoutils::str::stream() <<
+                                "Illegal value for authorization data schema version, " <<
+                                authzVersion);
+                break;
+            case schemaVersion26Final:
+            case schemaVersion26Upgrade:
+                status = _fetchUserV2(userName, &user);
+                break;
+            case schemaVersion24:
+                status = _fetchUserV1(userName, &user);
+                break;
+            }
+            if (status.isOK())
+                break;
+            if (status != ErrorCodes::AuthSchemaIncompatible)
+                return status;
+
+            authzVersion = schemaVersionInvalid;
+        }
         if (!status.isOK())
             return status;
 
-        // If "dbname" is the admin database, handle the otherDBPrivileges field, which
-        // grants privileges on databases other than "dbname".
-        BSONElement otherDbPrivileges = privilegeDocument[OTHER_DB_ROLES_FIELD_NAME];
-        if (dbname == ADMIN_DBNAME) {
-            switch (otherDbPrivileges.type()) {
-            case EOO:
-                break;
-            case Object: {
-                for (BSONObjIterator iter(otherDbPrivileges.embeddedObject());
-                     iter.more(); iter.next()) {
+        guard.endFetchPhase();
 
-                    BSONElement rolesElement = *iter;
-                    status = _getPrivilegesFromRoles(
-                            rolesElement.fieldName(), rolesElement, &acquiredPrivileges);
-                    if (!status.isOK())
-                        return status;
-                }
-                break;
-            }
-            default:
-                return Status(ErrorCodes::TypeMismatch,
-                              "Field \"otherDBRoles\" must be an object, if present.");
-            }
-        }
-        else if (!otherDbPrivileges.eoo()) {
-            return Status(ErrorCodes::BadValue, "Only the admin database may contain a field "
-                          "called \"otherDBRoles\"");
-        }
-
-        result->grantPrivileges(acquiredPrivileges, principal);
-        return Status::OK();
-    }
-
-    bool AuthorizationManager::checkAuthorization(const std::string& resource,
-                                                  ActionType action) {
-        return checkAuthForPrivilege(Privilege(resource, action)).isOK();
-    }
-
-    bool AuthorizationManager::checkAuthorization(const std::string& resource,
-                                                  ActionSet actions) {
-        return checkAuthForPrivilege(Privilege(resource, actions)).isOK();
-    }
-
-    Status AuthorizationManager::checkAuthForQuery(const std::string& ns) {
-        NamespaceString namespaceString(ns);
-        verify(!namespaceString.isCommand());
-        if (!checkAuthorization(ns, ActionType::find)) {
-            return Status(ErrorCodes::Unauthorized,
-                          mongoutils::str::stream() << "not authorized for query on " << ns,
-                          0);
-        }
-        return Status::OK();
-    }
-
-    Status AuthorizationManager::checkAuthForInsert(const std::string& ns) {
-        NamespaceString namespaceString(ns);
-        if (!checkAuthorization(ns, ActionType::insert)) {
-            return Status(ErrorCodes::Unauthorized,
-                          mongoutils::str::stream() << "not authorized for insert on " << ns,
-                          0);
-        }
-        return Status::OK();
-    }
-
-    Status AuthorizationManager::checkAuthForUpdate(const std::string& ns, bool upsert) {
-        NamespaceString namespaceString(ns);
-        if (!upsert) {
-            if (!checkAuthorization(ns, ActionType::update)) {
-                return Status(ErrorCodes::Unauthorized,
-                              mongoutils::str::stream() << "not authorized for update on " << ns,
-                              0);
-            }
+        user->incrementRefCount();
+        // NOTE: It is not safe to throw an exception from here to the end of the method.
+        if (guard.isSameCacheGeneration()) {
+            _userCache.insert(make_pair(userName, user.get()));
+            if (_version == schemaVersionInvalid)
+                _version = authzVersion;
         }
         else {
-            ActionSet required;
-            required.addAction(ActionType::update);
-            required.addAction(ActionType::insert);
-            if (!checkAuthorization(ns, required)) {
-                return Status(ErrorCodes::Unauthorized,
-                              mongoutils::str::stream() << "not authorized for upsert on " << ns,
-                              0);
+            // If the cache generation changed while this thread was in fetch mode, the data
+            // associated with the user may now be invalid, so we must mark it as such.  The caller
+            // may still opt to use the information for a short while, but not indefinitely.
+            user->invalidate();
+        }
+        *acquiredUser = user.release();
+
+        return Status::OK();
+    }
+
+    Status AuthorizationManager::_fetchUserV2(const UserName& userName,
+                                              std::auto_ptr<User>* acquiredUser) {
+        BSONObj userObj;
+        Status status = getUserDescription(userName, &userObj);
+        if (!status.isOK()) {
+            return status;
+        }
+
+        // Put the new user into an auto_ptr temporarily in case there's an error while
+        // initializing the user.
+        std::auto_ptr<User> user(new User(userName));
+
+        status = _initializeUserFromPrivilegeDocument(user.get(), userObj);
+        if (!status.isOK()) {
+            return status;
+        }
+        acquiredUser->reset(user.release());
+        return Status::OK();
+    }
+
+    Status AuthorizationManager::_fetchUserV1(const UserName& userName,
+                                              std::auto_ptr<User>* acquiredUser) {
+
+        BSONObj privDoc;
+        V1UserDocumentParser parser;
+        const bool isExternalUser = (userName.getDB() == "$external");
+        const bool isAdminUser = (userName.getDB() == "admin");
+
+        std::auto_ptr<User> user(new User(userName));
+        user->setSchemaVersion1();
+        user->markProbedV1("$external");
+        if (isExternalUser) {
+            User::CredentialData creds;
+            creds.isExternal = true;
+            user->setCredentials(creds);
+        }
+        else {
+            // Users from databases other than "$external" must have an associated privilege
+            // document in their database.
+            Status status = _externalState->getPrivilegeDocumentV1(
+                    userName.getDB(), userName, &privDoc);
+            if (!status.isOK())
+                return status;
+
+            status = parser.initializeUserRolesFromUserDocument(
+                    user.get(), privDoc, userName.getDB());
+            if (!status.isOK())
+                return status;
+
+            status = parser.initializeUserCredentialsFromUserDocument(user.get(), privDoc);
+            if (!status.isOK())
+                return status;
+            user->markProbedV1(userName.getDB());
+        }
+        if (!isAdminUser) {
+            // Users from databases other than "admin" probe the "admin" database at login, to
+            // ensure that the acquire any privileges derived from "otherDBRoles" fields in
+            // admin.system.users.
+            Status status = _externalState->getPrivilegeDocumentV1("admin", userName, &privDoc);
+            if (status.isOK()) {
+                status = parser.initializeUserRolesFromUserDocument(user.get(), privDoc, "admin");
+                if (!status.isOK())
+                    return status;
+            }
+            else if (status != ErrorCodes::UserNotFound) {
+                return status;
+            }
+            user->markProbedV1("admin");
+        }
+
+        _initializeUserPrivilegesFromRolesV1(user.get());
+        acquiredUser->reset(user.release());
+        return Status::OK();
+    }
+
+    Status AuthorizationManager::acquireV1UserProbedForDb(
+            const UserName& userName, const StringData& dbname, User** acquiredUser) {
+
+        if (userName == internalSecurity.user->getName()) {
+            *acquiredUser = internalSecurity.user;
+            return Status::OK();
+        }
+
+        CacheGuard guard(this, CacheGuard::fetchSynchronizationManual);
+        std::auto_ptr<User> user;
+        {
+            unordered_map<UserName, User*>::iterator it;
+            while ((_userCache.end() == (it = _userCache.find(userName))) &&
+                   guard.otherUpdateInFetchPhase()) {
+
+                guard.wait();
+            }
+
+            if (_userCache.end() != it) {
+                User* cachedUser = it->second;
+                fassert(17225, cachedUser->isValid());
+                if ((cachedUser->getSchemaVersion() != schemaVersion24) ||
+                    cachedUser->hasProbedV1(dbname)) {
+
+                    cachedUser->incrementRefCount();
+                    *acquiredUser = cachedUser;
+                    return Status::OK();
+                }
+                // We clone cachedUser for two reasons.  First, because it is not OK to mutate a
+                // User object that may have been returned from acquireUser() or
+                // acquireV1UserProbedForDb().  Second, because outside of this scope (or more
+                // precisely, after calling guard.wait() or guard.beginFetchPhase(), after the
+                // scope), references to data in the _userCache for which we do not know the
+                // refcount is greater than zero are invalid.
+                user.reset(cachedUser->clone());
             }
         }
-        return Status::OK();
-    }
+        while (guard.otherUpdateInFetchPhase())
+            guard.wait();
+        guard.beginFetchPhase();
 
-    Status AuthorizationManager::checkAuthForDelete(const std::string& ns) {
-        NamespaceString namespaceString(ns);
-        if (!checkAuthorization(ns, ActionType::remove)) {
-            return Status(ErrorCodes::Unauthorized,
-                          mongoutils::str::stream() << "not authorized to remove from " << ns,
-                          0);
-        }
-        return Status::OK();
-    }
-
-    Status AuthorizationManager::checkAuthForGetMore(const std::string& ns) {
-        return checkAuthForQuery(ns);
-    }
-
-    Privilege AuthorizationManager::_modifyPrivilegeForSpecialCases(const Privilege& privilege) {
-        ActionSet newActions;
-        newActions.addAllActionsFromSet(privilege.getActions());
-        std::string collectionName = NamespaceString(privilege.getResource()).coll;
-        if (collectionName == "system.users") {
-            newActions.removeAction(ActionType::find);
-            newActions.removeAction(ActionType::insert);
-            newActions.removeAction(ActionType::update);
-            newActions.removeAction(ActionType::remove);
-            newActions.addAction(ActionType::userAdmin);
-        } else if (collectionName == "system.profile") {
-            newActions.removeAction(ActionType::find);
-            newActions.addAction(ActionType::profileRead);
-        } else if (collectionName == "system.indexes" && newActions.contains(ActionType::find)) {
-            newActions.removeAction(ActionType::find);
-            newActions.addAction(ActionType::indexRead);
-        }
-
-        return Privilege(privilege.getResource(), newActions);
-    }
-
-    Status AuthorizationManager::checkAuthForPrivilege(const Privilege& privilege) {
-        if (_externalState->shouldIgnoreAuthChecks())
-            return Status::OK();
-
-        return _probeForPrivilege(privilege);
-    }
-
-    Status AuthorizationManager::checkAuthForPrivileges(const vector<Privilege>& privileges) {
-        if (_externalState->shouldIgnoreAuthChecks())
-            return Status::OK();
-
-        for (size_t i = 0; i < privileges.size(); ++i) {
-            Status status = _probeForPrivilege(privileges[i]);
+        if (!user.get()) {
+            Status status = _fetchUserV1(userName, &user);
+            if (status == ErrorCodes::AuthSchemaIncompatible) {
+                // Must early-return from this if block, because we end the fetch phase.  Since the
+                // auth schema is incompatible with schemaVersion24, make a best effort to do the
+                // schemaVersion26(Upgrade|Final) user acquisition, and return.
+                status = _fetchUserV2(userName, &user);
+                guard.endFetchPhase();
+                if (status.isOK()) {
+                    // Not safe to throw from here until the function returns.
+                    if (guard.isSameCacheGeneration()) {
+                        _invalidateUserCache_inlock();
+                        _userCache.insert(make_pair(userName, user.get()));
+                    }
+                    else {
+                        user->invalidate();
+                    }
+                    user->incrementRefCount();
+                    *acquiredUser = user.release();
+                }
+                return status;
+            }
             if (!status.isOK())
                 return status;
         }
 
+        if (!user->hasProbedV1(dbname)) {
+            BSONObj privDoc;
+            Status status = _externalState->getPrivilegeDocumentV1(dbname, userName, &privDoc);
+            if (status.isOK()) {
+                V1UserDocumentParser parser;
+                status = parser.initializeUserRolesFromUserDocument(user.get(), privDoc, dbname);
+                if (!status.isOK())
+                    return status;
+                _initializeUserPrivilegesFromRolesV1(user.get());
+                user->markProbedV1(dbname);
+            }
+            else if (status == ErrorCodes::UserNotFound) {
+                user->markProbedV1(dbname);
+            } else {
+                return status;
+            }
+        }
+
+        guard.endFetchPhase();
+        user->incrementRefCount();
+        // NOTE: It is not safe to throw an exception from here to the end of the method.
+        *acquiredUser = user.release();
+        if (guard.isSameCacheGeneration()) {
+            unordered_map<UserName, User*>::iterator it = _userCache.find(userName);
+            if (it != _userCache.end()) {
+                it->second->invalidate();
+                it->second = *acquiredUser;
+            }
+            else {
+                _userCache.insert(make_pair(userName, *acquiredUser));
+            }
+        }
+        else {
+            // If the cache generation changed while this thread was in fetch mode, the data
+            // associated with the user may now be invalid, so we must mark it as such.  The caller
+            // may still opt to use the information for a short while, but not indefinitely.
+            (*acquiredUser)->invalidate();
+        }
         return Status::OK();
     }
 
-    Status AuthorizationManager::_probeForPrivilege(const Privilege& privilege) {
-        Privilege modifiedPrivilege = _modifyPrivilegeForSpecialCases(privilege);
-        if (_acquiredPrivileges.hasPrivilege(modifiedPrivilege))
-            return Status::OK();
-
-        std::string dbname = nsToDatabase(modifiedPrivilege.getResource());
-        for (PrincipalSet::iterator iter = _authenticatedPrincipals.begin(),
-                 end = _authenticatedPrincipals.end();
-             iter != end; ++iter) {
-
-            Principal* principal = *iter;
-            if (!principal->isImplicitPrivilegeAcquisitionEnabled())
-                continue;
-            if (principal->isDatabaseProbed(dbname))
-                continue;
-            _acquirePrivilegesForPrincipalFromDatabase(dbname, principal->getName());
-            principal->markDatabaseAsProbed(dbname);
-            if (_acquiredPrivileges.hasPrivilege(modifiedPrivilege))
-                return Status::OK();
+    void AuthorizationManager::releaseUser(User* user) {
+        if (user == internalSecurity.user) {
+            return;
         }
-        return Status(ErrorCodes::Unauthorized, "unauthorized", 0);
+
+        CacheGuard guard(this, CacheGuard::fetchSynchronizationManual);
+        user->decrementRefCount();
+        if (user->getRefCount() == 0) {
+            // If it's been invalidated then it's not in the _userCache anymore.
+            if (user->isValid()) {
+                MONGO_COMPILER_VARIABLE_UNUSED bool erased = _userCache.erase(user->getName());
+                dassert(erased);
+            }
+            delete user;
+        }
+    }
+
+    void AuthorizationManager::invalidateUserByName(const UserName& userName) {
+        CacheGuard guard(this, CacheGuard::fetchSynchronizationManual);
+        _updateCacheGeneration_inlock();
+        unordered_map<UserName, User*>::iterator it = _userCache.find(userName);
+        if (it == _userCache.end()) {
+            return;
+        }
+
+        User* user = it->second;
+        _userCache.erase(it);
+        user->invalidate();
+    }
+
+    void AuthorizationManager::invalidateUsersFromDB(const std::string& dbname) {
+        CacheGuard guard(this, CacheGuard::fetchSynchronizationManual);
+        _updateCacheGeneration_inlock();
+        unordered_map<UserName, User*>::iterator it = _userCache.begin();
+        while (it != _userCache.end()) {
+            User* user = it->second;
+            if (user->getName().getDB() == dbname) {
+                _userCache.erase(it++);
+                user->invalidate();
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    void AuthorizationManager::invalidateUserCache() {
+        CacheGuard guard(this, CacheGuard::fetchSynchronizationManual);
+        _invalidateUserCache_inlock();
+    }
+
+    void AuthorizationManager::_invalidateUserCache_inlock() {
+        _updateCacheGeneration_inlock();
+        for (unordered_map<UserName, User*>::iterator it = _userCache.begin();
+                it != _userCache.end(); ++it) {
+            fassert(17266, it->second != internalSecurity.user);
+            it->second->invalidate();
+        }
+        _userCache.clear();
+
+        // Reread the schema version before acquiring the next user.
+        _version = schemaVersionInvalid;
+    }
+
+    Status AuthorizationManager::initialize() {
+        invalidateUserCache();
+        Status status = _externalState->initialize();
+        if (!status.isOK())
+            return status;
+
+        return Status::OK();
+    }
+
+    bool AuthorizationManager::tryAcquireAuthzUpdateLock(const StringData& why) {
+        return _externalState->tryAcquireAuthzUpdateLock(why);
+    }
+
+    void AuthorizationManager::releaseAuthzUpdateLock() {
+        return _externalState->releaseAuthzUpdateLock();
+    }
+
+namespace {
+
+    /**
+     * Logs that the auth schema upgrade failed because of "status" and returns "status".
+     */
+    Status logUpgradeFailed(const Status& status) {
+        log() << "Auth schema upgrade failed with " << status;
+        return status;
+    }
+
+    /**
+     * Upserts a schemaVersion26Upgrade user document in the usersAltCollectionNamespace
+     * according to the schemaVersion24 user document "oldUserDoc" from database "sourceDB".
+     *
+     * Throws a DBException on errors.
+     */
+    void upgradeProcessUser(AuthzManagerExternalState* externalState,
+                            const StringData& sourceDB,
+                            const BSONObj& oldUserDoc,
+                            const BSONObj& writeConcern) {
+
+        uassert(17387,
+                mongoutils::str::stream() << "While preparing to upgrade user doc from the 2.4 "
+                        "user data schema to the 2.6 schema, found a user doc with a "
+                        "\"credentials\" field, indicating that the doc already has the new "
+                        "schema. Make sure that all documents in admin.system.users have the same "
+                        "user data schema and that the version document in admin.system.version "
+                        "indicates the correct schema version.  User doc found: " <<
+                        oldUserDoc.toString(),
+                !oldUserDoc.hasField("credentials"));
+
+        uassert(17386,
+                mongoutils::str::stream() << "While preparing to upgrade user doc from "
+                        "the 2.4 user data schema to the 2.6 schema, found a user doc "
+                        "that doesn't conform to the 2.4 *or* 2.6 schema.  Doc found: "
+                        << oldUserDoc.toString(),
+                oldUserDoc.hasField("user") &&
+                        (oldUserDoc.hasField("userSource") || oldUserDoc.hasField("pwd")));
+
+        std::string oldUserSource;
+        uassertStatusOK(bsonExtractStringFieldWithDefault(
+                                oldUserDoc,
+                                "userSource",
+                                sourceDB,
+                                &oldUserSource));
+
+        if (oldUserSource == "local")
+            return;  // Skips users from "local" database, which cannot be upgraded.
+
+        const std::string oldUserName = oldUserDoc["user"].String();
+        BSONObj query = BSON("_id" << oldUserSource + "." + oldUserName);
+
+        BSONObjBuilder updateBuilder;
+        {
+            BSONObjBuilder toSetBuilder(updateBuilder.subobjStart("$set"));
+            toSetBuilder << "user" << oldUserName << "db" << oldUserSource;
+            BSONElement pwdElement = oldUserDoc["pwd"];
+            if (!pwdElement.eoo()) {
+                toSetBuilder << "credentials" << BSON("MONGODB-CR" << pwdElement.String());
+            }
+            else if (oldUserSource == "$external") {
+                toSetBuilder << "credentials" << BSON("external" << true);
+            }
+        }
+        {
+            BSONObjBuilder pushAllBuilder(updateBuilder.subobjStart("$pushAll"));
+            BSONArrayBuilder rolesBuilder(pushAllBuilder.subarrayStart("roles"));
+
+            const bool readOnly = oldUserDoc["readOnly"].trueValue();
+            const BSONElement rolesElement = oldUserDoc["roles"];
+            if (readOnly) {
+                // Handles the cases where there is a truthy readOnly field, which is a 2.2-style
+                // read-only user.
+                if (sourceDB == "admin") {
+                    rolesBuilder << BSON("role" << "readAnyDatabase" << "db" << "admin");
+                }
+                else {
+                    rolesBuilder << BSON("role" << "read" << "db" << sourceDB);
+                }
+            }
+            else if (rolesElement.eoo()) {
+                // Handles the cases where the readOnly field is absent or falsey, but the
+                // user is known to be 2.2-style because it lacks a roles array.
+                if (sourceDB == "admin") {
+                    rolesBuilder << BSON("role" << "root" << "db" << "admin");
+                }
+                else {
+                    rolesBuilder << BSON("role" << "dbOwner" << "db" << sourceDB);
+                }
+            }
+            else {
+                // Handles 2.4-style user documents, with roles arrays and (optionally, in admin db)
+                // otherDBRoles objects.
+                uassert(17252,
+                        "roles field in v2.4 user documents must be an array",
+                        rolesElement.type() == Array);
+                for (BSONObjIterator oldRoles(rolesElement.Obj());
+                     oldRoles.more();
+                     oldRoles.next()) {
+
+                    BSONElement roleElement = *oldRoles;
+                    rolesBuilder << BSON("role" << roleElement.String() << "db" << sourceDB);
+                }
+
+                BSONElement otherDBRolesElement = oldUserDoc["otherDBRoles"];
+                if (sourceDB == "admin" && !otherDBRolesElement.eoo()) {
+                    uassert(17253,
+                            "otherDBRoles field in v2.4 user documents must be an object.",
+                            otherDBRolesElement.type() == Object);
+
+                    for (BSONObjIterator otherDBs(otherDBRolesElement.Obj());
+                         otherDBs.more();
+                         otherDBs.next()) {
+
+                        BSONElement otherDBRoles = *otherDBs;
+                        if (otherDBRoles.fieldNameStringData() == "local")
+                            continue;
+                        uassert(17254,
+                                "Member fields of otherDBRoles objects must be arrays.",
+                                otherDBRoles.type() == Array);
+                        for (BSONObjIterator oldRoles(otherDBRoles.Obj());
+                             oldRoles.more();
+                             oldRoles.next()) {
+
+                            BSONElement roleElement = *oldRoles;
+                            rolesBuilder << BSON("role" << roleElement.String() <<
+                                                 "db" << otherDBRoles.fieldNameStringData());
+                        }
+                    }
+                }
+            }
+        }
+        BSONObj update = updateBuilder.obj();
+
+        uassertStatusOK(externalState->updateOne(
+                                AuthorizationManager::usersAltCollectionNamespace,
+                                query,
+                                update,
+                                true,
+                                writeConcern));
+    }
+
+    /**
+     * For every schemaVersion24 user document in the system.users collection of "db",
+     * upserts the appropriate schemaVersion26Upgrade user document in usersAltCollectionNamespace.
+     */
+    Status upgradeUsersFromDB(AuthzManagerExternalState* externalState,
+                             const StringData& db,
+                             const BSONObj& writeConcern) {
+        log() << "Auth schema upgrade processing schema version " <<
+            AuthorizationManager::schemaVersion24 << " users from database " << db;
+        return externalState->query(
+                NamespaceString(db, "system.users"),
+                BSONObj(),
+                BSONObj(),
+                boost::bind(upgradeProcessUser, externalState, db, _1, writeConcern));
+    }
+
+    /**
+     * Inserts "document" into "collection", throwing a DBException on failure.
+     */
+    void uassertInsertIntoCollection(
+            AuthzManagerExternalState* externalState,
+            const NamespaceString& collection,
+            const BSONObj& document,
+            const BSONObj& writeConcern) {
+        uassertStatusOK(externalState->insert(collection, document, writeConcern));
+    }
+
+    /**
+     * Copies the contents of "sourceCollection" into "targetCollection", which must be a distinct
+     * collection.
+     */
+    Status copyCollectionContents(
+            AuthzManagerExternalState* externalState,
+            const NamespaceString& targetCollection,
+            const NamespaceString& sourceCollection,
+            const BSONObj& writeConcern) {
+        return externalState->query(
+                sourceCollection,
+                BSONObj(),
+                BSONObj(),
+                boost::bind(uassertInsertIntoCollection,
+                            externalState,
+                            targetCollection,
+                            _1,
+                            writeConcern));
+    }
+
+    /**
+     * Upgrades auth schema from schemaVersion24 to schemaVersion26Upgrade.
+     *
+     * Assumes that the current version is schemaVersion24.
+     *
+     * - Backs up usersCollectionNamespace into usersBackupCollectionNamespace.
+     * - Empties usersAltCollectionNamespace.
+     * - Builds usersAltCollectionNamespace from the contents of every database's system.users
+     *   collection.
+     * - Manipulates the schema version document appropriately.
+     *
+     * Upon successful completion, system is in schemaVersion26Upgrade.  On failure,
+     * system is in schemaVersion24 or schemaVersion26Upgrade, but it is safe to re-run this
+     * method.
+     */
+    Status buildNewUsersCollection(
+            AuthzManagerExternalState* externalState,
+            const BSONObj& writeConcern) {
+
+        // Write an explicit schemaVersion24 into the schema version document, to facilitate
+        // recovery.
+        Status status = externalState->updateOne(
+                AuthorizationManager::versionCollectionNamespace,
+                AuthorizationManager::versionDocumentQuery,
+                BSON("$set" << BSON(AuthorizationManager::schemaVersionFieldName <<
+                                    AuthorizationManager::schemaVersion24)),
+                true,
+                writeConcern);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+
+        log() << "Auth schema upgrade erasing contents of " <<
+            AuthorizationManager::usersBackupCollectionNamespace;
+        int numRemoved;
+        status = externalState->remove(
+                AuthorizationManager::usersBackupCollectionNamespace,
+                BSONObj(),
+                writeConcern,
+                &numRemoved);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+
+        log() << "Auth schema upgrade backing up " <<
+            AuthorizationManager::usersCollectionNamespace << " into " <<
+            AuthorizationManager::usersBackupCollectionNamespace;
+        status = copyCollectionContents(
+                externalState,
+                AuthorizationManager::usersBackupCollectionNamespace,
+                AuthorizationManager::usersCollectionNamespace,
+                writeConcern);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+
+        log() << "Auth schema upgrade dropping indexes from " <<
+            AuthorizationManager::usersAltCollectionNamespace;
+        status = externalState->dropIndexes(AuthorizationManager::usersAltCollectionNamespace,
+                                            writeConcern);
+        if (!status.isOK()) {
+            warning() << "Auth schema upgrade failed to drop indexes on " <<
+                AuthorizationManager::usersAltCollectionNamespace << " (" << status << ")";
+        }
+
+        log() << "Auth schema upgrade erasing contents of " <<
+            AuthorizationManager::usersAltCollectionNamespace;
+        status = externalState->remove(
+                AuthorizationManager::usersAltCollectionNamespace,
+                BSONObj(),
+                writeConcern,
+                &numRemoved);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+
+        log() << "Auth schema upgrade creating needed indexes of " <<
+            AuthorizationManager::usersAltCollectionNamespace;
+        status = externalState->createIndex(
+                AuthorizationManager::usersAltCollectionNamespace,
+                BSON("user" << 1 << "db" << 1),
+                true,
+                writeConcern);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+
+        // Update usersAltCollectionNamespace from the contents of each database's system.users
+        // collection.
+        std::vector<std::string> dbNames;
+        status = externalState->getAllDatabaseNames(&dbNames);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+        for (size_t i = 0; i < dbNames.size(); ++i) {
+            const std::string& db = dbNames[i];
+            status = upgradeUsersFromDB(externalState, db, writeConcern);
+            if (!status.isOK())
+                return logUpgradeFailed(status);
+        }
+
+        // Switch to schemaVersion26Upgrade.  Starting after this point, user information will be
+        // read from usersAltCollectionNamespace.
+        status = externalState->updateOne(
+                AuthorizationManager::versionCollectionNamespace,
+                AuthorizationManager::versionDocumentQuery,
+                BSON("$set" << BSON(AuthorizationManager::schemaVersionFieldName <<
+                                    AuthorizationManager::schemaVersion26Upgrade)),
+                true,
+                writeConcern);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+        return Status::OK();
+    }
+
+    /**
+     * Performs the upgrade to schemaVersion26Final from schemaVersion26Upgrade.
+     *
+     * Assumes that the current version is schemaVersion26Upgrade.
+     *
+     * - Erases contents and indexes of usersCollectionNamespace.
+     * - Erases contents and indexes of rolesCollectionNamespace.
+     * - Creates appropriate indexes on usersCollectionNamespace and rolesCollectionNamespace.
+     * - Copies usersAltCollectionNamespace to usersCollectionNamespace.
+     * - Manipulates the schema version document appropriately.
+     *
+     * Upon successful completion, system is in schemaVersion26Final.  On failure,
+     * system is in schemaVersion26Upgrade or schemaVersion26Final, but it is safe to re-run this
+     * method.
+     */
+    Status overwriteSystemUsersCollection(
+            AuthzManagerExternalState* externalState,
+            const BSONObj& writeConcern) {
+        log() << "Auth schema upgrade erasing version " << AuthorizationManager::schemaVersion24 <<
+            " users from " << AuthorizationManager::usersCollectionNamespace;
+        Status status = externalState->dropIndexes(AuthorizationManager::usersCollectionNamespace,
+                                                   writeConcern);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+        int numRemoved;
+        status = externalState->remove(
+                AuthorizationManager::usersCollectionNamespace,
+                BSONObj(),
+                writeConcern,
+                &numRemoved);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+
+        log() << "Auth schema upgrade erasing " << AuthorizationManager::rolesCollectionNamespace;
+        status = externalState->dropIndexes(AuthorizationManager::rolesCollectionNamespace,
+                                            writeConcern);
+        if (!status.isOK()) {
+            warning() << "Auth schema upgrade failed to drop indexes on " <<
+                AuthorizationManager::rolesCollectionNamespace << " (" << status << ")";
+        }
+
+        status = externalState->remove(
+                AuthorizationManager::rolesCollectionNamespace,
+                BSONObj(),
+                writeConcern,
+                &numRemoved);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+
+        log() << "Auth schema upgrade creating needed indexes of " <<
+            AuthorizationManager::rolesCollectionNamespace;
+        status = externalState->createIndex(
+                AuthorizationManager::rolesCollectionNamespace,
+                BSON("role" << 1 << "db" << 1),
+                true,
+                writeConcern);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+
+        log() << "Auth schema upgrade creating needed indexes of " <<
+            AuthorizationManager::usersCollectionNamespace;
+        status = externalState->createIndex(
+                AuthorizationManager::usersCollectionNamespace,
+                BSON("user" << 1 << "db" << 1),
+                true,
+                writeConcern);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+
+        log() << "Auth schema upgrade copying version " <<
+            AuthorizationManager::schemaVersion26Final << " users from " <<
+            AuthorizationManager::usersAltCollectionNamespace << " to " <<
+            AuthorizationManager::usersCollectionNamespace;
+
+        status = copyCollectionContents(
+                externalState,
+                AuthorizationManager::usersCollectionNamespace,
+                AuthorizationManager::usersAltCollectionNamespace,
+                writeConcern);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+
+        // Set the schema version in the schema version document, completing the process.
+        status = externalState->updateOne(
+                AuthorizationManager::versionCollectionNamespace,
+                AuthorizationManager::versionDocumentQuery,
+                BSON("$set" << BSON(AuthorizationManager::schemaVersionFieldName <<
+                                    AuthorizationManager::schemaVersion26Final)),
+                true,
+                writeConcern);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+        return Status::OK();
+    }
+}  // namespace
+
+    Status AuthorizationManager::upgradeSchemaStep(const BSONObj& writeConcern, bool* isDone) {
+        int authzVersion;
+        Status status = getAuthorizationVersion(&authzVersion);
+        if (!status.isOK()) {
+            return status;
+        }
+
+        switch (authzVersion) {
+        case schemaVersion24:
+            *isDone = false;
+            return buildNewUsersCollection(_externalState.get(), writeConcern);
+        case schemaVersion26Upgrade: {
+            Status status = overwriteSystemUsersCollection(_externalState.get(), writeConcern);
+            if (status.isOK())
+                *isDone = true;
+            return status;
+        }
+        case schemaVersion26Final:
+            *isDone = true;
+            return Status::OK();
+        default:
+            return Status(ErrorCodes::AuthSchemaIncompatible, mongoutils::str::stream() <<
+                          "Do not know how to upgrade auth schema from version " << authzVersion);
+        }
+    }
+
+    Status AuthorizationManager::upgradeSchema(int maxSteps, const BSONObj& writeConcern) {
+
+        if (maxSteps < 1) {
+            return Status(ErrorCodes::BadValue,
+                          "Minimum value for maxSteps parameter to upgradeSchema is 1");
+        }
+        invalidateUserCache();
+        for (int i = 0; i < maxSteps; ++i) {
+            bool isDone;
+            Status status = upgradeSchemaStep(writeConcern, &isDone);
+            invalidateUserCache();
+            if (!status.isOK() || isDone) {
+                return status;
+            }
+        }
+        return Status(ErrorCodes::OperationIncomplete, mongoutils::str::stream() <<
+                      "Auth schema upgrade incomplete after " << maxSteps << " successful steps.");
+    }
+
+namespace {
+    bool isAuthzNamespace(const StringData& ns) {
+        if (nsToCollectionSubstring(ns) == "system.users") {
+            // SERVER-15360 Make sure that changes made to non-admin system.users collections on a
+            // 2.4 primary replicating to us get detected and cause the user cache to be invalidated
+            return true;
+        }
+        return (ns == AuthorizationManager::rolesCollectionNamespace.ns() ||
+                ns == AuthorizationManager::usersCollectionNamespace.ns() ||
+                ns == AuthorizationManager::versionCollectionNamespace.ns());
+    }
+
+    bool isAuthzCollection(const StringData& coll) {
+        return (coll == AuthorizationManager::rolesCollectionNamespace.coll() ||
+                coll == AuthorizationManager::usersCollectionNamespace.coll() ||
+                coll == AuthorizationManager::versionCollectionNamespace.coll());
+    }
+
+    bool loggedCommandOperatesOnAuthzData(const char* ns, const BSONObj& cmdObj) {
+        if (ns != AuthorizationManager::adminCommandNamespace.ns())
+            return false;
+        const StringData cmdName(cmdObj.firstElement().fieldNameStringData());
+        if (cmdName == "drop") {
+            return isAuthzCollection(StringData(cmdObj.firstElement().valuestr(),
+                                                cmdObj.firstElement().valuestrsize() - 1));
+        }
+        else if (cmdName == "dropDatabase") {
+            return true;
+        }
+        else if (cmdName == "renameCollection") {
+            return isAuthzCollection(cmdObj.firstElement().str()) ||
+                isAuthzCollection(cmdObj["to"].str());
+        }
+        else if (cmdName == "dropIndexes" || cmdName == "deleteIndexes") {
+            return false;
+        }
+        else if (cmdName == "create") {
+            return false;
+        }
+        else {
+            return true;
+        }
+    }
+
+    bool appliesToAuthzData(
+            const char* op,
+            const char* ns,
+            const BSONObj& o) {
+
+        switch (*op) {
+        case 'i':
+        case 'u':
+        case 'd':
+            return isAuthzNamespace(ns);
+        case 'c':
+            return loggedCommandOperatesOnAuthzData(ns, o);
+            break;
+        case 'n':
+            return false;
+        default:
+            return true;
+        }
+    }
+
+}  // namespace
+
+    void AuthorizationManager::_updateCacheGeneration_inlock() {
+        _cacheGeneration = OID::gen();
+    }
+
+    void AuthorizationManager::logOp(
+            const char* op,
+            const char* ns,
+            const BSONObj& o,
+            BSONObj* o2,
+            bool* b) {
+
+        _externalState->logOp(op, ns, o, o2, b);
+        if (appliesToAuthzData(op, ns, o)) {
+            CacheGuard guard(this, CacheGuard::fetchSynchronizationManual);
+            _invalidateUserCache_inlock();
+        }
     }
 
 } // namespace mongo

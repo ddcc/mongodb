@@ -52,7 +52,9 @@ if (user) {
 }
 else {
     print("adding user");
-    s.getDB(adminUser.db).addUser(adminUser.username, adminUser.password);
+    s.getDB(adminUser.db).createUser({user: adminUser.username,
+                                      pwd: adminUser.password,
+                                      roles: jsTest.adminUserRoles});
 }
 
 login(adminUser);
@@ -80,7 +82,7 @@ logout(adminUser);
 
 var result = s.getDB("admin").runCommand({addShard : shardName});
 printjson(result);
-assert.eq(result.errmsg, "unauthorized");
+assert.eq(result.code, 13);
 
 login(adminUser);
 
@@ -112,8 +114,12 @@ s.getDB("admin").runCommand({shardCollection : "test.foo", key : {x : 1}});
 
 d1.waitForState( d1.getSecondaries(), d1.SECONDARY, 5 * 60 * 1000 )
 
-s.getDB(testUser.db).addUser(testUser.username, testUser.password , false, 3 )
-s.getDB(testUserReadOnly.db).addUser(testUserReadOnly.username, testUserReadOnly.password, true, 3 )
+s.getDB(testUser.db).createUser({user: testUser.username,
+                                 pwd: testUser.password,
+                                 roles: jsTest.basicUserRoles})
+s.getDB(testUserReadOnly.db).createUser({user: testUserReadOnly.username,
+                                         pwd: testUserReadOnly.password,
+                                         roles: jsTest.readOnlyUserRoles});
 
 logout(adminUser);
 
@@ -159,7 +165,7 @@ s.getDB("test").foo.remove({})
 
 var num = 100000;
 for (i=0; i<num; i++) {
-    s.getDB("test").foo.insert({x:i, abc : "defg", date : new Date(), str : "all the talk on the market"});
+    s.getDB("test").foo.insert({_id:i, x:i, abc : "defg", date : new Date(), str : "all the talk on the market"});
 }
 
 // Make sure all data gets sent through
@@ -199,6 +205,14 @@ if (numDocs != num) {
     assert.eq(numDocs, numDocsSeen, "More docs discovered on second find() even though getLastError was already called")
     assert.eq(num - numDocs, missingDocNumbers.length);
 
+    load('jstests/libs/trace_missing_docs.js');
+    
+    for ( var i = 0; i < missingDocNumbers.length; i++ ) {
+        jsTest.log( "Tracing doc: " + missingDocNumbers[i] );
+        traceMissingDoc( s.getDB( "test" ).foo, { _id : missingDocNumbers[i], 
+                                                    x : missingDocNumbers[i] } );
+    }
+    
     assert(false, "Number of docs found does not equal the number inserted. Missing docs: " + missingDocNumbers);
 }
 
@@ -227,8 +241,14 @@ logout(adminUser);
 d2.waitForState( d2.getSecondaries(), d2.SECONDARY, 5 * 60 * 1000 )
 
 // add admin on shard itself, hack to prevent localhost auth bypass
-d1.getMaster().getDB(adminUser.db).addUser(adminUser.username, adminUser.password, false, 3);
-d2.getMaster().getDB(adminUser.db).addUser(adminUser.username, adminUser.password, false, 3);
+d1.getMaster().getDB(adminUser.db).createUser({user: adminUser.username,
+                                               pwd: adminUser.password,
+                                               roles: jsTest.adminUserRoles},
+                                              {w: 3, wtimeout: 30000});
+d2.getMaster().getDB(adminUser.db).createUser({user: adminUser.username,
+                                               pwd: adminUser.password,
+                                               roles: jsTest.adminUserRoles},
+                                              {w: 3, wtimeout: 30000});
 
 login(testUser);
 print( "testing map reduce" );

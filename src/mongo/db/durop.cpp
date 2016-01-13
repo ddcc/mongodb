@@ -14,26 +14,37 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
-#include "pch.h"
-#include "d_concurrency.h"
-#include "../util/alignedbuilder.h"
-#include "../util/mongoutils/str.h"
-#include "../util/file.h"
-#include "mongommf.h"
-#include "durop.h"
-#include "../util/file_allocator.h"
+#include "mongo/pch.h"
+
+#include "mongo/db/durop.h"
+
+#include "mongo/db/d_concurrency.h"
+#include "mongo/db/repair_database.h"
+#include "mongo/db/storage/durable_mapped_file.h"
+#include "mongo/util/alignedbuilder.h"
+#include "mongo/util/file.h"
+#include "mongo/util/file_allocator.h"
+#include "mongo/util/mongoutils/str.h"
 
 using namespace mongoutils;
 
 #include <boost/filesystem/operations.hpp>
 
 namespace mongo {
-
-    extern string dbpath; // --dbpath parm
-
-    void _deleteDataFiles(const char *);
 
     namespace dur {
 
@@ -79,7 +90,7 @@ namespace mongo {
         /** throws */
         void DropDbOp::replay() {
             log() << "recover replay drop db " << _db << endl;
-            _deleteDataFiles(_db.c_str());
+            _deleteDataFiles(_db);
         }
 
         FileCreatedOp::FileCreatedOp(const std::string& f, unsigned long long l) :

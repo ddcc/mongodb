@@ -15,16 +15,14 @@
  *    limitations under the License.
  */
 
-#include "pch.h"
-#include "processinfo.h"
+#include "mongo/pch.h"
+
 #include <iostream>
 #include <psapi.h>
 
-using namespace std;
+#include "mongo/util/processinfo.h"
 
-int getpid() {
-    return GetCurrentProcessId();
-}
+using namespace std;
 
 namespace mongo {
 
@@ -32,11 +30,11 @@ namespace mongo {
     // does not support what we need)
     struct PsApiInit {
         bool supported;
-        typedef BOOL (WINAPI *pQueryWorkingSetEx)(HANDLE hProcess, 
-                                                  PVOID pv, 
+        typedef BOOL (WINAPI *pQueryWorkingSetEx)(HANDLE hProcess,
+                                                  PVOID pv,
                                                   DWORD cb);
         pQueryWorkingSetEx QueryWSEx;
-        
+
         PsApiInit() {
             HINSTANCE psapiLib = LoadLibrary( TEXT("psapi.dll") );
             if (psapiLib) {
@@ -57,7 +55,7 @@ namespace mongo {
         return (int)( s / ( 1024 * 1024 ) );
     }
 
-    ProcessInfo::ProcessInfo( pid_t pid ) {
+    ProcessInfo::ProcessInfo( ProcessId pid ) {
     }
 
     ProcessInfo::~ProcessInfo() {
@@ -97,6 +95,89 @@ namespace mongo {
         }
     }
 
+    bool getFileVersion(const char *filePath, DWORD &fileVersionMS, DWORD &fileVersionLS) {
+        DWORD verSize = GetFileVersionInfoSizeA(filePath, NULL);
+        if (verSize == 0) {
+            DWORD gle = GetLastError();
+            warning() << "GetFileVersionInfoSizeA on " << filePath << " failed with " << errnoWithDescription(gle);
+            return false;
+        }
+
+        boost::scoped_array<char> verData(new char[verSize]);
+        if (GetFileVersionInfoA(filePath, NULL, verSize, verData.get()) == 0) {
+            DWORD gle = GetLastError();
+            warning() << "GetFileVersionInfoSizeA on " << filePath << " failed with " << errnoWithDescription(gle);
+            return false;
+        }
+
+        UINT size;
+        VS_FIXEDFILEINFO *verInfo;
+        if (VerQueryValueA(verData.get(), "\\", (LPVOID *)&verInfo, &size) == 0) {
+            DWORD gle = GetLastError();
+            warning() << "VerQueryValueA on " << filePath << " failed with " << errnoWithDescription(gle);
+            return false;
+        }
+
+        if (size != sizeof(VS_FIXEDFILEINFO)) {
+            warning() << "VerQueryValueA on " << filePath << " returned structure with unexpected size";
+            return false;
+        }
+
+        fileVersionMS = verInfo->dwFileVersionMS;
+        fileVersionLS = verInfo->dwFileVersionLS;
+        return true;
+    }
+
+    // If the version of the ntfs.sys driver shows that the KB2731284 hotfix or a later update
+    // is installed, zeroing out data files is unnecessary. The file version numbers used below
+    // are taken from the Hotfix File Information at http://support.microsoft.com/kb/2731284.
+    bool isKB2731284OrLaterUpdateInstalled() {
+        UINT pathBufferSize = GetSystemDirectoryA(NULL, 0);
+        if (pathBufferSize == 0) {
+            DWORD gle = GetLastError();
+            warning() << "GetSystemDirectoryA failed with " << errnoWithDescription(gle);
+            return false;
+        }
+
+        boost::scoped_array<char> systemDirectory(new char[pathBufferSize]);
+        UINT systemDirectoryPathLen;
+        systemDirectoryPathLen = GetSystemDirectoryA(systemDirectory.get(), pathBufferSize);
+        if (systemDirectoryPathLen == 0) {
+            DWORD gle = GetLastError();
+            warning() << "GetSystemDirectoryA failed with " << errnoWithDescription(gle);
+            return false;
+        }
+
+        if (systemDirectoryPathLen != pathBufferSize - 1) {
+            warning() << "GetSystemDirectoryA returned unexpected path length";
+            return false;
+        }
+
+        string ntfsDotSysPath = systemDirectory.get();
+        if (ntfsDotSysPath.back() != '\\') {
+            ntfsDotSysPath.append("\\");
+        }
+        ntfsDotSysPath.append("drivers\\ntfs.sys");
+        DWORD fileVersionMS;
+        DWORD fileVersionLS;
+        if (getFileVersion(ntfsDotSysPath.c_str(), fileVersionMS, fileVersionLS)) {
+            WORD fileVersionFirstNumber = HIWORD(fileVersionMS);
+            WORD fileVersionSecondNumber = LOWORD(fileVersionMS);
+            WORD fileVersionThirdNumber = HIWORD(fileVersionLS);
+            WORD fileVersionFourthNumber = LOWORD(fileVersionLS);
+
+            if (fileVersionFirstNumber == 6 && fileVersionSecondNumber == 1 && fileVersionThirdNumber == 7600 &&
+                    fileVersionFourthNumber >= 21296 && fileVersionFourthNumber <= 21999) {
+                return true;
+            } else if (fileVersionFirstNumber == 6 && fileVersionSecondNumber == 1 && fileVersionThirdNumber == 7601 &&
+                    fileVersionFourthNumber >= 22083 && fileVersionFourthNumber <= 22999) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     void ProcessInfo::SystemInfo::collectSystemInfo() {
         BSONObjBuilder bExtra;
         stringstream verstr;
@@ -131,11 +212,17 @@ namespace mongo {
             switch ( osvi.dwMajorVersion ) {
             case 6:
                 switch ( osvi.dwMinorVersion ) {
+                    case 3:
+                        if ( osvi.wProductType == VER_NT_WORKSTATION )
+                            osName += "Windows 8.1";
+                        else
+                            osName += "Windows Server 2012 R2";
+                        break;
                     case 2:
                         if ( osvi.wProductType == VER_NT_WORKSTATION )
                             osName += "Windows 8";
                         else
-                            osName += "Windows Server 8";
+                            osName += "Windows Server 2012";
                         break;
                     case 1:
                         if ( osvi.wProductType == VER_NT_WORKSTATION )
@@ -145,11 +232,17 @@ namespace mongo {
 
                         // Windows 6.1 is either Windows 7 or Windows 2008 R2. There is no SP2 for
                         // either of these two operating systems, but the check will hold if one
-                        // were released. This code assumes that SP2 will include fix for 
+                        // were released. This code assumes that SP2 will include fix for
                         // http://support.microsoft.com/kb/2731284.
                         //
                         if ((osvi.wServicePackMajor >= 0) && (osvi.wServicePackMajor < 2)) {
-                            fileZeroNeeded = true;
+                              if (isKB2731284OrLaterUpdateInstalled()) {
+                                  log() << "Hotfix KB2731284 or later update is installed, no need to zero-out data files";
+                                  fileZeroNeeded = false;
+                              } else {
+                                  log() << "Hotfix KB2731284 or later update is not installed, will zero-out data files";
+                                  fileZeroNeeded = true;
+                              }
                         }
                         break;
                     case 0:
@@ -207,7 +300,54 @@ namespace mongo {
     }
 
     bool ProcessInfo::checkNumaEnabled() {
-        return false;
+        typedef BOOL(WINAPI *LPFN_GLPI)(
+            PSYSTEM_LOGICAL_PROCESSOR_INFORMATION,
+            PDWORD);
+
+        DWORD returnLength = 0;
+        DWORD numaNodeCount = 0;
+        scoped_array<SYSTEM_LOGICAL_PROCESSOR_INFORMATION> buffer;
+
+        LPFN_GLPI glpi(reinterpret_cast<LPFN_GLPI>(GetProcAddress(
+            GetModuleHandleW(L"kernel32"),
+            "GetLogicalProcessorInformation")));
+        if (glpi == NULL) {
+            return false;
+        }
+
+        DWORD returnCode = 0;
+        do {
+            returnCode = glpi(buffer.get(), &returnLength);
+
+            if (returnCode == FALSE) {
+                if (GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+                    buffer.reset(reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION>(
+                        new BYTE[returnLength]));
+                }
+                else {
+                    DWORD gle = GetLastError();
+                    warning() << "GetLogicalProcessorInformation failed with "
+                        << errnoWithDescription(gle);
+                    return false;
+                }
+            }
+        } while (returnCode == FALSE);
+
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = buffer.get();
+
+        unsigned int byteOffset = 0;
+        while (byteOffset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) <= returnLength) {
+            if (ptr->Relationship == RelationNumaNode) {
+                // Non-NUMA systems report a single record of this type.
+                numaNodeCount++;
+            }
+
+            byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+            ptr++;
+        }
+
+        // For non-NUMA machines, the count is 1
+        return numaNodeCount > 1;
     }
 
     bool ProcessInfo::blockCheckSupported() {

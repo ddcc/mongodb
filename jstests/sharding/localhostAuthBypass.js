@@ -10,16 +10,16 @@ var numConfigs = 3;
 var username = "foo";
 var password = "bar";
 
-var addUser = function(mongo) {
+var createUser = function(mongo) {
     print("============ adding a user.");
-    mongo.getDB("admin").addUser(username, password);
+    mongo.getDB("admin").createUser({user: username, pwd: password, roles: jsTest.adminUserRoles});
 };
 
 var addUsersToEachShard = function(st) {
     for(i = 0; i < numShards; i++) {
         print("============ adding a user to shard " + i);
         var d = st["shard" + i];
-        d.getDB("admin").addUser(username, password);
+        d.getDB("admin").createUser({user: username, pwd: password, roles: jsTest.adminUserRoles});
     }
 };
 
@@ -126,7 +126,7 @@ var setupSharding = function(mongo) {
     mongo.getDB("admin").runCommand({shardCollection : "test.foo", key : {_id : 1}});
 
     var test = mongo.getDB("test");
-    for(i = 1; i < 40; i++) {
+    for(i = 1; i < 20; i++) {
         test.foo.insert({_id: i});
     }
 };
@@ -200,7 +200,7 @@ var runTest = function(useHostName) {
 
     assertCanRunCommands(mongo, st);
 
-    addUser(mongo);
+    createUser(mongo);
 
     // now that we have a user, we need to make sure 
     // helper functions on st work for the rest of the script.

@@ -29,7 +29,7 @@ namespace mongo {
     /**
      * get the DBClientBase connection from JS args
      */
-    mongo::DBClientBase* getConnection(V8Scope* scope, const v8::Arguments& args);
+    boost::shared_ptr<mongo::DBClientBase> getConnection(V8Scope* scope, const v8::Arguments& args);
 
     // Internal Cursor
     v8::Handle<v8::FunctionTemplate> getInternalCursorFunctionTemplate(V8Scope* scope);
@@ -46,6 +46,7 @@ namespace mongo {
     v8::Handle<v8::Value> mongoUpdate(V8Scope* scope, const v8::Arguments& args);
     v8::Handle<v8::Value> mongoAuth(V8Scope* scope, const v8::Arguments& args);
     v8::Handle<v8::Value> mongoLogout(V8Scope* scope, const v8::Arguments& args);
+    v8::Handle<v8::Value> mongoCursorFromId(V8Scope* scope, const v8::Arguments& args);
 
     // Cursor object
     v8::Handle<v8::Value> internalCursorCons(V8Scope* scope, const v8::Arguments& args);
@@ -105,8 +106,16 @@ namespace mongo {
     // HexData constructor
     v8::Handle<v8::Value> hexDataInit(V8Scope* scope, const v8::Arguments& args);
 
+    // Object.invalidForStorage()
+    v8::Handle<v8::Value> v8ObjectInvalidForStorage(V8Scope* scope, const v8::Arguments& args);
+
     // Object.bsonsize()
     v8::Handle<v8::Value> bsonsize(V8Scope* scope, const v8::Arguments& args);
+
+    // global method
+    // Accepts 2 objects, converts them to BSONObj and calls woCompare on the first against the
+    // second.
+    v8::Handle<v8::Value> bsonWoCompare(V8Scope* scope, const v8::Arguments& args);
 
     // 'db.collection' property handlers
     v8::Handle<v8::Value> collectionGetter(v8::Local<v8::String> name,

@@ -12,6 +12,18 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 #include "mongo/s/config_upgrade.h"
@@ -20,8 +32,8 @@
 
 #include "mongo/base/init.h"
 #include "mongo/client/dbclientcursor.h"
-#include "mongo/client/distlock.h"
 #include "mongo/s/cluster_client_internal.h"
+#include "mongo/s/distlock.h"
 #include "mongo/s/mongo_version_range.h"
 #include "mongo/s/type_config_version.h"
 #include "mongo/s/type_database.h"
@@ -105,13 +117,13 @@ namespace mongo {
 
         ConfigUpgradeRegistry registry;
 
-        // v0 to v4
-        Upgrade v0ToV4(0, VersionRange(3, 4), doUpgradeV0ToV4);
-        registry.insert(make_pair(v0ToV4.fromVersion, v0ToV4));
+        // v0 to v5
+        Upgrade v0ToV5(0, VersionRange(4, 5), doUpgradeV0ToV5);
+        registry.insert(make_pair(v0ToV5.fromVersion, v0ToV5));
 
-        // v3 to v4
-        Upgrade v3ToV4(3, VersionRange(3, 4), doUpgradeV3ToV4);
-        registry.insert(make_pair(v3ToV4.fromVersion, v3ToV4));
+        // v4 to v5
+        Upgrade v4ToV5(4, VersionRange(4, 5), doUpgradeV4ToV5);
+        registry.insert(make_pair(v4ToV5.fromVersion, v4ToV5));
 
         validateRegistry(registry);
 
@@ -164,14 +176,10 @@ namespace mongo {
 
     // Gets the config version information from the config server
     Status getConfigVersion(const ConnectionString& configLoc, VersionType* versionInfo) {
-
-        scoped_ptr<ScopedDbConnection> connPtr;
-
         try {
             versionInfo->clear();
 
-            connPtr.reset(ScopedDbConnection::getInternalScopedDbConnection(configLoc, 30));
-            ScopedDbConnection& conn = *connPtr;
+            ScopedDbConnection conn(configLoc, 30);
 
             scoped_ptr<DBClientCursor> cursor(_safeCursor(conn->query("config.version",
                                                                       BSONObj())));
@@ -192,7 +200,7 @@ namespace mongo {
                     versionInfo->setCurrentVersion(UpgradeHistory_EmptyVersion);
                 }
 
-                connPtr->done();
+                conn.done();
                 return Status::OK();
             }
 
@@ -200,7 +208,7 @@ namespace mongo {
             string errMsg;
 
             if (!versionInfo->parseBSON(versionDoc, &errMsg) || !versionInfo->isValid(&errMsg)) {
-                connPtr->done();
+                conn.done();
 
                 return Status(ErrorCodes::UnsupportedFormat,
                               stream() << "invalid config version document " << versionDoc
@@ -208,18 +216,18 @@ namespace mongo {
             }
 
             if (cursor->more()) {
-                connPtr->done();
+                conn.done();
 
                 return Status(ErrorCodes::RemoteValidationError,
                               stream() << "should only have 1 document "
                                        << "in config.version collection");
             }
+            conn.done();
         }
         catch (const DBException& e) {
             return e.toStatus();
         }
 
-        connPtr->done();
         return Status::OK();
     }
 
@@ -282,22 +290,17 @@ namespace mongo {
     bool _isBalancerStopped(const ConnectionString& configLoc, string* errMsg) {
         
         // Get the balancer information
-        scoped_ptr<ScopedDbConnection> connPtr;
-        
         BSONObj balancerDoc;
         try {
-            connPtr.reset(ScopedDbConnection::getInternalScopedDbConnection(configLoc, 30));
-            ScopedDbConnection& conn = *connPtr;
-            
+            ScopedDbConnection conn(configLoc, 30);
             balancerDoc = conn->findOne(SettingsType::ConfigNS,
                                         BSON(SettingsType::key("balancer")));
+            conn.done();
         }
         catch (const DBException& e) {
             *errMsg = e.toString();
             return false;
         }
-
-        connPtr->done();
         
         return balancerDoc[SettingsType::balancerStopped()].trueValue();
     }
@@ -305,14 +308,10 @@ namespace mongo {
     // Checks that all config servers are online
     bool _checkConfigServersAlive(const ConnectionString& configLoc, string* errMsg) {
         
-        scoped_ptr<ScopedDbConnection> connPtr;
-
         bool resultOk;
         BSONObj result;
         try {
-            connPtr.reset(ScopedDbConnection::getInternalScopedDbConnection(configLoc, 30));
-            ScopedDbConnection& conn = *connPtr;
-            
+            ScopedDbConnection conn(configLoc, 30);
             if (conn->type() == ConnectionString::SYNC) {
                 // TODO: Dynamic cast is bad, we need a better way of managing this op
                 // via the heirarchy (or not)
@@ -323,13 +322,12 @@ namespace mongo {
             else {
                 resultOk = conn->runCommand("admin", BSON( "fsync" << 1 ), result); 
             }
+            conn.done();
         }
         catch (const DBException& e) {
             *errMsg = e.toString();
             return false;
         }
-
-        connPtr->done();
         
         if (!resultOk) {
             *errMsg = DBClientWithCommands::getLastErrorString(result);

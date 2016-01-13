@@ -14,6 +14,18 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -29,6 +41,9 @@
 #include "mongo/scripting/engine.h"
 
 namespace mongo {
+
+    class Collection;
+    class Database;
 
     namespace mr {
 
@@ -240,10 +255,14 @@ namespace mongo {
             void emit( const BSONObj& a );
 
             /**
-             * if size is big, run a reduce
-             * if its still big, dump to temp collection
-             */
-            void checkSize();
+            * Checks the size of the transient in-memory results accumulated so far and potentially
+            * runs reduce in order to compact them. If the data is still too large, it will be 
+            * spilled to the output collection.
+            *
+            * NOTE: Make sure that no DB locks are held, when calling this function, because it may
+            * try to acquire write DB lock for the write to the output collection.
+            */
+            void reduceAndSpillInMemoryStateIfNeeded();
 
             /**
              * run reduce on _temp
@@ -308,13 +327,21 @@ namespace mongo {
             void switchMode(bool jsMode);
             void bailFromJS();
 
+            Collection* getCollectionOrUassert(Database* db, const StringData& ns);
+
             const Config& _config;
             DBDirectClient _db;
             bool _useIncremental;   // use an incremental collection
 
         protected:
 
-            void _add( InMemory* im , const BSONObj& a , long& size );
+            /**
+             * Appends a new document to the in-memory list of tuples, which are under that
+             * document's key.
+             *
+             * @return estimated in-memory size occupied by the newly added document.
+             */
+            int _add(InMemory* im , const BSONObj& a);
 
             scoped_ptr<Scope> _scope;
             bool _onDisk; // if the end result of this map reduce is disk or not
@@ -335,7 +362,8 @@ namespace mongo {
         BSONObj fast_emit( const BSONObj& args, void* data );
         BSONObj _bailFromJS( const BSONObj& args, void* data );
 
-        void addPrivilegesRequiredForMapReduce(const std::string& dbname,
+        void addPrivilegesRequiredForMapReduce(Command* commandTemplate,
+                                               const std::string& dbname,
                                                const BSONObj& cmdObj,
                                                std::vector<Privilege>* out);
     } // end mr namespace

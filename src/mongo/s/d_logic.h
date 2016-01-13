@@ -13,6 +13,18 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 
@@ -21,16 +33,15 @@
 #include "mongo/pch.h"
 
 #include "mongo/db/jsobj.h"
-#include "mongo/s/d_chunk_manager.h"
+#include "mongo/s/collection_metadata.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/util/concurrency/ticketholder.h"
+#include "mongo/util/net/message.h"
 
 namespace mongo {
 
     class Database;
     class DiskLoc;
-
-    typedef ChunkVersion ConfigVersion;
 
     // --------------
     // --- global state ---
@@ -50,10 +61,14 @@ namespace mongo {
         static void initialize(const string& server);
 
         void gotShardName( const string& name );
-        void gotShardHost( string host );
+        bool setShardName( const string& name ); // Same as above, does not throw
+        string getShardName() { scoped_lock lk(_mutex); return _shardName; }
 
-        string getShardName() { return _shardName; }
-        string getShardHost() { return _shardHost; }
+        // Helpers for SetShardVersion which report the host name sent to this shard when the shard
+        // name does not match.  Do not use in other places.
+        // TODO: Remove once SSV is deprecated
+        void gotShardNameAndHost( const string& name, const string& host );
+        bool setShardNameAndHost( const string& name, const string& host );
 
         /** Reverts back to a state where this mongod is not sharded. */
         void resetShardingState(); 
@@ -61,86 +76,165 @@ namespace mongo {
         // versioning support
 
         bool hasVersion( const string& ns );
-        bool hasVersion( const string& ns , ConfigVersion& version );
-        const ConfigVersion getVersion( const string& ns ) const;
+        bool hasVersion( const string& ns , ChunkVersion& version );
+        const ChunkVersion getVersion( const string& ns ) const;
 
         /**
-         * Uninstalls the manager for a given collection. This should be used when the collection is dropped.
+         * If the metadata for 'ns' at this shard is at or above the requested version,
+         * 'reqShardVersion', returns OK and fills in 'latestShardVersion' with the latest shard
+         * version.  The latter is always greater or equal than 'reqShardVersion' if in the same
+         * epoch.
          *
-         * NOTE:
-         *   An existing collection with no chunks on this shard will have a manager on version 0, which is different than a
-         *   a dropped collection, which will not have a manager.
+         * Otherwise, falls back to refreshMetadataNow.
          *
-         * TODO
-         *   When sharding state is enabled, absolutely all collections should have a manager. (The non-sharded ones are
-         *   a be degenerate case of one-chunk collections).
-         *   For now, a dropped collection and an non-sharded one are indistinguishable (SERVER-1849)
+         * This call blocks if there are more than N threads
+         * currently refreshing metadata. (N is the number of
+         * tickets in ShardingState::_configServerTickets,
+         * currently 3.)
          *
-         * @param ns the collection to be dropped
+         * Locking Note:
+         *   + Must NOT be called with the write lock because this call may go into the network,
+         *     and deadlocks may occur with shard-as-a-config.  Therefore, nothing here guarantees
+         *     that 'latestShardVersion' is indeed the current one on return.
          */
-        void resetVersion( const string& ns );
+        Status refreshMetadataIfNeeded( const string& ns,
+                                        const ChunkVersion& reqShardVersion,
+                                        ChunkVersion* latestShardVersion );
 
         /**
-         * Requests to access a collection at a certain version. If the collection's manager is not at that version it
-         * will try to update itself to the newest version. The request is only granted if the version is the current or
-         * the newest one.
+         * Refreshes collection metadata by asking the config server for the latest information.
+         * Starts a new config server request.
          *
-         * @param ns collection to be accessed
-         * @param version (IN) the client believe this collection is on and (OUT) the version the manager is actually in
-         * @return true if the access can be allowed at the provided version
+         * Locking Notes:
+         *   + Must NOT be called with the write lock because this call may go into the network,
+         *     and deadlocks may occur with shard-as-a-config.  Therefore, nothing here guarantees
+         *     that 'latestShardVersion' is indeed the current one on return.
+         *
+         *   + Because this call must not be issued with the DBLock held, by the time the config
+         *     server sent us back the collection metadata information, someone else may have
+         *     updated the previously stored collection metadata.  There are cases when one can't
+         *     tell which of updated or loaded metadata are the freshest. There are also cases where
+         *     the data coming from configs do not correspond to a consistent snapshot.
+         *     In these cases, return RemoteChangeDetected. (This usually means this call needs to
+         *     be issued again, at caller discretion)
+         *
+         * @return OK if remote metadata successfully loaded (may or may not have been installed)
+         * @return RemoteChangeDetected if something changed while reloading and we may retry
+         * @return !OK if something else went wrong during reload
+         * @return latestShardVersion the version that is now stored for this collection
          */
-        bool trySetVersion( const string& ns , ConfigVersion& version );
+        Status refreshMetadataNow( const string& ns, ChunkVersion* latestShardVersion );
 
         void appendInfo( BSONObjBuilder& b );
 
         // querying support
 
-        bool needShardChunkManager( const string& ns ) const;
-        ShardChunkManagerPtr getShardChunkManager( const string& ns );
+        bool needCollectionMetadata( const string& ns ) const;
+        CollectionMetadataPtr getCollectionMetadata( const string& ns );
 
         // chunk migrate and split support
 
         /**
-         * Creates and installs a new chunk manager for a given collection by "forgetting" about one of its chunks.
-         * The new manager uses the provided version, which has to be higher than the current manager's.
-         * One exception: if the forgotten chunk is the last one in this shard for the collection, version has to be 0.
+         * Creates and installs a new chunk metadata for a given collection by "forgetting" about
+         * one of its chunks.  The new metadata uses the provided version, which has to be higher
+         * than the current metadata's shard version.
+         *
+         * One exception: if the forgotten chunk is the last one in this shard for the collection,
+         * version has to be 0.
          *
          * If it runs successfully, clients need to grab the new version to access the collection.
          *
+         * LOCKING NOTE:
+         * Only safe to do inside the
+         *
          * @param ns the collection
-         * @param min max the chunk to eliminate from the current manager
-         * @param version at which the new manager should be at
+         * @param min max the chunk to eliminate from the current metadata
+         * @param version at which the new metadata should be at
          */
         void donateChunk( const string& ns , const BSONObj& min , const BSONObj& max , ChunkVersion version );
 
         /**
-         * Creates and installs a new chunk manager for a given collection by reclaiming a previously donated chunk.
-         * The previous manager's version has to be provided.
+         * Creates and installs new chunk metadata for a given collection by reclaiming a previously
+         * donated chunk.  The previous metadata's shard version has to be provided.
          *
-         * If it runs successfully, clients that became stale by the previous donateChunk will be able to access the
-         * collection again.
+         * If it runs successfully, clients that became stale by the previous donateChunk will be
+         * able to access the collection again.
+         *
+         * Note: If a migration has aborted but not yet unregistered a pending chunk, replacing the
+         * metadata may leave the chunk as pending - this is not dangerous and should be rare, but
+         * will require a stepdown to fully recover.
          *
          * @param ns the collection
-         * @param min max the chunk to reclaim and add to the current manager
-         * @param version at which the new manager should be at
+         * @param prevMetadata the previous metadata before we donated a chunk
          */
-        void undoDonateChunk( const string& ns , const BSONObj& min , const BSONObj& max , ChunkVersion version );
+        void undoDonateChunk( const string& ns, CollectionMetadataPtr prevMetadata );
 
         /**
-         * Creates and installs a new chunk manager for a given collection by splitting one of its chunks in two or more.
-         * The version for the first split chunk should be provided. The subsequent chunks' version would be the latter with the
-         * minor portion incremented.
+         * Remembers a chunk range between 'min' and 'max' as a range which will have data migrated
+         * into it.  This data can then be protected against cleanup of orphaned data.
          *
-         * The effect on clients will depend on the version used. If the major portion is the same as the current shards,
-         * clients shouldn't perceive the split.
+         * Overlapping pending ranges will be removed, so it is only safe to use this when you know
+         * your metadata view is definitive, such as at the start of a migration.
+         *
+         * @return false with errMsg if the range is owned by this shard
+         */
+        bool notePending( const string& ns,
+                          const BSONObj& min,
+                          const BSONObj& max,
+                          const OID& epoch,
+                          string* errMsg );
+
+        /**
+         * Stops tracking a chunk range between 'min' and 'max' that previously was having data
+         * migrated into it.  This data is no longer protected against cleanup of orphaned data.
+         *
+         * To avoid removing pending ranges of other operations, ensure that this is only used when
+         * a migration is still active.
+         * TODO: Because migrations may currently be active when a collection drops, an epoch is
+         * necessary to ensure the pending metadata change is still applicable.
+         *
+         * @return false with errMsg if the range is owned by the shard or the epoch of the metadata
+         * has changed
+         */
+        bool forgetPending( const string& ns,
+                            const BSONObj& min,
+                            const BSONObj& max,
+                            const OID& epoch,
+                            string* errMsg );
+
+        /**
+         * Creates and installs a new chunk metadata for a given collection by splitting one of its
+         * chunks in two or more. The version for the first split chunk should be provided. The
+         * subsequent chunks' version would be the latter with the minor portion incremented.
+         *
+         * The effect on clients will depend on the version used. If the major portion is the same
+         * as the current shards, clients shouldn't perceive the split.
          *
          * @param ns the collection
          * @param min max the chunk that should be split
          * @param splitKeys point in which to split
-         * @param version at which the new manager should be at
+         * @param version at which the new metadata should be at
          */
         void splitChunk( const string& ns , const BSONObj& min , const BSONObj& max , const vector<BSONObj>& splitKeys ,
                          ChunkVersion version );
+
+        /**
+         * Creates and installs a new chunk metadata for a given collection by merging a range of
+         * chunks ['minKey', 'maxKey') into a single chunk with version 'mergedVersion'.
+         * The current metadata must overlap the range completely and minKey and maxKey must not
+         * divide an existing chunk.
+         *
+         * The merged chunk version must have a greater version than the current shard version,
+         * and if it has a greater major version clients will need to reload metadata.
+         *
+         * @param ns the collection
+         * @param minKey maxKey the range which should be merged
+         * @param newShardVersion the shard version the newly merged chunk should have
+         */
+        void mergeChunks( const string& ns,
+                          const BSONObj& minKey,
+                          const BSONObj& maxKey,
+                          ChunkVersion mergedVersion );
 
         bool inCriticalMigrateSection();
 
@@ -149,13 +243,28 @@ namespace mongo {
          */
         bool waitTillNotInCriticalSection( int maxSecondsToWait );
 
+        /**
+         * TESTING ONLY
+         * Uninstalls the metadata for a given collection.
+         */
+        void resetMetadata( const string& ns );
+
     private:
+
+        /**
+         * Refreshes collection metadata by asking the config server for the latest information.
+         * May or may not be based on a requested version.
+         */
+        Status doRefreshMetadata( const string& ns,
+                                  const ChunkVersion& reqShardVersion,
+                                  bool useRequestedVersion,
+                                  ChunkVersion* latestShardVersion );
+
         bool _enabled;
 
         string _configServer;
 
         string _shardName;
-        string _shardHost;
 
         // protects state below
         mutable mongo::mutex _mutex;
@@ -163,10 +272,9 @@ namespace mongo {
         // Using a ticket holder so we can have multiple redundant tries at any given time
         mutable TicketHolder _configServerTickets;
 
-        // map from a namespace into the ensemble of chunk ranges that are stored in this mongod
-        // a ShardChunkManager carries all state we need for a collection at this shard, including its version information
-        typedef map<string,ShardChunkManagerPtr> ChunkManagersMap;
-        ChunkManagersMap _chunks;
+        // Map from a namespace into the metadata we need for each collection on this shard
+        typedef map<string,CollectionMetadataPtr> CollectionMetadataMap;
+        CollectionMetadataMap _collMetadata;
     };
 
     extern ShardingState shardingState;
@@ -183,8 +291,8 @@ namespace mongo {
         bool hasID() const { return _id.isSet(); }
         void setID( const OID& id );
 
-        const ConfigVersion getVersion( const string& ns ) const;
-        void setVersion( const string& ns , const ConfigVersion& version );
+        const ChunkVersion getVersion( const string& ns ) const;
+        void setVersion( const string& ns , const ChunkVersion& version );
 
         static ShardedConnectionInfo* get( bool create );
         static void reset();
@@ -202,7 +310,7 @@ namespace mongo {
         OID _id;
         bool _forceVersionOk; // if this is true, then chunk version #s aren't check, and all ops are allowed
 
-        typedef map<string,ConfigVersion> NSVersionMap;
+        typedef map<string,ChunkVersion> NSVersionMap;
         NSVersionMap _versions;
 
         static boost::thread_specific_ptr<ShardedConnectionInfo> _tl;
@@ -238,7 +346,10 @@ namespace mongo {
      * @return true if the current threads shard version is ok, or not in sharded version
      * Also returns an error message and the Config/ChunkVersions causing conflicts
      */
-    bool shardVersionOk( const string& ns , string& errmsg, ConfigVersion& received, ConfigVersion& wanted );
+    bool shardVersionOk( const string& ns,
+                         string& errmsg,
+                         ChunkVersion& received,
+                         ChunkVersion& wanted );
 
     /**
      * @return true if we took care of the message and nothing else should be done
@@ -254,7 +365,18 @@ namespace mongo {
         return _handlePossibleShardedMessage(m, dbresponse);
     }
 
-    void logOpForSharding( const char * opstr , const char * ns , const BSONObj& obj , BSONObj * patt );
-    void aboutToDeleteForSharding( const Database* db , const DiskLoc& dl );
+    /**
+     * If a migration for the chunk in 'ns' where 'obj' lives is occurring, save this log entry
+     * if it's relevant. The entries saved here are later transferred to the receiving side of
+     * the migration. A relevant entry is an insertion, a deletion, or an update.
+     */
+    void logOpForSharding( const char * opstr,
+                           const char * ns,
+                           const BSONObj& obj,
+                           BSONObj * patt,
+                           const BSONObj* fullObj,
+                           bool forMigrateCleanup );
+
+    void ensureShardVersionOKOrThrow(const std::string& ns);
 
 }

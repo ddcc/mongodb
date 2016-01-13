@@ -16,14 +16,14 @@
  */
 
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include "mongo/client/syncclusterconnection.h"
 
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/dbmessage.h"
-#include "mongo/db/namespacestring.h"
+#include "mongo/db/namespace_string.h"
 
 // error codes 8000-8009
 
@@ -131,7 +131,9 @@ namespace mongo {
 
         for ( size_t i = 0; i<_conns.size(); i++ ) {
             BSONObj res = _lastErrors[i];
-            if ( res["ok"].trueValue() && (res["fsyncFiles"].numberInt() > 0 || res.hasElement("waited")))
+            if ( res["ok"].trueValue() && (res["fsyncFiles"].numberInt() > 0 ||
+                                           res.hasElement("waited") ||
+                                           res["syncMillis"].numberInt() >= 0 ) )
                 continue;
             ok = false;
             err << _conns[i]->toString() << ": " << res << " " << errors[i];
@@ -159,6 +161,8 @@ namespace mongo {
     void SyncClusterConnection::_connect( const std::string& host ) {
         log() << "SyncClusterConnection connecting to [" << host << "]" << endl;
         DBClientConnection * c = new DBClientConnection( true );
+        c->setRunCommandHook(_runCommandHook);
+        c->setPostRunCommandHook(_postRunCommandHook);
         c->setSoTimeout( _socketTimeout );
         string errmsg;
         if ( ! c->connect( host , errmsg ) )
@@ -211,39 +215,39 @@ namespace mongo {
     }
 
     void SyncClusterConnection::_auth(const BSONObj& params) {
-        // A SCC is authorized if any connection has been authorized
+        // A SCC is authenticated if any connection has been authenticated
         // Credentials are stored in the auto-reconnect connections.
 
         bool authedOnce = false;
         vector<string> errors;
 
-        for( vector<DBClientConnection*>::iterator it = _conns.begin(); it < _conns.end(); ++it ){
+        for ( vector<DBClientConnection*>::iterator it = _conns.begin(); it < _conns.end(); ++it ) {
 
             massert( 15848, "sync cluster of sync clusters?",
                             (*it)->type() != ConnectionString::SYNC );
 
-            // Authorize or collect the error message
+            // Authenticate or collect the error message
             string lastErrmsg;
             bool authed;
-            try{
+            try {
                 // Auth errors can manifest either as exceptions or as false results
                 // TODO: Make this better
                 (*it)->auth(params);
                 authed = true;
             }
-            catch( const DBException& e ){
+            catch ( const DBException& e ) {
                 // auth will be retried on reconnect
                 lastErrmsg = e.what();
                 authed = false;
             }
 
-            if( ! authed ){
+            if ( ! authed ) {
 
                 // Since we're using auto-reconnect connections, we're sure the auth info has been
                 // stored if needed for later
 
                 lastErrmsg = str::stream() << "auth error on " << (*it)->getServerAddress()
-                                                               << causedBy( lastErrmsg );
+                                           << causedBy( lastErrmsg );
 
                 LOG(1) << lastErrmsg << endl;
                 errors.push_back( lastErrmsg );
@@ -287,8 +291,27 @@ namespace mongo {
         return isOk( info );
     }
 
+    void SyncClusterConnection::attachQueryHandler( QueryHandler* handler ) {
+        _customQueryHandler.reset( handler );
+    }
+
     auto_ptr<DBClientCursor> SyncClusterConnection::_queryOnActive(const string &ns, Query query, int nToReturn, int nToSkip,
             const BSONObj *fieldsToReturn, int queryOptions, int batchSize ) {
+
+        if ( _customQueryHandler && _customQueryHandler->canHandleQuery( ns, query ) ) {
+
+            LOG( 2 ) << "custom query handler used for query on " << ns << ": "
+                     << query.toString() << endl;
+
+            return _customQueryHandler->handleQuery( _connAddresses,
+                                                     ns,
+                                                     query,
+                                                     nToReturn,
+                                                     nToSkip,
+                                                     fieldsToReturn,
+                                                     queryOptions,
+                                                     batchSize );
+        }
 
         for ( size_t i=0; i<_conns.size(); i++ ) {
             try {
@@ -296,13 +319,19 @@ namespace mongo {
                     _conns[i]->query( ns , query , nToReturn , nToSkip , fieldsToReturn , queryOptions , batchSize );
                 if ( cursor.get() )
                     return cursor;
-                log() << "query failed to: " << _conns[i]->toString() << " no data" << endl;
+
+                log() << "query on " << ns << ": " << query.toString() << " failed to: "
+                      << _conns[i]->toString() << " no data" << endl;
             }
             catch ( std::exception& e ) {
-                log() << "query failed to: " << _conns[i]->toString() << " exception: " << e.what() << endl;
+
+                log() << "query on " << ns << ": " << query.toString() << " failed to: "
+                      << _conns[i]->toString() << " exception: " << e.what() << endl;
             }
             catch ( ... ) {
-                log() << "query failed to: " << _conns[i]->toString() << " exception" << endl;
+
+                log() << "query on " << ns << ": " << query.toString() << " failed to: "
+                      << _conns[i]->toString() << " exception" << endl;
             }
         }
         throw UserException( 8002 , str::stream() << "all servers down/unreachable when querying: " << _address );
@@ -317,8 +346,8 @@ namespace mongo {
     void SyncClusterConnection::insert( const string &ns, BSONObj obj , int flags) {
 
         uassert(13119,
-                (string)"SyncClusterConnection::insert obj has to have an _id: " + obj.jsonString(),
-                 NamespaceString(ns).coll == "system.indexes" || obj["_id"].type());
+                str::stream() << "SyncClusterConnection::insert obj has to have an _id: " << obj,
+                nsToCollectionSubstring(ns) == "system.indexes" || obj["_id"].type());
 
         string errmsg;
         if ( ! prepare( errmsg ) )
@@ -385,7 +414,7 @@ namespace mongo {
         if ( _writeConcern ) {
             string errmsg;
             if ( ! prepare( errmsg ) )
-                throw UserException( 8005 , (string)"SyncClusterConnection::udpate prepare failed: " + errmsg );
+                throw UserException( 8005 , (string)"SyncClusterConnection::update prepare failed: " + errmsg );
         }
 
         for ( size_t i = 0; i < _conns.size(); i++ ) {
@@ -423,7 +452,18 @@ namespace mongo {
 
     string SyncClusterConnection::_toString() const {
         stringstream ss;
-        ss << "SyncClusterConnection [" << _address << "]";
+        ss << "SyncClusterConnection ";
+        ss << " [";
+        for ( size_t i = 0; i < _conns.size(); i++ ) {
+            if ( i != 0 ) ss << ",";
+            if ( _conns[i] ) {
+                ss << _conns[i]->toString();
+            }
+            else {
+                ss << "(no conn)";
+            }
+        }
+        ss << "]";
         return ss.str();
     }
 
@@ -492,6 +532,18 @@ namespace mongo {
         verify(0);
     }
 
+    // A SCC should be reused only if all the existing connections haven't been broken in the
+    // background.
+    // Note: an SCC may have missing connections if a config server is temporarily offline,
+    // but reading from the others is still allowed.
+    bool SyncClusterConnection::isStillConnected() {
+        for ( size_t i = 0; i < _conns.size(); i++ ) {
+            if ( _conns[i] && !_conns[i]->isStillConnected() ) return false;
+
+        }
+        return true;
+    }
+
     void SyncClusterConnection::setAllSoTimeouts( double socketTimeout ){
         _socketTimeout = socketTimeout;
         for ( size_t i=0; i<_conns.size(); i++ )
@@ -499,4 +551,24 @@ namespace mongo {
             if( _conns[i] ) _conns[i]->setSoTimeout( socketTimeout );
     }
 
+    void SyncClusterConnection::setRunCommandHook(DBClientWithCommands::RunCommandHookFunc func) {
+        // Set the hooks in both our sub-connections and in ourselves.
+        for (size_t i = 0; i < _conns.size(); ++i) {
+            if (_conns[i]) { 
+                _conns[i]->setRunCommandHook(func);
+            }
+        }
+        _runCommandHook = func;
+    }
+
+    void SyncClusterConnection::setPostRunCommandHook
+    (DBClientWithCommands::PostRunCommandHookFunc func) {
+        // Set the hooks in both our sub-connections and in ourselves.
+        for (size_t i = 0; i < _conns.size(); ++i) {
+            if (_conns[i]) { 
+                _conns[i]->setPostRunCommandHook(func);
+            }
+        }
+        _postRunCommandHook = func;
+    }
 }

@@ -12,6 +12,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #include "mongo/pch.h"
@@ -23,6 +35,8 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/connections.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/oplogreader.h"
 #include "mongo/db/repl/rs.h"
 #include "mongo/util/background.h"
 #include "mongo/util/concurrency/task.h"
@@ -43,7 +57,7 @@ namespace mongo {
     using namespace mongoutils::html;
     using namespace bson;
 
-    static RamLog * _rsLog = new RamLog( "rs" );
+    static RamLog * _rsLog = RamLog::get("rs");
     Tee *rsLog = _rsLog;
     extern bool replSetBlind; // for testing
 
@@ -126,8 +140,6 @@ namespace mongo {
         return "";
     }
 
-    extern time_t started;
-
     // oplogdiags in web ui
     static void say(stringstream&ss, const bo& op) {
         ss << "<tr>";
@@ -177,21 +189,19 @@ namespace mongo {
         const bo fields;
 
         /** todo fix we might want an so timeout here */
-        DBClientConnection conn(false, 0, /*timeout*/ 20);
-        {
-            string errmsg;
-            if( !conn.connect(m->fullName(), errmsg) ) {
-                ss << "couldn't connect to " << m->fullName() << ' ' << errmsg;
-                return;
-            }
+        OplogReader reader;
+
+        if (reader.connect(m->fullName()) == false) {
+            ss << "couldn't connect to " << m->fullName();
+            return;
         }
 
-        auto_ptr<DBClientCursor> c = conn.query(rsoplog, Query().sort("$natural",1), 20, 0, &fields);
-        if( c.get() == 0 ) {
+        reader.query(rsoplog, Query().sort("$natural",1), 20, 0, &fields);
+        if ( !reader.haveCursor() ) {
             ss << "couldn't query " << rsoplog;
             return;
         }
-        static const char *h[] = {"ts","optime", "h","op","ns","rest",0};
+        static const char *h[] = {"ts","optime","h","op","ns","rest",0};
 
         ss << "<style type=\"text/css\" media=\"screen\">"
            "table { font-size:75% }\n"
@@ -205,8 +215,8 @@ namespace mongo {
         OpTime otFirst;
         OpTime otLast;
         OpTime otEnd;
-        while( c->more() ) {
-            bo o = c->next();
+        while( reader.more() ) {
+            bo o = reader.next();
             otLast = o["ts"]._opTime();
             if( otFirst.isNull() )
                 otFirst = otLast;
@@ -217,13 +227,13 @@ namespace mongo {
             ss << rsoplog << " is empty\n";
         }
         else {
-            auto_ptr<DBClientCursor> c = conn.query(rsoplog, Query().sort("$natural",-1), 20, 0, &fields);
-            if( c.get() == 0 ) {
+            reader.query(rsoplog, Query().sort("$natural",-1), 20, 0, &fields);
+            if( !reader.haveCursor() ) {
                 ss << "couldn't query [2] " << rsoplog;
                 return;
             }
             string x;
-            bo o = c->next();
+            bo o = reader.next();
             otEnd = o["ts"]._opTime();
             while( 1 ) {
                 stringstream z;
@@ -231,9 +241,9 @@ namespace mongo {
                     break;
                 say(z, o);
                 x = z.str() + x;
-                if( !c->more() )
+                if( !reader.more() )
                     break;
-                o = c->next();
+                o = reader.next();
             }
             if( !x.empty() ) {
                 ss << "<tr><td>...</td><td>...</td><td>...</td><td>...</td><td>...</td></tr>\n" << x;
@@ -309,7 +319,7 @@ namespace mongo {
             s << tr() << td(_self->fullName() + " (me)") <<
               td(_self->id()) <<
               td("1") <<  //up
-              td(ago(started)) <<
+              td(ago(serverGlobalParams.started)) <<
               td("") << // last heartbeat
               td(ToString(_self->config().votes)) <<
               td(ToString(_self->config().priority)) <<
@@ -349,6 +359,15 @@ namespace mongo {
         return 0;
     }
 
+    Member* ReplSetImpl::getMutableMember(unsigned id) {
+        if( _self && id == _self->id() ) return _self;
+
+        for( Member *m = head(); m; m = m->next() )
+            if( m->id() == id )
+                return m;
+        return 0;
+    }
+
     Member* ReplSetImpl::findByName(const std::string& hostname) const {
         if (_self && hostname == _self->fullName()) {
             return _self;
@@ -379,6 +398,24 @@ namespace mongo {
         return closest;
     }
 
+    const OpTime ReplSetImpl::lastOtherElectableOpTime() const {
+        OpTime closest(0,0);
+
+        for( Member *m = _members.head(); m; m=m->next() ) {
+            if (!m->hbinfo().up()) {
+                continue;
+            }
+
+            if (m->hbinfo().opTime > closest && m->config().potentiallyHot()) {
+                log() << m->fullName() << " is now closest at "
+                      <<  m->hbinfo().opTime << endl;
+                closest = m->hbinfo().opTime;
+            }
+        }
+
+        return closest;
+    }
+
     void ReplSetImpl::_summarizeStatus(BSONObjBuilder& b) const {
         vector<BSONObj> v;
 
@@ -395,7 +432,7 @@ namespace mongo {
             bb.append("health", 1.0);
             bb.append("state", (int)myState.s);
             bb.append("stateStr", myState.toString());
-            bb.append("uptime", (unsigned)(time(0) - cmdLine.started));
+            bb.append("uptime", (unsigned)(time(0) - serverGlobalParams.started));
             if (!_self->config().arbiterOnly) {
                 bb.appendTimestamp("optime", lastOpTimeWritten.asDate());
                 bb.appendDate("optimeDate", lastOpTimeWritten.getSecs() * 1000LL);
@@ -409,7 +446,12 @@ namespace mongo {
             if (theReplSet) {
                 string s = theReplSet->hbmsg();
                 if( !s.empty() )
-                    bb.append("errmsg", s);
+                    bb.append("infoMessage", s);
+
+                if (myState == MemberState::RS_PRIMARY) {
+                    bb.appendTimestamp("electionTime", theReplSet->getElectionTime().asDate());
+                    bb.appendDate("electionDate", theReplSet->getElectionTime().getSecs() * 1000LL);
+                }
             }
             bb.append("self", true);
             v.push_back(bb.obj());
@@ -449,6 +491,11 @@ namespace mongo {
             string syncingTo = m->hbinfo().syncingTo;
             if (!syncingTo.empty()) {
                 bb.append("syncingTo", syncingTo);
+            }
+
+            if (m->state() == MemberState::RS_PRIMARY) {
+                bb.appendTimestamp("electionTime", m->hbinfo().electionTime.asDate());
+                bb.appendDate("electionDate", m->hbinfo().electionTime.getSecs() * 1000LL);
             }
 
             v.push_back(bb.obj());

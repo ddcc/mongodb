@@ -15,16 +15,13 @@
 
 #pragma once
 
-#include <string>
+#include <cstdlib>
+#include <fcntl.h>
 
 namespace mongo {
-    class Extent;
-
-    // Given a namespace, page in all pages associated with that namespace
-    void touchNs( const std::string& ns );
 
     // Touch a range of pages using an OS-specific method.
     // Takes a file descriptor, offset, and length, for Linux use.
     // Additionally takes an Extent pointer for use on other platforms.
-    void touch_pages( HANDLE fd, int offset, size_t length, const Extent* ext );
+    void touch_pages( const char* buf, size_t length );
 }

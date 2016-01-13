@@ -58,6 +58,8 @@ var forceSync = function() {
     );
 };
 
+// SERVER-12922
+//
 if (!_isWindows()) {
     print("break the network so that node 2 cannot replicate");
     breakNetwork();

@@ -1,4 +1,3 @@
-if (0) { // SERVER-10429, SERVER-7533
 load("jstests/replsets/rslib.js");
 
 var NODE_COUNT = 2;
@@ -202,9 +201,6 @@ var testBadMode = function(conn, hostList, isMongos, mode, tagSets) {
 
         if (failureMsg) throw failureMsg;
     }
-
-    // Can't be routed to secondary, succeeds by ignoring mode and tags
-    testDB.runCommand({ create: 'quux' });
 };
 
 var testAllModes = function(conn, hostList, isMongos) {
@@ -275,13 +271,16 @@ ReplSetTest.awaitRSClientHosts(st.s, st.rs0.nodes);
 // Tag primary with { dc: 'ny', tag: 'one' }, secondary with { dc: 'ny', tag: 'two' }
 var primary = st.rs0.getPrimary();
 var secondary = st.rs0.getSecondary();
+var PRIMARY_TAG = { dc: 'ny', tag: 'one' };
+var SECONDARY_TAG = { dc: 'ny', tag: 'two' };
+
 var rsConfig = primary.getDB("local").system.replset.findOne();
 jsTest.log('got rsconf ' + tojson(rsConfig));
 rsConfig.members.forEach(function(member) {
     if (member.host == primary.host) {
-        member.tags = { dc: 'ny', tag: 'one' }
+        member.tags = PRIMARY_TAG;
     } else {
-        member.tags = { dc: 'ny', tag: 'two' }
+        member.tags = SECONDARY_TAG;
     }
 });
 
@@ -320,21 +319,9 @@ jsTest.log('got rsconf ' + tojson(rsConfig));
 
 var replConn = new Mongo(st.rs0.getURL());
 
-// TODO: use api in SERVER-7533 once available.
-// Make sure replica set connection is ready by repeatedly performing a dummy query
-// against the secondary until it succeeds. This hack is needed because awaitRSClientHosts
-// won't work on the shell's instance of the ReplicaSetMonitor.
-assert.soon(function() {
-    try {
-        replConn.getDB('test').user.find().readPref('secondary').hasNext();
-        return true;
-    }
-    catch (x) {
-        // Intentionally caused an error that forces the monitor to refresh.
-        print('Caught exception while doing dummy query: ' + tojson(x));
-        return false;
-    }
-});
+// Make sure replica set connection is ready
+_awaitRSHostViaRSMonitor(primary.name, { ok: true, tags: PRIMARY_TAG }, st.rs0.name);
+_awaitRSHostViaRSMonitor(secondary.name, { ok: true, tags: SECONDARY_TAG }, st.rs0.name);
 
 testAllModes(replConn, st.rs0.nodes, false);
 
@@ -343,5 +330,3 @@ jsTest.log('Starting test for mongos connection');
 testAllModes(st.s, st.rs0.nodes, true);
 
 st.stop();
-
-}

@@ -14,12 +14,24 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #pragma once
 
-#include "diskloc.h"
-#include "mongommf.h"
+#include "mongo/db/diskloc.h"
+#include "mongo/db/storage/durable_mapped_file.h"
 
 namespace mongo {
 
@@ -37,7 +49,7 @@ namespace mongo {
 
         /** Call during startup so durability module can initialize
             Throws if fatal error
-            Does nothing if cmdLine.dur is false
+            Does nothing if storageGlobalParams.dur is false
          */
         void startup();
 
@@ -120,7 +132,7 @@ namespace mongo {
             virtual bool commitIfNeeded(bool force=false) = 0;
 
             /** @return true if time to commit but does NOT do a commit */
-            virtual bool aCommitIsNeeded() const = 0;
+            virtual bool isCommitNeeded() const = 0;
 
             /** Declare write intent for a DiskLoc.  @see DiskLoc::writing() */
             inline DiskLoc& writingDiskLoc(DiskLoc& d) { return *((DiskLoc*) writingPtr(&d, sizeof(d))); }
@@ -135,7 +147,7 @@ namespace mongo {
             inline
             T* alreadyDeclared(T *x) {
 #if defined(_TESTINTENT)
-                return (T*) MongoMMF::switchToPrivateView(x);
+                return (T*) DurableMappedFile::switchToPrivateView(x);
 #else
                 return x;
 #endif
@@ -156,6 +168,8 @@ namespace mongo {
                 that have had changes made after this call applied.
              */
             virtual void syncDataAndTruncateJournal() = 0;
+
+            virtual bool isDurable() const = 0;
 
             static DurableInterface& getDur() { return *_impl; }
 
@@ -186,10 +200,11 @@ namespace mongo {
             void declareWriteIntent(void *, unsigned);
             void createdFile(const std::string& filename, unsigned long long len) { }
             bool awaitCommit() { return false; }
-            bool commitNow() { return false; }
-            bool commitIfNeeded(bool) { return false; }
-            bool aCommitIsNeeded() const { return false; }
+            bool commitNow();
+            bool commitIfNeeded(bool);
+            bool isCommitNeeded() const { return false; }
             void syncDataAndTruncateJournal() {}
+            bool isDurable() const { return false; }
         };
 
         class DurableImpl : public DurableInterface {
@@ -201,9 +216,10 @@ namespace mongo {
             void createdFile(const std::string& filename, unsigned long long len);
             bool awaitCommit();
             bool commitNow();
-            bool aCommitIsNeeded() const;
+            bool isCommitNeeded() const;
             bool commitIfNeeded(bool);
             void syncDataAndTruncateJournal();
+            bool isDurable() const { return true; }
         };
 
     } // namespace dur

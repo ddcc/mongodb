@@ -29,17 +29,26 @@ namespace {
      * doesn't initialize the library for us.
      */
 
-    void* saslOurMalloc(unsigned long sz) {
+// Version 2.1.26 is the first version to use size_t in the allocator signatures
+#if (SASL_VERSION_FULL >= ((2 << 16) | (1 << 8) | 26))
+    typedef size_t SaslAllocSize;
+#else
+    typedef unsigned long SaslAllocSize;
+#endif
+
+    typedef int(*SaslCallbackFn)();
+
+    void* saslOurMalloc(SaslAllocSize sz) {
         return ourmalloc(sz);
     }
 
-    void* saslOurCalloc(unsigned long count, unsigned long size) {
+    void* saslOurCalloc(SaslAllocSize count, SaslAllocSize size) {
         void* ptr = calloc(count, size);
-        if (!ptr) printStackAndExit(0);
+        if (!ptr) abort();
         return ptr;
     }
 
-    void* saslOurRealloc(void* ptr, unsigned long sz) {
+    void* saslOurRealloc(void* ptr, SaslAllocSize sz) {
         return ourrealloc(ptr, sz);
     }
 
@@ -83,6 +92,10 @@ namespace {
         return Status::OK();
     }
 
+    int saslClientLogSwallow(void *context, int priority, const char *message) {
+        return SASL_OK;  // do nothing
+    }
+
     /**
      * Initializes the client half of the SASL library, but is effectively a no-op if the client
      * application has already done it.
@@ -97,7 +110,9 @@ namespace {
     MONGO_INITIALIZER_WITH_PREREQUISITES(SaslClientContext, ("CyrusSaslAllocatorsAndMutexes"))(
             InitializerContext* context) {
 
-        static sasl_callback_t saslClientGlobalCallbacks[] = { { SASL_CB_LIST_END } };
+        static sasl_callback_t saslClientGlobalCallbacks[] = 
+            { { SASL_CB_LOG, SaslCallbackFn(saslClientLogSwallow), NULL /* context */ },
+              { SASL_CB_LIST_END } };
 
         // If the client application has previously called sasl_client_init(), the callbacks passed
         // in here are ignored.
@@ -178,8 +193,6 @@ namespace {
         _step(0),
         _done(false) {
 
-        typedef int(*SaslCallbackFn)();
-
         const sasl_callback_t callbackTemplate[maxCallbacks] = {
             { SASL_CB_AUTHNAME, SaslCallbackFn(saslClientGetSimple), this },
             { SASL_CB_USER, SaslCallbackFn(saslClientGetSimple), this },
@@ -220,7 +233,7 @@ namespace {
     bool SaslClientSession::hasParameter(Parameter id) {
         if (id < 0 || id >= numParameters)
             return false;
-        return _parameters[id].data;
+        return static_cast<bool>(_parameters[id].data);
     }
 
     StringData SaslClientSession::getParameter(Parameter id) {

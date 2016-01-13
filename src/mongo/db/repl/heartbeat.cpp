@@ -12,6 +12,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #include "mongo/pch.h"
@@ -20,15 +32,16 @@
 
 #include "mongo/db/commands.h"
 #include "mongo/db/instance.h"
-#include "mongo/db/repl.h"
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/connections.h"
 #include "mongo/db/repl/health.h"
+#include "mongo/db/repl/replication_server_status.h"  // replSettings
 #include "mongo/db/repl/rs.h"
 #include "mongo/util/background.h"
 #include "mongo/util/concurrency/msg.h"
 #include "mongo/util/concurrency/task.h"
 #include "mongo/util/concurrency/value.h"
+#include "mongo/util/fail_point_service.h"
 #include "mongo/util/goodies.h"
 #include "mongo/util/mongoutils/html.h"
 #include "mongo/util/ramlog.h"
@@ -37,8 +50,10 @@ namespace mongo {
 
     using namespace bson;
 
+    MONGO_FP_DECLARE(rsDelayHeartbeatResponse);
+    MONGO_FP_DECLARE(rsStopHeartbeatRequest);
+
     extern bool replSetBlind;
-    extern ReplSettings replSettings;
 
     unsigned int HeartbeatInfo::numPings;
 
@@ -63,18 +78,20 @@ namespace mongo {
         skew = newInfo.skew;
         authIssue = newInfo.authIssue;
         ping = newInfo.ping;
+        electionTime = newInfo.electionTime;
     }
 
     /* { replSetHeartbeat : <setname> } */
     class CmdReplSetHeartbeat : public ReplSetCommand {
     public:
+        void help(stringstream& h) const { h << "internal"; }
         CmdReplSetHeartbeat() : ReplSetCommand("replSetHeartbeat") { }
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::replSetHeartbeat);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+            actions.addAction(ActionType::internal);
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         virtual bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             if( replSetBlind ) {
@@ -82,6 +99,11 @@ namespace mongo {
                     errmsg = str::stream() << theReplSet->selfFullName() << " is blind";
                 }
                 return false;
+            }
+
+            MONGO_FAIL_POINT_BLOCK(rsDelayHeartbeatResponse, delay) {
+                const BSONObj& data = delay.getData();
+                sleepsecs(data["delay"].numberInt());
             }
 
             /* we don't call ReplSetCommand::check() here because heartbeat
@@ -104,9 +126,10 @@ namespace mongo {
             }
             {
                 string s = string(cmdObj.getStringField("replSetHeartbeat"));
-                if( cmdLine.ourSetName() != s ) {
+                if (replSettings.ourSetName() != s) {
                     errmsg = "repl set names do not match";
-                    log() << "replSet set names do not match, our cmdline: " << cmdLine._replSet << rsLog;
+                    log() << "replSet set names do not match, our cmdline: " << replSettings.replSet
+                          << rsLog;
                     log() << "replSet s: " << s << rsLog;
                     result.append("mismatch", true);
                     return false;
@@ -133,7 +156,13 @@ namespace mongo {
                 return false;
             }
             result.append("set", theReplSet->name());
-            result.append("state", theReplSet->state().s);
+
+            MemberState currentState = theReplSet->state();
+            result.append("state", currentState.s);
+            if (currentState == MemberState::RS_PRIMARY) {
+                result.appendDate("electionTime", theReplSet->getElectionTime().asDate());
+            }
+
             result.append("e", theReplSet->iAmElectable());
             result.append("hbmsg", theReplSet->hbmsg());
             result.append("time", (long long) time(0));
@@ -148,9 +177,17 @@ namespace mongo {
             if( v > cmdObj["v"].Int() )
                 result << "config" << theReplSet->config().asBson();
 
-            Member *from = theReplSet->findByName(cmdObj.getStringField("from"));
+            Member* from = NULL;
+            if (cmdObj.hasField("fromId")) {
+                if (v == cmdObj["v"].Int()) {
+                    from = theReplSet->getMutableMember(cmdObj["fromId"].Int());
+                }
+            }
             if (!from) {
-                return true;
+                from = theReplSet->findByName(cmdObj.getStringField("from"));
+                if (!from) {
+                    return true;
+                }
             }
 
             // if we thought that this node is down, let it know
@@ -178,14 +215,31 @@ namespace mongo {
             return false;
         }
 
-        BSONObj cmd = BSON( "replSetHeartbeat" << setName <<
-                            "v" << myCfgVersion <<
-                            "pv" << 1 <<
-                            "checkEmpty" << checkEmpty <<
-                            "from" << from );
+        MONGO_FAIL_POINT_BLOCK(rsStopHeartbeatRequest, member) {
+            const BSONObj& data = member.getData();
+            const std::string& stopMember = data["member"].str();
+
+            if (memberFullName == stopMember) {
+                return false;
+            }
+        }
+        int me = -1;
+        if (theReplSet) {
+            me = theReplSet->selfId();
+        }
+
+        BSONObjBuilder cmdBuilder;
+        cmdBuilder.append("replSetHeartbeat", setName);
+        cmdBuilder.append("v", myCfgVersion);
+        cmdBuilder.append("pv", 1);
+        cmdBuilder.append("checkEmpty", checkEmpty);
+        cmdBuilder.append("from", from);
+        if (me > -1) {
+            cmdBuilder.append("fromId", me);
+        }
 
         ScopedConn conn(memberFullName);
-        return conn.runCommand("admin", cmd, result, 0);
+        return conn.runCommand("admin", cmdBuilder.done(), result, 0);
     }
 
     /**
@@ -257,7 +311,9 @@ namespace mongo {
                 if( ok ) {
                     up(info, mem);
                 }
-                else if (!info["errmsg"].eoo() && info["errmsg"].str() == "unauthorized") {
+                else if (info["code"].numberInt() == ErrorCodes::Unauthorized ||
+                         info["errmsg"].str() == "unauthorized") {
+
                     authIssue(mem);
                 }
                 else {
@@ -389,7 +445,8 @@ namespace mongo {
             // if we've received a heartbeat from this member within the last two seconds, don't
             // change its state to down (if it's already down, leave it down since we don't have
             // any info about it other than it's heartbeating us)
-            if (m.lastHeartbeatRecv+2 >= time(0)) {
+            const Member* oldMemInfo = theReplSet->findById(mem.id());
+            if (oldMemInfo && oldMemInfo->hbinfo().lastHeartbeatRecv+2 >= time(0)) {
                 log() << "replset info " << h.toString()
                       << " just heartbeated us, but our heartbeat failed: " << msg
                       << ", not changing state" << rsLog;
@@ -423,6 +480,10 @@ namespace mongo {
             mem.lastHeartbeatMsg = info["hbmsg"].String();
             if (info.hasElement("syncingTo")) {
                 mem.syncingTo = info["syncingTo"].String();
+            }
+            else {
+                // empty out syncingTo since they are no longer syncing to anyone
+                mem.syncingTo = "";
             }
 
             if( info.hasElement("opTime") )
@@ -458,6 +519,10 @@ namespace mongo {
                 boost::function<void()> f =
                     boost::bind(&Manager::msgReceivedNewConfig, theReplSet->mgr, cfg.Obj().copy());
                 theReplSet->mgr->send(f);
+            }
+            if (info.hasElement("electionTime")) {
+                LOG(4) << "setting electionTime to " << info["electionTime"];
+                mem.electionTime = info["electionTime"].Date();
             }
         }
 

@@ -2,6 +2,8 @@
 
 Import("env")
 Import("has_option")
+Import("debugBuild")
+Import("darwin")
 
 files = [
     'src/base/dynamic_annotations.c',
@@ -10,7 +12,6 @@ files = [
     'src/base/atomicops-internals-x86.cc',
     'src/base/sysinfo.cc',
     'src/base/spinlock.cc',
-    'src/tcmalloc.cc',
     'src/malloc_hook.cc',
     'src/span.cc',
     'src/maybe_threads.cc',
@@ -28,6 +29,14 @@ files = [
     'src/sampler.cc',
     'src/stacktrace.cc'
     ]
+
+# Disable debugallocation on darwin per SERVER-11650, this can be reverted
+# when the fix for https://code.google.com/p/gperftools/issues/detail?id=581
+# is available in our vendored gperftools
+if darwin or (not debugBuild):
+    files += ['src/tcmalloc.cc'],
+else:
+    files += ['src/debugallocation.cc']
 
 if has_option( 'use-cpu-profiler' ):
     files += [
@@ -56,7 +65,16 @@ conf.CheckMallocHookVolatile()
 env = conf.Finish()
 
 
-env.Append( CPPDEFINES=["NO_TCMALLOC_SAMPLES","NO_TCMALLOC_SAMPLES","NO_HEAP_CHECK"] )
+env.Append( CPPDEFINES=[ "NO_TCMALLOC_SAMPLES", "NO_HEAP_CHECK"] )
+
+# The build system doesn't define NDEBUG globally for historical reasons, however, TCMalloc
+# expects that NDEBUG is used to select between preferring the mmap or the sbrk allocator. For
+# non-debug builds, we want to prefer the sbrk allocator since this is TCMallocs preferred
+# production deployment configuration. See the use of NDEBUG and kDebugMode in
+# src/system-alloc.cc for more details.
+if not debugBuild:
+    env.Append( CPPDEFINES=["NDEBUG"] )
+
 env.Prepend( CPPPATH=["src/"] )
 
 my_SYSLIBDEPS = []
@@ -74,4 +92,4 @@ def removeIfPresent(lst, item):
 for to_remove in ['-Werror', "-Wsign-compare","-Wall"]:
     removeIfPresent(env['CCFLAGS'], to_remove)
 
-env.StaticLibrary('tcmalloc_minimal', files, SYSLIBDEPS=my_SYSLIBDEPS)
+env.Library('tcmalloc_minimal', files, SYSLIBDEPS=my_SYSLIBDEPS)

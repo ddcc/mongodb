@@ -13,10 +13,23 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 #include "mongo/scripting/engine_v8.h"
 
+#include "mongo/base/init.h"
 #include "mongo/platform/unordered_set.h"
 #include "mongo/scripting/v8_db.h"
 #include "mongo/scripting/v8_utils.h"
@@ -26,6 +39,10 @@
 using namespace mongoutils;
 
 namespace mongo {
+
+#ifndef _MSC_EXTENSIONS
+    const int V8Scope::objectDepthLimit;
+#endif
 
     // Generated symbols for JS files
     namespace JSFiles {
@@ -303,78 +320,77 @@ namespace mongo {
 
     template <typename _GCState>
     void gcCallback(v8::GCType type, v8::GCCallbackFlags flags) {
-        const int verbosity = 1;    // log level for stat collection
-        if (logLevel < verbosity)
-            // don't collect stats unless verbose
-            return;
+        if (!logger::globalLogDomain()->shouldLog(logger::LogSeverity::Debug(1)))
+             // don't collect stats unless verbose
+             return;
 
-        v8::HeapStatistics stats;
-        v8::V8::GetHeapStatistics(&stats);
-        log() << "V8 GC " << _GCState::name
-              << " heap stats - "
-              << " total: " << stats.total_heap_size()
-              << " exec: " << stats.total_heap_size_executable()
-              << " used: " << stats.used_heap_size()<< " limit: "
-              << stats.heap_size_limit()
-              << endl;
-    }
+         v8::HeapStatistics stats;
+         v8::V8::GetHeapStatistics(&stats);
+         log() << "V8 GC " << _GCState::name
+               << " heap stats - "
+               << " total: " << stats.total_heap_size()
+               << " exec: " << stats.total_heap_size_executable()
+               << " used: " << stats.used_heap_size()<< " limit: "
+               << stats.heap_size_limit()
+               << endl;
+     }
 
-    V8ScriptEngine::V8ScriptEngine() :
-        _globalInterruptLock("GlobalV8InterruptLock"),
-        _opToScopeMap(),
-        _deadlineMonitor() {
-    }
+     V8ScriptEngine::V8ScriptEngine() :
+         _globalInterruptLock("GlobalV8InterruptLock"),
+         _opToScopeMap(),
+         _deadlineMonitor() {
+     }
 
-    V8ScriptEngine::~V8ScriptEngine() {
-    }
+     V8ScriptEngine::~V8ScriptEngine() {
+     }
 
-    void ScriptEngine::setup() {
-        if (!globalScriptEngine) {
-            globalScriptEngine = new V8ScriptEngine();
-        }
-    }
+     void ScriptEngine::setup() {
+         if (!globalScriptEngine) {
+             globalScriptEngine = new V8ScriptEngine();
+         }
+     }
 
-    std::string ScriptEngine::getInterpreterVersionString() {
-        return "V8 3.12.19";
-    }
+     std::string ScriptEngine::getInterpreterVersionString() {
+         return "V8 3.12.19";
+     }
 
-    void V8ScriptEngine::interrupt(unsigned opId) {
-        mongo::mutex::scoped_lock intLock(_globalInterruptLock);
-        OpIdToScopeMap::iterator iScope = _opToScopeMap.find(opId);
-        if (iScope == _opToScopeMap.end()) {
-            // got interrupt request for a scope that no longer exists
-            LOG(1) << "received interrupt request for unknown op: " << opId
-                   << printKnownOps_inlock() << endl;
-            return;
-        }
-        LOG(1) << "interrupting op: " << opId << printKnownOps_inlock() << endl;
-        iScope->second->kill();
-    }
+     void V8ScriptEngine::interrupt(unsigned opId) {
+         mongo::mutex::scoped_lock intLock(_globalInterruptLock);
+         OpIdToScopeMap::iterator iScope = _opToScopeMap.find(opId);
+         if (iScope == _opToScopeMap.end()) {
+             // got interrupt request for a scope that no longer exists
+             LOG(1) << "received interrupt request for unknown op: " << opId
+                    << printKnownOps_inlock() << endl;
+             return;
+         }
+         LOG(1) << "interrupting op: " << opId << printKnownOps_inlock() << endl;
+         iScope->second->kill();
+     }
 
-    void V8ScriptEngine::interruptAll() {
-        mongo::mutex::scoped_lock interruptLock(_globalInterruptLock);
-        for (OpIdToScopeMap::iterator iScope = _opToScopeMap.begin();
-             iScope != _opToScopeMap.end(); ++iScope) {
-            iScope->second->kill();
-        }
-    }
+     void V8ScriptEngine::interruptAll() {
+         mongo::mutex::scoped_lock interruptLock(_globalInterruptLock);
+         for (OpIdToScopeMap::iterator iScope = _opToScopeMap.begin();
+              iScope != _opToScopeMap.end(); ++iScope) {
+             iScope->second->kill();
+         }
+     }
 
-    void V8Scope::registerOpId() {
-        scoped_lock giLock(_engine->_globalInterruptLock);
-        if (_engine->haveGetCurrentOpIdCallback()) {
-            // this scope has an associated operation
-            _opId = _engine->getCurrentOpId();
-            _engine->_opToScopeMap[_opId] = this;
-        }
-        else
-            // no associated op id (e.g. running from shell)
-            _opId = 0;
-        LOG(2) << "V8Scope " << this << " registered for op " << _opId << endl;
-    }
+     void V8Scope::registerOpId() {
+         scoped_lock giLock(_engine->_globalInterruptLock);
+         if (_engine->haveGetCurrentOpIdCallback()) {
+             // this scope has an associated operation
+             _opId = _engine->getCurrentOpId();
+             _engine->_opToScopeMap[_opId] = this;
+         }
+         else
+             // no associated op id (e.g. running from shell)
+             _opId = 0;
+         LOG(2) << "V8Scope " << static_cast<const void*>(this) << " registered for op " << _opId << endl;
+     }
 
-    void V8Scope::unregisterOpId() {
-        scoped_lock giLock(_engine->_globalInterruptLock);
-        LOG(2) << "V8Scope " << this << " unregistered for op " << _opId << endl;
+     void V8Scope::unregisterOpId() {
+         scoped_lock giLock(_engine->_globalInterruptLock);
+         LOG(2) << "V8Scope " << static_cast<const void*>(this) << " unregistered for op " << _opId << endl;
         if (_engine->haveGetCurrentOpIdCallback() || _opId != 0) {
             // scope is currently associated with an operation id
             V8ScriptEngine::OpIdToScopeMap::iterator it = _engine->_opToScopeMap.find(_opId);
@@ -387,12 +403,12 @@ namespace mongo {
         v8::Locker l(_isolate);
         mongo::mutex::scoped_lock cbEnterLock(_interruptLock);
         if (v8::V8::IsExecutionTerminating(_isolate)) {
-            LOG(2) << "v8 execution interrupted.  isolate: " << _isolate << endl;
+            LOG(2) << "v8 execution interrupted.  isolate: " << static_cast<const void*>(_isolate) << endl;
             return false;
         }
         if (_pendingKill || globalScriptEngine->interrupted()) {
             // kill flag was set before entering our callback
-            LOG(2) << "marked for death while leaving callback.  isolate: " << _isolate << endl;
+            LOG(2) << "marked for death while leaving callback.  isolate: " << static_cast<const void*>(_isolate) << endl;
             v8::V8::TerminateExecution(_isolate);
             return false;
         }
@@ -405,11 +421,11 @@ namespace mongo {
         mongo::mutex::scoped_lock cbLeaveLock(_interruptLock);
         _inNativeExecution = false;
         if (v8::V8::IsExecutionTerminating(_isolate)) {
-            LOG(2) << "v8 execution interrupted.  isolate: " << _isolate << endl;
+            LOG(2) << "v8 execution interrupted.  isolate: " << static_cast<const void*>(_isolate) << endl;
             return false;
         }
         if (_pendingKill || globalScriptEngine->interrupted()) {
-            LOG(2) << "marked for death while leaving callback.  isolate: " << _isolate << endl;
+            LOG(2) << "marked for death while leaving callback.  isolate: " << static_cast<const void*>(_isolate) << endl;
             v8::V8::TerminateExecution(_isolate);
             return false;
         }
@@ -422,9 +438,9 @@ namespace mongo {
             // Set the TERMINATE flag on the stack guard for this isolate.
             // This won't happen between calls to nativePrologue and nativeEpilogue().
             v8::V8::TerminateExecution(_isolate);
-            LOG(1) << "killing v8 scope.  isolate: " << _isolate << endl;
+            LOG(1) << "killing v8 scope.  isolate: " << static_cast<const void*>(_isolate) << endl;
         }
-        LOG(1) << "marking v8 scope for death.  isolate: " << _isolate << endl;
+        LOG(1) << "marking v8 scope for death.  isolate: " << static_cast<const void*>(_isolate) << endl;
         _pendingKill = true;
     }
 
@@ -438,7 +454,7 @@ namespace mongo {
      */
     std::string V8ScriptEngine::printKnownOps_inlock() {
         stringstream out;
-        if (logLevel > 1) {
+        if (logger::globalLogDomain()->shouldLog(logger::LogSeverity::Debug(2))) {
             out << "  known ops: " << endl;
             for(OpIdToScopeMap::iterator iSc = _opToScopeMap.begin();
                 iSc != _opToScopeMap.end(); ++iSc) {
@@ -458,7 +474,7 @@ namespace mongo {
           _pendingKill(false) {
 
         // create new isolate and enter it via a scope
-        _isolate = v8::Isolate::New();
+        _isolate.set(v8::Isolate::New());
         v8::Isolate::Scope iscope(_isolate);
 
         // lock the isolate and enter the context
@@ -529,24 +545,12 @@ namespace mongo {
         // install global utility functions
         installGlobalUtils(*this);
 
+        // Don't add anything that can throw after this line otherwise we won't be unregistered.
         registerOpId();
     }
 
     V8Scope::~V8Scope() {
         unregisterOpId();
-        {
-            V8_SIMPLE_HEADER
-            for(unsigned i = 0; i < _funcs.size(); ++i)
-                _funcs[ i ].Dispose();
-            _funcs.clear();
-            _global.Dispose();
-            _context.Dispose();
-            // Note: This block is unnecessary since we destroy the v8 Heap (Isolate) immediately
-            //       after. Leaving in for now, but nothing new should be added.
-        }
-        _isolate->Dispose();
-        // set the isolate to NULL so ObjTracker destructors know that v8 is no longer reachable
-        _isolate = NULL;
     }
 
     bool V8Scope::hasOutOfMemoryException() {
@@ -560,7 +564,7 @@ namespace mongo {
         v8::Context::Scope context_scope(scope->_context);
         for (int i = 0; i < args.Length(); ++i) {
             std::string filename(toSTLString(args[i]));
-            if (!scope->execFile(filename, false, true, false)) {
+            if (!scope->execFile(filename, false, true)) {
                 return v8AssertionException(string("error loading js file: ") + filename);
             }
         }
@@ -572,11 +576,11 @@ namespace mongo {
         string exceptionText;
         v8::HandleScope handle_scope;
         try {
-            v8::Local<v8::External> f =
-                    v8::External::Cast(*args.Callee()->Get(scope->strLitToV8("_native_function")));
+            v8::Local<v8::External> f = args.Callee()->GetHiddenValue(
+                scope->strLitToV8("_native_function")).As<v8::External>();
             NativeFunction function = (NativeFunction)(f->Value());
-            v8::Local<v8::External> data =
-                    v8::External::Cast(*args.Callee()->Get(scope->strLitToV8("_native_data")));
+            v8::Local<v8::External> data = args.Callee()->GetHiddenValue(
+                scope->strLitToV8("_native_data")).As<v8::External>();
             BSONObjBuilder b;
             for (int i = 0; i < args.Length(); ++i)
                 scope->v8ToMongoElement(b, BSONObjBuilder::numStr(i), args[i]);
@@ -645,9 +649,9 @@ namespace mongo {
         _global->ForceSet(v8StringData(field), v8::Number::New(val));
     }
 
-    void V8Scope::setString(const char * field, const char * val) {
+    void V8Scope::setString(const char * field, const StringData& val) {
         V8_SIMPLE_HEADER
-        _global->ForceSet(v8StringData(field), v8::String::New(val));
+        _global->ForceSet(v8StringData(field), v8::String::New(val.rawData(), val.size()));
     }
 
     void V8Scope::setBoolean(const char * field, bool val) {
@@ -839,8 +843,7 @@ namespace mongo {
 
     std::string V8Scope::v8ExceptionToSTLString(const v8::TryCatch* try_catch) {
         stringstream ss;
-        v8::String::Utf8Value exceptionText(try_catch->Exception());
-        ss << *exceptionText;
+        ss << StringData(V8String((try_catch->Exception())));
 
         // get the exception message
         v8::Handle<v8::Message> message = try_catch->Message();
@@ -950,8 +953,9 @@ namespace mongo {
         string fn = str::stream() << "_funcs" << functionNumber;
         code = str::stream() << fn << " = " << code;
 
-        v8::Handle<v8::Script> script = v8::Script::Compile(v8::String::New(code.c_str()),
-                                        v8::String::New(fn.c_str()));
+        v8::Handle<v8::Script> script = v8::Script::Compile(
+                                            v8::String::New(code.c_str(), code.length()),
+                                            v8::String::New(fn.c_str()));
 
         // throw on error
         checkV8ErrorState(script, try_catch);
@@ -1065,7 +1069,7 @@ namespace mongo {
 
         v8::Handle<v8::Script> script =
                 v8::Script::Compile(v8::String::New(code.rawData(), code.size()),
-                                    v8::String::New(name.c_str()));
+                                    v8::String::New(name.c_str(), name.length()));
 
         if (checkV8ErrorState(script, try_catch, reportError, assertOnError))
             return false;
@@ -1116,16 +1120,15 @@ namespace mongo {
         injectNative(field, func, _global, data);
     }
 
-    void V8Scope::injectNative(const char *field, NativeFunction func, v8::Handle<v8::Object>& obj,
+    void V8Scope::injectNative(const char* field,
+                               NativeFunction nativeFunc,
+                               v8::Handle<v8::Object>& obj,
                                void* data) {
         v8::Handle<v8::FunctionTemplate> ft = createV8Function(nativeCallback);
-        ft->Set(strLitToV8("_native_function"),
-                           v8::External::New((void*)func),
-                           v8::PropertyAttribute(v8::DontEnum | v8::ReadOnly));
-        ft->Set(strLitToV8("_native_data"),
-                           v8::External::New(data),
-                           v8::PropertyAttribute(v8::DontEnum | v8::ReadOnly));
         injectV8Function(field, ft, obj);
+        v8::Handle<v8::Function> func = ft->GetFunction();
+        func->SetHiddenValue(strLitToV8("_native_function"), v8::External::New((void*)nativeFunc));
+        func->SetHiddenValue(strLitToV8("_native_data"), v8::External::New(data));
     }
 
     v8::Handle<v8::FunctionTemplate> V8Scope::injectV8Function(const char *field, v8Function func) {
@@ -1195,9 +1198,6 @@ namespace mongo {
 
             // install db access functions in the global object
             installDBAccess();
-
-            // add global load() helper
-            injectV8Function("load", load);
 
             // install the Mongo function object and instantiate the 'db' global
             _MongoFT = FTPtr::New(getMongoFunctionTemplate(this, true));
@@ -1283,9 +1283,14 @@ namespace mongo {
         injectV8Function("MD5", md5Init);
         injectV8Function("HexData", hexDataInit);
 
+        injectV8Function("bsonWoCompare", bsonWoCompare);
+
         _global->Get(strLitToV8("Object"))->ToObject()->ForceSet(
                             strLitToV8("bsonsize"),
                             createV8Function(bsonsize)->GetFunction());
+        _global->Get(strLitToV8("Object"))->ToObject()->ForceSet(
+                            strLitToV8("invalidForStorage"),
+                            createV8Function(v8ObjectInvalidForStorage)->GetFunction());
     }
 
 
@@ -1300,12 +1305,13 @@ namespace mongo {
         registerOpId();
     }
 
-    v8::Local<v8::Value> V8Scope::newFunction(const char *code) {
+    v8::Local<v8::Value> V8Scope::newFunction(const StringData& code) {
         v8::HandleScope handle_scope;
         v8::TryCatch try_catch;
         string codeStr = str::stream() << "____MongoToV8_newFunction_temp = " << code;
 
-        v8::Local<v8::Script> compiled = v8::Script::New(v8::String::New(codeStr.c_str()));
+        v8::Local<v8::Script> compiled = v8::Script::New(v8::String::New(codeStr.c_str(),
+                                                                         codeStr.length()));
 
         // throw on compile error
         checkV8ErrorState(compiled, try_catch);
@@ -1322,7 +1328,8 @@ namespace mongo {
         v8::HandleScope handle_scope;
         v8::Handle<v8::Function> idCons = ObjectIdFT()->GetFunction();
         v8::Handle<v8::Value> argv[1];
-        argv[0] = v8::String::New(id.str().c_str());
+        const string& idString = id.str();
+        argv[0] = v8::String::New(idString.c_str(), idString.length());
         return handle_scope.Close(idCons->NewInstance(1, argv));
     }
 
@@ -1367,14 +1374,14 @@ namespace mongo {
 
         switch (elem.type()) {
         case mongo::Code:
-            return newFunction(elem.valuestr());
+            return newFunction(StringData(elem.valuestr(), elem.valuestrsize() - 1));
         case CodeWScope:
             if (!elem.codeWScopeObject().isEmpty())
                 log() << "warning: CodeWScope doesn't transfer to db.eval" << endl;
-            return newFunction(elem.codeWScopeCode());
+            return newFunction(StringData(elem.codeWScopeCode(), elem.codeWScopeCodeLen() - 1));
         case mongo::Symbol:
         case mongo::String:
-            return v8::String::New(elem.valuestr());
+            return v8::String::New(elem.valuestr(), elem.valuestrsize() - 1);
         case mongo::jstOID:
             return newId(elem.__oid());
         case mongo::NumberDouble:
@@ -1433,10 +1440,21 @@ namespace mongo {
             argv[1] = v8::String::New(ss.str().c_str());
             return BinDataFT()->GetFunction()->NewInstance(2, argv);
         }
-        case mongo::Timestamp:
+        case mongo::Timestamp: {
+            v8::TryCatch tryCatch;
+
             argv[0] = v8::Number::New(elem.timestampTime() / 1000);
             argv[1] = v8::Number::New(elem.timestampInc());
-            return TimestampFT()->GetFunction()->NewInstance(2,argv);
+
+            v8::Handle<v8::Value> ret = TimestampFT()->GetFunction()->NewInstance(2,argv);
+            uassert(17355, str::stream() << "Error converting " << elem.toString(false)
+                                         << " in field " << elem.fieldName()
+                                         << " to a JS Timestamp object: "
+                                         << toSTLString(tryCatch.Exception()),
+                    !tryCatch.HasCaught());
+
+            return ret;
+        }
         case mongo::NumberLong:
             nativeUnsignedLong = elem.numberLong();
             // values above 2^53 are not accurately represented in JS
@@ -1572,6 +1590,10 @@ namespace mongo {
     void V8Scope::v8ToMongoElement(BSONObjBuilder & b, const StringData& sname,
                                    v8::Handle<v8::Value> value, int depth,
                                    BSONObj* originalParent) {
+        uassert(17279,
+                str::stream() << "Exceeded depth limit of " << objectDepthLimit
+                              << " when converting js object to BSON. Do you have a cycle?",
+                depth < objectDepthLimit);
 
         // Null char should be at the end, not in the string
         uassert(16985,
@@ -1665,13 +1687,22 @@ namespace mongo {
             v8::Local<v8::Value> value = o->Get(name);
             v8ToMongoElement(b, sname, value, depth + 1, &originalBSON);
         }
-        return b.obj();
+
+        const int sizeWithEOO = b.len() + 1/*EOO*/ - 4/*BSONObj::Holder ref count*/;
+        uassert(17260, str::stream() << "Converting from JavaScript to BSON failed: "
+                                     << "Object size " << sizeWithEOO << " exceeds limit of "
+                                     << BSONObjMaxInternalSize << " bytes.",
+                sizeWithEOO <= BSONObjMaxInternalSize);
+
+        return b.obj(); // Would give an uglier error than above for oversized objects.
     }
 
     // --- random utils ----
 
+    static logger::MessageLogDomain* jsPrintLogDomain;
     v8::Handle<v8::Value> V8Scope::Print(V8Scope* scope, const v8::Arguments& args) {
-        stringstream ss;
+        LogstreamBuilder builder(jsPrintLogDomain, getThreadName(), logger::LogSeverity::Log());
+        std::ostream& ss = builder.stream();
         v8::HandleScope handle_scope;
         bool first = true;
         for (int i = 0; i < args.Length(); i++) {
@@ -1695,7 +1726,6 @@ namespace mongo {
             ss << *str;
         }
         ss << "\n";
-        Logstream::logLockless(ss.str());
         return handle_scope.Close(v8::Undefined());
     }
 
@@ -1733,6 +1763,11 @@ namespace mongo {
         }
         return scope->mongoToLZV8(scope->_cpuProfiler.fetch(
                 *v8::String::Utf8Value(args[0]->ToString())));
+    }
+
+    MONGO_INITIALIZER(JavascriptPrintDomain)(InitializerContext*) {
+        jsPrintLogDomain = logger::globalLogManager()->getNamedDomain("javascriptOutput");
+        return Status::OK();
     }
 
 } // namespace mongo

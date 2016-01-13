@@ -7,15 +7,14 @@
 //
 //       These transitions are tested for dbEval, $where, MapReduce and $group
 
-var conn = MongoRunner.runMongod({ auth: "", smallfiles: ""});
+var conn = MongoRunner.runMongod({ smallfiles: ""});
 var test = conn.getDB("test");
 
 // insert a single document and add two test users
 test.foo.insert({a:1});
-test.getLastError();
 assert.eq(1, test.foo.findOne().a);
-test.addUser('a', 'a');
-test.addUser('b', 'b');
+test.createUser({user:'a', pwd: 'a', roles: jsTest.basicUserRoles});
+test.createUser({user:'b', pwd: 'b', roles: jsTest.basicUserRoles});
 
 function missingOrEquals(string) {
     return 'function() { '
@@ -87,17 +86,17 @@ function testMapReduce() {
 
     // test new user auth causes scope to be cleared
     test.auth('a', 'a');
-    getGlobalFromMap('a'); // throws on fail
+    assert.doesNotThrow(function() { getGlobalFromMap('a'); }, [], "M/R: Auth user 'a'");
 
     // test auth as another user causes scope to be cleared
     setGlobalInMap('a');
     test.auth('b', 'b');
-    getGlobalFromMap('a&b'); // throws on fail
+    assert.doesNotThrow(function() { getGlobalFromMap('a&b'); }, [], "M/R: Auth user 'b'");
 
     // test user logout causes scope to be cleared
     setGlobalInMap('a&b');
     test.logout();
-    getGlobalFromMap('noUsers'); // throws on fail
+    assert.doesNotThrow(function() { getGlobalFromMap('noUsers'); }, [], "M/R: Log out");
 }
 testMapReduce();
 testMapReduce();
@@ -121,17 +120,17 @@ function testGroup() {
 
     // test new user auth causes scope to be cleared
     test.auth('a', 'a');
-    getGlobalFromGroup('a'); // throws on fail
+    assert.doesNotThrow(getGlobalFromGroup, ['a'], "Group: Auth user 'a'");
 
     // test auth as another user causes scope to be cleared
     setGlobalInGroup('a');
     test.auth('b', 'b');
-    getGlobalFromGroup('a&b'); // throws on fail
+    assert.doesNotThrow(getGlobalFromGroup, ['a&b'], "Group: Auth user 'b'");
 
     // test user logout causes scope to be cleared
     setGlobalInGroup('a&b');
     test.logout();
-    getGlobalFromGroup('noUsers'); // throws on fail
+    assert.doesNotThrow(getGlobalFromGroup, ['noUsers'], "Group: Log out");
 }
 testGroup();
 testGroup();

@@ -14,16 +14,27 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #pragma once
 
-#include "jsobj.h"
-#include "namespace-inl.h"
-#include "../util/net/message.h"
-#include "../client/constants.h"
-#include "instance.h"
 #include "mongo/bson/bson_validate.h"
+#include "mongo/client/constants.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/util/net/message.h"
+#include "mongo/util/net/message_port.h"
 
 namespace mongo {
 
@@ -120,7 +131,7 @@ namespace mongo {
         // Indicates whether this message is expected to have a ns
         // or in the case of dbMsg, a string in the same place as ns
         bool messageShouldHaveNs() const {
-            return (_msg.operation() >= dbMsg) && (_msg.operation() <= dbDelete);
+            return (_msg.operation() >= dbMsg) & (_msg.operation() <= dbDelete);
         }
 
         /** the 32 bit field before the ns
@@ -129,15 +140,9 @@ namespace mongo {
          * 1: fromWriteback
          */
         int reservedField() const { return _reserved; }
-        void setReservedField(int value) {  _reserved = value; }
 
         const char * getns() const;
         int getQueryNToReturn() const;
-
-        int getFlags() const;
-        void setFlags(int value);
-
-        long long getInt64(int offsetBytes) const;
 
         int pullInt();
         long long pullInt64();
@@ -160,15 +165,12 @@ namespace mongo {
             _mark = _nextjsobj;
         }
 
-        void markReset(const char * toMark = NULL);
+        void markReset(const char * toMark);
 
     private:
         // Check if we have enough data to read
         template<typename T>
         void checkRead(const char* start, size_t count = 0) const;
-
-        template<typename T>
-        void checkReadOffset(const char* start, size_t offset) const;
 
         // Read some type without advancing our position
         template<typename T>
@@ -200,7 +202,10 @@ namespace mongo {
         BSONObj query;
         BSONObj fields;
 
-        /* parses the message into the above fields */
+        /**
+         * parses the message into the above fields
+         * Warning: constructor mutates DbMessage.
+         */
         QueryMessage(DbMessage& d) {
             ns = d.getns();
             ntoskip = d.pullInt();
@@ -211,6 +216,20 @@ namespace mongo {
             }
             queryOptions = d.msg().header()->dataAsInt();
         }
+    };
+
+    /**
+     * A response to a DbMessage.
+     */
+    struct DbResponse {
+        Message *response;
+        MSGID responseTo;
+        string exhaustNS; /* points to ns if exhaust mode. 0=normal mode*/
+        DbResponse(Message *r, MSGID rt) : response(r), responseTo(rt){ }
+        DbResponse() {
+            response = 0;
+        }
+        ~DbResponse() { delete response; }
     };
 
     void replyToQuery(int queryResultFlags,

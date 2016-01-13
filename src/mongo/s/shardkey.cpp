@@ -14,14 +14,28 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
-#include "pch.h"
-#include "chunk.h"
-#include "../db/jsobj.h"
+#include "mongo/pch.h"
+
+#include "mongo/s/chunk.h"
+#include "mongo/s/shard_key_pattern.h"
+#include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
-#include "../util/startup_test.h"
-#include "../util/timer.h"
+#include "mongo/util/startup_test.h"
+#include "mongo/util/timer.h"
 
 namespace mongo {
 
@@ -42,16 +56,21 @@ namespace mongo {
         gMax = max.obj();
     }
 
-    bool ShardKeyPattern::hasShardKey( const BSONObj& obj ) const {
-        /* this is written s.t. if obj has lots of fields, if the shard key fields are early,
-           it is fast.  so a bit more work to try to be semi-fast.
-           */
+    static bool _hasShardKey(const BSONObj& doc,
+                             const set<string>& patternFields,
+                             bool allowRegex) {
 
-        for(set<string>::const_iterator it = patternfields.begin(); it != patternfields.end(); ++it) {
-            BSONElement e = obj.getFieldDotted(it->c_str());
-            if(     e.eoo() ||
-                    e.type() == Array ||
-                    (e.type() == Object && !e.embeddedObject().okForStorage())) {
+        // this is written s.t. if doc has lots of fields, if the shard key fields are early,
+        // it is fast.  so a bit more work to try to be semi-fast.
+
+        for (set<string>::const_iterator it = patternFields.begin(); it != patternFields.end();
+            ++it) {
+            BSONElement shardKeyField = doc.getFieldDotted(it->c_str());
+            if (shardKeyField.eoo()
+                || shardKeyField.type() == Array
+                || (!allowRegex && shardKeyField.type() == RegEx)
+                || (shardKeyField.type() == Object &&
+                    !shardKeyField.embeddedObject().okForStorage())) {
                 // Don't allow anything for a shard key we can't store -- like $gt/$lt ops
                 return false;
             }
@@ -59,16 +78,16 @@ namespace mongo {
         return true;
     }
 
-    bool ShardKeyPattern::isPrefixOf( const KeyPattern& otherPattern ) const {
-        return pattern.isPrefixOf( otherPattern );
+    bool ShardKeyPattern::hasShardKey(const BSONObj& doc) const {
+        return _hasShardKey(doc, patternfields, true);
+    }
+
+    bool ShardKeyPattern::hasTargetableShardKey(const BSONObj& doc) const {
+        return _hasShardKey(doc, patternfields, false);
     }
 
     bool ShardKeyPattern::isUniqueIndexCompatible( const KeyPattern& uniqueIndexPattern ) const {
-        if ( ! uniqueIndexPattern.toBSON().isEmpty() &&
-             str::equals( uniqueIndexPattern.toBSON().firstElementFieldName(), "_id" ) ){
-            return true;
-        }
-        return pattern.toBSON().isFieldNamePrefixOf( uniqueIndexPattern.toBSON() );
+        return mongo::isUniqueIndexCompatible( pattern.toBSON(), uniqueIndexPattern.toBSON() );
     }
 
     string ShardKeyPattern::toString() const {

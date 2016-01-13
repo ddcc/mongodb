@@ -12,6 +12,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 /* @file diskloc.h
@@ -31,7 +43,7 @@ namespace mongo {
     class Record;
     class DeletedRecord;
     class Extent;
-    class MongoDataFile;
+    class DataFile;
     class DiskLoc;
 
     template< class Version > class BtreeBucket;
@@ -75,7 +87,7 @@ namespace mongo {
             _a = -1;
             ofs = 0; /* note NullOfs is different. todo clean up.  see refs to NullOfs in code - use is valid but outside DiskLoc context so confusing as-is. */
         }
-        void assertOk() { verify(!isNull()); }
+        void assertOk() const { verify(!isNull()); }
         void setInvalid() {
             _a = -2;
             ofs = 0;
@@ -152,19 +164,26 @@ namespace mongo {
            (think of this as an unchecked type cast)
            Note: set your Context first so that the database to which the diskloc applies is known.
         */
-        BSONObj obj() const;
-        Record* rec() const;
-        DeletedRecord* drec() const;
-        Extent* ext() const;
+        BSONObj obj() const; // TODO(ERH): remove
+        Record* rec() const; // TODO(ERH): remove
+        DeletedRecord* drec() const; // TODO(ERH): remove
+        Extent* ext() const; // TODO(ERH): remove
 
         template< class V >
-        const BtreeBucket<V> * btree() const;
+        const BtreeBucket<V> * btree() const; // TODO(ERH): remove
 
         // Explicitly signals we are writing and casts away const
         template< class V >
-        BtreeBucket<V> * btreemod() const;
+        BtreeBucket<V> * btreemod() const; // TODO(ERH): remove
 
-        /*MongoDataFile& pdf() const;*/
+        /// members for Sorter
+        struct SorterDeserializeSettings {}; // unused
+        void serializeForSorter(BufBuilder& buf) const { buf.appendStruct(*this); }
+        static DiskLoc deserializeForSorter(BufReader& buf, const SorterDeserializeSettings&) {
+            return buf.read<DiskLoc>();
+        }
+        int memUsageForSorter() const { return sizeof(DiskLoc); }
+        DiskLoc getOwned() const { return *this; }
     };
 #pragma pack()
 

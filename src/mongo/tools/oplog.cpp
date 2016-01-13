@@ -1,5 +1,3 @@
-// oplog.cpp
-
 /**
 *    Copyright (C) 2008 10gen Inc.
 *
@@ -14,76 +12,76 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
-#include "pch.h"
-#include "mongo/base/initializer.h"
-#include "db/json.h"
-#include "db/oplogreader.h"
-
-#include "tool.h"
+#include "mongo/pch.h"
 
 #include <fstream>
 #include <iostream>
 
-#include <boost/program_options.hpp>
+#include "mongo/db/json.h"
+#include "mongo/db/repl/oplogreader.h"
+#include "mongo/tools/mongooplog_options.h"
+#include "mongo/tools/tool.h"
+#include "mongo/util/options_parser/option_section.h"
 
 using namespace mongo;
 
-namespace po = boost::program_options;
-
 class OplogTool : public Tool {
 public:
-    OplogTool() : Tool( "oplog" ) {
-        add_options()
-        ("seconds,s" , po::value<int>() , "seconds to go back default:86400" )
-        ("from", po::value<string>() , "host to pull from" )
-        ("oplogns", po::value<string>()->default_value( "local.oplog.rs" ) , "ns to pull from" )
-        ;
-    }
+    OplogTool() : Tool() { }
 
-    virtual void printExtraHelp(ostream& out) {
-        out << "Pull and replay a remote MongoDB oplog.\n" << endl;
+    virtual void printHelp( ostream & out ) {
+        printMongoOplogHelp(&out);
     }
 
     int run() {
 
-        if ( ! hasParam( "from" ) ) {
-            log() << "need to specify --from" << endl;
-            return -1;
-        }
-
         Client::initThread( "oplogreplay" );
 
-        log() << "going to connect" << endl;
+        toolInfoLog() << "going to connect" << std::endl;
         
-        OplogReader r(false);
+        OplogReader r;
         r.setTailingQueryOptions( QueryOption_SlaveOk | QueryOption_AwaitData );
-        r.connect( getParam( "from" ) );
+        r.connect(mongoOplogGlobalParams.from);
 
-        log() << "connected" << endl;
+        toolInfoLog() << "connected" << std::endl;
 
-        OpTime start( time(0) - getParam( "seconds" , 86400 ) , 0 );
-        log() << "starting from " << start.toStringPretty() << endl;
+        OpTime start(time(0) - mongoOplogGlobalParams.seconds, 0);
+        toolInfoLog() << "starting from " << start.toStringPretty() << std::endl;
 
-        string ns = getParam( "oplogns" );
-        r.tailingQueryGTE( ns.c_str() , start );
+        r.tailingQueryGTE(mongoOplogGlobalParams.ns.c_str(), start);
 
         int num = 0;
         while ( r.more() ) {
             BSONObj o = r.next();
-            LOG(2) << o << endl;
+            if (logger::globalLogDomain()->shouldLog(logger::LogSeverity::Debug(2))) {
+                toolInfoLog() << o << std::endl;
+            }
             
             if ( o["$err"].type() ) {
-                log() << "error getting oplog" << endl;
-                log() << o << endl;
+                toolError() << "error getting oplog" << std::endl;
+                toolError() << o << std::endl;
                 return -1;
             }
                 
 
             bool print = ++num % 100000 == 0;
-            if ( print )
-                cout << num << "\t" << o << endl;
+            if (print) {
+                toolInfoLog() << num << "\t" << o << std::endl;
+            }
             
             if ( o["op"].String() == "n" )
                 continue;
@@ -97,16 +95,15 @@ public:
             
             BSONObj res;
             bool ok = conn().runCommand( "admin" , c , res );
-            if ( print || ! ok )
-                log() << res << endl;
+            if (!ok) {
+                toolError() << res << std::endl;
+            } else if (print) {
+                toolInfoLog() << res << std::endl;
+            }
         }
 
         return 0;
     }
 };
 
-int main( int argc , char** argv, char** envp ) {
-    mongo::runGlobalInitializersOrDie(argc, argv, envp);
-    OplogTool t;
-    return t.main( argc , argv );
-}
+REGISTER_MONGO_TOOL(OplogTool);

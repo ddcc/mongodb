@@ -37,7 +37,9 @@ namespace mongo {
     void logOpForDbHash( const char* opstr,
                          const char* ns,
                          const BSONObj& obj,
-                         BSONObj* patt );
+                         BSONObj* patt,
+                         const BSONObj* fullObj,
+                         bool forMigrateCleanup );
 
     class DBHashCmd : public Command {
     public:

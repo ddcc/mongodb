@@ -12,16 +12,28 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 // client.cpp
 
-#include "pch.h"
+#include "mongo/pch.h"
 
-#include "dbtests.h"
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/db/d_concurrency.h"
 #include "mongo/db/pdfile.h"
+#include "mongo/dbtests/dbtests.h"
 
 namespace ClientTests {
 
@@ -116,7 +128,7 @@ namespace ClientTests {
             db.insert(ns(), BSON("x" << 1 << "y" << 2));
             db.insert(ns(), BSON("x" << 2 << "y" << 2));
 
-            ASSERT_EQUALS(1, nsdetails(ns())->nIndexes);
+            ASSERT_EQUALS(1, nsdetails(ns())->getCompletedIndexCount());
             // _id index
             ASSERT_EQUALS(1U, db.count("test.system.indexes"));
             // test.buildindex
@@ -126,13 +138,13 @@ namespace ClientTests {
 
             db.ensureIndex(ns(), BSON("y" << 1), true);
 
-            ASSERT_EQUALS(1, nsdetails(ns())->nIndexes);
+            ASSERT_EQUALS(1, nsdetails(ns())->getCompletedIndexCount());
             ASSERT_EQUALS(1U, db.count("test.system.indexes"));
             ASSERT_EQUALS(3U, db.count("test.system.namespaces"));
 
             db.ensureIndex(ns(), BSON("x" << 1), true);
 
-            ASSERT_EQUALS(2, nsdetails(ns())->nIndexes);
+            ASSERT_EQUALS(2, nsdetails(ns())->getCompletedIndexCount());
             ASSERT_EQUALS(2U, db.count("test.system.indexes"));
             ASSERT_EQUALS(4U, db.count("test.system.namespaces"));
         }

@@ -15,23 +15,37 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
-#include "pch.h"
-#include "../server.h"
-#include "../bson/util/atomic_int.h"
-#include "../util/concurrency/mvar.h"
-#include "../util/concurrency/thread_pool.h"
-#include "../util/concurrency/list.h"
-#include "../util/timer.h"
-#include <boost/thread.hpp>
+#include "mongo/pch.h"
+
 #include <boost/bind.hpp>
-#include "../db/d_concurrency.h"
-#include "../util/concurrency/synchronization.h"
-#include "../util/concurrency/qlock.h"
-#include "dbtests.h"
-#include "mongo/util/concurrency/ticketholder.h"
+#include <boost/thread.hpp>
+
+#include "mongo/bson/util/atomic_int.h"
+#include "mongo/db/d_concurrency.h"
+#include "mongo/dbtests/dbtests.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/util/concurrency/mvar.h"
+#include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/concurrency/list.h"
+#include "mongo/util/timer.h"
+#include "mongo/util/concurrency/synchronization.h"
+#include "mongo/util/concurrency/qlock.h"
+#include "mongo/util/concurrency/ticketholder.h"
+#include "mongo/server.h"
 
 namespace mongo { 
     void testNonGreedy();
@@ -253,7 +267,7 @@ namespace ThreadedTests {
             cc().shutdown();
         }
         virtual void validate() {
-            log() << "mongomutextest validate" << endl;
+            mongo::unittest::log() << "mongomutextest validate" << endl;
             ASSERT( ! Lock::isReadLocked() );
             ASSERT( wToXSuccessfulUpgradeCount >= 39 * N / 2000 );
             {
@@ -637,7 +651,7 @@ namespace ThreadedTests {
                     RWLock::Upgradable u(m);
                     LOG(Z) << x << ' ' << ch << " got" << endl;
                     if( ch == 'U' ) {
-#ifdef MONGO_USE_SRW_ON_WINDOWS
+#if defined(NTDDI_VERSION) && defined(NTDDI_WIN7) && (NTDDI_VERSION >= NTDDI_WIN7)
                         // SRW locks are neither fair nor FIFO, as per docs
                         if( t.millis() > 2000 ) {
 #else
@@ -645,10 +659,13 @@ namespace ThreadedTests {
 #endif
                             DEV {
                                 // a _DEBUG buildbot might be slow, try to avoid false positives
-                                log() << "warning lock upgrade was slow " << t.millis() << endl;
+                                mongo::unittest::log() <<
+                                    "warning lock upgrade was slow " << t.millis() << endl;
                             }
                             else {
-                                log() << "assertion failure: lock upgrade was too slow: " << t.millis() << endl;
+                                mongo::unittest::log() <<
+                                    "assertion failure: lock upgrade was too slow: " <<
+                                    t.millis() << endl;
                                 ASSERT( false );
                             }
                         }
@@ -812,13 +829,16 @@ namespace ThreadedTests {
         }
     };
 
-    class WriteLocksAreGreedy : public ThreadedTest<3> {
+    const int WriteLocksAreGreedy_ThreadCount = 3;
+    class WriteLocksAreGreedy : public ThreadedTest<WriteLocksAreGreedy_ThreadCount> {
     public:
-        WriteLocksAreGreedy() : m("gtest") {}
+        WriteLocksAreGreedy() : m("gtest"), _barrier(WriteLocksAreGreedy_ThreadCount) {}
     private:
         RWLock m;
+        boost::barrier _barrier;
         virtual void validate() { }
         virtual void subthread(int x) {
+            _barrier.wait();
             int Z = 0;
             Client::initThread("utest");
             if( x == 1 ) { 
@@ -846,16 +866,19 @@ namespace ThreadedTests {
         }
     };
 
-    class QLockTest : public ThreadedTest<3> {
+    const int QLockTest_ThreadCount = 3;
+    class QLockTest : public ThreadedTest<QLockTest_ThreadCount> {
     public:
         bool gotW;
-        QLockTest() : gotW(false), m() { }
+        QLockTest() : gotW(false), m(), _barrier(QLockTest_ThreadCount) { }
         void setup() {}
         ~QLockTest() {}
     private:
         QLock m;
+        boost::barrier _barrier;
         virtual void validate() { }
         virtual void subthread(int x) {
+            _barrier.wait();
             int Z = 0;
             Client::initThread("qtest");
             if( x == 1 ) { 
@@ -946,7 +969,7 @@ namespace ThreadedTests {
                 _hotel.checkOut();
 
                 if( ( i % ( checkIns / 10 ) ) == 0 )
-                    log() << "checked in " << i << " times..." << endl;
+                    mongo::unittest::log() << "checked in " << i << " times..." << endl;
 
             }
 
@@ -994,7 +1017,7 @@ namespace ThreadedTests {
 
 
             add< RWLockTest1 >();
-            //add< RWLockTest2 >(); // SERVER-2996
+            add< RWLockTest2 >();
             add< RWLockTest3 >();
             add< RWLockTest4 >();
 

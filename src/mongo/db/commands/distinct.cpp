@@ -14,6 +14,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #include <string>
@@ -21,13 +33,16 @@
 
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
-#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/kill_current_op.h"
+#include "mongo/db/pdfile.h"
+#include "mongo/db/query/get_runner.h"
+#include "mongo/db/query/query_planner_common.h"
+#include "mongo/db/query/type_explain.h"
 #include "mongo/util/timer.h"
 
 namespace mongo {
@@ -35,20 +50,26 @@ namespace mongo {
     class DistinctCommand : public Command {
     public:
         DistinctCommand() : Command("distinct") {}
-        virtual bool slaveOk() const { return true; }
+
+        virtual bool slaveOk() const { return false; }
+        virtual bool slaveOverrideOk() const { return true; }
         virtual LockType locktype() const { return READ; }
+
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
             actions.addAction(ActionType::find);
-            out->push_back(Privilege(parseNs(dbname, cmdObj), actions));
+            out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
         }
+
         virtual void help( stringstream &help ) const {
             help << "{ distinct : 'collection name' , key : 'a.b' , query : {} }";
         }
 
-        bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
+        bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result,
+                 bool fromRepl ) {
+
             Timer t;
             string ns = dbname + '.' + cmdObj.firstElement().valuestr();
 
@@ -67,89 +88,64 @@ namespace mongo {
             long long nscanned = 0; // locations looked at
             long long nscannedObjects = 0; // full objects looked at
             long long n = 0; // matches
-            MatchDetails md;
 
-            NamespaceDetails * d = nsdetails( ns );
+            Collection* collection = cc().database()->getCollection( ns );
 
-            if ( ! d ) {
+            if (!collection) {
                 result.appendArray( "values" , BSONObj() );
-                result.append( "stats" , BSON( "n" << 0 << "nscanned" << 0 << "nscannedObjects" << 0 ) );
+                result.append("stats", BSON("n" << 0 <<
+                                            "nscanned" << 0 <<
+                                            "nscannedObjects" << 0));
                 return true;
             }
 
-            shared_ptr<Cursor> cursor;
-            if ( ! query.isEmpty() ) {
-                cursor = NamespaceDetailsTransient::getCursor(ns.c_str() , query , BSONObj() );
-            }
-            else {
-
-                // query is empty, so lets see if we can find an index
-                // with the key so we don't have to hit the raw data
-                NamespaceDetails::IndexIterator ii = d->ii();
-                while ( ii.more() ) {
-                    IndexDetails& idx = ii.next();
-
-                    if ( d->isMultikey( ii.pos() - 1 ) )
-                        continue;
-
-                    if ( idx.inKeyPattern( key ) ) {
-                        cursor = NamespaceDetailsTransient::bestGuessCursor( ns.c_str() ,
-                                                                            BSONObj() ,
-                                                                            idx.keyPattern() );
-                        if( cursor.get() ) break;
-                    }
-
-                }
-
-                if ( ! cursor.get() )
-                    cursor = NamespaceDetailsTransient::getCursor(ns.c_str() , query , BSONObj() );
-
+            Runner* rawRunner;
+            Status status = getRunnerDistinct(collection, query, key, &rawRunner);
+            if (!status.isOK()) {
+                uasserted(17216, mongoutils::str::stream() << "Can't get runner for query "
+                              << query << ": " << status.toString());
+                return 0;
             }
 
-            
-            verify( cursor );
-            string cursorName = cursor->toString();
-            
-            auto_ptr<ClientCursor> cc (new ClientCursor(QueryOption_NoCursorTimeout, cursor, ns));
+            auto_ptr<Runner> runner(rawRunner);
+            const ScopedRunnerRegistration safety(runner.get());
+            runner->setYieldPolicy(Runner::YIELD_AUTO);
 
-            while ( cursor->ok() ) {
-                nscanned++;
-                bool loadedRecord = false;
+            string cursorName;
+            BSONObj obj;
+            Runner::RunnerState state;
+            while (Runner::RUNNER_ADVANCED == (state = runner->getNext(&obj, NULL))) {
+                // Distinct expands arrays.
+                //
+                // If our query is covered, each value of the key should be in the index key and
+                // available to us without this.  If a collection scan is providing the data, we may
+                // have to expand an array.
+                BSONElementSet elts;
+                obj.getFieldsDotted(key, elts);
 
-                if ( cursor->currentMatches( &md ) && !cursor->getsetdup( cursor->currLoc() ) ) {
-                    n++;
+                for (BSONElementSet::iterator it = elts.begin(); it != elts.end(); ++it) {
+                    BSONElement elt = *it;
+                    if (values.count(elt)) { continue; }
+                    int currentBufPos = bb.len();
 
-                    BSONObj holder;
-                    BSONElementSet temp;
-                    loadedRecord = ! cc->getFieldsDotted( key , temp, holder );
+                    uassert(17217, "distinct too big, 16mb cap",
+                            (currentBufPos + elt.size() + 1024) < bufSize);
 
-                    for ( BSONElementSet::iterator i=temp.begin(); i!=temp.end(); ++i ) {
-                        BSONElement e = *i;
-                        if ( values.count( e ) )
-                            continue;
-
-                        int now = bb.len();
-
-                        uassert(10044,  "distinct too big, 16mb cap", ( now + e.size() + 1024 ) < bufSize );
-
-                        arr.append( e );
-                        BSONElement x( start + now );
-
-                        values.insert( x );
-                    }
+                    arr.append(elt);
+                    BSONElement x(start + currentBufPos);
+                    values.insert(x);
                 }
-
-                if ( loadedRecord || md.hasLoadedRecord() )
-                    nscannedObjects++;
-
-                cursor->advance();
-
-                if (!cc->yieldSometimes( ClientCursor::MaybeCovered )) {
-                    cc.release();
-                    break;
+            }
+            TypeExplain* bareExplain;
+            Status res = runner->getInfo(&bareExplain, NULL);
+            if (res.isOK()) {
+                auto_ptr<TypeExplain> explain(bareExplain);
+                if (explain->isCursorSet()) {
+                    cursorName = explain->getCursor();
                 }
-
-                RARELY killCurrentOp.checkForInterrupt();
+                n = explain->getN();
+                nscanned = explain->getNScanned();
+                nscannedObjects = explain->getNScannedObjects();
             }
 
             verify( start == bb.buf() );
@@ -168,7 +164,6 @@ namespace mongo {
 
             return true;
         }
-
     } distinctCmd;
 
-}
+}  // namespace mongo

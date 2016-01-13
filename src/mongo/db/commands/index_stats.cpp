@@ -30,13 +30,13 @@
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/btree.h"
+#include "mongo/db/structure/btree/btree.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/db.h"
-#include "mongo/db/index.h"
+#include "mongo/db/structure/catalog/index_details.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/kill_current_op.h"
-#include "mongo/db/namespace_details.h"
+#include "mongo/db/structure/catalog/namespace_details.h"
 #include "mongo/util/descriptive_stats.h"
 
 namespace mongo {
@@ -492,7 +492,7 @@ namespace mongo {
                                            std::vector<Privilege>* out) {
             ActionSet actions;
             actions.addAction(ActionType::indexStats);
-            out->push_back(Privilege(parseNs(dbname, cmdObj), actions));
+            out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
         }
 
         bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg,
@@ -500,8 +500,8 @@ namespace mongo {
 
             string ns = dbname + "." + cmdObj.firstElement().valuestrsafe();
             const NamespaceDetails* nsd = nsdetails(ns);
-            if (!cmdLine.quiet) {
-                tlog() << "CMD: indexStats " << ns << endl;
+            if (!serverGlobalParams.quiet) {
+                MONGO_TLOG(0) << "CMD: indexStats " << ns << endl;
             }
             if (!nsd) {
                 errmsg = "ns not found";
@@ -544,7 +544,7 @@ namespace mongo {
     };
 
     MONGO_INITIALIZER(IndexStatsCmd)(InitializerContext* context) {
-        if (cmdLine.experimental.indexStatsCmdEnabled) {
+        if (serverGlobalParams.experimental.indexStatsCmdEnabled) {
             // Leaked intentionally: a Command registers itself when constructed.
             new IndexStatsCmd();
         }

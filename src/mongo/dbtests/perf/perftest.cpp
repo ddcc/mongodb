@@ -15,22 +15,36 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
-#include "pch.h"
+#include "mongo/pch.h"
+
 #include <boost/date_time/posix_time/posix_time.hpp>
 
 #include "mongo/base/initializer.h"
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/json.h"
-#include "mongo/db/queryoptimizer.h"
+#include "mongo/dbtests/dbtests.h"
 #include "mongo/dbtests/framework.h"
 #include "mongo/util/file_allocator.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
-    extern string dbpath;
+    // This specifies default dbpath for our testing framework
+    const std::string default_test_dbpath = "/data/db/perftest";
 } // namespace mongo
 
 
@@ -59,7 +73,7 @@ string testNs( T *t ) {
 }
 
 template <class T>
-class Runner {
+class TestRunner {
 public:
     void run() {
         T test;
@@ -74,7 +88,7 @@ public:
              << setw( 6 ) << setfill( '0' ) << micro % 1000000
              << "}" << endl;
     }
-    ~Runner() {
+    ~TestRunner() {
         FileAllocator::get()->waitUntilFinished();
         client_->dropDatabase( testDb< T >().c_str() );
     }
@@ -86,7 +100,7 @@ public:
 protected:
     template< class T >
     void add() {
-        Suite::add< Runner< T > >();
+        Suite::add< TestRunner< T > >();
     }
 };
 
@@ -650,6 +664,8 @@ namespace Count {
 
 namespace Plan {
 
+    // QUERY_MIGRATION: what is this really testing?
+#if 0
     class Hint {
     public:
         Hint() : ns_( testNs( this ) ) {
@@ -726,6 +742,7 @@ namespace Plan {
             add< Query >();
         }
     } all;
+#endif
 } // namespace Plan
 
 namespace Misc {
@@ -762,9 +779,9 @@ namespace Misc {
 int main( int argc, char **argv, char** envp ) {
     mongo::runGlobalInitializersOrDie(argc, argv, envp);
 
-    logLevel = -1;
+    mongo::logger::globalLogDomain()->setMinimumLoggedSeverity(mongo::logger::LogSeverity::Log());
     client_ = new DBDirectClient();
 
-    return mongo::dbtests::runDbTests(argc, argv, "/data/db/perftest");
+    return mongo::dbtests::runDbTests(argc, argv);
 }
 

@@ -3,7 +3,7 @@
 port = allocatePorts( 1 )[ 0 ];
 baseName = "tool_dumpauth";
 
-m = startMongod( "--auth", "--port", port, "--dbpath", "/data/db/" + baseName, "--nohttpinterface", "--bind_ip", "127.0.0.1" );
+m = startMongod( "--auth", "--port", port, "--dbpath", MongoRunner.dataPath + baseName, "--nohttpinterface", "--bind_ip", "127.0.0.1" );
 db = m.getDB( "admin" );
 
 t = db[ baseName ];
@@ -13,9 +13,7 @@ for(var i = 0; i < 100; i++) {
   t["testcol"].save({ "x": i });
 }
 
-users = db.getCollection( "system.users" );
-
-db.addUser( "testuser" , "testuser" );
+db.createUser({user:  "testuser" , pwd: "testuser", roles: jsTest.adminUserRoles});
 
 assert( db.auth( "testuser" , "testuser" ) , "auth failed" );
 

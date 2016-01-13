@@ -15,19 +15,30 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
-#include "pch.h"
-#include "../bson/util/builder.h"
-#include "../db/jsobj.h"
-#include "../db/jsobjmanipulator.h"
-#include "../db/json.h"
-#include "../db/repl.h"
-#include "dbtests.h"
-#include "../util/stringutils.h"
-#include "../util/mongoutils/checksum.h"
-#include "../db/key.h"
+#include "mongo/pch.h"
+
+#include "mongo/bson/util/builder.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/db/json.h"
+#include "mongo/db/structure/btree/key.h"
+#include "mongo/dbtests/dbtests.h"
 #include "mongo/platform/float_utils.h"
+#include "mongo/util/mongoutils/checksum.h"
+#include "mongo/util/stringutils.h"
 
 namespace JsobjTests {
 
@@ -330,50 +341,6 @@ namespace JsobjTests {
             }
         };
 
-        class TimestampTest : public Base {
-        public:
-            void run() {
-                Client *c = currentClient.get();
-                if( c == 0 ) {
-                    Client::initThread("pretouchN");
-                    c = &cc();
-                }
-                Lock::GlobalWrite lk; // for initTimestamp
-        
-                BSONObjBuilder b;
-                b.appendTimestamp( "a" );
-                BSONObj o = b.done();
-                o.toString();
-                ASSERT( o.valid() );
-                ASSERT_EQUALS( Timestamp, o.getField( "a" ).type() );
-                BSONObjIterator i( o );
-                ASSERT( i.moreWithEOO() );
-                ASSERT( i.more() );
-
-                BSONElement e = i.next();
-                ASSERT_EQUALS( Timestamp, e.type() );
-                ASSERT( i.moreWithEOO() );
-                ASSERT( ! i.more() );
-
-                e = i.next();
-                ASSERT( e.eoo() );
-
-                OpTime before = OpTime::_now();
-                BSONElementManipulator( o.firstElement() ).initTimestamp();
-                OpTime after = OpTime::_now();
-
-                OpTime test = OpTime( o.firstElement().date() );
-                ASSERT( before < test && test < after );
-
-                BSONElementManipulator( o.firstElement() ).initTimestamp();
-                test = OpTime( o.firstElement().date() );
-                ASSERT( before < test && test < after );
-
-                OpTime x(123,456);
-                ASSERT_EQUALS( 528280977864LL , x.asLL() );
-            }
-        };
-
         class Nan : public Base {
         public:
             void run() {
@@ -540,9 +507,9 @@ namespace JsobjTests {
                 ASSERT(o["i4"].type() == NumberInt);
                 ASSERT(o["i4"].number() == -1*billion);
 
-                ASSERT(o["L1"].type() == NumberLong);
+                ASSERT(o["L1"].isNumber());
                 ASSERT(o["L1"].number() == 2*billion);
-                ASSERT(o["L2"].type() == NumberLong);
+                ASSERT(o["L2"].isNumber());
                 ASSERT(o["L2"].number() == -2*billion);
                 ASSERT(o["L3"].type() == NumberLong);
                 ASSERT(o["L3"].number() == 4*billion);
@@ -847,6 +814,16 @@ namespace JsobjTests {
                 ASSERT_EQUALS( 2 , o.getFieldDotted( "b.a" ).numberInt() );
                 ASSERT_EQUALS( 3 , o.getFieldDotted( "c.0.a" ).numberInt() );
                 ASSERT_EQUALS( 4 , o.getFieldDotted( "c.1.a" ).numberInt() );
+                ASSERT( o.getFieldDotted( "x" ).eoo() );
+                ASSERT( o.getFieldDotted( "a.x" ).eoo() );
+                ASSERT( o.getFieldDotted( "x.y" ).eoo() );
+                ASSERT( o.getFieldDotted( "" ).eoo() );
+                ASSERT( o.getFieldDotted( "." ).eoo() );
+                ASSERT( o.getFieldDotted( ".." ).eoo() );
+                ASSERT( o.getFieldDotted( "..." ).eoo() );
+                ASSERT( o.getFieldDotted( "a." ).eoo() );
+                ASSERT( o.getFieldDotted( ".a" ).eoo() );
+                ASSERT( o.getFieldDotted( "b.a." ).eoo() );
                 keyTest(o);
             }
         };
@@ -899,6 +876,19 @@ namespace JsobjTests {
                  */
                 nestedBSON = recursiveBSON( BSONObj::maxToStringRecursionDepth + 1 );
                 ASSERT_THROWS( nestedBSON.toString( s, false, true ) , UserException );
+            }
+        };
+
+        class StringWithNull {
+        public:
+            void run() {
+                const string input = string("a") + '\0' + 'b';
+                ASSERT_EQUALS(input.size(), 3U);
+
+                BSONObj obj = BSON("str" << input);
+                const string output = obj.firstElement().String();
+                ASSERT_EQUALS(escape(output), escape(input)); // for better failure output
+                ASSERT_EQUALS(output, input);
             }
         };
 
@@ -1217,23 +1207,11 @@ namespace JsobjTests {
         public:
             void run() {
                 OID oid;
+                const Date_t base( ::time( 0 ) );
+                oid.init( base );
 
-                {
-                    time_t before = ::time(0);
-                    oid.init();
-                    time_t after = ::time(0);
-                    ASSERT( oid.asTimeT() >= before );
-                    ASSERT( oid.asTimeT() <= after );
-                }
-
-                {
-                    Date_t before = jsTime();
-                    sleepsecs(1);
-                    oid.init();
-                    Date_t after = jsTime();
-                    ASSERT( oid.asDateT() >= before );
-                    ASSERT( oid.asDateT() <= after );
-                }
+                ASSERT_EQUALS( base.millis / 1000, oid.asDateT().millis / 1000 );
+                ASSERT_EQUALS( base.toTimeT(), oid.asTimeT() );
             }
         };
 
@@ -1848,25 +1826,82 @@ namespace JsobjTests {
     public:
 
         void good( string s ) {
-            BSONObj o = fromjson( s );
-            if ( o.okForStorage() )
+            good( fromjson( s ) );
+        }
+
+        void good( BSONObj o ) {
+            if ( o.okForStorageAsRoot() )
                 return;
-            throw UserException( 12528 , (string)"should be ok for storage:" + s );
+            throw UserException( 12528 , (string)"should be ok for storage:" + o.toString() );
         }
 
         void bad( string s ) {
-            BSONObj o = fromjson( s );
-            if ( ! o.okForStorage() )
+            bad( fromjson( s ) );
+        }
+
+        void bad( BSONObj o ) {
+            if ( ! o.okForStorageAsRoot() )
                 return;
-            throw UserException( 12529 , (string)"should NOT be ok for storage:" + s );
+            throw UserException( 12529 , (string)"should NOT be ok for storage:" + o.toString() );
         }
 
         void run() {
+            // basic docs are good
+            good( "{}" );
             good( "{x:1}" );
-            bad( "{'x.y':1}" );
-
             good( "{x:{a:2}}" );
+
+            // no dots allowed
+            bad( "{'x.y':1}" );
+            bad( "{'x\\.y':1}" );
+
+            // Check for $
             bad( "{x:{'$a':2}}" );
+            good( "{'a$b':2}" );
+            good( "{'a$': {b: 2}}" );
+            good( "{'a$':2}" );
+            good( "{'a $ a': 'foo'}" );
+
+            // Queries are not ok
+            bad( "{num: {$gt: 1}}" );
+            bad( "{_id: {$regex:'test'}}" );
+            bad( "{$gt: 2}" );
+            bad( "{a : { oo: [ {$bad:1}, {good:1}] }}");
+            good( "{a : { oo: [ {'\\\\$good':1}, {good:1}] }}");
+
+            // DBRef stuff -- json parser can't handle this yet
+            good( BSON("a" << BSON("$ref" << "coll" << "$id" << 1)) );
+            good( BSON("a" << BSON("$ref" << "coll" << "$id" << 1 << "$db" << "a")) );
+            good( BSON("a" << BSON("$ref" << "coll" << "$id" << 1 << "stuff" << 1)) );
+            good( BSON("a" << BSON("$ref" << "coll" << "$id" << 1 << "$db" <<
+                                   "a" << "stuff" << 1)) );
+
+            bad( BSON("a" << BSON("$ref" << 1 << "$id" << 1)) );
+            bad( BSON("a" << BSON("$ref" << 1 << "$id" << 1 << "$db" << "a")) );
+            bad( BSON("a" << BSON("$ref" << "coll" << "$id" << 1 << "$db" << 1)) );
+            bad( BSON("a" << BSON("$ref" << "coll")) );
+            bad( BSON("a" << BSON("$ref" << "coll" << "$db" << "db")) );
+            bad( BSON("a" << BSON("$id" << 1)) );
+            bad( BSON("a" << BSON("$id" << 1 << "$ref" << "coll")) );
+            bad( BSON("a" << BSON("$ref" << "coll" << "$id" << 1 << "$hater" << 1)) );
+            bad( BSON("a" << BSON("$ref" << "coll" << "$id" << 1 << "dot.dot" << 1)) );
+
+            // _id isn't a RegEx, or Array
+            good( "{_id: 0}" );
+            good( "{_id: {a:1, b:1}}" );
+            good( "{_id: {rx: /a/}}" );
+            good( "{_id: {rx: {$regex: 'a'}}}" );
+            bad( "{_id: /a/ }" );
+            bad( "{_id: /a/, other:1}" );
+            bad( "{hi:1, _id: /a/ }" );
+            bad( "{_id: /a/i }" );
+            bad( "{first:/f/i, _id: /a/i }" );
+            //Not really a regex type
+            bad( "{_id: {$regex: 'a'} }" );
+            bad( "{_id: {$regex: 'a', $options:'i'} }" );
+            bad( "{_id:  [1,2]}" );
+            bad( "{_id:  [1]}" );
+
         }
     };
 
@@ -2106,7 +2141,6 @@ namespace JsobjTests {
             add< BSONObjTests::WoSortOrder >();
             add< BSONObjTests::IsPrefixOf >();
             add< BSONObjTests::MultiKeySortOrder > ();
-            add< BSONObjTests::TimestampTest >();
             add< BSONObjTests::Nan >();
             add< BSONObjTests::AsTempObj >();
             add< BSONObjTests::AppendIntOrLL >();
@@ -2117,6 +2151,7 @@ namespace JsobjTests {
             add< BSONObjTests::ArrayAppendAs >();
             add< BSONObjTests::GetField >();
             add< BSONObjTests::ToStringRecursionDepth >();
+            add< BSONObjTests::StringWithNull >();
 
             add< BSONObjTests::Validation::BadType >();
             add< BSONObjTests::Validation::EooBeforeEnd >();

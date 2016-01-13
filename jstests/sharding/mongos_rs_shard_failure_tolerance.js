@@ -23,8 +23,6 @@ var admin = mongos.getDB( "admin" );
 var shards = mongos.getDB( "config" ).shards.find().toArray();
 
 assert.commandWorked( admin.runCommand({ setParameter : 1, traceExceptions : true }) );
-assert.commandWorked( admin.runCommand({ setParameter : 1, ignoreInitialVersionFailure : true }) );
-assert.commandWorked( admin.runCommand({ setParameter : 1, authOnPrimaryOnly : false }) );
 
 var collSharded = mongos.getCollection( "fooSharded.barSharded" );
 var collUnsharded = mongos.getCollection( "fooUnsharded.barUnsharded" );
@@ -458,3 +456,8 @@ gc(); // Clean up new connections
 
 jsTest.log("DONE!");
 st.stop();
+
+
+
+
+

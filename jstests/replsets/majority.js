@@ -1,5 +1,3 @@
-if (!_isWindows()) {
-
 var testInsert = function() {
     master.getDB("foo").bar.insert({x:1});
     var result = master.getDB("foo").runCommand({getLastError:1, w:"majority", wtimeout:timeout});
@@ -18,12 +16,12 @@ var port = replTest.ports;
 var config = {_id : name, members :
         [
          {_id:0, host : host+":"+port[0], priority : 2},
-         {_id:1, host : host+":"+port[1], votes : 3},
+         {_id:1, host : host+":"+port[1]},
          {_id:2, host : host+":"+port[2]},
-         {_id:3, host : host+":"+port[3], arbiterOnly : true},
-         {_id:4, host : host+":"+port[4], arbiterOnly : true},
-         {_id:5, host : host+":"+port[5], arbiterOnly : true},
-         {_id:6, host : host+":"+port[6], arbiterOnly : true},
+         {_id:3, host : host+":"+port[3], arbiterOnly : true, votes: 0},
+         {_id:4, host : host+":"+port[4], arbiterOnly : true, votes: 0},
+         {_id:5, host : host+":"+port[5], arbiterOnly : true, votes: 0},
+         {_id:6, host : host+":"+port[6], arbiterOnly : true, votes: 0},
         ],
              };
 replTest.initiate(config);
@@ -58,6 +56,12 @@ print("remove 2 of the arbiters");
 config.version = 2;
 config.members.pop();
 config.members.pop();
+
+// wait for nodes 3 and 4 to come back as arbiters
+assert.soon(function() {
+    var status = master.getDB("admin").runCommand({replSetGetStatus:1});
+    return status.members[3].state == 7 && status.members[4].state == 7;
+});
 
 try {
     master.getDB("admin").runCommand({replSetReconfig : config});
@@ -117,4 +121,3 @@ assert.contains(config.members[1], result);
 assert.contains(config.members[2], result);
 
 replTest.stopSet();
-}

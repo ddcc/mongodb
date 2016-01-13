@@ -14,34 +14,49 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
-#include "pch.h"
-#include "client.h"
-#include "namespace.h"
-#include "dur_journal.h"
-#include "dur_journalformat.h"
-#include "dur_stats.h"
-#include "../util/logfile.h"
-#include "../util/timer.h"
-#include "../util/alignedbuilder.h"
-#include "../util/net/listen.h" // getelapsedtimemillis
+#include "mongo/pch.h"
+
+#include "mongo/db/dur_journal.h"
+
 #include <boost/static_assert.hpp>
 #include <boost/filesystem.hpp>
-#include "../util/mongoutils/str.h"
-#include "dur_journalimpl.h"
-#include "../util/file.h"
-#include "../util/checksum.h"
-#include "../util/concurrency/race.h"
-#include "../util/compress.h"
-#include "../util/progress_meter.h"
-#include "../server.h"
-#include "../util/mmap.h"
+#include <boost/filesystem/operations.hpp>
+
+#include "mongo/base/init.h"
+#include "mongo/db/client.h"
+#include "mongo/db/dur_journalformat.h"
+#include "mongo/db/dur_journalimpl.h"
+#include "mongo/db/dur_stats.h"
+#include "mongo/db/storage_options.h"
 #include "mongo/platform/random.h"
+#include "mongo/server.h"
+#include "mongo/util/alignedbuilder.h"
+#include "mongo/util/checksum.h"
+#include "mongo/util/compress.h"
+#include "mongo/util/concurrency/race.h"
+#include "mongo/util/file.h"
+#include "mongo/util/logfile.h"
+#include "mongo/util/mmap.h"
+#include "mongo/util/mongoutils/str.h"
+#include "mongo/util/net/listen.h" // getelapsedtimemillis
+#include "mongo/util/progress_meter.h"
+#include "mongo/util/timer.h"
 
 using namespace mongoutils;
-
-#include <boost/filesystem/operations.hpp>
 
 namespace mongo {
 
@@ -64,6 +79,14 @@ namespace mongo {
         unsigned long long DataLimitPerJournalFile = (sizeof(void*)==4) ? 256 * 1024 * 1024 : 1 * 1024 * 1024 * 1024;
 #endif
 
+        MONGO_INITIALIZER(InitializeJournalingParams)(InitializerContext* context) {
+            if (storageGlobalParams.smallfiles == true) {
+                verify(dur::DataLimitPerJournalFile >= 128 * 1024 * 1024);
+                dur::DataLimitPerJournalFile = 128 * 1024 * 1024;
+            }
+            return Status::OK();
+        }
+
         BOOST_STATIC_ASSERT( sizeof(Checksum) == 16 );
         BOOST_STATIC_ASSERT( sizeof(JHeader) == 8192 );
         BOOST_STATIC_ASSERT( sizeof(JSectHeader) == 20 );
@@ -76,7 +99,7 @@ namespace mongo {
         void removeOldJournalFile(boost::filesystem::path p);
 
         boost::filesystem::path getJournalDir() {
-            boost::filesystem::path p(dbpath);
+            boost::filesystem::path p(storageGlobalParams.dbpath);
             p /= "journal";
             return p;
         }
@@ -392,12 +415,12 @@ namespace mongo {
         }
 
         void preallocateFiles() {
-            if (! (cmdLine.durOptions & CmdLine::DurNoCheckSpace))
+            if (!(storageGlobalParams.durOptions & StorageGlobalParams::DurNoCheckSpace))
                 checkFreeSpace();
 
             if( exists(preallocPath(0)) || // if enabled previously, keep using
                 exists(preallocPath(1)) ||
-                ( cmdLine.preallocj && preallocateIsFaster() ) ) {
+                (storageGlobalParams.preallocj && preallocateIsFaster()) ) {
                     usingPreallocate = true;
                     try {
                         _preallocateFiles();

@@ -12,14 +12,36 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #pragma once
 
-#include "mongo/pch.h"
+#include <string>
+#include <vector>
+
+#include "mongo/base/owned_pointer_vector.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/geo/s2.h"
+#include "third_party/s2/s2cap.h"
+#include "third_party/s2/s2cell.h"
+#include "third_party/s2/s2latlng.h"
+#include "third_party/s2/s2polygon.h"
+#include "third_party/s2/s2polyline.h"
 
 namespace mongo {
+
     struct Point;
     double distance(const Point& p1, const Point &p2);
     bool distanceWithin(const Point &p1, const Point &p2, double radius);
@@ -103,4 +125,77 @@ namespace mongo {
         bool _boundsCalculated;
         vector<Point> _points;
     };
+
+    // Clearly this isn't right but currently it's sufficient.
+    enum CRS {
+        FLAT,
+        SPHERE
+    };
+
+    struct PointWithCRS {
+        PointWithCRS() : flatUpgradedToSphere(false) { }
+        S2Point point;
+        S2Cell cell;
+        Point oldPoint;
+        CRS crs;
+        // If crs is FLAT, we might be able to upgrade the point to SPHERE if it's a valid SPHERE
+        // point (lng/lat in bounds).  In this case, we can use FLAT data with SPHERE predicates.
+        bool flatUpgradedToSphere;
+    };
+
+    struct LineWithCRS {
+        S2Polyline line;
+        CRS crs;
+    };
+
+    struct CapWithCRS {
+        S2Cap cap;
+        Circle circle;
+        CRS crs;
+    };
+
+    struct BoxWithCRS {
+        Box box;
+        CRS crs;
+    };
+
+    struct PolygonWithCRS {
+        S2Polygon polygon;
+        Polygon oldPolygon;
+        CRS crs;
+    };
+
+    struct MultiPointWithCRS {
+        vector<S2Point> points;
+        vector<S2Cell> cells;
+        CRS crs;
+    };
+
+    struct MultiLineWithCRS {
+        OwnedPointerVector<S2Polyline> lines;
+        CRS crs;
+    };
+
+    struct MultiPolygonWithCRS {
+        OwnedPointerVector<S2Polygon> polygons;
+        CRS crs;
+    };
+
+    struct GeometryCollection {
+        vector<PointWithCRS> points;
+
+        // The amount of indirection here is painful but we can't operator= scoped_ptr or
+        // OwnedPointerVector.
+        OwnedPointerVector<LineWithCRS> lines;
+        OwnedPointerVector<PolygonWithCRS> polygons;
+        OwnedPointerVector<MultiPointWithCRS> multiPoints;
+        OwnedPointerVector<MultiLineWithCRS> multiLines;
+        OwnedPointerVector<MultiPolygonWithCRS> multiPolygons;
+
+        bool supportsContains() {
+            // Only polygons (and multiPolygons) support containment.
+            return (polygons.vector().size() > 0 || multiPolygons.vector().size() > 0);
+        }
+    };
+
 }  // namespace mongo

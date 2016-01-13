@@ -14,6 +14,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 /*
@@ -24,19 +36,19 @@
      @see https://docs.google.com/drawings/edit?id=1TklsmZzm7ohIZkwgeK6rMvsdaR13KjtJYMsfLr175Zc
 */
 
-#include "pch.h"
-#include "cmdline.h"
-#include "dur.h"
-#include "dur_journal.h"
-#include "dur_journalimpl.h"
-#include "dur_commitjob.h"
-#include "../util/mongoutils/hash.h"
-#include "../util/mongoutils/str.h"
-#include "../util/alignedbuilder.h"
+#include "mongo/pch.h"
+
+#include "mongo/db/dur.h"
+#include "mongo/db/dur_commitjob.h"
+#include "mongo/db/dur_journal.h"
+#include "mongo/db/dur_journalimpl.h"
+#include "mongo/db/dur_stats.h"
+#include "mongo/server.h"
+#include "mongo/util/alignedbuilder.h"
+#include "mongo/util/mongoutils/hash.h"
+#include "mongo/util/mongoutils/str.h"
 #include "mongo/util/stacktrace.h"
-#include "../util/timer.h"
-#include "dur_stats.h"
-#include "../server.h"
+#include "mongo/util/timer.h"
 
 using namespace mongoutils;
 
@@ -47,8 +59,8 @@ namespace mongo {
 
         RelativePath local = RelativePath::fromRelativePath("local");
 
-        static MongoMMF* findMMF_inlock(void *ptr, size_t &ofs) {
-            MongoMMF *f = privateViews.find_inlock(ptr, ofs);
+        static DurableMappedFile* findMMF_inlock(void *ptr, size_t &ofs) {
+            DurableMappedFile *f = privateViews.find_inlock(ptr, ofs);
             if( f == 0 ) {
                 error() << "findMMF_inlock failed " << privateViews.numberOfViews_inlock() << endl;
                 printStackTrace(); // we want a stack trace and the assert below didn't print a trace once in the real world - not sure why
@@ -62,7 +74,7 @@ namespace mongo {
         /** put the basic write operation into the buffer (bb) to be journaled */
         static void prepBasicWrite_inlock(AlignedBuilder&bb, const WriteIntent *i, RelativePath& lastDbPath) {
             size_t ofs = 1;
-            MongoMMF *mmf = findMMF_inlock(i->start(), /*out*/ofs);
+            DurableMappedFile *mmf = findMMF_inlock(i->start(), /*out*/ofs);
 
             if( unlikely(!mmf->willNeedRemap()) ) {
                 // tag this mmf as needed a remap of its private view later.
@@ -72,7 +84,7 @@ namespace mongo {
             }
 
             // since we have already looked up the mmf, we go ahead and remember the write view location
-            // so we don't have to find the MongoMMF again later in WRITETODATAFILES()
+            // so we don't have to find the DurableMappedFile again later in WRITETODATAFILES()
             // 
             // this was for WRITETODATAFILES_Impl2 so commented out now
             //
@@ -129,7 +141,12 @@ namespace mongo {
 
             assertNothingSpooled();
             const vector<WriteIntent>& _intents = commitJob.getIntentsSorted();
-            verify( !_intents.empty() );
+
+            // right now the durability code assumes there is at least one write intent
+            // this does not have to be true in theory as i could just add or delete a file
+            // callers have to ensure they do at least something for now even though its ugly
+            // until this can be addressed
+            fassert( 17388, !_intents.empty() );
 
             WriteIntent last;
             for( vector<WriteIntent>::const_iterator i = _intents.begin(); i != _intents.end(); i++ ) { 
@@ -161,7 +178,7 @@ namespace mongo {
             @return partially populated sectheader and _ab set
         */
         static void _PREPLOGBUFFER(JSectHeader& h, AlignedBuilder& bb) {
-            verify( cmdLine.dur );
+            verify(storageGlobalParams.dur);
             assertLockedForCommitting();
 
             resetLogBuffer(h, bb); // adds JSectHeader

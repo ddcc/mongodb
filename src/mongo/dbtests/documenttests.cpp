@@ -14,15 +14,26 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include "mongo/db/pipeline/document.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/value.h"
-
-#include "dbtests.h"
+#include "mongo/dbtests/dbtests.h"
 
 namespace DocumentTests {
 
@@ -38,13 +49,11 @@ namespace DocumentTests {
         using mongo::Document;
 
         BSONObj toBson( const Document& document ) {
-            BSONObjBuilder bob;
-            document->toBson( &bob );
-            return bob.obj();
+            return document.toBson();
         }
 
         Document fromBson( BSONObj obj ) {
-            return Document::createFromBsonObj( &obj );
+            return Document(obj);
         }
 
         void assertRoundTrips( const Document& document1 ) {
@@ -52,7 +61,7 @@ namespace DocumentTests {
             Document document2 = fromBson( obj1 );
             BSONObj obj2 = toBson( document2 );
             ASSERT_EQUALS( obj1, obj2 );
-            ASSERT_EQUALS( 0, Document::compare( document1, document2 ) );
+            ASSERT_EQUALS( document1, document2 );
         }
 
         /** Create a Document. */
@@ -60,7 +69,7 @@ namespace DocumentTests {
         public:
             void run() {
                 Document document;
-                ASSERT_EQUALS( 0U, document->getFieldCount() );
+                ASSERT_EQUALS( 0U, document.size() );
                 assertRoundTrips( document );
             }
         };
@@ -70,9 +79,9 @@ namespace DocumentTests {
         public:
             void run() {
                 Document document = fromBson( BSONObj() );
-                ASSERT_EQUALS( 0U, document->getFieldCount() );
+                ASSERT_EQUALS( 0U, document.size() );
                 document = fromBson( BSON( "a" << 1 << "b" << "q" ) );
-                ASSERT_EQUALS( 2U, document->getFieldCount() );
+                ASSERT_EQUALS( 2U, document.size() );
                 ASSERT_EQUALS( "a", getNthField(document, 0).first.toString() );
                 ASSERT_EQUALS( 1,   getNthField(document, 0).second.getInt() );
                 ASSERT_EQUALS( "b", getNthField(document, 1).first.toString() );
@@ -86,17 +95,17 @@ namespace DocumentTests {
         public:
             void run() {
                 MutableDocument md;
-                md.addField( "foo", Value::createInt( 1 ) );
-                ASSERT_EQUALS( 1U, md.peek().getFieldCount() );
-                ASSERT_EQUALS( 1, md.peek().getValue( "foo" ).getInt() );
-                md.addField( "bar", Value::createInt( 99 ) );
-                ASSERT_EQUALS( 2U, md.peek().getFieldCount() );
-                ASSERT_EQUALS( 99, md.peek().getValue( "bar" ).getInt() );
+                md.addField( "foo", Value( 1 ) );
+                ASSERT_EQUALS( 1U, md.peek().size() );
+                ASSERT_EQUALS( 1, md.peek()["foo"].getInt() );
+                md.addField( "bar", Value( 99 ) );
+                ASSERT_EQUALS( 2U, md.peek().size() );
+                ASSERT_EQUALS( 99, md.peek()["bar"].getInt() );
                 // No assertion is triggered by a duplicate field name.
-                md.addField( "a", Value::createInt( 5 ) );
+                md.addField( "a", Value( 5 ) );
 
                 Document final = md.freeze();
-                ASSERT_EQUALS( 3U, final.getFieldCount() );
+                ASSERT_EQUALS( 3U, final.size() );
                 assertRoundTrips( final );
             }
         };
@@ -106,13 +115,13 @@ namespace DocumentTests {
         public:
             void run() {
                 Document document = fromBson( BSON( "a" << 1 << "b" << 2.2 ) );
-                ASSERT_EQUALS( 1, document->getValue( "a" ).getInt() );
-                ASSERT_EQUALS( 1, document->getField( "a" ).getInt() );
-                ASSERT_EQUALS( 2.2, document->getValue( "b" ).getDouble() );
-                ASSERT_EQUALS( 2.2, document->getField( "b" ).getDouble() );
+                ASSERT_EQUALS( 1, document["a"].getInt() );
+                ASSERT_EQUALS( 1, document["a"].getInt() );
+                ASSERT_EQUALS( 2.2, document["b"].getDouble() );
+                ASSERT_EQUALS( 2.2, document["b"].getDouble() );
                 // Missing field.
-                ASSERT( document->getValue( "c" ).missing() );
-                ASSERT( document->getField( "c" ).missing() );
+                ASSERT( document["c"].missing() );
+                ASSERT( document["c"].missing() );
                 assertRoundTrips( document );
             }
         };
@@ -132,42 +141,42 @@ namespace DocumentTests {
 
                 // Set the first field.
                 md.setField( "a" , Value( "foo" ) );
-                ASSERT_EQUALS( 3U, md.peek().getFieldCount() );
-                ASSERT_EQUALS( "foo", md.peek().getValue( "a" ).getString() );
+                ASSERT_EQUALS( 3U, md.peek().size() );
+                ASSERT_EQUALS( "foo", md.peek()["a"].getString() );
                 ASSERT_EQUALS( "foo", getNthField(md.peek(), 0).second.getString() );
                 assertRoundTrips( md.peek() );
                 // Set the second field.
                 md["b"] = Value("bar");
-                ASSERT_EQUALS( 3U, md.peek().getFieldCount() );
-                ASSERT_EQUALS( "bar", md.peek().getValue( "b" ).getString() );
+                ASSERT_EQUALS( 3U, md.peek().size() );
+                ASSERT_EQUALS( "bar", md.peek()["b"].getString() );
                 ASSERT_EQUALS( "bar", getNthField(md.peek(), 1).second.getString() );
                 assertRoundTrips( md.peek() );
 
                 // Remove the second field.
                 md.setField("b", Value());
                 PRINT(md.peek().toString());
-                ASSERT_EQUALS( 2U, md.peek().getFieldCount() );
-                ASSERT( md.peek().getValue( "b" ).missing() );
+                ASSERT_EQUALS( 2U, md.peek().size() );
+                ASSERT( md.peek()["b"].missing() );
                 ASSERT_EQUALS( "a", getNthField(md.peek(), 0 ).first.toString() );
                 ASSERT_EQUALS( "c", getNthField(md.peek(), 1 ).first.toString() );
-                ASSERT_EQUALS( 99, md.peek().getValue("c").getInt() );
+                ASSERT_EQUALS( 99, md.peek()["c"].getInt() );
                 assertRoundTrips( md.peek() );
 
                 // Remove the first field.
                 md["a"] = Value();
-                ASSERT_EQUALS( 1U, md.peek().getFieldCount() );
-                ASSERT( md.peek().getValue( "a" ).missing() );
+                ASSERT_EQUALS( 1U, md.peek().size() );
+                ASSERT( md.peek()["a"].missing() );
                 ASSERT_EQUALS( "c", getNthField(md.peek(), 0 ).first.toString() );
-                ASSERT_EQUALS( 99, md.peek().getValue("c").getInt() );
+                ASSERT_EQUALS( 99, md.peek()["c"].getInt() );
                 assertRoundTrips( md.peek() );
 
                 // Remove the final field. Verify document is empty.
                 md.remove("c");
                 ASSERT( md.peek().empty() );
-                ASSERT_EQUALS( 0U, md.peek().getFieldCount() );
-                ASSERT_EQUALS( 0, Document::compare(md.peek(), Document()) );
+                ASSERT_EQUALS( 0U, md.peek().size() );
+                ASSERT_EQUALS( md.peek(), Document() );
                 ASSERT( !FieldIterator(md.peek()).more() );
-                ASSERT( md.peek().getValue( "c" ).missing() );
+                ASSERT( md.peek()["c"].missing() );
                 assertRoundTrips( md.peek() );
 
                 // Set a nested field using []
@@ -227,7 +236,7 @@ namespace DocumentTests {
             }
             size_t hash( const BSONObj& obj ) {
                 size_t seed = 0x106e1e1;
-                fromBson( obj )->hash_combine( seed );
+                Document(obj).hash_combine(seed);
                 return seed;
             }
         };
@@ -253,29 +262,29 @@ namespace DocumentTests {
                 MutableDocument cloneOnDemand (document);
 
                 // Check equality.
-                ASSERT_EQUALS( 0, Document::compare( document, cloneOnDemand.peek() ) );
+                ASSERT_EQUALS(document, cloneOnDemand.peek());
                 // Check pointer equality of sub document.
-                ASSERT_EQUALS( document->getValue( "a" ).getDocument().getPtr(),
-                               cloneOnDemand.peek().getValue( "a" ).getDocument().getPtr() );
+                ASSERT_EQUALS( document["a"].getDocument().getPtr(),
+                               cloneOnDemand.peek()["a"].getDocument().getPtr() );
 
 
                 // Change field in clone and ensure the original document's field is unchanged.
                 cloneOnDemand.setField( StringData("a"), Value(2) );
-                ASSERT_EQUALS( Value(1), document->getNestedField(FieldPath("a.b")) );
+                ASSERT_EQUALS( Value(1), document.getNestedField(FieldPath("a.b")) );
 
 
                 // setNestedField and ensure the original document is unchanged.
 
                 cloneOnDemand.reset(document);
                 vector<Position> path;
-                ASSERT_EQUALS( Value(1), document->getNestedField(FieldPath("a.b"), &path) );
+                ASSERT_EQUALS( Value(1), document.getNestedField(FieldPath("a.b"), &path) );
 
                 cloneOnDemand.setNestedField(path, Value(2));
 
                 ASSERT_EQUALS( Value(1), document.getNestedField(FieldPath("a.b")) );
                 ASSERT_EQUALS( Value(2), cloneOnDemand.peek().getNestedField(FieldPath("a.b")) );
-                ASSERT_EQUALS( BSON( "a" << BSON( "b" << 1 ) ), toBson( document ) );
-                ASSERT_EQUALS( BSON( "a" << BSON( "b" << 2 ) ), toBson( cloneOnDemand.freeze() ) );
+                ASSERT_EQUALS( DOC( "a" << DOC( "b" << 1 ) ), document );
+                ASSERT_EQUALS( DOC( "a" << DOC( "b" << 2 ) ), cloneOnDemand.freeze() );
             }
         };
 
@@ -285,8 +294,8 @@ namespace DocumentTests {
             void run() {
                 Document document =
                         fromBson( fromjson( "{a:1,b:['ra',4],c:{z:1},d:'lal'}" ) );
-                Document clonedDocument = document->clone();
-                ASSERT_EQUALS( 0, Document::compare( document, clonedDocument ) );
+                Document clonedDocument = document.clone();
+                ASSERT_EQUALS(document, clonedDocument);
             }
         };
 
@@ -388,15 +397,21 @@ namespace DocumentTests {
 
                 // logical equality
                 ASSERT_EQUALS(obj, obj2);
-                if (Document::compare(doc, doc2)) {
-                    PRINT(doc);
-                    PRINT(doc2);
-                }
-                ASSERT_EQUALS(Document::compare(doc, doc2), 0);
+                ASSERT_EQUALS(doc, doc2);
 
                 // binary equality
                 ASSERT_EQUALS(obj.objsize(), obj2.objsize());
                 ASSERT_EQUALS(memcmp(obj.objdata(), obj2.objdata(), obj.objsize()), 0);
+
+                // ensure sorter serialization round-trips correctly
+                BufBuilder bb;
+                doc.serializeForSorter(bb);
+                BufReader reader(bb.buf(), bb.len());
+                const Document doc3 = Document::deserializeForSorter(
+                                                    reader, Document::SorterDeserializeSettings());
+                BSONObj obj3 = toBson(doc3);
+                ASSERT_EQUALS(obj.objsize(), obj3.objsize());
+                ASSERT_EQUALS(memcmp(obj.objdata(), obj3.objdata(), obj.objsize()), 0);
             }
 
             template <typename T>
@@ -429,7 +444,7 @@ namespace DocumentTests {
 
         Value fromBson( const BSONObj& obj ) {
             BSONElement element = obj.firstElement();
-            return Value::createFromBsonElement( &element );
+            return Value( element );
         }
 
         void assertRoundTrips( const Value& value1 ) {
@@ -441,11 +456,19 @@ namespace DocumentTests {
             ASSERT_EQUALS(value1.getType(), value2.getType());
         }
 
+        class BSONArrayTest {
+        public:
+            void run() {
+                ASSERT_EQUALS(Value(BSON_ARRAY(1 << 2 << 3)), DOC_ARRAY(1 << 2 << 3));
+                ASSERT_EQUALS(Value(BSONArray()), Value(vector<Value>()));
+            }
+        };
+
         /** Int type. */
         class Int {
         public:
             void run() {
-                Value value = Value::createInt( 5 );
+                Value value = Value( 5 );
                 ASSERT_EQUALS( 5, value.getInt() );
                 ASSERT_EQUALS( 5, value.getLong() );
                 ASSERT_EQUALS( 5, value.getDouble() );
@@ -458,7 +481,7 @@ namespace DocumentTests {
         class Long {
         public:
             void run() {
-                Value value = Value::createLong( 99 );
+                Value value = Value( 99LL );
                 ASSERT_EQUALS( 99, value.getLong() );
                 ASSERT_EQUALS( 99, value.getDouble() );
                 ASSERT_EQUALS( NumberLong, value.getType() );
@@ -470,7 +493,7 @@ namespace DocumentTests {
         class Double {
         public:
             void run() {
-                Value value = Value::createDouble( 5.5 );
+                Value value = Value( 5.5 );
                 ASSERT_EQUALS( 5.5, value.getDouble() );
                 ASSERT_EQUALS( NumberDouble, value.getType() );
                 assertRoundTrips( value );
@@ -481,7 +504,7 @@ namespace DocumentTests {
         class String {
         public:
             void run() {
-                Value value = Value::createString( "foo" );
+                Value value = Value( "foo" );
                 ASSERT_EQUALS( "foo", value.getString() );
                 ASSERT_EQUALS( mongo::String, value.getType() );
                 assertRoundTrips( value );
@@ -505,7 +528,7 @@ namespace DocumentTests {
         class Date {
         public:
             void run() {
-                Value value = Value::createDate(999);
+                Value value = Value(Date_t(999));
                 ASSERT_EQUALS( 999, value.getDate() );
                 ASSERT_EQUALS( mongo::Date, value.getType() );
                 assertRoundTrips( value );
@@ -516,7 +539,7 @@ namespace DocumentTests {
         class Timestamp {
         public:
             void run() {
-                Value value = Value::createTimestamp( OpTime( 777 ) );
+                Value value = Value( OpTime( 777 ) );
                 ASSERT( OpTime( 777 ) == value.getTimestamp() );
                 ASSERT_EQUALS( mongo::Timestamp, value.getType() );
                 assertRoundTrips( value );
@@ -528,7 +551,7 @@ namespace DocumentTests {
         public:
             void run() {
                 mongo::Document document = mongo::Document();
-                Value value = Value::createDocument( document );
+                Value value = Value( document );
                 ASSERT_EQUALS( document.getPtr(), value.getDocument().getPtr() );
                 ASSERT_EQUALS( Object, value.getType() );                
                 assertRoundTrips( value );
@@ -540,18 +563,18 @@ namespace DocumentTests {
         public:
             void run() {
                 mongo::MutableDocument md;
-                md.addField( "a", Value::createInt( 5 ) );
-                md.addField( "apple", Value::createString( "rrr" ) );
-                md.addField( "banana", Value::createDouble( -.3 ) );
+                md.addField( "a", Value( 5 ) );
+                md.addField( "apple", Value( "rrr" ) );
+                md.addField( "banana", Value( -.3 ) );
                 mongo::Document document = md.freeze();
 
-                Value value = Value::createDocument( document );
+                Value value = Value( document );
                 // Check document pointers are equal.
                 ASSERT_EQUALS( document.getPtr(), value.getDocument().getPtr() );
                 // Check document contents.
-                ASSERT_EQUALS( 5, document->getValue( "a" ).getInt() );
-                ASSERT_EQUALS( "rrr", document->getValue( "apple" ).getString() );
-                ASSERT_EQUALS( -.3, document->getValue( "banana" ).getDouble() );
+                ASSERT_EQUALS( 5, document["a"].getInt() );
+                ASSERT_EQUALS( "rrr", document["apple"].getString() );
+                ASSERT_EQUALS( -.3, document["banana"].getDouble() );
                 ASSERT_EQUALS( Object, value.getType() );                
                 assertRoundTrips( value );
             }
@@ -577,10 +600,10 @@ namespace DocumentTests {
         public:
             void run() {
                 vector<Value> array;
-                array.push_back( Value::createInt( 5 ) );
-                array.push_back( Value::createString( "lala" ) );
-                array.push_back( Value::createDouble( 3.14 ) );
-                Value value = Value::createArray( array );
+                array.push_back( Value( 5 ) );
+                array.push_back( Value( "lala" ) );
+                array.push_back( Value( 3.14 ) );
+                Value value = Value( array );
                 const vector<Value>& array2 = value.getArray();
 
                 ASSERT( !array2.empty() );
@@ -643,7 +666,7 @@ namespace DocumentTests {
         class Undefined {
         public:
             void run() {
-                Value value = Value(mongo::Undefined);
+                Value value = Value(BSONUndefined);
                 ASSERT_EQUALS( mongo::Undefined, value.getType() );
                 assertRoundTrips( value );
             }
@@ -653,7 +676,7 @@ namespace DocumentTests {
         class Null {
         public:
             void run() {
-                Value value = Value(mongo::jstNULL);
+                Value value = Value(BSONNULL);
                 ASSERT_EQUALS( jstNULL, value.getType() );
                 assertRoundTrips( value );
             }
@@ -738,56 +761,56 @@ namespace DocumentTests {
 
             /** Coerce 0 to bool. */
             class ZeroIntToBool : public ToBoolFalse {
-                Value value() { return Value::createInt( 0 ); }
+                Value value() { return Value( 0 ); }
             };
             
             /** Coerce -1 to bool. */
             class NonZeroIntToBool : public ToBoolTrue {
-                Value value() { return Value::createInt( -1 ); }
+                Value value() { return Value( -1 ); }
             };
             
             /** Coerce 0LL to bool. */
             class ZeroLongToBool : public ToBoolFalse {
-                Value value() { return Value::createLong( 0 ); }
+                Value value() { return Value( 0LL ); }
             };
             
             /** Coerce 5LL to bool. */
             class NonZeroLongToBool : public ToBoolTrue {
-                Value value() { return Value::createLong( 5 ); }
+                Value value() { return Value( 5LL ); }
             };
             
             /** Coerce 0.0 to bool. */
             class ZeroDoubleToBool : public ToBoolFalse {
-                Value value() { return Value::createDouble( 0 ); }
+                Value value() { return Value( 0 ); }
             };
             
             /** Coerce -1.3 to bool. */
             class NonZeroDoubleToBool : public ToBoolTrue {
-                Value value() { return Value::createDouble( -1.3 ); }
+                Value value() { return Value( -1.3 ); }
             };
 
             /** Coerce "" to bool. */
             class StringToBool : public ToBoolTrue {
-                Value value() { return Value::createString( "" ); }                
+                Value value() { return Value( "" ); }
             };
             
             /** Coerce {} to bool. */
             class ObjectToBool : public ToBoolTrue {
                 Value value() {
-                    return Value::createDocument( mongo::Document() );
+                    return Value( mongo::Document() );
                 }
             };
             
             /** Coerce [] to bool. */
             class ArrayToBool : public ToBoolTrue {
                 Value value() {
-                    return Value::createArray( vector<Value>() );
+                    return Value( vector<Value>() );
                 }
             };
 
             /** Coerce Date(0) to bool. */
             class DateToBool : public ToBoolTrue {
-                Value value() { return Value::createDate(0); }
+                Value value() { return Value(Date_t(0)); }
             };
             
             /** Coerce js literal regex to bool. */
@@ -807,12 +830,12 @@ namespace DocumentTests {
             
             /** Coerce null to bool. */
             class NullToBool : public ToBoolFalse {
-                Value value() { return Value(mongo::jstNULL); }
+                Value value() { return Value(BSONNULL); }
             };
             
             /** Coerce undefined to bool. */
             class UndefinedToBool : public ToBoolFalse {
-                Value value() { return Value(mongo::Undefined); }
+                Value value() { return Value(BSONUndefined); }
             };
 
             class ToIntBase {
@@ -833,31 +856,31 @@ namespace DocumentTests {
 
             /** Coerce -5 to int. */
             class IntToInt : public ToIntBase {
-                Value value() { return Value::createInt( -5 ); }
+                Value value() { return Value( -5 ); }
                 int expected() { return -5; }
             };
             
             /** Coerce long to int. */
             class LongToInt : public ToIntBase {
-                Value value() { return Value::createLong( 0xff00000007LL ); }
+                Value value() { return Value( 0xff00000007LL ); }
                 int expected() { return 7; }
             };
             
             /** Coerce 9.8 to int. */
             class DoubleToInt : public ToIntBase {
-                Value value() { return Value::createDouble( 9.8 ); }
+                Value value() { return Value( 9.8 ); }
                 int expected() { return 9; }
             };
             
             /** Coerce null to int. */
             class NullToInt : public ToIntBase {
-                Value value() { return Value(mongo::jstNULL); }
+                Value value() { return Value(BSONNULL); }
                 bool asserts() { return true; }
             };
             
             /** Coerce undefined to int. */
             class UndefinedToInt : public ToIntBase {
-                Value value() { return Value(mongo::Undefined); }
+                Value value() { return Value(BSONUndefined); }
                 bool asserts() { return true; }
             };
             
@@ -865,7 +888,7 @@ namespace DocumentTests {
             class StringToInt {
             public:
                 void run() {
-                    ASSERT_THROWS( Value::createString( "" ).coerceToInt(), UserException );
+                    ASSERT_THROWS( Value( "" ).coerceToInt(), UserException );
                 }
             };
             
@@ -887,31 +910,31 @@ namespace DocumentTests {
             
             /** Coerce -5 to long. */
             class IntToLong : public ToLongBase {
-                Value value() { return Value::createInt( -5 ); }
+                Value value() { return Value( -5 ); }
                 long long expected() { return -5; }
             };
             
             /** Coerce long to long. */
             class LongToLong : public ToLongBase {
-                Value value() { return Value::createLong( 0xff00000007LL ); }
+                Value value() { return Value( 0xff00000007LL ); }
                 long long expected() { return 0xff00000007LL; }
             };
             
             /** Coerce 9.8 to long. */
             class DoubleToLong : public ToLongBase {
-                Value value() { return Value::createDouble( 9.8 ); }
+                Value value() { return Value( 9.8 ); }
                 long long expected() { return 9; }
             };
             
             /** Coerce null to long. */
             class NullToLong : public ToLongBase {
-                Value value() { return Value(mongo::jstNULL); }
+                Value value() { return Value(BSONNULL); }
                 bool asserts() { return true; }
             };
             
             /** Coerce undefined to long. */
             class UndefinedToLong : public ToLongBase {
-                Value value() { return Value(mongo::Undefined); }
+                Value value() { return Value(BSONUndefined); }
                 bool asserts() { return true; }
             };
             
@@ -919,7 +942,7 @@ namespace DocumentTests {
             class StringToLong {
             public:
                 void run() {
-                    ASSERT_THROWS( Value::createString( "" ).coerceToLong(), UserException );
+                    ASSERT_THROWS( Value( "" ).coerceToLong(), UserException );
                 }
             };
             
@@ -941,7 +964,7 @@ namespace DocumentTests {
             
             /** Coerce -5 to double. */
             class IntToDouble : public ToDoubleBase {
-                Value value() { return Value::createInt( -5 ); }
+                Value value() { return Value( -5 ); }
                 double expected() { return -5; }
             };
             
@@ -949,26 +972,26 @@ namespace DocumentTests {
             class LongToDouble : public ToDoubleBase {
                 Value value() {
                     // A long that cannot be exactly represented as a double.
-                    return Value::createDouble( static_cast<double>( 0x8fffffffffffffffLL ) );
+                    return Value( static_cast<double>( 0x8fffffffffffffffLL ) );
                 }
                 double expected() { return static_cast<double>( 0x8fffffffffffffffLL ); }
             };
             
             /** Coerce double to double. */
             class DoubleToDouble : public ToDoubleBase {
-                Value value() { return Value::createDouble( 9.8 ); }
+                Value value() { return Value( 9.8 ); }
                 double expected() { return 9.8; }
             };
             
             /** Coerce null to double. */
             class NullToDouble : public ToDoubleBase {
-                Value value() { return Value(mongo::jstNULL); }
+                Value value() { return Value(BSONNULL); }
                 bool asserts() { return true; }
             };
             
             /** Coerce undefined to double. */
             class UndefinedToDouble : public ToDoubleBase {
-                Value value() { return Value(mongo::Undefined); }
+                Value value() { return Value(BSONUndefined); }
                 bool asserts() { return true; }
             };
             
@@ -976,7 +999,7 @@ namespace DocumentTests {
             class StringToDouble {
             public:
                 void run() {
-                    ASSERT_THROWS( Value::createString( "" ).coerceToDouble(), UserException );
+                    ASSERT_THROWS( Value( "" ).coerceToDouble(), UserException );
                 }
             };
 
@@ -994,7 +1017,7 @@ namespace DocumentTests {
 
             /** Coerce date to date. */
             class DateToDate : public ToDateBase {
-                Value value() { return Value::createDate(888); }
+                Value value() { return Value(Date_t(888)); }
                 long long expected() { return 888; }
             };
 
@@ -1004,7 +1027,7 @@ namespace DocumentTests {
              */
             class TimestampToDate : public ToDateBase {
                 Value value() {
-                    return Value::createTimestamp( OpTime( 777, 666 ) );
+                    return Value( OpTime( 777, 666 ) );
                 }
                 long long expected() { return 777 * 1000; }
             };
@@ -1013,7 +1036,7 @@ namespace DocumentTests {
             class StringToDate {
             public:
                 void run() {
-                    ASSERT_THROWS( Value::createString( "" ).coerceToDate(), UserException );
+                    ASSERT_THROWS( Value( "" ).coerceToDate(), UserException );
                 }
             };
             
@@ -1031,57 +1054,57 @@ namespace DocumentTests {
 
             /** Coerce -0.2 to string. */
             class DoubleToString : public ToStringBase {
-                Value value() { return Value::createDouble( -0.2 ); }
+                Value value() { return Value( -0.2 ); }
                 string expected() { return "-0.2"; }
             };
             
             /** Coerce -4 to string. */
             class IntToString : public ToStringBase {
-                Value value() { return Value::createInt( -4 ); }
+                Value value() { return Value( -4 ); }
                 string expected() { return "-4"; }
             };
             
             /** Coerce 10000LL to string. */
             class LongToString : public ToStringBase {
-                Value value() { return Value::createLong( 10000 ); }
+                Value value() { return Value( 10000LL ); }
                 string expected() { return "10000"; }
             };
             
             /** Coerce string to string. */
             class StringToString : public ToStringBase {
-                Value value() { return Value::createString( "fO_o" ); }
+                Value value() { return Value( "fO_o" ); }
                 string expected() { return "fO_o"; }
             };
             
             /** Coerce timestamp to string. */
             class TimestampToString : public ToStringBase {
                 Value value() {
-                    return Value::createTimestamp( OpTime( 1, 2 ) );
+                    return Value( OpTime( 1, 2 ) );
                 }
                 string expected() { return OpTime( 1, 2 ).toStringPretty(); }
             };
             
             /** Coerce date to string. */
             class DateToString : public ToStringBase {
-                Value value() { return Value::createDate(1234567890LL*1000); }
+                Value value() { return Value(Date_t(1234567890LL*1000)); }
                 string expected() { return "2009-02-13T23:31:30"; } // from js
             };
 
             /** Coerce null to string. */
             class NullToString : public ToStringBase {
-                Value value() { return Value(mongo::jstNULL); }
+                Value value() { return Value(BSONNULL); }
             };
 
             /** Coerce undefined to string. */
             class UndefinedToString : public ToStringBase {
-                Value value() { return Value(mongo::Undefined); }
+                Value value() { return Value(BSONUndefined); }
             };
 
             /** Coerce document to string unsupported. */
             class DocumentToString {
             public:
                 void run() {
-                    ASSERT_THROWS( Value::createDocument
+                    ASSERT_THROWS( Value
                                         ( mongo::Document() ).coerceToString(),
                                    UserException );
                 }
@@ -1091,7 +1114,7 @@ namespace DocumentTests {
             class TimestampToTimestamp {
             public:
                 void run() {
-                    Value value = Value::createTimestamp( OpTime( 1010 ) );
+                    Value value = Value( OpTime( 1010 ) );
                     ASSERT( OpTime( 1010 ) == value.coerceToTimestamp() );
                 }
             };
@@ -1100,7 +1123,7 @@ namespace DocumentTests {
             class DateToTimestamp {
             public:
                 void run() {
-                    ASSERT_THROWS( Value::createDate(1010).coerceToTimestamp(),
+                    ASSERT_THROWS( Value(Date_t(1010)).coerceToTimestamp(),
                                    UserException );
                 }
             };
@@ -1150,9 +1173,9 @@ namespace DocumentTests {
         public:
             void run() {
                 BSONObjBuilder bob;
-                Value::createDouble( 4.4 ).addToBsonObj( &bob, "a" );
-                Value::createInt( 22 ).addToBsonObj( &bob, "b" );
-                Value::createString( "astring" ).addToBsonObj( &bob, "c" );
+                Value( 4.4 ).addToBsonObj( &bob, "a" );
+                Value( 22 ).addToBsonObj( &bob, "b" );
+                Value( "astring" ).addToBsonObj( &bob, "c" );
                 ASSERT_EQUALS( BSON( "a" << 4.4 << "b" << 22 << "c" << "astring" ), bob.obj() );
             }
         };
@@ -1162,9 +1185,9 @@ namespace DocumentTests {
         public:
             void run() {
                 BSONArrayBuilder bab;
-                Value::createDouble( 4.4 ).addToBsonArray( &bab );
-                Value::createInt( 22 ).addToBsonArray( &bab );
-                Value::createString( "astring" ).addToBsonArray( &bab );
+                Value( 4.4 ).addToBsonArray( &bab );
+                Value( 22 ).addToBsonArray( &bab );
+                Value( "astring" ).addToBsonArray( &bab );
                 ASSERT_EQUALS( BSON_ARRAY( 4.4 << 22 << "astring" ), bab.arr() );
             }
         };
@@ -1256,17 +1279,17 @@ namespace DocumentTests {
 
                 // Cross-type comparisons. Listed in order of canonical types.
                 assertComparison(-1, Value(mongo::MINKEY), Value());
-                assertComparison(0,  Value(), Value(mongo::EOO));
-                assertComparison(0,  Value(), Value(mongo::Undefined));
-                assertComparison(-1, Value(mongo::Undefined), Value(mongo::jstNULL));
-                assertComparison(-1, Value(mongo::jstNULL), Value(1));
+                assertComparison(0,  Value(), Value());
+                assertComparison(0,  Value(), Value(BSONUndefined));
+                assertComparison(-1, Value(BSONUndefined), Value(BSONNULL));
+                assertComparison(-1, Value(BSONNULL), Value(1));
                 assertComparison(0,  Value(1), Value(1LL));
                 assertComparison(0,  Value(1), Value(1.0));
                 assertComparison(-1, Value(1), Value("string"));
                 assertComparison(0,  Value("string"), Value(BSONSymbol("string")));
                 assertComparison(-1, Value("string"), Value(mongo::Document()));
-                assertComparison(-1, Value(mongo::Document()), Value(mongo::Array));
-                assertComparison(-1, Value(mongo::Array), Value(BSONBinData("", 0, MD5Type)));
+                assertComparison(-1, Value(mongo::Document()), Value(vector<Value>()));
+                assertComparison(-1, Value(vector<Value>()), Value(BSONBinData("", 0, MD5Type)));
                 assertComparison(-1, Value(BSONBinData("", 0, MD5Type)), Value(mongo::OID()));
                 assertComparison(-1, Value(mongo::OID()), Value(false));
                 assertComparison(-1, Value(false), Value(OpTime()));
@@ -1301,7 +1324,8 @@ namespace DocumentTests {
                 assertComparison(expectedResult, fromBson(a), fromBson(b));
             }
             void assertComparison(int expectedResult, const Value& a, const Value& b) {
-                log() << "testing " << a.toString() << " and " << b.toString() << endl;
+                mongo::unittest::log() <<
+                    "testing " << a.toString() << " and " << b.toString() << endl;
                 // reflexivity
                 ASSERT_EQUALS(0, cmp(a, a));
                 ASSERT_EQUALS(0, cmp(b, b));
@@ -1310,9 +1334,14 @@ namespace DocumentTests {
                 ASSERT_EQUALS( expectedResult, cmp( a, b ) );
                 ASSERT_EQUALS( -expectedResult, cmp( b, a ) );
 
-                // equal values must hash equally.
                 if ( expectedResult == 0 ) {
+                    // equal values must hash equally.
                     ASSERT_EQUALS( hash( a ), hash( b ) );
+                }
+                else {
+                    // unequal values must hash unequally.
+                    // (not true in general but we should error if it fails in any of these cases)
+                    ASSERT_NOT_EQUALS( hash( a ), hash( b ) );
                 }
                 
                 // same as BSON
@@ -1358,6 +1387,27 @@ namespace DocumentTests {
             }
         };
         
+
+        class SerializationOfMissingForSorter {
+            // Can't be tested in AllTypesDoc since missing values are omitted when adding to BSON.
+        public:
+            void run() {
+                const Value missing;
+                const Value arrayOfMissing = Value(vector<Value>(10));
+
+                BufBuilder bb;
+                missing.serializeForSorter(bb);
+                arrayOfMissing.serializeForSorter(bb);
+
+                BufReader reader(bb.buf(), bb.len());
+                ASSERT_EQUALS(
+                        missing,
+                        Value::deserializeForSorter(reader, Value::SorterDeserializeSettings()));
+                ASSERT_EQUALS(
+                        arrayOfMissing,
+                        Value::deserializeForSorter(reader, Value::SorterDeserializeSettings()));
+            }
+        };
     } // namespace Value
 
     class All : public Suite {
@@ -1379,6 +1429,7 @@ namespace DocumentTests {
             add<Document::FieldIteratorMultiple>();
             add<Document::AllTypesDoc>();
 
+            add<Value::BSONArrayTest>();
             add<Value::Int>();
             add<Value::Long>();
             add<Value::Double>();
@@ -1454,6 +1505,7 @@ namespace DocumentTests {
             add<Value::AddToBsonArray>();
             add<Value::Compare>();
             add<Value::SubFields>();
+            add<Value::SerializationOfMissingForSorter>();
         }
     } myall;
     

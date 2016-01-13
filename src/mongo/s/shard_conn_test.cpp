@@ -15,6 +15,10 @@
 
 #include "mongo/base/init.h"
 #include "mongo/client/connpool.h"
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_manager_global.h"
+#include "mongo/db/auth/authorization_manager_global.h"
+#include "mongo/db/auth/authz_manager_external_state_mock.h"
 #include "mongo/dbtests/mock/mock_conn_registry.h"
 #include "mongo/dbtests/mock/mock_dbclient_connection.h"
 #include "mongo/platform/cstdint.h"
@@ -38,25 +42,6 @@ using mongo::ShardConnection;
 using std::string;
 using std::vector;
 
-namespace mongo {
-    // Note: these are all crutch and hopefully will eventually go away
-    CmdLine cmdLine;
-
-    bool inShutdown() {
-        return false;
-    }
-
-    DBClientBase *createDirectClient() { return NULL; }
-
-    void dbexit(ExitCode rc, const char *why){
-        ::_exit(-1);
-    }
-
-    bool haveLocalShardingInfo(const string& ns) {
-        return false;
-    }
-}
-
 namespace mongo_test {
     const string TARGET_HOST = "$dummy:27017";
 
@@ -66,12 +51,15 @@ namespace mongo_test {
     class ShardConnFixture: public mongo::unittest::Test {
     public:
         void setUp() {
-            _maxPoolSizePerHost = mongo::PoolForHost::getMaxPerHost();
+            _maxPoolSizePerHost = mongo::shardConnectionPool.getMaxPoolSize();
 
             mongo::ConnectionString::setConnectionHook(
                     mongo::MockConnRegistry::get()->getConnStrHook());
             _dummyServer = new MockRemoteDBServer(TARGET_HOST);
             mongo::MockConnRegistry::get()->addServer(_dummyServer);
+
+            mongo::setGlobalAuthorizationManager(new mongo::AuthorizationManager(
+                    new mongo::AuthzManagerExternalStateMock()));
         }
 
         void tearDown() {
@@ -80,7 +68,9 @@ namespace mongo_test {
             mongo::MockConnRegistry::get()->removeServer(_dummyServer->getServerAddress());
             delete _dummyServer;
 
-            mongo::PoolForHost::setMaxPerHost(_maxPoolSizePerHost);
+            mongo::shardConnectionPool.setMaxPoolSize(_maxPoolSizePerHost);
+
+            mongo::clearGlobalAuthorizationManager();
         }
 
         void killServer() {
@@ -261,7 +251,7 @@ namespace mongo_test {
     }
 
     TEST_F(ShardConnFixture, InvalidateBadConnEvenWhenPoolIsFull) {
-        mongo::PoolForHost::setMaxPerHost(2);
+        mongo::shardConnectionPool.setMaxPoolSize(2);
 
         ShardConnection conn1(TARGET_HOST, "test.user");
         ShardConnection conn2(TARGET_HOST, "test.user");

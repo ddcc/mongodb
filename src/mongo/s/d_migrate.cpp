@@ -14,6 +14,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
 
@@ -22,7 +34,7 @@
    mostly around shard management and checking
  */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include <algorithm>
 #include <boost/thread/thread.hpp>
@@ -32,71 +44,61 @@
 
 #include "mongo/client/connpool.h"
 #include "mongo/client/dbclientcursor.h"
-#include "mongo/client/distlock.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_manager_global.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/btreecursor.h"
 #include "mongo/db/clientcursor.h"
-#include "mongo/db/cmdline.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/dur.h"
+#include "mongo/db/field_parser.h"
 #include "mongo/db/hasher.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/kill_current_op.h"
 #include "mongo/db/pagefault.h"
-#include "mongo/db/queryoptimizer.h"
-#include "mongo/db/repl.h"
-#include "mongo/db/repl_block.h"
+#include "mongo/db/query/internal_plans.h"
+#include "mongo/db/range_deleter_service.h"
+#include "mongo/db/repl/is_master.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/replication_server_status.h"
 #include "mongo/db/repl/rs.h"
 #include "mongo/db/repl/rs_config.h"
+#include "mongo/db/repl/write_concern.h"
+#include "mongo/logger/ramlog.h"
 #include "mongo/s/chunk.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/config.h"
 #include "mongo/s/d_logic.h"
+#include "mongo/s/distlock.h"
 #include "mongo/s/shard.h"
 #include "mongo/s/type_chunk.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/elapsed_tracker.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/queue.h"
-#include "mongo/util/ramlog.h"
 #include "mongo/util/startup_test.h"
+#include "mongo/util/fail_point_service.h"
+
+// Pause while a fail point is enabled.
+#define MONGO_FP_PAUSE_WHILE(symbol) while (MONGO_FAIL_POINT(symbol)) { sleepmillis(100); }
 
 using namespace std;
 
 namespace mongo {
 
-    bool findShardKeyIndexPattern_locked( const string& ns,
-                                          const BSONObj& shardKeyPattern,
-                                          BSONObj* indexPattern ) {
-        verify( Lock::isLocked() );
-        NamespaceDetails* nsd = nsdetails( ns );
-        if ( !nsd )
-            return false;
-        const IndexDetails* idx = nsd->findIndexByPrefix( shardKeyPattern , true );  /* require single key */
-        if ( !idx )
-            return false;
-        *indexPattern = idx->keyPattern().getOwned();
-        return true;
-    }
+    MONGO_FP_DECLARE(failMigrationCommit);
+    MONGO_FP_DECLARE(failMigrationConfigWritePrepare);
 
-    bool findShardKeyIndexPattern_unlocked( const string& ns,
-                                            const BSONObj& shardKeyPattern,
-                                            BSONObj* indexPattern ) {
-        Client::ReadContext context( ns );
-        return findShardKeyIndexPattern_locked( ns, shardKeyPattern, indexPattern );
-    }
-
-    Tee* migrateLog = new RamLog( "migrate" );
+    Tee* migrateLog = RamLog::get("migrate");
 
     class MoveTimingHelper {
     public:
-        MoveTimingHelper( const string& where , const string& ns , BSONObj min , BSONObj max , int total , string& cmdErrmsg )
+        MoveTimingHelper( const string& where , const string& ns , BSONObj min , BSONObj max ,
+                          int total , string* cmdErrmsg )
             : _where( where ) , _ns( ns ) , _next( 0 ) , _total( total ) , _cmdErrmsg( cmdErrmsg ) {
-            _nextNote = 0;
             _b.append( "min" , min );
             _b.append( "max" , max );
         }
@@ -106,13 +108,14 @@ namespace mongo {
             // sigh
             try {
                 if ( _next != _total ) {
-                    note( "aborted" );
+                    _b.append( "note" , "aborted" );
                 }
-                if ( _cmdErrmsg.size() ) {
-                    note( _cmdErrmsg );
-                    warning() << "got error doing chunk migrate: " << _cmdErrmsg << endl;
+                else {
+                    _b.append( "note" , "success" );
                 }
-                    
+                if ( !_cmdErrmsg->empty() ) {
+                    _b.append( "errmsg" , *_cmdErrmsg );
+                }
                 configServer.logChange( (string)"moveChunk." + _where , _ns, _b.obj() );
             }
             catch ( const std::exception& e ) {
@@ -125,7 +128,7 @@ namespace mongo {
             verify( step <= _total );
 
             stringstream ss;
-            ss << "step" << step << " of " << _total;
+            ss << "step " << step << " of " << _total;
             string s = ss.str();
 
             CurOp * op = cc().curop();
@@ -146,19 +149,6 @@ namespace mongo {
 #endif
         }
 
-
-        void note( const string& s ) {
-            string field = "note";
-            if ( _nextNote > 0 ) {
-                StringBuilder buf;
-                buf << "note" << _nextNote;
-                field = buf.str();
-            }
-            _nextNote++;
-
-            _b.append( field , s );
-        }
-
     private:
         Timer _t;
 
@@ -167,90 +157,12 @@ namespace mongo {
 
         int _next;
         int _total; // expected # of steps
-        int _nextNote;
 
-        string _cmdErrmsg;
+        const string* _cmdErrmsg;
 
         BSONObjBuilder _b;
 
     };
-
-    struct OldDataCleanup {
-        static AtomicUInt _numThreads; // how many threads are doing async cleanup
-
-        bool secondaryThrottle;
-        string ns;
-        BSONObj min;
-        BSONObj max;
-        BSONObj shardKeyPattern;
-        set<CursorId> initial;
-
-        OldDataCleanup(){
-            _numThreads++;
-        }
-        OldDataCleanup( const OldDataCleanup& other ) {
-            secondaryThrottle = other.secondaryThrottle;
-            ns = other.ns;
-            min = other.min.getOwned();
-            max = other.max.getOwned();
-            shardKeyPattern = other.shardKeyPattern.getOwned();
-            initial = other.initial;
-            _numThreads++;
-        }
-        ~OldDataCleanup(){
-            _numThreads--;
-        }
-
-        string toString() const {
-            return str::stream() << ns << " from " << min << " -> " << max;
-        }
-
-        void doRemove() {
-            ShardForceVersionOkModeBlock sf;
-            {
-                RemoveSaver rs("moveChunk",ns,"post-cleanup");
-
-                log() << "moveChunk starting delete for: " << this->toString() << migrateLog;
-
-                BSONObj indexKeyPattern;
-                if ( !findShardKeyIndexPattern_unlocked( ns, shardKeyPattern, &indexKeyPattern ) ) {
-                    warning() << "collection or index dropped before data could be cleaned" << endl;
-                    return;
-                }
-
-                long long numDeleted =
-                        Helpers::removeRange( ns,
-                                              min,
-                                              max,
-                                              indexKeyPattern,
-                                              false, /*maxInclusive*/
-                                              secondaryThrottle,
-                                              cmdLine.moveParanoia ? &rs : 0, /*callback*/
-                                              true, /*fromMigrate*/
-                                              true ); /*onlyRemoveOrphans*/ 
-
-                log() << "moveChunk deleted " << numDeleted << " documents for "
-                      << this->toString() << migrateLog;
-            }
-
-            ReplTime lastOpApplied = cc().getLastOp().asDate();
-            Timer t;
-            for ( int i=0; i<3600; i++ ) {
-                if ( opReplicatedEnough( lastOpApplied , ( getSlaveCount() / 2 ) + 1 ) ) {
-                    LOG(t.seconds() < 30 ? 1 : 0) << "moveChunk repl sync took " << t.seconds() << " seconds" << migrateLog;
-                    return;
-                }
-                sleepsecs(1);
-            }
-            
-            warning() << "moveChunk repl sync timed out after " << t.seconds() << " seconds" << migrateLog;
-        }
-
-    };
-
-    AtomicUInt OldDataCleanup::_numThreads = 0;
-
-    static const char * const cleanUpThreadName = "cleanupOldData";
 
     class ChunkCommandHelper : public Command {
     public:
@@ -279,9 +191,7 @@ namespace mongo {
 
     class MigrateFromStatus {
     public:
-
-        MigrateFromStatus() : _mutex("MigrateFromStatus"),
-			      _cleanupTickets(1) /* only one cleanup thread at once */ {
+        MigrateFromStatus() : _mutex("MigrateFromStatus") {
             _active = false;
             _inCriticalSection = false;
             _memoryUsed = 0;
@@ -323,6 +233,10 @@ namespace mongo {
         void done() {
             log() << "MigrateFromStatus::done About to acquire global write lock to exit critical "
                     "section" << endl;
+
+
+            _dummyRunner.reset( NULL );
+
             Lock::GlobalWrite lk;
             log() << "MigrateFromStatus::done Global lock acquired" << endl;
 
@@ -340,7 +254,11 @@ namespace mongo {
             _inCriticalSectionCV.notify_all();
         }
 
-        void logOp( const char * opstr , const char * ns , const BSONObj& obj , BSONObj * patt ) {
+        void logOp(const char* opstr,
+                   const char* ns,
+                   const BSONObj& obj,
+                   BSONObj* patt,
+                   bool notInActiveChunk) {
             if ( ! _getActive() )
                 return;
 
@@ -371,7 +289,7 @@ namespace mongo {
 
             case 'd': {
 
-                if (getThreadName().find(cleanUpThreadName) == 0) {
+                if (notInActiveChunk) {
                     // we don't want to xfer things we're cleaning
                     // as then they'll be deleted on TO
                     // which is bad
@@ -466,14 +384,21 @@ namespace mongo {
          */
         bool storeCurrentLocs( long long maxChunkSize , string& errmsg , BSONObjBuilder& result ) {
             Client::ReadContext ctx( _ns );
-            NamespaceDetails *d = nsdetails( _ns );
-            if ( ! d ) {
+            Collection* collection = ctx.ctx().db()->getCollection( _ns );
+            if ( !collection ) {
                 errmsg = "ns not found, should be impossible";
                 return false;
             }
 
-            const IndexDetails *idx = d->findIndexByPrefix( _shardKeyPattern ,
-                                                            true );  /* require single key */
+            invariant( _dummyRunner.get() == NULL );
+            _dummyRunner.reset( new DummyRunner( _ns, collection ) );
+
+            // Allow multiKey based on the invariant that shard keys must be single-valued.
+            // Therefore, any multi-key index prefixed by shard key cannot be multikey over
+            // the shard key fields.
+            IndexDescriptor *idx =
+                collection->getIndexCatalog()->findIndexByPrefix( _shardKeyPattern ,
+                                                                  false );  /* allow multi key */
 
             if ( idx == NULL ) {
                 errmsg = (string)"can't find index in storeCurrentLocs" + causedBy( errmsg );
@@ -484,19 +409,19 @@ namespace mongo {
             BSONObj min = Helpers::toKeyFormat( kp.extendRangeBound( _min, false ) );
             BSONObj max = Helpers::toKeyFormat( kp.extendRangeBound( _max, false ) );
 
-            BtreeCursor* btreeCursor = BtreeCursor::make( d , *idx , min , max , false , 1 );
-            auto_ptr<ClientCursor> cc(
-                    new ClientCursor( QueryOption_NoCursorTimeout ,
-                            shared_ptr<Cursor>( btreeCursor ) ,  _ns ) );
+            auto_ptr<Runner> runner(InternalPlanner::indexScan(collection, idx, min, max, false));
+            // we can afford to yield here because any change to the base data that we might miss is
+            // already being  queued and will be migrated in the 'transferMods' stage
+            runner->setYieldPolicy(Runner::YIELD_AUTO);
 
             // use the average object size to estimate how many objects a full chunk would carry
             // do that while traversing the chunk's range using the sharding index, below
             // there's a fair amount of slack before we determine a chunk is too large because object sizes will vary
             unsigned long long maxRecsWhenFull;
             long long avgRecSize;
-            const long long totalRecs = d->stats.nrecords;
+            const long long totalRecs = collection->numRecords();
             if ( totalRecs > 0 ) {
-                avgRecSize = d->stats.datasize / totalRecs;
+                avgRecSize = collection->details()->dataSize() / totalRecs;
                 maxRecsWhenFull = maxChunkSize / avgRecSize;
                 maxRecsWhenFull = std::min( (unsigned long long)(Chunk::MaxObjectPerChunk + 1) , 130 * maxRecsWhenFull / 100 /* slack */ );
             }
@@ -509,25 +434,18 @@ namespace mongo {
             // we want the number of records to better report, in that case
             bool isLargeChunk = false;
             unsigned long long recCount = 0;;
-            while ( cc->ok() ) {
-                DiskLoc dl = cc->currLoc();
+            DiskLoc dl;
+            while (Runner::RUNNER_ADVANCED == runner->getNext(NULL, &dl)) {
                 if ( ! isLargeChunk ) {
                     scoped_spinlock lk( _trackerLocks );
                     _cloneLocs.insert( dl );
-                }
-                cc->advance();
-
-                // we can afford to yield here because any change to the base data that we might miss is already being
-                // queued and will be migrated in the 'transferMods' stage
-                if ( ! cc->yieldSometimes( ClientCursor::DontNeed ) ) {
-                    cc.release();
-                    break;
                 }
 
                 if ( ++recCount > maxRecsWhenFull ) {
                     isLargeChunk = true;
                 }
             }
+            runner.reset();
 
             if ( isLargeChunk ) {
                 warning() << "can't move chunk of size (approximately) " << recCount * avgRecSize
@@ -558,10 +476,12 @@ namespace mongo {
             int allocSize;
             {
                 Client::ReadContext ctx( _ns );
-                NamespaceDetails *d = nsdetails( _ns );
-                verify( d );
+                Collection* collection = ctx.ctx().db()->getCollection( _ns );
+                verify( collection );
                 scoped_spinlock lk( _trackerLocks );
-                allocSize = std::min(BSONObjMaxUserSize, (int)((12 + d->averageObjectSize()) * _cloneLocs.size()));
+                allocSize =
+                    std::min(BSONObjMaxUserSize,
+                             (int)((12 + collection->averageObjectSize()) * _cloneLocs.size()));
             }
             BSONArrayBuilder a (allocSize);
             
@@ -621,17 +541,7 @@ namespace mongo {
             return true;
         }
 
-        void aboutToDelete( const Database* db , const DiskLoc& dl ) {
-            verify(db);
-            Lock::assertWriteLocked(db->name);
-
-            if ( ! _getActive() )
-                return;
-
-            if ( ! db->ownsNS( _ns ) )
-                return;
-
-            
+        void aboutToDelete( const DiskLoc& dl ) {
             // not needed right now
             // but trying to prevent a future bug
             scoped_spinlock lk( _trackerLocks ); 
@@ -677,15 +587,6 @@ namespace mongo {
         }
 
         bool isActive() const { return _getActive(); }
-        
-        void doRemove( OldDataCleanup& cleanup ) {
-
-            log() << "waiting to remove documents for " << cleanup.toString() << endl;
-
-            ScopedTicket ticket(&_cleanupTickets);
-
-            cleanup.doRemove();
-        }
 
     private:
         mutable mongo::mutex _mutex; // protect _inCriticalSection and _active
@@ -713,13 +614,72 @@ namespace mongo {
         list<BSONObj> _deleted; // objects deleted during clone that should be deleted later
         long long _memoryUsed; // bytes in _reload + _deleted
 
-        // this is used to make sure only a certain number of threads are doing cleanup at once.
-        mutable TicketHolder _cleanupTickets;
-
         bool _getActive() const { scoped_lock l(_mutex); return _active; }
         void _setActive( bool b ) { scoped_lock l(_mutex); _active = b; }
 
+
+        class DummyRunner : public Runner {
+        public:
+            DummyRunner( const StringData& ns,
+                         Collection* collection ) {
+                _ns = ns.toString();
+                _collection = collection;
+                _collection->cursorCache()->registerRunner( this );
+            }
+            ~DummyRunner() {
+                if ( !_collection )
+                    return;
+                Client::ReadContext ctx( _ns );
+                Collection* collection = ctx.ctx().db()->getCollection( _ns );
+                invariant( _collection == collection );
+                _collection->cursorCache()->deregisterRunner( this );
+            }
+            virtual void setYieldPolicy(YieldPolicy policy) {
+                invariant( false );
+            }
+            virtual RunnerState getNext(BSONObj* objOut, DiskLoc* dlOut) {
+                invariant( false );
+            }
+            virtual bool isEOF() {
+                invariant( false );
+                return false;
+            }
+            virtual void kill() {
+                _collection = NULL;
+            }
+            virtual void saveState() {
+                invariant( false );
+            }
+            virtual bool restoreState() {
+                invariant( false );
+            }
+            virtual const string& ns() {
+                invariant( false );
+                return _ns;
+            }
+            virtual void invalidate(const DiskLoc& dl, InvalidationType type);
+            virtual const Collection* collection() {
+                return _collection;
+            }
+            virtual Status getInfo(TypeExplain** explain, PlanInfo** planInfo) const {
+                return Status( ErrorCodes::InternalError, "no" );
+            }
+
+        private:
+            string _ns;
+            Collection* _collection;
+        };
+
+        scoped_ptr<DummyRunner> _dummyRunner;
+
     } migrateFromStatus;
+
+    void MigrateFromStatus::DummyRunner::invalidate(const DiskLoc& dl,
+                                                    InvalidationType type) {
+        if ( type == INVALIDATION_DELETION ) {
+            migrateFromStatus.aboutToDelete( dl );
+        }
+    }
 
     struct MigrateStatusHolder {
         MigrateStatusHolder( const std::string& ns ,
@@ -742,86 +702,26 @@ namespace mongo {
         bool _isAnotherMigrationActive;
     };
 
-    void _cleanupOldData( OldDataCleanup cleanup ) {
-
-        Client::initThread((string(cleanUpThreadName) + string("-") +
-                                                        OID::gen().toString()).c_str());
-
-        if (!noauth) {
-            cc().getAuthorizationManager()->grantInternalAuthorization("_cleanupOldData");
-        }
-
-        log() << " (start) waiting to cleanup " << cleanup
-              << ", # cursors remaining: " << cleanup.initial.size() << migrateLog;
-
-        int loops = 0;
-        Timer t;
-        while ( t.seconds() < 900 ) { // 15 minutes
-            verify( !Lock::isLocked() );
-            sleepmillis( 20 );
-
-            set<CursorId> now;
-            ClientCursor::find( cleanup.ns , now );
-
-            set<CursorId> left;
-            for ( set<CursorId>::iterator i=cleanup.initial.begin(); i!=cleanup.initial.end(); ++i ) {
-                CursorId id = *i;
-                if ( now.count(id) )
-                    left.insert( id );
-            }
-
-            if ( left.size() == 0 )
-                break;
-            cleanup.initial = left;
-
-            if ( ( loops++ % 200 ) == 0 ) {
-                log() << " (looping " << loops << ") waiting to cleanup " << cleanup.ns << " from " << cleanup.min << " -> " << cleanup.max << "  # cursors:" << cleanup.initial.size() << migrateLog;
-
-                stringstream ss;
-                for ( set<CursorId>::iterator i=cleanup.initial.begin(); i!=cleanup.initial.end(); ++i ) {
-                    CursorId id = *i;
-                    ss << id << " ";
-                }
-                log() << " cursors: " << ss.str() << migrateLog;
-            }
-        }
-
-        migrateFromStatus.doRemove( cleanup );
-
-        cc().shutdown();
-    }
-
-    void cleanupOldData( OldDataCleanup cleanup ) {
-        try {
-            _cleanupOldData( cleanup );
-        }
-        catch ( std::exception& e ) {
-            log() << " error cleaning old data:" << e.what() << migrateLog;
-        }
-        catch ( ... ) {
-            log() << " unknown error cleaning old data" << migrateLog;
-        }
-    }
-
-    void logOpForSharding( const char * opstr , const char * ns , const BSONObj& obj , BSONObj * patt ) {
-        migrateFromStatus.logOp( opstr , ns , obj , patt );
-    }
-
-    void aboutToDeleteForSharding( const Database* db, const NamespaceDetails* nsd, const DiskLoc& dl ) {
-        if ( nsd->isCapped() )
-            return;
-        migrateFromStatus.aboutToDelete( db , dl );
+    void logOpForSharding(const char * opstr,
+                          const char * ns,
+                          const BSONObj& obj,
+                          BSONObj * patt,
+                          const BSONObj* fullObj,
+                          bool notInActiveChunk) {
+        // TODO: include fullObj?
+        migrateFromStatus.logOp(opstr, ns, obj, patt, notInActiveChunk);
     }
 
     class TransferModsCommand : public ChunkCommandHelper {
     public:
+        void help(stringstream& h) const { h << "internal"; }
         TransferModsCommand() : ChunkCommandHelper( "_transferMods" ) {}
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::_transferMods);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+            actions.addAction(ActionType::internal);
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             return migrateFromStatus.transferMods( errmsg, result );
@@ -831,19 +731,27 @@ namespace mongo {
 
     class InitialCloneCommand : public ChunkCommandHelper {
     public:
+        void help(stringstream& h) const { h << "internal"; }
         InitialCloneCommand() : ChunkCommandHelper( "_migrateClone" ) {}
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::_migrateClone);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+            actions.addAction(ActionType::internal);
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             return migrateFromStatus.clone( errmsg, result );
         }
     } initialCloneCommand;
 
+    // Tests can pause / resume moveChunk's progress at each step by enabling / disabling each fail point.
+    MONGO_FP_DECLARE(moveChunkHangAtStep1);
+    MONGO_FP_DECLARE(moveChunkHangAtStep2);
+    MONGO_FP_DECLARE(moveChunkHangAtStep3);
+    MONGO_FP_DECLARE(moveChunkHangAtStep4);
+    MONGO_FP_DECLARE(moveChunkHangAtStep5);
+    MONGO_FP_DECLARE(moveChunkHangAtStep6);
 
     /**
      * this is the main entry for moveChunk
@@ -861,15 +769,21 @@ namespace mongo {
         virtual bool slaveOk() const { return false; }
         virtual bool adminOnly() const { return true; }
         virtual LockType locktype() const { return NONE; }
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {
-            ActionSet actions;
-            actions.addAction(ActionType::moveChunk);
-            out->push_back(Privilege(AuthorizationManager::CLUSTER_RESOURCE_NAME, actions));
+        virtual Status checkAuthForCommand(ClientBasic* client,
+                                           const std::string& dbname,
+                                           const BSONObj& cmdObj) {
+            if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
+                    ResourcePattern::forExactNamespace(NamespaceString(parseNs(dbname, cmdObj))),
+                    ActionType::moveChunk)) {
+                return Status(ErrorCodes::Unauthorized, "Unauthorized");
+            }
+            return Status::OK();
+        }
+        virtual std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const {
+            return parseNsFullyQualified(dbname, cmdObj);
         }
 
-        bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
+        bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             // 1. parse options
             // 2. make sure my view is complete and lock
             // 3. start migrate
@@ -887,7 +801,7 @@ namespace mongo {
             // -------------------------------
 
             // 1.
-            string ns = cmdObj.firstElement().str();
+            string ns = parseNs(dbname, cmdObj);
             string to = cmdObj["to"].str();
             string from = cmdObj["from"].str(); // my public address, a tad redundant, but safe
 
@@ -977,7 +891,7 @@ namespace mongo {
                 ShardingState::initialize(configdb);
             }
 
-            MoveTimingHelper timing( "from" , ns , min , max , 6 /* steps */ , errmsg );
+            MoveTimingHelper timing( "from" , ns , min , max , 6 /* steps */ , &errmsg );
 
             // Make sure we're as up-to-date as possible with shard information
             // This catches the case where we had to previously changed a shard's host by
@@ -994,11 +908,13 @@ namespace mongo {
             log() << "received moveChunk request: " << cmdObj << migrateLog;
 
             timing.done(1);
+            MONGO_FP_PAUSE_WHILE(moveChunkHangAtStep1);
 
             // 2.
             
             if ( migrateFromStatus.isActive() ) {
                 errmsg = "migration already in progress";
+                warning() << errmsg << endl;
                 return false;
             }
 
@@ -1010,11 +926,13 @@ namespace mongo {
             }
             catch( LockException& e ){
                 errmsg = str::stream() << "error locking distributed lock for migration " << "migrate-" << min.toString() << causedBy( e );
+                warning() << errmsg << endl;
                 return false;
             }
 
             if ( ! dlk.got() ) {
                 errmsg = str::stream() << "the collection metadata could not be locked with lock " << "migrate-" << min.toString();
+                warning() << errmsg << endl;
                 result.append( "who" , dlk.other() );
                 return false;
             }
@@ -1026,18 +944,16 @@ namespace mongo {
             ChunkVersion startingVersion;
             string myOldShard;
             {
-                scoped_ptr<ScopedDbConnection> conn(
-                        ScopedDbConnection::getInternalScopedDbConnection(
-                                shardingState.getConfigServer(), 30));
+                ScopedDbConnection conn(shardingState.getConfigServer(), 30);
 
                 BSONObj x;
                 BSONObj currChunk;
                 try{
-                    x = conn->get()->findOne(ChunkType::ConfigNS,
+                    x = conn->findOne(ChunkType::ConfigNS,
                                              Query(BSON(ChunkType::ns(ns)))
                                                   .sort(BSON(ChunkType::DEPRECATED_lastmod() << -1)));
 
-                    currChunk = conn->get()->findOne(ChunkType::ConfigNS,
+                    currChunk = conn->findOne(ChunkType::ConfigNS,
                                                      shardId.wrap(ChunkType::name().c_str()));
                 }
                 catch( DBException& e ){
@@ -1051,7 +967,7 @@ namespace mongo {
                 verify(currChunk[ChunkType::min()].type());
                 verify(currChunk[ChunkType::max()].type());
                 myOldShard = currChunk[ChunkType::shard()].String();
-                conn->done();
+                conn.done();
 
                 BSONObj currMin = currChunk[ChunkType::min()].Obj();
                 BSONObj currMax = currChunk[ChunkType::max()].Obj();
@@ -1087,63 +1003,81 @@ namespace mongo {
                     return false;
                 }
 
-                // since this could be the first call that enable sharding we also make sure to have the chunk manager up to date
+                // since this could be the first call that enable sharding we also make sure to
+                // load the shard's metadata, if we don't have it
                 shardingState.gotShardName( myOldShard );
 
-                // Using the maxVersion we just found will enforce a check - if we use zero version,
-                // it's possible this shard will be *at* zero version from a previous migrate and
-                // no refresh will be done
-                // TODO: Make this less fragile
-                startingVersion = maxVersion;
-                shardingState.trySetVersion( ns , startingVersion /* will return updated */ );
+                // Always refresh our metadata remotely
+                // TODO: The above checks should be removed, we should only have one refresh
+                // mechanism.
+                ChunkVersion startingVersion;
+                Status status = shardingState.refreshMetadataNow( ns, &startingVersion );
+
+                if (!status.isOK()) {
+                    errmsg = str::stream() << "moveChunk cannot start migrate of chunk "
+                                           << "[" << currMin << "," << currMax << ")"
+                                           << causedBy( status.reason() );
+
+                    warning() << errmsg << endl;
+                    return false;
+                }
 
                 if (startingVersion.majorVersion() == 0) {
-                   // It makes no sense to migrate if our version is zero and we have no chunks, so return
-                   warning() << "moveChunk cannot start migration with zero version" << endl;
-                   return false;
+                    // It makes no sense to migrate if our version is zero and we have no chunks
+                    errmsg = str::stream() << "moveChunk cannot start migrate of chunk "
+                                           << "[" << currMin << "," << currMax << ")"
+                                           << " with zero shard version";
+
+                    warning() << errmsg << endl;
+                    return false;
                 }
 
                 log() << "moveChunk request accepted at version " << startingVersion << migrateLog;
             }
 
             timing.done(2);
+            MONGO_FP_PAUSE_WHILE(moveChunkHangAtStep2);
 
             // 3.
 
-            ShardChunkManagerPtr chunkManager = shardingState.getShardChunkManager( ns );
-            verify( chunkManager != NULL );
-            BSONObj shardKeyPattern = chunkManager->getKey();
+            const CollectionMetadataPtr origCollMetadata( shardingState.getCollectionMetadata( ns ) );
+            verify( origCollMetadata != NULL );
+            BSONObj shardKeyPattern = origCollMetadata->getKeyPattern();
             if ( shardKeyPattern.isEmpty() ){
                 errmsg = "no shard key found";
+                warning() << errmsg << endl;
                 return false;
             }
 
             MigrateStatusHolder statusHolder( ns , min , max , shardKeyPattern );
             if (statusHolder.isAnotherMigrationActive()) {
                 errmsg = "moveChunk is already in progress from this shard";
+                warning() << errmsg << endl;
                 return false;
             }
 
             {
                 // this gets a read lock, so we know we have a checkpoint for mods
-                if ( ! migrateFromStatus.storeCurrentLocs( maxChunkSize , errmsg , result ) )
+                if ( ! migrateFromStatus.storeCurrentLocs( maxChunkSize , errmsg , result ) ) {
+                    warning() << errmsg << endl;
                     return false;
-
-                scoped_ptr<ScopedDbConnection> connTo(
-                        ScopedDbConnection::getScopedDbConnection( toShard.getConnString() ) );
+                }
+                ScopedDbConnection connTo(toShard.getConnString());
                 BSONObj res;
                 bool ok;
                 try{
-                    ok = connTo->get()->runCommand( "admin" ,
-                                                    BSON( "_recvChunkStart" << ns <<
-                                                          "from" << fromShard.getConnString() <<
-                                                          "min" << min <<
-                                                          "max" << max <<
-                                                          "shardKeyPattern" << shardKeyPattern <<
-                                                          "configServer" << configServer.modelServer() <<
-                                                          "secondaryThrottle" << secondaryThrottle
-                                                          ) ,
-                                                    res );
+                    ok = connTo->runCommand( "admin" ,
+                                             BSON( "_recvChunkStart" << ns <<
+                                                   "from" << fromShard.getConnString() <<
+                                                   "fromShardName" << fromShard.getName() <<
+                                                   "toShardName" << toShard.getName() <<
+                                                   "min" << min <<
+                                                   "max" << max <<
+                                                   "shardKeyPattern" << shardKeyPattern <<
+                                                   "configServer" << configServer.modelServer() <<
+                                                   "secondaryThrottle" << secondaryThrottle
+                                             ) ,
+                                             res );
                 }
                 catch( DBException& e ){
                     errmsg = str::stream() << "moveChunk could not contact to: shard "
@@ -1152,7 +1086,7 @@ namespace mongo {
                     return false;
                 }
 
-                connTo->done();
+                connTo.done();
 
                 if ( ! ok ) {
                     errmsg = "moveChunk failed to engage TO-shard in the data transfer: ";
@@ -1165,6 +1099,7 @@ namespace mongo {
 
             }
             timing.done( 3 );
+            MONGO_FP_PAUSE_WHILE(moveChunkHangAtStep3);
 
             // 4.
 
@@ -1175,14 +1110,11 @@ namespace mongo {
                 // Exponential sleep backoff, up to 1024ms. Don't sleep much on the first few
                 // iterations, since we want empty chunk migrations to be fast.
                 sleepmillis( 1 << std::min( i , 10 ) );
-
-                scoped_ptr<ScopedDbConnection> conn(
-                        ScopedDbConnection::getScopedDbConnection( toShard.getConnString() ) );
-
+                ScopedDbConnection conn(toShard.getConnString());
                 bool ok;
                 res = BSONObj();
                 try {
-                    ok = conn->get()->runCommand( "admin" , BSON( "_recvChunkStatus" << 1 ) , res );
+                    ok = conn->runCommand( "admin" , BSON( "_recvChunkStatus" << 1 ) , res );
                     res = res.getOwned();
                 }
                 catch( DBException& e ){
@@ -1191,7 +1123,24 @@ namespace mongo {
                     return false;
                 }
 
-                conn->done();
+                conn.done();
+
+                if ( res["ns"].str() != ns ||
+                        res["from"].str() != fromShard.getConnString() ||
+                        !res["min"].isABSONObj() ||
+                        res["min"].Obj().woCompare(min) != 0 ||
+                        !res["max"].isABSONObj() ||
+                        res["max"].Obj().woCompare(max) != 0 ) {
+                    // This can happen when the destination aborted the migration and
+                    // received another recvChunk before this thread sees the transition
+                    // to the abort state. This is currently possible only if multiple migrations
+                    // are happening at once. This is an unfortunate consequence of the shards not
+                    // being able to keep track of multiple incoming and outgoing migrations.
+                    errmsg = str::stream() << "Destination shard aborted migration, "
+                            "now running a new one: " << res;
+                    warning() << errmsg << endl;
+                    return false;
+                }
 
                 LOG(0) << "moveChunk data transfer progress: " << res << " my mem used: " << migrateFromStatus.mbUsed() << migrateLog;
 
@@ -1208,13 +1157,16 @@ namespace mongo {
                 if ( migrateFromStatus.mbUsed() > (500 * 1024 * 1024) ) {
                     // this is too much memory for us to use for this
                     // so we're going to abort the migrate
-                    scoped_ptr<ScopedDbConnection> conn(
-                            ScopedDbConnection::getScopedDbConnection( toShard.getConnString() ) );
+                    ScopedDbConnection conn(toShard.getConnString());
 
                     BSONObj res;
-                    conn->get()->runCommand( "admin" , BSON( "_recvChunkAbort" << 1 ) , res );
+                    if (!conn->runCommand( "admin", BSON( "_recvChunkAbort" << 1 ), res )) {
+                        warning() << "Error encountered while trying to abort migration on "
+                                  << "destination shard" << toShard.getConnString() << endl;
+                    }
+
                     res = res.getOwned();
-                    conn->done();
+                    conn.done();
                     error() << "aborting migrate because too much memory used res: " << res << migrateLog;
                     errmsg = "aborting migrate because too much memory used";
                     result.appendBool( "split" , true );
@@ -1224,6 +1176,7 @@ namespace mongo {
                 killCurrentOp.checkForInterrupt();
             }
             timing.done(4);
+            MONGO_FP_PAUSE_WHILE(moveChunkHangAtStep4);
 
             // 5.
 
@@ -1257,11 +1210,12 @@ namespace mongo {
                 return false;
             }
 
-            log() << "About to enter migrate critical section";
+            log() << "About to enter migrate critical section" << endl;
 
             {
                 // 5.a
-                // we're under the collection lock here, so no other migrate can change maxVersion or ShardChunkManager state
+                // we're under the collection lock here, so no other migrate can change maxVersion
+                // or CollectionMetadata state
                 migrateFromStatus.setInCriticalSection( true );
                 ChunkVersion myVersion = maxVersion;
                 myVersion.incMajor();
@@ -1270,8 +1224,9 @@ namespace mongo {
                     Lock::DBWrite lk( ns );
                     verify( myVersion > shardingState.getVersion( ns ) );
 
-                    // bump the chunks manager's version up and "forget" about the chunk being moved
-                    // this is not the commit point but in practice the state in this shard won't until the commit it done
+                    // bump the metadata's version up and "forget" about the chunk being moved
+                    // this is not the commit point but in practice the state in this shard won't
+                    // until the commit it done
                     shardingState.donateChunk( ns , min , max , myVersion );
                 }
 
@@ -1285,11 +1240,9 @@ namespace mongo {
                 bool ok;
 
                 try {
-                    scoped_ptr<ScopedDbConnection> connTo(
-                            ScopedDbConnection::getScopedDbConnection( toShard.getConnString(),
-                                                                       35.0 ) );
-                    ok = connTo->get()->runCommand( "admin", BSON( "_recvChunkCommit" << 1 ), res );
-                    connTo->done();
+                    ScopedDbConnection connTo( toShard.getConnString(), 35.0 );
+                    ok = connTo->runCommand( "admin", BSON( "_recvChunkCommit" << 1 ), res );
+                    connTo.done();
                 }
                 catch ( DBException& e ) {
                     errmsg = str::stream() << "moveChunk could not contact to: shard "
@@ -1299,7 +1252,7 @@ namespace mongo {
                     ok = false;
                 }
 
-                if ( !ok ) {
+                if ( !ok || MONGO_FAIL_POINT(failMigrationCommit) ) {
                     log() << "moveChunk migrate commit not accepted by TO-shard: " << res
                           << " resetting shard version to: " << startingVersion << migrateLog;
                     {
@@ -1310,7 +1263,7 @@ namespace mongo {
 
                         // revert the chunk manager back to the state before "forgetting" about the
                         // chunk
-                        shardingState.undoDonateChunk( ns, min, max, startingVersion );
+                        shardingState.undoDonateChunk( ns, origCollMetadata );
                     }
                     log() << "Shard version successfully reset to clean up failed migration"
                           << endl;
@@ -1362,21 +1315,23 @@ namespace mongo {
 
                 nextVersion = myVersion;
 
-                // if we have chunks left on the FROM shard, update the version of one of them as well
-                // we can figure that out by grabbing the chunkManager installed on 5.a
-                // TODO expose that manager when installing it
+                // if we have chunks left on the FROM shard, update the version of one of them as
+                // well.  we can figure that out by grabbing the metadata installed on 5.a
 
-                ShardChunkManagerPtr chunkManager = shardingState.getShardChunkManager( ns );
-                if( chunkManager->getNumChunks() > 0 ) {
+                const CollectionMetadataPtr bumpedCollMetadata( shardingState.getCollectionMetadata( ns ) );
+                if( bumpedCollMetadata->getNumChunks() > 0 ) {
 
                     // get another chunk on that shard
-                    BSONObj lookupKey;
-                    BSONObj bumpMin, bumpMax;
-                    do {
-                        chunkManager->getNextChunk( lookupKey , &bumpMin , &bumpMax );
-                        lookupKey = bumpMin;
-                    }
-                    while( bumpMin == min );
+                    ChunkType bumpChunk;
+                    bool result = 
+                        bumpedCollMetadata->getNextChunk( bumpedCollMetadata->getMinKey(),
+                                                          &bumpChunk );
+                    BSONObj bumpMin = bumpChunk.getMin();
+                    BSONObj bumpMax = bumpChunk.getMax();
+
+                    (void)result; // for compile warning on non-debug
+                    dassert( result );
+                    dassert( bumpMin.woCompare( min ) != 0 );
 
                     BSONObjBuilder op;
                     op.append( "op" , "u" );
@@ -1434,12 +1389,16 @@ namespace mongo {
                 ok = false;
                 BSONObj cmdResult;
                 try {
-                    scoped_ptr<ScopedDbConnection> conn(
-                            ScopedDbConnection::getInternalScopedDbConnection(
-                                    shardingState.getConfigServer(),
-                                    10.0 ) );
-                    ok = conn->get()->runCommand( "config" , cmd , cmdResult );
-                    conn->done();
+                    
+                    // For testing migration failures
+                    if ( MONGO_FAIL_POINT(failMigrationConfigWritePrepare) ) {
+                        throw DBException( "mock migration failure before config write",
+                                           PrepareConfigsFailedCode );
+                    }
+
+                    ScopedDbConnection conn(shardingState.getConfigServer(), 10.0);
+                    ok = conn->runCommand( "config" , cmd , cmdResult );
+                    conn.done();
                 }
                 catch ( DBException& e ) {
                     warning() << e << migrateLog;
@@ -1465,9 +1424,9 @@ namespace mongo {
                     {
                         Lock::GlobalWrite lk;
 
-                        // Revert the chunk manager back to the state before "forgetting"
+                        // Revert the metadata back to the state before "forgetting"
                         // about the chunk.
-                        shardingState.undoDonateChunk( ns , min , max , startingVersion );
+                        shardingState.undoDonateChunk( ns, origCollMetadata );
                     }
 
                     log() << "Shard version successfully reset to clean up failed migration" << endl;
@@ -1489,16 +1448,13 @@ namespace mongo {
                     sleepsecs( 10 );
 
                     try {
-                        scoped_ptr<ScopedDbConnection> conn(
-                                ScopedDbConnection::getInternalScopedDbConnection(
-                                        shardingState.getConfigServer(),
-                                        10.0 ) );
+                        ScopedDbConnection conn(shardingState.getConfigServer(), 10.0);
 
                         // look for the chunk in this shard whose version got bumped
                         // we assume that if that mod made it to the config, the applyOps was successful
-                        BSONObj doc = conn->get()->findOne(ChunkType::ConfigNS,
-                                                           Query(BSON(ChunkType::ns(ns)))
-                                                               .sort(BSON(ChunkType::DEPRECATED_lastmod() << -1)));
+                        BSONObj doc = conn->findOne(ChunkType::ConfigNS,
+                                                    Query(BSON(ChunkType::ns(ns)))
+                                                        .sort(BSON(ChunkType::DEPRECATED_lastmod() << -1)));
 
                         ChunkVersion checkVersion =
                             ChunkVersion::fromBSON(doc[ChunkType::DEPRECATED_lastmod()]);
@@ -1509,13 +1465,13 @@ namespace mongo {
 
                         }
                         else {
-                            error() << "moveChunk commit failed: version is at"
+                            error() << "moveChunk commit failed: version is at "
                                             << checkVersion << " instead of " << nextVersion << migrateLog;
                             error() << "TERMINATING" << migrateLog;
                             dbexit( EXIT_SHARDING_ERROR );
                         }
 
-                        conn->done();
+                        conn.done();
 
                     }
                     catch ( ... ) {
@@ -1528,34 +1484,51 @@ namespace mongo {
                 migrateFromStatus.setInCriticalSection( false );
 
                 // 5.d
-                configServer.logChange( "moveChunk.commit" , ns , chunkInfo );
+                BSONObjBuilder commitInfo;
+                commitInfo.appendElements( chunkInfo );
+                if ( res["counts"].type() == Object )
+                    commitInfo.appendElements( res["counts"].Obj() );
+                configServer.logChange( "moveChunk.commit" , ns , commitInfo.obj() );
             }
 
             migrateFromStatus.done();
             timing.done(5);
+            MONGO_FP_PAUSE_WHILE(moveChunkHangAtStep5);
 
-            {
-                // 6.
-                OldDataCleanup c;
-                c.secondaryThrottle = secondaryThrottle;
-                c.ns = ns;
-                c.min = min.getOwned();
-                c.max = max.getOwned();
-                c.shardKeyPattern = shardKeyPattern.getOwned();
-                ClientCursor::find( ns , c.initial );
+            // 6.
+            // NOTE: It is important that the distributed collection lock be held for this step.
+            RangeDeleter* deleter = getDeleter();
+            if (waitForDelete) {
+                log() << "doing delete inline for cleanup of chunk data" << migrateLog;
 
-                if (!waitForDelete) {
-                    // 7.
-                    log() << "forking for cleanup of chunk data" << migrateLog;
-                    boost::thread t( boost::bind( &cleanupOldData , c ) );
+                string errMsg;
+                // This is an immediate delete, and as a consequence, there could be more
+                // deletes happening simultaneously than there are deleter worker threads.
+                if (!deleter->deleteNow(ns,
+                                        min.getOwned(),
+                                        max.getOwned(),
+                                        shardKeyPattern.getOwned(),
+                                        secondaryThrottle,
+                                        &errMsg)) {
+                    log() << "Error occured while performing cleanup: " << errMsg << endl;
                 }
-                else {
-                    // 7.
-                    log() << "doing delete inline for cleanup of chunk data" << migrateLog;
-                    c.doRemove();
+            }
+            else {
+                log() << "forking for cleanup of chunk data" << migrateLog;
+
+                string errMsg;
+                if (!deleter->queueDelete(ns,
+                                          min.getOwned(),
+                                          max.getOwned(),
+                                          shardKeyPattern.getOwned(),
+                                          secondaryThrottle,
+                                          NULL, // Don't want to be notified.
+                                          &errMsg)) {
+                    log() << "could not queue migration cleanup: " << errMsg << endl;
                 }
             }
             timing.done(6);
+            MONGO_FP_PAUSE_WHILE(moveChunkHangAtStep6);
 
             return true;
 
@@ -1583,6 +1556,14 @@ namespace mongo {
        command to get state
        commend to "commit"
     */
+
+    // Enabling / disabling these fail points pauses / resumes MigrateStatus::_go(), the thread
+    // that receives a chunk migration from the donor.
+    MONGO_FP_DECLARE(migrateThreadHangAtStep1);
+    MONGO_FP_DECLARE(migrateThreadHangAtStep2);
+    MONGO_FP_DECLARE(migrateThreadHangAtStep3);
+    MONGO_FP_DECLARE(migrateThreadHangAtStep4);
+    MONGO_FP_DECLARE(migrateThreadHangAtStep5);
 
     class MigrateStatus {
     public:
@@ -1618,6 +1599,16 @@ namespace mongo {
                 errmsg = "UNKNOWN ERROR";
                 error() << "migrate failed with unknown exception" << migrateLog;
             }
+
+            if ( state != DONE ) {
+                // Unprotect the range if needed/possible on unsuccessful TO migration
+                Lock::DBWrite lk( ns );
+                string errMsg;
+                if ( !shardingState.forgetPending( ns, min, max, epoch, &errMsg ) ) {
+                    warning() << errMsg << endl;
+                }
+            }
+
             setActive( false );
         }
 
@@ -1630,28 +1621,46 @@ namespace mongo {
             replSetMajorityCount = theReplSet ? theReplSet->config().getMajority() : 0;
 
             log() << "starting receiving-end of migration of chunk " << min << " -> " << max <<
-                    " for collection " << ns << " from " << from << endl;
+                    " for collection " << ns << " from " << from
+                  << " at epoch " << epoch.toString() << endl;
 
             string errmsg;
-            MoveTimingHelper timing( "to" , ns , min , max , 5 /* steps */ , errmsg );
+            MoveTimingHelper timing( "to" , ns , min , max , 5 /* steps */ , &errmsg );
 
-            scoped_ptr<ScopedDbConnection> connPtr(
-                    ScopedDbConnection::getScopedDbConnection( from ) );
-            ScopedDbConnection& conn = *connPtr;
+            ScopedDbConnection conn(from);
             conn->getLastError(); // just test connection
 
             {
                 // 0. copy system.namespaces entry if collection doesn't already exist
                 Client::WriteContext ctx( ns );
+
+                if (!isMasterNs(ns.c_str())) {
+                    errmsg = str::stream() << "Not primary during migration: " << ns
+                                           << ": checking if collection exists";
+                    warning() << errmsg;
+                    state = FAIL;
+                    return;
+                }
+
                 // Only copy if ns doesn't already exist
-                if ( ! nsdetails( ns ) ) {
-                    string system_namespaces = NamespaceString( ns ).db + ".system.namespaces";
-                    BSONObj entry = conn->findOne( system_namespaces, BSON( "name" << ns ) );
-                    if ( entry["options"].isABSONObj() ) {
-                        string errmsg;
-                        if ( ! userCreateNS( ns.c_str(), entry["options"].Obj(), errmsg, true, 0 ) )
-                            warning() << "failed to create collection with options: " << errmsg
-                                      << endl;
+                Database* db = ctx.ctx().db();
+                Collection* collection = db->getCollection( ns );
+
+                if ( !collection ) {
+                    list<BSONObj> infos =
+                        conn->getCollectionInfos(nsToDatabase(ns),
+                                                 BSON("name" << nsToCollectionSubstring(ns)));
+
+                    BSONObj options;
+                    if (infos.size() > 0) {
+                        BSONObj entry = infos.front();
+                        if (entry["options"].isABSONObj()) {
+                            options = entry["options"].Obj();
+                        }
+                    }
+                    if ( ! userCreateNS( ns.c_str(), options, errmsg, true, 0 ) ) {
+                        warning() << "failed to create collection [" << ns << "] "
+                                  << " with options " << options << ": " << errmsg;
                     }
                 }
             }
@@ -1664,46 +1673,104 @@ namespace mongo {
                     auto_ptr<DBClientCursor> indexes = conn->getIndexes( ns );
                     
                     while ( indexes->more() ) {
-                        all.push_back( indexes->next().getOwned() );
+                        all.push_back( indexes->nextSafe().getOwned() );
                     }
                 }
 
                 for ( unsigned i=0; i<all.size(); i++ ) {
                     BSONObj idx = all[i];
-                    Client::WriteContext ct( ns );
-                    string system_indexes = cc().database()->name + ".system.indexes";
-                    theDataFileMgr.insertAndLog( system_indexes.c_str() , idx, true /* flag fromMigrate in oplog */ );
+                    Client::WriteContext ctx( ns );
+                    if (!isMasterNs(ns.c_str())) {
+                        errmsg = str::stream() << "Not primary during migration: " << ns;
+                        warning() << errmsg;
+                        state = FAIL;
+                        return;
+                    }
+
+                    Database* db = ctx.ctx().db();
+                    Collection* collection = db->getCollection( ns );
+                    if ( !collection ) {
+                        errmsg = str::stream() << "collection dropped during migration: " << ns;
+                        warning() << errmsg;
+                        state = FAIL;
+                        return;
+                    }
+
+                    BSONObj idxPattern(idx["key"].Obj());
+                    bool hasIndex = collection->getIndexCatalog()->
+                            findIndexByKeyPattern(idxPattern, true /* include unfinished */);
+
+                    if (collection->numRecords() > 0 && !hasIndex) {
+                        errmsg = str::stream() << "aborting migration, shard is missing "
+                                               << "indexes and collection is not empty. "
+                                               << "Non-trivial index creation should be "
+                                               << "scheduled manually";
+                        warning() << errmsg;
+                        state = FAIL;
+                        return;
+                    }
+
+                    Status status = collection->getIndexCatalog()->createIndex( idx, false );
+                    if ( !status.isOK() && status.code() != ErrorCodes::IndexAlreadyExists ) {
+                        errmsg = str::stream() << "failed to create index before migrating data. "
+                                               << " idx: " << idx
+                                               << " error: " << status.toString();
+                        warning() << errmsg;
+                        state = FAIL;
+                        return;
+                    }
+
+                    // make sure to create index on secondaries as well
+                    logOp( "i", db->getSystemIndexesName().c_str(), idx,
+                           NULL, NULL, true /* fromMigrate */ );
                 }
 
                 timing.done(1);
+                MONGO_FP_PAUSE_WHILE(migrateThreadHangAtStep1);
             }
 
             {
+                // 2. delete any data already in range
+                Helpers::RemoveSaver rs( "moveChunk" , ns , "preCleanup" );
+                KeyRange range( ns, min, max, shardKeyPattern );
+                long long num = Helpers::removeRange( range,
+                                                      false, /*maxInclusive*/
+                                                      secondaryThrottle, /* secondaryThrottle */
+                                                      /*callback*/
+                                                      serverGlobalParams.moveParanoia ? &rs : 0,
+                                                      true ); /* flag fromMigrate in oplog */
 
-                BSONObj indexKeyPattern;
-                if ( !findShardKeyIndexPattern_unlocked( ns, shardKeyPattern, &indexKeyPattern ) ) {
+                if (num < 0) {
                     errmsg = "collection or index dropped during migrate";
                     warning() << errmsg << endl;
                     state = FAIL;
                     return;
                 }
 
-                // 2. delete any data already in range
-                RemoveSaver rs( "moveChunk" , ns , "preCleanup" );
-                long long num = Helpers::removeRange( ns,
-                                                      min,
-                                                      max,
-                                                      indexKeyPattern,
-                                                      false, /*maxInclusive*/
-                                                      secondaryThrottle, /* secondaryThrottle */
-                                                      cmdLine.moveParanoia ? &rs : 0, /*callback*/
-                                                      true ); /* flag fromMigrate in oplog */
+                {
+                    // Protect the range by noting that we're now starting a migration to it
+                    Lock::DBWrite lk( ns );
+                    if ( !shardingState.notePending( ns, min, max, epoch, &errmsg ) ) {
+                        warning() << errmsg << endl;
+                        state = FAIL;
+                        return;
+                    }
+                }
+
                 if ( num )
                     warning() << "moveChunkCmd deleted data already in chunk # objects: " << num << migrateLog;
 
                 timing.done(2);
+                MONGO_FP_PAUSE_WHILE(migrateThreadHangAtStep2);
             }
 
+            if (state == FAIL || state == ABORT) {
+                string errMsg;
+                if (!getDeleter()->queueDelete(ns, min, max, shardKeyPattern, secondaryThrottle,
+                                               NULL /* notifier */, &errMsg)) {
+                    warning() << "Failed to queue delete for migrate abort: " << errMsg << endl;
+                }
+            }
 
             {
                 // 3. initial bulk clone
@@ -1730,7 +1797,22 @@ namespace mongo {
                             PageFaultRetryableSection pgrs;
                             while ( 1 ) {
                                 try {
-                                    Lock::DBWrite lk( ns );
+                                    Client::WriteContext cx( ns );
+
+                                    BSONObj localDoc;
+                                    if ( willOverrideLocalId( o, &localDoc ) ) {
+                                        string errMsg =
+                                            str::stream() << "cannot migrate chunk, local document "
+                                                          << localDoc
+                                                          << " has same _id as cloned "
+                                                          << "remote document " << o;
+
+                                        warning() << errMsg << endl;
+
+                                        // Exception will abort migration cleanly
+                                        uasserted( 16976, errMsg );
+                                    }
+
                                     Helpers::upsert( ns, o, true );
                                     break;
                                 }
@@ -1738,7 +1820,7 @@ namespace mongo {
                                     e.touch();
                                 }
                             }
-                        }
+                        } // end PageFaultRetryableSection
                         thisTime++;
                         numCloned++;
                         clonedBytes += o.objsize();
@@ -1755,6 +1837,7 @@ namespace mongo {
                 }
 
                 timing.done(3);
+                MONGO_FP_PAUSE_WHILE(migrateThreadHangAtStep3);
             }
 
             // if running on a replicated system, we'll need to flush the docs we cloned to the secondaries
@@ -1782,7 +1865,6 @@ namespace mongo {
                     int i;
                     for ( i=0;i<maxIterations; i++) {
                         if ( state == ABORT ) {
-                            timing.note( "aborted" );
                             return;
                         }
                         
@@ -1806,6 +1888,7 @@ namespace mongo {
                 }
 
                 timing.done(4);
+                MONGO_FP_PAUSE_WHILE(migrateThreadHangAtStep4);
             }
 
             { 
@@ -1847,7 +1930,6 @@ namespace mongo {
                         continue;
 
                     if ( state == ABORT ) {
-                        timing.note( "aborted" );
                         return;
                     }
                     
@@ -1869,6 +1951,7 @@ namespace mongo {
                 }
 
                 timing.done(5);
+                MONGO_FP_PAUSE_WHILE(migrateThreadHangAtStep5);
             }
 
             state = DONE;
@@ -1908,7 +1991,7 @@ namespace mongo {
             bool didAnything = false;
 
             if ( xfer["deleted"].isABSONObj() ) {
-                RemoveSaver rs( "moveChunk" , ns , "removedDuring" );
+                Helpers::RemoveSaver rs( "moveChunk" , ns , "removedDuring" );
 
                 BSONObjIterator i( xfer["deleted"].Obj() );
                 while ( i.more() ) {
@@ -1931,13 +2014,11 @@ namespace mongo {
                     BSONObj idIndexPattern = Helpers::inferKeyPattern( id );
 
                     // TODO: create a better interface to remove objects directly
-                    Helpers::removeRange( ns ,
-                                          id ,
-                                          id,
-                                          idIndexPattern ,
+                    KeyRange range( ns, id, id, idIndexPattern );
+                    Helpers::removeRange( range ,
                                           true , /*maxInclusive*/
                                           false , /* secondaryThrottle */
-                                          cmdLine.moveParanoia ? &rs : 0 , /*callback*/
+                                          serverGlobalParams.moveParanoia ? &rs : 0 , /*callback*/
                                           true ); /*fromMigrate*/
 
                     *lastOpApplied = cx.ctx().getClient()->getLastOp().asDate();
@@ -1952,6 +2033,21 @@ namespace mongo {
 
                     BSONObj it = i.next().Obj();
 
+                    BSONObj localDoc;
+                    if ( willOverrideLocalId( it, &localDoc ) ) {
+                        string errMsg =
+                            str::stream() << "cannot migrate chunk, local document "
+                                          << localDoc
+                                          << " has same _id as reloaded remote document "
+                                          << it;
+
+                        warning() << errMsg << endl;
+
+                        // Exception will abort migration cleanly
+                        uasserted( 16977, errMsg );
+                    }
+
+                    // We are in write lock here, so sure we aren't killing
                     Helpers::upsert( ns , it , true );
 
                     *lastOpApplied = cx.ctx().getClient()->getLastOp().asDate();
@@ -1960,6 +2056,22 @@ namespace mongo {
             }
 
             return didAnything;
+        }
+
+        /**
+         * Checks if an upsert of a remote document will override a local document with the same _id
+         * but in a different range on this shard.
+         * Must be in WriteContext to avoid races and DBHelper errors.
+         * TODO: Could optimize this check out if sharding on _id.
+         */
+        bool willOverrideLocalId( BSONObj remoteDoc, BSONObj* localDoc ) {
+
+            *localDoc = BSONObj();
+            if ( Helpers::findById( cc(), ns.c_str(), remoteDoc, *localDoc ) ) {
+                return !isInRange( *localDoc , min , max , shardKeyPattern );
+            }
+
+            return false;
         }
 
         bool opReplicatedEnough( const ReplTime& lastOpApplied ) {
@@ -2009,20 +2121,30 @@ namespace mongo {
         }
 
         bool startCommit() {
+
             if ( state != STEADY )
                 return false;
             state = COMMIT_START;
             
-            Timer t;
-            // we wait for the commit to succeed before giving up
-            while ( t.seconds() <= 30 ) {
-                log() << "Waiting for commit to finish" << endl;
-                sleepmillis(1);
-                if ( state == DONE )
-                    return true;
+            boost::xtime xt;
+            boost::xtime_get(&xt, MONGO_BOOST_TIME_UTC);
+            xt.sec += 30;
+
+            scoped_lock lock(m_active);
+            while ( active ) {
+                if ( ! isActiveCV.timed_wait( lock.boost(), xt ) ){
+                    // TIMEOUT
+                    state = FAIL;
+                    log() << "startCommit never finished!" << migrateLog;
+                    return false;
+                }
             }
-            state = FAIL;
-            log() << "startCommit never finished!" << migrateLog;
+
+            if ( state == DONE ) {
+                return true;
+            }
+
+            log() << "startCommit failed, final data failed to transfer" << migrateLog;
             return false;
         }
 
@@ -2032,10 +2154,15 @@ namespace mongo {
         }
 
         bool getActive() const { scoped_lock l(m_active); return active; }
-        void setActive( bool b ) { scoped_lock l(m_active); active = b; }
+        void setActive( bool b ) { 
+            scoped_lock l(m_active);
+            active = b;
+            isActiveCV.notify_all(); 
+        }
 
         mutable mongo::mutex m_active;
         bool active;
+        boost::condition isActiveCV;
 
         string ns;
         string from;
@@ -2043,6 +2170,7 @@ namespace mongo {
         BSONObj min;
         BSONObj max;
         BSONObj shardKeyPattern;
+        OID epoch;
 
         long long numCloned;
         long long clonedBytes;
@@ -2059,9 +2187,9 @@ namespace mongo {
 
     void migrateThread() {
         Client::initThread( "migrateThread" );
-        if (!noauth) {
+        if (getGlobalAuthorizationManager()->isAuthEnabled()) {
             ShardedConnectionInfo::addHook();
-            cc().getAuthorizationManager()->grantInternalAuthorization("_migrateThread");
+            cc().getAuthorizationSession()->grantInternalAuthorization();
         }
         migrateStatus.go();
         cc().shutdown();
@@ -2069,40 +2197,70 @@ namespace mongo {
 
     class RecvChunkStartCommand : public ChunkCommandHelper {
     public:
+        void help(stringstream& h) const { h << "internal"; }
         RecvChunkStartCommand() : ChunkCommandHelper( "_recvChunkStart" ) {}
 
-        virtual LockType locktype() const { return WRITE; }  // this is so don't have to do locking internally
+        virtual LockType locktype() const { return NONE; }
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::_recvChunkStart);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+            actions.addAction(ActionType::internal);
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
 
+            // Active state of TO-side migrations (MigrateStatus) is serialized by distributed
+            // collection lock.
             if ( migrateStatus.getActive() ) {
                 errmsg = "migrate already in progress";
                 return false;
             }
-            
-            if ( OldDataCleanup::_numThreads > 0 ) {
-                errmsg = 
-                    str::stream() 
-                    << "still waiting for a previous migrates data to get cleaned, can't accept new chunks, num threads: " 
-                    << OldDataCleanup::_numThreads;
+
+            // Pending deletes (for migrations) are serialized by the distributed collection lock,
+            // we are sure we registered a delete for a range *before* we can migrate-in a
+            // subrange.
+            int numDeletes = getDeleter()->getStats()->getCurrentDeletes();
+            if (numDeletes > 0) {
+                errmsg = str::stream() << "can't accept new chunks because "
+                        << " there are still " << numDeletes
+                        << " deletes from previous migration";
                 return false;
             }
 
             if ( ! configServer.ok() )
                 ShardingState::initialize(cmdObj["configServer"].String());
 
-            migrateStatus.prepare();
+            if ( !cmdObj["toShardName"].eoo() ) {
+                dassert( cmdObj["toShardName"].type() == String );
+                shardingState.gotShardName( cmdObj["toShardName"].String() );
+            }
 
-            migrateStatus.ns = cmdObj.firstElement().String();
+            string ns = cmdObj.firstElement().String();
+            BSONObj min = cmdObj["min"].Obj().getOwned();
+            BSONObj max = cmdObj["max"].Obj().getOwned();
+
+            // Refresh our collection manager from the config server, we need a collection manager
+            // to start registering pending chunks.
+            // We force the remote refresh here to make the behavior consistent and predictable,
+            // generally we'd refresh anyway, and to be paranoid.
+            ChunkVersion currentVersion;
+            Status status = shardingState.refreshMetadataNow( ns, &currentVersion );
+
+            if ( !status.isOK() ) {
+                errmsg = str::stream() << "cannot start recv'ing chunk "
+                                       << "[" << min << "," << max << ")"
+                                       << causedBy( status.reason() );
+
+                warning() << errmsg << endl;
+                return false;
+            }
+
+            migrateStatus.ns = ns;
             migrateStatus.from = cmdObj["from"].String();
-            migrateStatus.min = cmdObj["min"].Obj().getOwned();
-            migrateStatus.max = cmdObj["max"].Obj().getOwned();
+            migrateStatus.min = min;
+            migrateStatus.max = max;
+            migrateStatus.epoch = currentVersion.epoch();
             migrateStatus.secondaryThrottle = cmdObj["secondaryThrottle"].trueValue();
             if (cmdObj.hasField("shardKeyPattern")) {
                 migrateStatus.shardKeyPattern = cmdObj["shardKeyPattern"].Obj().getOwned();
@@ -2127,6 +2285,9 @@ namespace mongo {
                 migrateStatus.secondaryThrottle = false;
             }
 
+            // Set the TO-side migration to active
+            migrateStatus.prepare();
+
             boost::thread m( migrateThread );
 
             result.appendBool( "started" , true );
@@ -2137,13 +2298,14 @@ namespace mongo {
 
     class RecvChunkStatusCommand : public ChunkCommandHelper {
     public:
+        void help(stringstream& h) const { h << "internal"; }
         RecvChunkStatusCommand() : ChunkCommandHelper( "_recvChunkStatus" ) {}
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::_recvChunkStatus);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+            actions.addAction(ActionType::internal);
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             migrateStatus.status( result );
@@ -2154,13 +2316,14 @@ namespace mongo {
 
     class RecvChunkCommitCommand : public ChunkCommandHelper {
     public:
+        void help(stringstream& h) const { h << "internal"; }
         RecvChunkCommitCommand() : ChunkCommandHelper( "_recvChunkCommit" ) {}
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::_recvChunkCommit);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+            actions.addAction(ActionType::internal);
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             bool ok = migrateStatus.startCommit();
@@ -2172,13 +2335,14 @@ namespace mongo {
 
     class RecvChunkAbortCommand : public ChunkCommandHelper {
     public:
+        void help(stringstream& h) const { h << "internal"; }
         RecvChunkAbortCommand() : ChunkCommandHelper( "_recvChunkAbort" ) {}
         virtual void addRequiredPrivileges(const std::string& dbname,
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {
             ActionSet actions;
-            actions.addAction(ActionType::_recvChunkAbort);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+            actions.addAction(ActionType::internal);
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
             migrateStatus.abort();

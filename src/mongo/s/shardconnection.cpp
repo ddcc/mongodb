@@ -14,12 +14,25 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include <set>
 
+#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/lasterror.h"
@@ -30,17 +43,10 @@
 #include "mongo/s/stale_exception.h"
 #include "mongo/s/version_manager.h"
 #include "mongo/server.h"
+#include "mongo/util/concurrency/spin_lock.h"
 #include "mongo/util/stacktrace.h"
 
 namespace mongo {
-
-    bool ShardConnection::ignoreInitialVersionFailure( false );
-    ExportedServerParameter<bool>
-        _ignoreInitialVersionFailure( ServerParameterSet::getGlobal(),
-                                      "ignoreInitialVersionFailure",
-                                      &ShardConnection::ignoreInitialVersionFailure,
-                                      true,
-                                      true );
 
     DBConnectionPool shardConnectionPool;
 
@@ -95,7 +101,7 @@ namespace mongo {
         {
             ActionSet actions;
             actions.addAction( ActionType::connPoolStats );
-            out->push_back( Privilege( AuthorizationManager::SERVER_RESOURCE_NAME, actions ) );
+            out->push_back( Privilege( ResourcePattern::forClusterResource(), actions ) );
         }
 
         virtual bool run ( const string&, mongo::BSONObj&, int, std::string&, mongo::BSONObjBuilder& result, bool ) {
@@ -244,11 +250,8 @@ namespace mongo {
             vector<Shard> all;
             Shard::getAllShards( all );
 
-            scoped_ptr<LastError::Disabled> ignoreForGLE;
-            if ( ShardConnection::ignoreInitialVersionFailure ) {
-                // Don't report exceptions here as errors in GetLastError if ignoring failures
-                ignoreForGLE.reset( new LastError::Disabled( lastError.get( false ) ) );
-            }
+            // Don't report exceptions here as errors in GetLastError
+            LastError::Disabled ignoreForGLE(lastError.get(false));
 
             // Now only check top-level shard connections
             for ( unsigned i=0; i<all.size(); i++ ) {
@@ -267,16 +270,11 @@ namespace mongo {
                 }
                 catch ( const DBException& ex ) {
 
-                    warning() << "problem while initially checking shard versions on "
+                    warning() << "problem while initially checking shard versions on" << " "
                               << shard.getName() << causedBy( ex ) << endl;
-                    
-                    if ( !ShardConnection::ignoreInitialVersionFailure ) {
-                        throw;
-                    }
-                    else {
-                        // We swallow the error here, checking shard version here is a heuristic to
-                        // prevent later stale config exceptions, not required for correctness.
-                    }
+
+                    // NOTE: This is only a heuristic, to avoid multiple stale version retries
+                    // across multiple shards, and does not affect correctness.
                 }
             }
         }
@@ -496,15 +494,47 @@ namespace mongo {
         }
     }
 
-    bool ShardConnection::releaseConnectionsAfterResponse( false );
+    bool ShardConnection::releaseConnectionsAfterResponse( true );
 
-    ExportedServerParameter<bool> ReleaseConnectionsAfterResponse(
-        ServerParameterSet::getGlobal(),
-        "releaseConnectionsAfterResponse",
-         &ShardConnection::releaseConnectionsAfterResponse,
-        true,
-        true
-    );
+    namespace {
+
+        /**
+         * Custom deprecated RCAR server parameter
+         */
+        class DeprecatedRCARParameter : public ExportedServerParameter<bool> {
+        public:
+
+            DeprecatedRCARParameter( ServerParameterSet* sps,
+                                     const std::string& name,
+                                     bool* value,
+                                     bool allowedToChangeAtStartup,
+                                     bool allowedToChangeAtRuntime ) :
+                ExportedServerParameter<bool>( sps,
+                                               name,
+                                               value,
+                                               allowedToChangeAtStartup,
+                                               allowedToChangeAtRuntime ) {
+            }
+
+            virtual ~DeprecatedRCARParameter() {}
+
+        protected:
+            virtual Status validate( const bool& newValue ) {
+                if ( newValue == true )
+                    return Status::OK();
+
+                return Status( ErrorCodes::BadValue,
+                               "releaseConnectionAfterResponse is always true in v2.6 and above" );
+            }
+        };
+    }
+
+    DeprecatedRCARParameter //
+    ReleaseConnectionsAfterResponse( ServerParameterSet::getGlobal(),
+                                     "releaseConnectionsAfterResponse",
+                                     &ShardConnection::releaseConnectionsAfterResponse,
+                                     true,
+                                     true );
 
     void ShardConnection::releaseMyConnections() {
         ClientConnections::threadInstance()->releaseAll();

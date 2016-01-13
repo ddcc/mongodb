@@ -14,13 +14,26 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
 #pragma once
 
+#include "mongo/base/string_data.h"
 #include "mongo/bson/util/atomic_int.h"
-#include "mongo/client/distlock.h"
 #include "mongo/s/chunk_version.h"
+#include "mongo/s/distlock.h"
 #include "mongo/s/shard.h"
 #include "mongo/s/shardkey.h"
 #include "mongo/util/concurrency/ticketholder.h"
@@ -154,6 +167,7 @@ namespace mongo {
          * @param chunSize maximum number of bytes beyond which the migrate should no go trhough
          * @param secondaryThrottle whether during migrate all writes should block for repl
          * @param waitForDelete whether chunk move should wait for cleanup or return immediately
+         * @param maxTimeMS max time for the migrate request
          * @param res the object containing details about the migrate execution
          * @return true if move was successful
          */
@@ -161,6 +175,7 @@ namespace mongo {
                            long long chunkSize,
                            bool secondaryThrottle,
                            bool waitForDelete,
+                           int maxTimeMS,
                            BSONObj& res) const;
 
         /**
@@ -346,7 +361,9 @@ namespace mongo {
 
         const ShardKeyPattern& getShardKey() const {  return _key; }
 
-        bool hasShardKey( const BSONObj& obj ) const;
+        bool hasShardKey(const BSONObj& doc) const;
+
+        bool hasTargetableShardKey(const BSONObj& doc) const;
 
         bool isUnique() const { return _unique; }
 
@@ -409,7 +426,7 @@ namespace mongo {
         /** @param shards set to the shards covered by the interval [min, max], see SERVER-4791 */
         void getShardsForRange( set<Shard>& shards, const BSONObj& min, const BSONObj& max ) const;
 
-        ChunkMap getChunkMap() const { return _chunkMap; }
+        const ChunkMap& getChunkMap() const { return _chunkMap; }
 
         /**
          * Returns true if, for this shard, the chunks are identical in both chunk managers
@@ -422,6 +439,7 @@ namespace mongo {
 
         string toString() const;
 
+        ChunkVersion getVersion( const StringData& shardName ) const;
         ChunkVersion getVersion( const Shard& shard ) const;
         ChunkVersion getVersion() const;
 

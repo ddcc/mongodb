@@ -8,7 +8,7 @@ var path = "jstests/libs/";
 
 
 print("try starting mongod with auth");
-var m = MongoRunner.runMongod({auth : "", port : port[4], dbpath : "/data/db/wrong-auth"});
+var m = MongoRunner.runMongod({auth : "", port : port[4], dbpath : MongoRunner.dataDir + "/wrong-auth"});
 
 assert.eq(m.getDB("local").auth("__system", ""), 0);
 
@@ -21,7 +21,7 @@ run("chmod", "644", path+"key2");
 
 
 print("try starting mongod");
-m = runMongoProgram( "mongod", "--keyFile", path+"key1", "--port", port[0], "--dbpath", "/data/db/" + name);
+m = runMongoProgram( "mongod", "--keyFile", path+"key1", "--port", port[0], "--dbpath", MongoRunner.dataPath + name);
 
 
 print("should fail with wrong permissions");
@@ -36,13 +36,10 @@ run("chmod", "600", path+"key2");
 
 print("add a user to server0: foo");
 m = startMongodTest( port[0], name+"-0", 0 );
-m.getDB("admin").addUser("foo", "bar");
-m.getDB("test").addUser("bar", "baz");
+m.getDB("admin").createUser({user: "foo", pwd: "bar", roles: jsTest.adminUserRoles});
+m.getDB("test").createUser({user: "bar", pwd: "baz", roles: jsTest.basicUserRoles});
 print("make sure user is written before shutting down");
-m.getDB("test").getLastError();
 stopMongod(port[0]);
-
-if ( !_isWindows() ) {  // SERVER-5024
 
 print("start up rs");
 var rs = new ReplSetTest({"name" : name, "nodes" : 3, "startPort" : port[0]});
@@ -65,9 +62,7 @@ wait(function() {
         return status.members && status.members[1].state == 2 && status.members[2].state == 2;
     });
 
-master.foo.insert({x:1});
-master.runCommand({getlasterror:1, w:3, wtimeout:60000});
-
+master.foo.insert({ x: 1 }, { writeConcern: { w:3, wtimeout:60000 }});
 
 print("try some legal and illegal reads");
 var r = master.foo.findOne();
@@ -85,11 +80,11 @@ function doQueryOn(p) {
         if (typeof(JSON) != "undefined") {
             err = JSON.parse(e.substring(6));
         }
-        else if (e.indexOf("16550") > 0) {
-            err.code = 16550;
+        else if (e.indexOf("13") > 0) {
+            err.code = 13;
         }
     }
-    assert.eq(err.code, 16550);
+    assert.eq(err.code, 13);
 };
 
 doQueryOn(slave);
@@ -110,11 +105,11 @@ assert.eq(r.x, 1);
 
 print("add some data");
 master.auth("bar", "baz");
+var bulk = master.foo.initializeUnorderedBulkOp();
 for (var i=0; i<1000; i++) {
-    master.foo.insert({x:i, foo : "bar"});
+    bulk.insert({ x: i, foo: "bar" });
 }
-master.runCommand({getlasterror:1, w:3, wtimeout:60000});
-
+assert.writeOK(bulk.execute({ w: 3, wtimeout: 60000 }));
 
 print("fail over");
 rs.stop(0);
@@ -151,14 +146,14 @@ rs.restart(0, {"keyFile" : path+"key1"});
 
 
 print("add some more data 2");
+var bulk = master.foo.initializeUnorderedBulkOp();
 for (var i=0; i<1000; i++) {
-    master.foo.insert({x:i, foo : "bar"});
+    bulk.insert({ x: i, foo: "bar" });
 }
-master.runCommand({getlasterror:1, w:3, wtimeout:60000});
-
+bulk.execute({ w:3, wtimeout:60000 });
 
 print("add member with wrong key");
-var conn = new MongodRunner(port[3], "/data/db/"+name+"-3", null, null, ["--replSet","rs_auth1","--rest","--oplogSize","2", "--keyFile", path+"key2"], {no_bind : true});
+var conn = new MongodRunner(port[3], MongoRunner.dataPath+name+"-3", null, null, ["--replSet","rs_auth1","--rest","--oplogSize","2", "--keyFile", path+"key2"], {no_bind : true});
 conn.start();
 
 
@@ -191,7 +186,7 @@ stopMongod(port[3]);
 
 
 print("start back up with correct key");
-conn = new MongodRunner(port[3], "/data/db/"+name+"-3", null, null, ["--replSet","rs_auth1","--rest","--oplogSize","2", "--keyFile", path+"key1"], {no_bind : true});
+conn = new MongodRunner(port[3], MongoRunner.dataPath+name+"-3", null, null, ["--replSet","rs_auth1","--rest","--oplogSize","2", "--keyFile", path+"key1"], {no_bind : true});
 conn.start();
 
 wait(function() {
@@ -218,4 +213,3 @@ assert.soon(function() {
         }
         return true;
     });
-    } // !isWindows

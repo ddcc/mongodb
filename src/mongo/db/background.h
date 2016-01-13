@@ -12,6 +12,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 /* background.h
@@ -21,7 +33,13 @@
 
 #pragma once
 
-#include "mongo/db/namespacestring.h"
+#include <map>
+#include <set>
+#include <iosfwd>
+
+#include "mongo/base/disallow_copying.h"
+#include "mongo/base/string_data.h"
+#include "mongo/db/namespace_string.h"
 
 namespace mongo {
 
@@ -35,24 +53,24 @@ namespace mongo {
        It's assumed this is not for super-high RPS things, so we don't do
        anything special in the implementation here to be fast.
     */
-    class BackgroundOperation : public boost::noncopyable {
+    class BackgroundOperation {
+        MONGO_DISALLOW_COPYING(BackgroundOperation);
     public:
-        static bool inProgForDb(const char *db);
-        static bool inProgForNs(const char *ns);
-        static void assertNoBgOpInProgForDb(const char *db);
-        static void assertNoBgOpInProgForNs(const char *ns);
-        static void dump(stringstream&);
+        static bool inProgForDb(const StringData& db);
+        static bool inProgForNs(const StringData& ns);
+        static void assertNoBgOpInProgForDb(const StringData& db);
+        static void assertNoBgOpInProgForNs(const StringData& ns);
+        static void awaitNoBgOpInProgForDb(const StringData& db);
+        static void awaitNoBgOpInProgForNs(const StringData& ns);
+        static void dump(std::ostream&);
 
         /* check for in progress before instantiating */
-        BackgroundOperation(const char *ns);
+        BackgroundOperation(const StringData& ns);
 
         virtual ~BackgroundOperation();
 
     private:
         NamespaceString _ns;
-        static map<string, unsigned> dbsInProg;
-        static set<string> nsInProg;
-        static SimpleMutex m;
     };
 
 } // namespace mongo

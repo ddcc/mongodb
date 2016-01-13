@@ -145,7 +145,7 @@ Array.shuffle = function(arr){
 }
 
 Array.tojson = function(a, indent, nolint){
-    var lineEnding = nolint ? " " : "\n";
+    var elementSeparator = nolint ? " " : "\n";
 
     if (!indent)
         indent = "";
@@ -156,20 +156,24 @@ Array.tojson = function(a, indent, nolint){
         return "[ ]";
     }
 
-    var s = "[" + lineEnding;
-    indent += "\t";
+    var s = "[" + elementSeparator;
+
+    // add to indent if we are pretty
+    if (!nolint)
+      indent += "\t";
+
     for (var i=0; i<a.length; i++){
         s += indent + tojson(a[i], indent, nolint);
         if (i < a.length - 1){
-            s += "," + lineEnding;
+            s += "," + elementSeparator;
         }
     }
-    if (a.length == 0) {
-        s += indent;
-    }
 
-    indent = indent.substring(1);
-    s += lineEnding+indent+"]";
+    // remove from indent if we are pretty
+    if (!nolint)
+      indent = indent.substring(1);
+
+    s += elementSeparator + indent + "]";
     return s;
 }
 
@@ -608,16 +612,10 @@ tojsonObject = function(x, indent, nolint){
     // push one level of indent
     indent += tabSpace;
 
-    var total = 0;
-    for (var k in x) total++;
-    if (total == 0) {
-        s += indent + lineEnding;
-    }
-
     var keys = x;
     if (typeof(x._simpleKeys) == "function")
         keys = x._simpleKeys();
-    var num = 1;
+    var fieldStrings = [];
     for (var k in keys){
         var val = x[k];
 
@@ -627,13 +625,16 @@ tojsonObject = function(x, indent, nolint){
         if (typeof DBCollection != 'undefined' && val == DBCollection.prototype)
             continue;
 
-        s += indent + "\"" + k + "\" : " + tojson(val, indent, nolint);
-        if (num != total) {
-            s += ",";
-            num++;
-        }
-        s += lineEnding;
+        fieldStrings.push(indent + "\"" + k + "\" : " + tojson(val, indent, nolint));
     }
+
+    if (fieldStrings.length > 0) {
+        s += fieldStrings.join("," + lineEnding);
+    }
+    else {
+        s += indent;
+    }
+    s += lineEnding;
 
     // pop one level of indent
     indent = indent.substring(1);

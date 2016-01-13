@@ -14,45 +14,34 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
-#include "pch.h"
-
-#include "mongo/db/pipeline/accumulator.h"
+#include "mongo/pch.h"
 
 #include "mongo/db/interrupt_status_mongod.h"
+#include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/document.h"
 #include "mongo/db/pipeline/expression_context.h"
-
-#include "dbtests.h"
+#include "mongo/dbtests/dbtests.h"
 
 namespace AccumulatorTests {
 
     class Base {
-    public:
-        Base() :
-            _standalone( ExpressionContext::create( &InterruptStatusMongod::status ) ),
-            _shard( ExpressionContext::create( &InterruptStatusMongod::status ) ),
-            _router( ExpressionContext::create( &InterruptStatusMongod::status ) ) {
-                _standalone->setInShard( false );
-                _standalone->setDoingMerge( false );
-                _shard->setInShard( true );
-                _shard->setDoingMerge( false );
-                _router->setInShard( false );
-                _router->setDoingMerge( true );
-        }
     protected:
-        Document fromjson( const string& json ) {
-            return frombson( mongo::fromjson( json ) );
-        }
-        Document frombson( const BSONObj& bson ) {
-            BSONObj myBson = bson;
-            return Document::createFromBsonObj( &myBson );
-        }
         BSONObj fromDocument( const Document& document ) {
-            BSONObjBuilder bob;
-            document->toBson( &bob );
-            return bob.obj();
+            return document.toBson();
         }
         BSONObj fromValue( const Value& value ) {
             BSONObjBuilder bob;
@@ -64,17 +53,7 @@ namespace AccumulatorTests {
             ASSERT_EQUALS( expected, actual );
             ASSERT( expected.binaryEqual( actual ) );
         }
-        void assertBsonRepresentation( const BSONObj& expected,
-                                       const intrusive_ptr<Accumulator>& accumulator ) const {
-            BSONObjBuilder bob;
-            accumulator->addToBsonObj( &bob, "", true );
-            assertBinaryEqual( expected, bob.obj().firstElement().Obj().getOwned() );
-        }
-        intrusive_ptr<ExpressionContext> standalone() const { return _standalone; }
-        intrusive_ptr<ExpressionContext> shard() const { return _shard; }
-        intrusive_ptr<ExpressionContext> router() const { return _router; }
     private:
-        intrusive_ptr<ExpressionContext> _standalone;
         intrusive_ptr<ExpressionContext> _shard;
         intrusive_ptr<ExpressionContext> _router;        
     };
@@ -86,11 +65,9 @@ namespace AccumulatorTests {
             virtual ~Base() {
             }
         protected:
-            virtual intrusive_ptr<ExpressionContext> context() { return standalone(); }
             void createAccumulator() {
-                _accumulator = AccumulatorAvg::create( context() );
-                _accumulator->addOperand( ExpressionFieldPath::create( "d" ) );
-                assertBsonRepresentation( BSON( "$avg" << "$d" ), _accumulator );
+                _accumulator = AccumulatorAvg::create();
+                ASSERT_EQUALS(string("$avg"), _accumulator->getOpName());
             }
             Accumulator *accumulator() { return _accumulator.get(); }
         private:
@@ -102,7 +79,7 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                ASSERT_EQUALS( 0, accumulator()->getValue().getDouble() );
+                ASSERT_EQUALS( 0, accumulator()->getValue(false).getDouble() );
             }
         };
         
@@ -111,8 +88,8 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( frombson( BSON( "d" << 3 ) ) );
-                ASSERT_EQUALS( 3, accumulator()->getValue().getDouble() );
+                accumulator()->process(Value(3), false);
+                ASSERT_EQUALS( 3, accumulator()->getValue(false).getDouble() );
             }
         };
         
@@ -121,8 +98,8 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( frombson( BSON( "d" << -4LL ) ) );
-                ASSERT_EQUALS( -4, accumulator()->getValue().getDouble() );
+                accumulator()->process(Value(-4LL), false);
+                ASSERT_EQUALS( -4, accumulator()->getValue(false).getDouble() );
             }
         };
         
@@ -131,8 +108,8 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( frombson( BSON( "d" << 22.6 ) ) );
-                ASSERT_EQUALS( 22.6, accumulator()->getValue().getDouble() );
+                accumulator()->process(Value(22.6), false);
+                ASSERT_EQUALS( 22.6, accumulator()->getValue(false).getDouble() );
             }
         };
         
@@ -141,9 +118,9 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( frombson( BSON( "d" << 10 ) ) );
-                accumulator()->evaluate( frombson( BSON( "d" << 11 ) ) );
-                ASSERT_EQUALS( 10.5, accumulator()->getValue().getDouble() );
+                accumulator()->process(Value(10), false);
+                accumulator()->process(Value(11), false);
+                ASSERT_EQUALS( 10.5, accumulator()->getValue(false).getDouble() );
             }
         };        
         
@@ -152,9 +129,9 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( frombson( BSON( "d" << 10 ) ) );
-                accumulator()->evaluate( frombson( BSON( "d" << 11.0 ) ) );
-                ASSERT_EQUALS( 10.5, accumulator()->getValue().getDouble() );
+                accumulator()->process(Value(10), false);
+                accumulator()->process(Value(11.0), false);
+                ASSERT_EQUALS( 10.5, accumulator()->getValue(false).getDouble() );
             }
         };        
         
@@ -163,9 +140,10 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( frombson( BSON( "d" << numeric_limits<int>::max() ) ) );
-                accumulator()->evaluate( frombson( BSON( "d" << numeric_limits<int>::max() ) ) );
-                ASSERT_EQUALS( numeric_limits<int>::max(), accumulator()->getValue().getDouble() );
+                accumulator()->process(Value(numeric_limits<int>::max()), false);
+                accumulator()->process(Value(numeric_limits<int>::max()), false);
+                ASSERT_EQUALS(numeric_limits<int>::max(),
+                              accumulator()->getValue(false).getDouble());
             }
         };        
         
@@ -174,50 +152,43 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate
-                        ( frombson( BSON( "d" << numeric_limits<long long>::max() ) ) );
-                accumulator()->evaluate
-                        ( frombson( BSON( "d" << numeric_limits<long long>::max() ) ) );
+                accumulator()->process(Value(numeric_limits<long long>::max()), false);
+                accumulator()->process(Value(numeric_limits<long long>::max()), false);
                 ASSERT_EQUALS( ( (double)numeric_limits<long long>::max() +
                                  numeric_limits<long long>::max() ) / 2.0,
-                               accumulator()->getValue().getDouble() );
+                               accumulator()->getValue(false).getDouble() );
             }
         };
 
         namespace Shard {
-
-            class Base : public Avg::Base {
-                virtual intrusive_ptr<ExpressionContext> context() { return shard(); }
-            };
-
             class SingleOperandBase : public Base {
             public:
                 void run() {
                     createAccumulator();
-                    accumulator()->evaluate( frombson( operand() ) );
+                    accumulator()->process(operand(), false);
                     assertBinaryEqual( expectedResult(),
-                                       fromDocument( accumulator()->getValue().getDocument() ) );
+                                       fromDocument(accumulator()->getValue(true).getDocument()));
                 }
             protected:
-                virtual BSONObj operand() = 0;
+                virtual Value operand() = 0;
                 virtual BSONObj expectedResult() = 0;
             };
 
             /** Shard result for one integer. */
             class Int : public SingleOperandBase {
-                BSONObj operand() { return BSON( "d" << 3 ); }
+                Value operand() { return Value(3); }
                 BSONObj expectedResult() { return BSON( "subTotal" << 3.0 << "count" << 1LL ); }
             };
             
             /** Shard result for one long. */
             class Long : public SingleOperandBase {
-                BSONObj operand() { return BSON( "d" << 5LL ); }
+                Value operand() { return Value(5LL); }
                 BSONObj expectedResult() { return BSON( "subTotal" << 5.0 << "count" << 1LL ); }
             };
             
             /** Shard result for one double. */
             class Double : public SingleOperandBase {
-                BSONObj operand() { return BSON( "d" << 116.0 ); }
+                Value operand() { return Value(116.0); }
                 BSONObj expectedResult() { return BSON( "subTotal" << 116.0 << "count" << 1LL ); }
             };
 
@@ -228,23 +199,23 @@ namespace AccumulatorTests {
                     checkAvg( operand2(), operand1() );
                 }
             protected:
-                virtual BSONObj operand1() = 0;
-                virtual BSONObj operand2() = 0;
+                virtual Value operand1() = 0;
+                virtual Value operand2() = 0;
                 virtual BSONObj expectedResult() = 0;
             private:
-                void checkAvg( const BSONObj& a, const BSONObj& b ) {
+                void checkAvg( const Value& a, const Value& b ) {
                     createAccumulator();
-                    accumulator()->evaluate( frombson( a ) );
-                    accumulator()->evaluate( frombson( b ) );
-                    assertBinaryEqual( expectedResult(),
-                                       fromDocument( accumulator()->getValue().getDocument() ) );
+                    accumulator()->process(a, false);
+                    accumulator()->process(b, false);
+                    assertBinaryEqual(expectedResult(),
+                                      fromDocument(accumulator()->getValue(true).getDocument()));
                 }
             };
 
             /** Shard two ints overflow. */
             class IntIntOverflow : public TwoOperandBase {
-                BSONObj operand1() { return BSON( "d" << numeric_limits<int>::max() ); }
-                BSONObj operand2() { return BSON( "d" << 3 ); }
+                Value operand1() { return Value(numeric_limits<int>::max()); }
+                Value operand2() { return Value(3); }
                 BSONObj expectedResult() {
                     return BSON( "subTotal" << numeric_limits<int>::max() + 3.0 << "count" << 2LL );
                 }
@@ -252,22 +223,22 @@ namespace AccumulatorTests {
 
             /** Shard avg an int and a long. */
             class IntLong : public TwoOperandBase {
-                BSONObj operand1() { return BSON( "d" << 5 ); }
-                BSONObj operand2() { return BSON( "d" << 3LL ); }
+                Value operand1() { return Value(5); }
+                Value operand2() { return Value(3LL); }
                 BSONObj expectedResult() { return BSON( "subTotal" << 8.0 << "count" << 2LL ); }
             };
             
             /** Shard avg an int and a double. */
             class IntDouble : public TwoOperandBase {
-                BSONObj operand1() { return BSON( "d" << 5 ); }
-                BSONObj operand2() { return BSON( "d" << 6.2 ); }
+                Value operand1() { return Value(5); }
+                Value operand2() { return Value(6.2); }
                 BSONObj expectedResult() { return BSON( "subTotal" << 11.2 << "count" << 2LL ); }
             };
             
             /** Shard avg a long and a double. */
             class LongDouble : public TwoOperandBase {
-                BSONObj operand1() { return BSON( "d" << 5LL ); }
-                BSONObj operand2() { return BSON( "d" << 1.0 ); }
+                Value operand1() { return Value(5LL); }
+                Value operand2() { return Value(1.0); }
                 BSONObj expectedResult() { return BSON( "subTotal" << 6.0 << "count" << 2LL ); }
             };
 
@@ -276,32 +247,25 @@ namespace AccumulatorTests {
             public:
                 void run() {
                     createAccumulator();
-                    accumulator()->evaluate( frombson( BSON( "d" << 1 ) ) );
-                    accumulator()->evaluate( frombson( BSON( "d" << 2LL ) ) );
-                    accumulator()->evaluate( frombson( BSON( "d" << 4.0 ) ) );
-                    assertBinaryEqual( BSON( "subTotal" << 7.0 << "count" << 3LL ),
-                                       fromDocument( accumulator()->getValue().getDocument() ) );
+                    accumulator()->process(Value(1), false);
+                    accumulator()->process(Value(2LL), false);
+                    accumulator()->process(Value(4.0), false);
+                    assertBinaryEqual(BSON( "subTotal" << 7.0 << "count" << 3LL ),
+                                      fromDocument(accumulator()->getValue(true).getDocument()));
                 }
             };
 
         } // namespace Shard
 
         namespace Router {
-
-            class Base : public Avg::Base {
-                virtual intrusive_ptr<ExpressionContext> context() { return router(); }
-            };
-
             /** Router result from one shard. */
             class OneShard : public Base {
             public:
                 void run() {
                     createAccumulator();
-                    accumulator()->evaluate
-                            ( frombson
-                             ( BSON( "d" << BSON( "subTotal" << 3.0 << "count" << 2LL ) ) ) );
+                    accumulator()->process(Value(DOC("subTotal" << 3.0 << "count" << 2LL)), true);
                     assertBinaryEqual( BSON( "" << 3.0 / 2 ),
-                                       fromValue( accumulator()->getValue() ) );
+                                       fromValue( accumulator()->getValue(false) ) );
                 }
             };
             
@@ -310,14 +274,10 @@ namespace AccumulatorTests {
             public:
                 void run() {
                     createAccumulator();
-                    accumulator()->evaluate
-                            ( frombson
-                             ( BSON( "d" << BSON( "subTotal" << 6.0 << "count" << 1LL ) ) ) );
-                    accumulator()->evaluate
-                            ( frombson
-                             ( BSON( "d" << BSON( "subTotal" << 5.0 << "count" << 2LL ) ) ) );
+                    accumulator()->process(Value(DOC("subTotal" << 6.0 << "count" << 1LL)), true);
+                    accumulator()->process(Value(DOC("subTotal" << 5.0 << "count" << 2LL)), true);
                     assertBinaryEqual( BSON( "" << 11.0 / 3 ),
-                                       fromValue( accumulator()->getValue() ) );
+                                       fromValue( accumulator()->getValue(false) ) );
                 }
             };
 
@@ -330,9 +290,8 @@ namespace AccumulatorTests {
         class Base : public AccumulatorTests::Base {
         protected:
             void createAccumulator() {
-                _accumulator = AccumulatorFirst::create( standalone() );
-                _accumulator->addOperand( ExpressionFieldPath::create( "a" ) );
-                assertBsonRepresentation( BSON( "$first" << "$a" ), _accumulator );
+                _accumulator = AccumulatorFirst::create();
+                ASSERT_EQUALS(string("$first"), _accumulator->getOpName());
             }
             Accumulator *accumulator() { return _accumulator.get(); }
         private:
@@ -345,7 +304,7 @@ namespace AccumulatorTests {
             void run() {
                 createAccumulator();
                 // The accumulator returns no value in this case.
-                ASSERT( accumulator()->getValue().missing() );
+                ASSERT( accumulator()->getValue(false).missing() );
             }
         };
 
@@ -354,8 +313,8 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( fromjson( "{a:5}" ) );
-                ASSERT_EQUALS( 5, accumulator()->getValue().getInt() );
+                accumulator()->process(Value(5), false);
+                ASSERT_EQUALS( 5, accumulator()->getValue(false).getInt() );
             }
         };
         
@@ -364,8 +323,8 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( fromjson( "{}" ) );
-                ASSERT_EQUALS( EOO, accumulator()->getValue().getType() );
+                accumulator()->process(Value(), false);
+                ASSERT_EQUALS( EOO, accumulator()->getValue(false).getType() );
             }
         };
         
@@ -374,9 +333,9 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( fromjson( "{a:5}" ) );
-                accumulator()->evaluate( fromjson( "{a:7}" ) );
-                ASSERT_EQUALS( 5, accumulator()->getValue().getInt() );
+                accumulator()->process(Value(5), false);
+                accumulator()->process(Value(7), false);
+                ASSERT_EQUALS( 5, accumulator()->getValue(false).getInt() );
             }
         };
         
@@ -385,9 +344,9 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( fromjson( "{}" ) );
-                accumulator()->evaluate( fromjson( "{a:7}" ) );
-                ASSERT_EQUALS( EOO, accumulator()->getValue().getType() );
+                accumulator()->process(Value(), false);
+                accumulator()->process(Value(7), false);
+                ASSERT_EQUALS( EOO, accumulator()->getValue(false).getType() );
             }
         };
         
@@ -398,9 +357,8 @@ namespace AccumulatorTests {
         class Base : public AccumulatorTests::Base {
         protected:
             void createAccumulator() {
-                _accumulator = AccumulatorLast::create( standalone() );
-                _accumulator->addOperand( ExpressionFieldPath::create( "b" ) );
-                assertBsonRepresentation( BSON( "$last" << "$b" ), _accumulator );
+                _accumulator = AccumulatorLast::create();
+                ASSERT_EQUALS(string("$last"), _accumulator->getOpName());
             }
             Accumulator *accumulator() { return _accumulator.get(); }
         private:
@@ -413,7 +371,7 @@ namespace AccumulatorTests {
             void run() {
                 createAccumulator();
                 // The accumulator returns no value in this case.
-                ASSERT( accumulator()->getValue().missing() );
+                ASSERT( accumulator()->getValue(false).missing() );
             }
         };
         
@@ -422,8 +380,8 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( fromjson( "{b:5}" ) );
-                ASSERT_EQUALS( 5, accumulator()->getValue().getInt() );
+                accumulator()->process(Value(5), false);
+                ASSERT_EQUALS( 5, accumulator()->getValue(false).getInt() );
             }
         };
         
@@ -432,8 +390,8 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( fromjson( "{}" ) );
-                ASSERT_EQUALS( EOO , accumulator()->getValue().getType() );
+                accumulator()->process(Value(), false);
+                ASSERT_EQUALS( EOO , accumulator()->getValue(false).getType() );
             }
         };
         
@@ -442,9 +400,9 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( fromjson( "{b:5}" ) );
-                accumulator()->evaluate( fromjson( "{b:7}" ) );
-                ASSERT_EQUALS( 7, accumulator()->getValue().getInt() );
+                accumulator()->process(Value(5), false);
+                accumulator()->process(Value(7), false);
+                ASSERT_EQUALS( 7, accumulator()->getValue(false).getInt() );
             }
         };
         
@@ -453,9 +411,9 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( fromjson( "{b:7}" ) );
-                accumulator()->evaluate( fromjson( "{}" ) );
-                ASSERT_EQUALS( EOO , accumulator()->getValue().getType() );
+                accumulator()->process(Value(7), false);
+                accumulator()->process(Value(), false);
+                ASSERT_EQUALS( EOO , accumulator()->getValue(false).getType() );
             }
         };
         
@@ -466,9 +424,8 @@ namespace AccumulatorTests {
         class Base : public AccumulatorTests::Base {
         protected:
             void createAccumulator() {
-                _accumulator = AccumulatorMinMax::createMin( standalone() );
-                _accumulator->addOperand( ExpressionFieldPath::create( "c" ) );
-                assertBsonRepresentation( BSON( "$min" << "$c" ), _accumulator );
+                _accumulator = AccumulatorMinMax::createMin();
+                ASSERT_EQUALS(string("$min"), _accumulator->getOpName());
             }
             Accumulator *accumulator() { return _accumulator.get(); }
         private:
@@ -481,7 +438,7 @@ namespace AccumulatorTests {
             void run() {
                 createAccumulator();
                 // The accumulator returns no value in this case.
-                ASSERT( accumulator()->getValue().missing() );
+                ASSERT( accumulator()->getValue(false).missing() );
             }
         };
         
@@ -490,8 +447,8 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( fromjson( "{c:5}" ) );
-                ASSERT_EQUALS( 5, accumulator()->getValue().getInt() );
+                accumulator()->process(Value(5), false);
+                ASSERT_EQUALS( 5, accumulator()->getValue(false).getInt() );
             }
         };
         
@@ -500,8 +457,8 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( fromjson( "{}" ) );
-                ASSERT_EQUALS( EOO , accumulator()->getValue().getType() );
+                accumulator()->process(Value(), false);
+                ASSERT_EQUALS( EOO , accumulator()->getValue(false).getType() );
             }
         };
         
@@ -510,9 +467,9 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( fromjson( "{c:5}" ) );
-                accumulator()->evaluate( fromjson( "{c:7}" ) );
-                ASSERT_EQUALS( 5, accumulator()->getValue().getInt() );
+                accumulator()->process(Value(5), false);
+                accumulator()->process(Value(7), false);
+                ASSERT_EQUALS( 5, accumulator()->getValue(false).getInt() );
             }
         };
         
@@ -521,9 +478,9 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( fromjson( "{c:7}" ) );
-                accumulator()->evaluate( fromjson( "{}" ) );
-                ASSERT_EQUALS( 7 , accumulator()->getValue().getInt() );
+                accumulator()->process(Value(7), false);
+                accumulator()->process(Value(), false);
+                ASSERT_EQUALS( 7 , accumulator()->getValue(false).getInt() );
             }
         };
         
@@ -534,9 +491,8 @@ namespace AccumulatorTests {
         class Base : public AccumulatorTests::Base {
         protected:
             void createAccumulator() {
-                _accumulator = AccumulatorMinMax::createMax( standalone() );
-                _accumulator->addOperand( ExpressionFieldPath::create( "d" ) );
-                assertBsonRepresentation( BSON( "$max" << "$d" ), _accumulator );
+                _accumulator = AccumulatorMinMax::createMax();
+                ASSERT_EQUALS(string("$max"), _accumulator->getOpName());
             }
             Accumulator *accumulator() { return _accumulator.get(); }
         private:
@@ -549,7 +505,7 @@ namespace AccumulatorTests {
             void run() {
                 createAccumulator();
                 // The accumulator returns no value in this case.
-                ASSERT( accumulator()->getValue().missing() );
+                ASSERT( accumulator()->getValue(false).missing() );
             }
         };
         
@@ -558,8 +514,8 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( fromjson( "{d:5}" ) );
-                ASSERT_EQUALS( 5, accumulator()->getValue().getInt() );
+                accumulator()->process(Value(5), false);
+                ASSERT_EQUALS( 5, accumulator()->getValue(false).getInt() );
             }
         };
         
@@ -568,8 +524,8 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( fromjson( "{}" ) );
-                ASSERT_EQUALS( EOO, accumulator()->getValue().getType() );
+                accumulator()->process(Value(), false);
+                ASSERT_EQUALS( EOO, accumulator()->getValue(false).getType() );
             }
         };
         
@@ -578,9 +534,9 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( fromjson( "{d:5}" ) );
-                accumulator()->evaluate( fromjson( "{d:7}" ) );
-                ASSERT_EQUALS( 7, accumulator()->getValue().getInt() );
+                accumulator()->process(Value(5), false);
+                accumulator()->process(Value(7), false);
+                ASSERT_EQUALS( 7, accumulator()->getValue(false).getInt() );
             }
         };
         
@@ -589,9 +545,9 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( fromjson( "{d:7}" ) );
-                accumulator()->evaluate( fromjson( "{}" ) );
-                ASSERT_EQUALS( 7, accumulator()->getValue().getInt() );
+                accumulator()->process(Value(7), false);
+                accumulator()->process(Value(), false);
+                ASSERT_EQUALS( 7, accumulator()->getValue(false).getInt() );
             }
         };
         
@@ -602,9 +558,8 @@ namespace AccumulatorTests {
         class Base : public AccumulatorTests::Base {
         protected:
             void createAccumulator() {
-                _accumulator = AccumulatorSum::create( standalone() );
-                _accumulator->addOperand( ExpressionFieldPath::create( "d" ) );
-                assertBsonRepresentation( BSON( "$sum" << "$d" ), _accumulator );
+                _accumulator = AccumulatorSum::create();
+                ASSERT_EQUALS(string("$sum"), _accumulator->getOpName());
             }
             Accumulator *accumulator() { return _accumulator.get(); }
         private:
@@ -616,7 +571,7 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                ASSERT_EQUALS( 0, accumulator()->getValue().getInt() );
+                ASSERT_EQUALS( 0, accumulator()->getValue(false).getInt() );
             }
         };
 
@@ -625,8 +580,8 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( frombson( BSON( "d" << 5 ) ) );
-                ASSERT_EQUALS( 5, accumulator()->getValue().getInt() );
+                accumulator()->process(Value(5), false);
+                ASSERT_EQUALS( 5, accumulator()->getValue(false).getInt() );
             }
         };
 
@@ -635,8 +590,8 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( frombson( BSON( "d" << 6LL ) ) );
-                ASSERT_EQUALS( 6, accumulator()->getValue().getLong() );
+                accumulator()->process(Value(6LL), false);
+                ASSERT_EQUALS( 6, accumulator()->getValue(false).getLong() );
             }
         };
         
@@ -645,8 +600,8 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( frombson( BSON( "d" << 60000000000LL ) ) );
-                ASSERT_EQUALS( 60000000000LL, accumulator()->getValue().getLong() );
+                accumulator()->process(Value(60000000000LL), false);
+                ASSERT_EQUALS( 60000000000LL, accumulator()->getValue(false).getLong() );
             }
         };
         
@@ -655,8 +610,8 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( frombson( BSON( "d" << 7.0 ) ) );
-                ASSERT_EQUALS( 7.0, accumulator()->getValue().getDouble() );
+                accumulator()->process(Value(7.0), false);
+                ASSERT_EQUALS( 7.0, accumulator()->getValue(false).getDouble() );
             }
         };
 
@@ -665,8 +620,8 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( frombson( BSON( "d" << 7.5 ) ) );
-                ASSERT_EQUALS( 7.5, accumulator()->getValue().getDouble() );
+                accumulator()->process(Value(7.5), false);
+                ASSERT_EQUALS( 7.5, accumulator()->getValue(false).getDouble() );
             }
         };
 
@@ -675,11 +630,10 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate
-                        ( frombson( BSON( "d" << numeric_limits<double>::quiet_NaN() ) ) );
+                accumulator()->process(Value(numeric_limits<double>::quiet_NaN()), false);
                 // NaN is unequal to itself.
-                ASSERT_NOT_EQUALS( accumulator()->getValue().getDouble(),
-                                   accumulator()->getValue().getDouble() );
+                ASSERT_NOT_EQUALS( accumulator()->getValue(false).getDouble(),
+                                   accumulator()->getValue(false).getDouble() );
             }
         };
         
@@ -692,145 +646,135 @@ namespace AccumulatorTests {
                 checkPairSum( summand2(), summand1() );
             }
         protected:
-            virtual BSONObj summand1() { verify( false ); }
-            virtual BSONObj summand2() { verify( false ); }
-            virtual BSONObj expectedSum() = 0;
-            void checkPairSum( BSONObj first, BSONObj second ) {
-                Document firstDocument = Document::createFromBsonObj( &first );
-                Document secondDocument = Document::createFromBsonObj( &second );
+            virtual Value summand1() { verify( false ); }
+            virtual Value summand2() { verify( false ); }
+            virtual Value expectedSum() = 0;
+            void checkPairSum( Value first, Value second ) {
                 createAccumulator();
-                accumulator()->evaluate( firstDocument );
-                accumulator()->evaluate( secondDocument );
+                accumulator()->process(first, false);
+                accumulator()->process(second, false);
                 checkSum();
             }
             void checkSum() {
-                BSONObjBuilder resultBuilder;
-                accumulator()->getValue().addToBsonObj( &resultBuilder, "" );
-                BSONObj result = resultBuilder.obj();
-                ASSERT_EQUALS( expectedSum().firstElement(), result.firstElement() );                
-                ASSERT_EQUALS( expectedSum().firstElement().type(), result.firstElement().type() );
+                Value result = accumulator()->getValue(false);
+                ASSERT_EQUALS( expectedSum(), result );                
+                ASSERT_EQUALS( expectedSum().getType(), result.getType() );
             }
         };
 
         /** Two ints are summed. */
         class IntInt : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << 4 ); }
-            BSONObj summand2() { return BSON( "d" << 5 ); }
-            BSONObj expectedSum() { return BSON( "" << 9 ); }
+            Value summand1() { return Value(4); }
+            Value summand2() { return Value(5); }
+            Value expectedSum() { return Value(9); }
         };
 
         /** Two ints overflow. */
         class IntIntOverflow : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << numeric_limits<int>::max() ); }
-            BSONObj summand2() { return BSON( "d" << 10 ); }
-            BSONObj expectedSum() {
-                return BSON( "" << numeric_limits<int>::max() + 10LL );
-            }
+            Value summand1() { return Value(numeric_limits<int>::max()); }
+            Value summand2() { return Value(10); }
+            Value expectedSum() { return Value(numeric_limits<int>::max() + 10LL); }
         };
 
         /** Two ints negative overflow. */
         class IntIntNegativeOverflow : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << -numeric_limits<int>::max() ); }
-            BSONObj summand2() { return BSON( "d" << -10 ); }
-            BSONObj expectedSum() {
-                return BSON( "" << -numeric_limits<int>::max() + -10LL );
-            }
+            Value summand1() { return Value(-numeric_limits<int>::max()); }
+            Value summand2() { return Value(-10); }
+            Value expectedSum() { return Value(-numeric_limits<int>::max() + -10LL); }
         };
         
         /** An int and a long are summed. */
         class IntLong : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << 4 ); }
-            BSONObj summand2() { return BSON( "d" << 5LL ); }
-            BSONObj expectedSum() { return BSON( "" << 9LL ); }
+            Value summand1() { return Value(4); }
+            Value summand2() { return Value(5LL); }
+            Value expectedSum() { return Value(9LL); }
         };
         
         /** An int and a long do not trigger an int overflow. */
         class IntLongNoIntOverflow : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << numeric_limits<int>::max() ); }
-            BSONObj summand2() { return BSON( "d" << 1LL ); }
-            BSONObj expectedSum() {
-                return BSON( "" << (long long)numeric_limits<int>::max() + 1 );
-            }
+            Value summand1() { return Value(numeric_limits<int>::max()); }
+            Value summand2() { return Value(1LL); }
+            Value expectedSum() { return Value((long long)numeric_limits<int>::max() + 1); }
         };
         
         /** An int and a long overflow. */
         class IntLongLongOverflow : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << 1 ); }
-            BSONObj summand2() { return BSON( "d" << numeric_limits<long long>::max() ); }
-            BSONObj expectedSum() { return BSON( "" << numeric_limits<long long>::max() + 1 ); }
+            Value summand1() { return Value(1); }
+            Value summand2() { return Value(numeric_limits<long long>::max()); }
+            Value expectedSum() { return Value(numeric_limits<long long>::max() + 1); }
         };
 
         /** Two longs are summed. */
         class LongLong : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << 4LL ); }
-            BSONObj summand2() { return BSON( "d" << 5LL ); }
-            BSONObj expectedSum() { return BSON( "" << 9LL ); }            
+            Value summand1() { return Value(4LL); }
+            Value summand2() { return Value(5LL); }
+            Value expectedSum() { return Value(9LL); }            
         };
         
         /** Two longs overflow. */
         class LongLongOverflow : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << numeric_limits<long long>::max() ); }
-            BSONObj summand2() { return BSON( "d" << numeric_limits<long long>::max() ); }
-            BSONObj expectedSum() {
-                return BSON( "" << numeric_limits<long long>::max() +
-                        numeric_limits<long long>::max() );
+            Value summand1() { return Value(numeric_limits<long long>::max()); }
+            Value summand2() { return Value(numeric_limits<long long>::max()); }
+            Value expectedSum() {
+                return Value(numeric_limits<long long>::max()
+                           + numeric_limits<long long>::max());
             }
         };
         
         /** An int and a double are summed. */
         class IntDouble : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << 4 ); }
-            BSONObj summand2() { return BSON( "d" << 5.5 ); }
-            BSONObj expectedSum() { return BSON( "" << 9.5 ); }
+            Value summand1() { return Value(4); }
+            Value summand2() { return Value(5.5); }
+            Value expectedSum() { return Value(9.5); }
         };
         
         /** An int and a NaN double are summed. */
         class IntNanDouble : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << 4 ); }
-            BSONObj summand2() { return BSON( "d" << numeric_limits<double>::quiet_NaN() ); }
-            BSONObj expectedSum() {
+            Value summand1() { return Value(4); }
+            Value summand2() { return Value(numeric_limits<double>::quiet_NaN()); }
+            Value expectedSum() {
                 // BSON compares NaN values as equal.
-                return BSON( "" << numeric_limits<double>::quiet_NaN() );
+                return Value(numeric_limits<double>::quiet_NaN());
             }
         };
         
         /** An int and a NaN sum to NaN. */
         class IntDoubleNoIntOverflow : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << numeric_limits<int>::max() ); }
-            BSONObj summand2() { return BSON( "d" << 1.0 ); }
-            BSONObj expectedSum() {
-                return BSON( "" << (long long)numeric_limits<int>::max() + 1.0 );
+            Value summand1() { return Value(numeric_limits<int>::max()); }
+            Value summand2() { return Value(1.0); }
+            Value expectedSum() {
+                return Value((long long)numeric_limits<int>::max() + 1.0);
             }
         };
         
         /** A long and a double are summed. */
         class LongDouble : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << 4LL ); }
-            BSONObj summand2() { return BSON( "d" << 5.5 ); }
-            BSONObj expectedSum() { return BSON( "" << 9.5 ); }
+            Value summand1() { return Value(4LL); }
+            Value summand2() { return Value(5.5); }
+            Value expectedSum() { return Value(9.5); }
         };
         
         /** A long and a double do not trigger a long overflow. */
         class LongDoubleNoLongOverflow : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << numeric_limits<long long>::max() ); }
-            BSONObj summand2() { return BSON( "d" << 1.0 ); }
-            BSONObj expectedSum() {
-                return BSON( "" << (long long)numeric_limits<long long>::max() + 1.0 );
+            Value summand1() { return Value(numeric_limits<long long>::max()); }
+            Value summand2() { return Value(1.0); }
+            Value expectedSum() {
+                return Value((long long)numeric_limits<long long>::max() + 1.0);
             }
         };
 
         /** Two double values are summed. */
         class DoubleDouble : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << 2.5 ); }
-            BSONObj summand2() { return BSON( "d" << 5.5 ); }
-            BSONObj expectedSum() { return BSON( "" << 8.0 ); }
+            Value summand1() { return Value(2.5); }
+            Value summand2() { return Value(5.5); }
+            Value expectedSum() { return Value(8.0); }
         };
 
         /** Two double values overflow. */
         class DoubleDoubleOverflow : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << numeric_limits<double>::max() ); }
-            BSONObj summand2() { return BSON( "d" << numeric_limits<double>::max() ); }
-            BSONObj expectedSum() { return BSON( "" << numeric_limits<double>::infinity() ); }
+            Value summand1() { return Value(numeric_limits<double>::max()); }
+            Value summand2() { return Value(numeric_limits<double>::max()); }
+            Value expectedSum() { return Value(numeric_limits<double>::infinity()); }
         };
 
         /** Three values, an int, a long, and a double, are summed. */
@@ -838,41 +782,41 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate( frombson( BSON( "d" << 5 ) ) );
-                accumulator()->evaluate( frombson( BSON( "d" << 99 ) ) );
-                accumulator()->evaluate( frombson( BSON( "d" << 0.2 ) ) );
+                accumulator()->process(Value(5), false);
+                accumulator()->process(Value(99), false);
+                accumulator()->process(Value(0.2), false);
                 checkSum();
             }
         private:
-            BSONObj expectedSum() { return BSON( "" << 104.2 ); }
+            Value expectedSum() { return Value(104.2); }
         };
 
         /** A negative value is summed. */
         class Negative : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << 5 ); }
-            BSONObj summand2() { return BSON( "d" << -8.8 ); }
-            BSONObj expectedSum() { return BSON( "" << 5 - 8.8 ); }
+            Value summand1() { return Value(5); }
+            Value summand2() { return Value(-8.8); }
+            Value expectedSum() { return Value(5 - 8.8); }
         };
 
         /** A long and a negative int are is summed. */
         class LongIntNegative : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << 5LL ); }
-            BSONObj summand2() { return BSON( "d" << -6 ); }
-            BSONObj expectedSum() { return BSON( "" << -1LL ); }
+            Value summand1() { return Value(5LL); }
+            Value summand2() { return Value(-6); }
+            Value expectedSum() { return Value(-1LL); }
         };
         
         /** A null value is summed as zero. */
         class IntNull : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << 5 ); }
-            BSONObj summand2() { return BSON( "d" << BSONNULL ); }
-            BSONObj expectedSum() { return BSON( "" << 5 ); }
+            Value summand1() { return Value(5); }
+            Value summand2() { return Value(BSONNULL); }
+            Value expectedSum() { return Value(5); }
         };
 
         /** An undefined value is summed as zero. */
         class IntUndefined : public TypeConversionBase {
-            BSONObj summand1() { return BSON( "d" << 9 ); }
-            BSONObj summand2() { return BSONObj(); }
-            BSONObj expectedSum() { return BSON( "" << 9 ); }
+            Value summand1() { return Value(9); }
+            Value summand2() { return Value(); }
+            Value expectedSum() { return Value(9); }
         };
 
         /** Two large integers do not overflow if a double is added later. */
@@ -880,17 +824,15 @@ namespace AccumulatorTests {
         public:
             void run() {
                 createAccumulator();
-                accumulator()->evaluate
-                        ( frombson( BSON( "d" << numeric_limits<long long>::max() ) ) );
-                accumulator()->evaluate
-                        ( frombson( BSON( "d" << numeric_limits<long long>::max() ) ) );
-                accumulator()->evaluate( frombson( BSON( "d" << 1.0 ) ) );
+                accumulator()->process(Value(numeric_limits<long long>::max()), false);
+                accumulator()->process(Value(numeric_limits<long long>::max()), false);
+                accumulator()->process(Value(1.0), false);
                 checkSum();
             }
         private:
-            BSONObj expectedSum() {
-                return BSON( "" << (double)numeric_limits<long long>::max() +
-                             (double)numeric_limits<long long>::max() );
+            Value expectedSum() {
+                return Value((double)numeric_limits<long long>::max()
+                           + (double)numeric_limits<long long>::max());
             }
         };
         

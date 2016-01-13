@@ -19,9 +19,10 @@
 
 #include <stack>
 
-#include "mongo/util/background.h"
 #include "mongo/client/dbclientinterface.h"
+#include "mongo/client/export_macros.h"
 #include "mongo/platform/cstdint.h"
+#include "mongo/util/background.h"
 
 namespace mongo {
 
@@ -32,19 +33,39 @@ namespace mongo {
      * not thread safe
      * thread safety is handled by DBConnectionPool
      */
-    class PoolForHost {
+    class MONGO_CLIENT_API PoolForHost {
     public:
-        PoolForHost()
-            : _created(0), _minValidCreationTimeMicroSec(0) {}
 
-        PoolForHost( const PoolForHost& other ) {
+        // Sentinel value indicating pool has no cleanup limit
+        static const int kPoolSizeUnlimited;
+
+        PoolForHost() :
+            _created(0),
+            _minValidCreationTimeMicroSec(0),
+            _type(ConnectionString::INVALID),
+            _maxPoolSize(kPoolSizeUnlimited) {
+        }
+
+        PoolForHost(const PoolForHost& other) :
+            _created(other._created),
+            _minValidCreationTimeMicroSec(other._minValidCreationTimeMicroSec),
+            _type(other._type),
+            _maxPoolSize(other._maxPoolSize) {
+            verify(_created == 0);
             verify(other._pool.size() == 0);
-            _created = other._created;
-            _minValidCreationTimeMicroSec = other._minValidCreationTimeMicroSec;
-            verify( _created == 0 );
         }
 
         ~PoolForHost();
+
+        /**
+         * Returns the maximum number of connections stored in the pool
+         */
+        int getMaxPoolSize() { return _maxPoolSize; }
+
+        /**
+         * Sets the maximum number of connections stored in the pool
+         */
+        void setMaxPoolSize( int maxPoolSize ) { _maxPoolSize = maxPoolSize; }
 
         int numAvailable() const { return (int)_pool.size(); }
 
@@ -64,7 +85,7 @@ namespace mongo {
         void done( DBConnectionPool * pool , DBClientBase * c );
 
         void flush();
-        
+
         void getStaleConnections( vector<DBClientBase*>& stale );
 
         /**
@@ -84,8 +105,6 @@ namespace mongo {
          */
         void initializeHostName(const std::string& hostName);
 
-        static void setMaxPerHost( unsigned max ) { _maxPerHost = max; }
-        static unsigned getMaxPerHost() { return _maxPerHost; }
     private:
 
         struct StoredConnection {
@@ -99,12 +118,13 @@ namespace mongo {
 
         std::string _hostName;
         std::stack<StoredConnection> _pool;
-        
+
         int64_t _created;
         uint64_t _minValidCreationTimeMicroSec;
         ConnectionString::ConnectionType _type;
 
-        static unsigned _maxPerHost;
+        // The maximum number of connections we'll save in the pool
+        int _maxPoolSize;
     };
 
     class DBConnectionHook {
@@ -130,8 +150,8 @@ namespace mongo {
            c.conn()...
         }
     */
-    class DBConnectionPool : public PeriodicTask {
-        
+    class MONGO_CLIENT_API DBConnectionPool : public PeriodicTask {
+
     public:
 
         DBConnectionPool();
@@ -139,6 +159,22 @@ namespace mongo {
 
         /** right now just controls some asserts.  defaults to "dbconnectionpool" */
         void setName( const string& name ) { _name = name; }
+
+        /**
+         * Returns the maximum number of connections pooled per-host
+         *
+         * This setting only applies to new host connection pools, previously-pooled host pools are
+         * unaffected.
+         */
+        int getMaxPoolSize() { return _maxPoolSize; }
+
+        /**
+         * Sets the maximum number of connections pooled per-host.
+         *
+         * This setting only applies to new host connection pools, previously-pooled host pools are
+         * unaffected.
+         */
+        void setMaxPoolSize( int maxPoolSize ) { _maxPoolSize = maxPoolSize; }
 
         void onCreate( DBClientBase * conn );
         void onHandedOut( DBClientBase * conn );
@@ -179,15 +215,15 @@ namespace mongo {
         };
 
         virtual string taskName() const { return "DBConnectionPool-cleaner"; }
-        virtual void taskDoWork();        
+        virtual void taskDoWork();
 
     private:
         DBConnectionPool( DBConnectionPool& p );
-        
+
         DBClientBase* _get( const string& ident , double socketTimeout );
 
         DBClientBase* _finishCreate( const string& ident , double socketTimeout, DBClientBase* conn );
-        
+
         struct PoolKey {
             PoolKey( const std::string& i , double t ) : ident( i ) , timeout( t ) {}
             string ident;
@@ -202,27 +238,32 @@ namespace mongo {
 
         mongo::mutex _mutex;
         string _name;
-        
+
+        // The maximum number of connections we'll save in the pool per-host
+        // PoolForHost::kPoolSizeUnlimited is a sentinel value meaning "no limit"
+        // 0 effectively disables the pool
+        int _maxPoolSize;
+
         PoolMap _pools;
 
         // pointers owned by me, right now they leak on shutdown
         // _hooks itself also leaks because it creates a shutdown race condition
-        list<DBConnectionHook*> * _hooks; 
+        list<DBConnectionHook*> * _hooks;
 
     };
 
-    extern DBConnectionPool pool;
+    extern MONGO_CLIENT_API DBConnectionPool pool;
 
-    class AScopedConnection : boost::noncopyable {
+    class MONGO_CLIENT_API AScopedConnection : boost::noncopyable {
     public:
         AScopedConnection() { _numConnections++; }
         virtual ~AScopedConnection() { _numConnections--; }
-        
+
         virtual DBClientBase* get() = 0;
         virtual void done() = 0;
         virtual string getHost() const = 0;
-        
-        /** 
+
+        /**
          * @return true iff this has a connection to the db
          */
         virtual bool ok() const = 0;
@@ -240,8 +281,8 @@ namespace mongo {
        clean up nicely (i.e. the socket gets closed automatically when the
        scopeddbconnection goes out of scope).
     */
-    class ScopedDbConnection : public AScopedConnection {
-    private:
+    class MONGO_CLIENT_API ScopedDbConnection : public AScopedConnection {
+    public:
         /** the main constructor you want to use
             throws UserException if can't connect
             */
@@ -259,25 +300,6 @@ namespace mongo {
         ScopedDbConnection(const string& host, DBClientBase* conn, double socketTimeout = 0 ) : _host( host ) , _conn( conn ), _socketTimeout( socketTimeout ) {
             _setSocketTimeout();
         }
-    public:
-
-        // Factory functions for getting ScopedDbConnections.  The caller owns the resulting object
-        // and is responsible for deleting it when finished. This should be used when running a
-        // command on a shard from the mongos and the command should run with the client's
-        // authentication.  If the command should be run with full permissions regardless
-        // of whether or not the user is authorized, then use getInternalScopedDbConnection().
-        static ScopedDbConnection* getScopedDbConnection(const string& host,
-                                                         double socketTimeout = 0);
-        static ScopedDbConnection* getScopedDbConnection(const ConnectionString& host,
-                                                         double socketTimeout = 0);
-        static ScopedDbConnection* getScopedDbConnection();
-
-        // DEPRECATED. This is now just a synonym for getScopedDbConnection.
-        static ScopedDbConnection* getInternalScopedDbConnection(const string& host,
-                                                                 double socketTimeout = 0);
-        static ScopedDbConnection* getInternalScopedDbConnection(const ConnectionString& host,
-                                                                 double socketTimeout = 0);
-        static ScopedDbConnection* getInternalScopedDbConnection();
 
         static void clearPool();
 

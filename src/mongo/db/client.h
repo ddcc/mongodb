@@ -20,6 +20,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #pragma once
@@ -30,8 +42,8 @@
 #include "mongo/db/d_concurrency.h"
 #include "mongo/db/lasterror.h"
 #include "mongo/db/lockstate.h"
-#include "mongo/db/namespace-inl.h"
 #include "mongo/db/stats/top.h"
+#include "mongo/db/storage_options.h"
 #include "mongo/util/concurrency/rwlock.h"
 #include "mongo/util/concurrency/threadlocal.h"
 #include "mongo/util/paths.h"
@@ -95,25 +107,40 @@ namespace mongo {
         void appendLastOp( BSONObjBuilder& b ) const;
 
         bool isGod() const { return _god; } /* this is for map/reduce writes */
+        bool setGod(bool newVal) { const bool prev = _god; _god = newVal; return prev; }
         string toString() const;
-        void gotHandshake( const BSONObj& o );
+        bool gotHandshake( const BSONObj& o );
         BSONObj getRemoteID() const { return _remoteId; }
         BSONObj getHandshake() const { return _handshake; }
         ConnectionId getConnectionId() const { return _connectionId; }
 
         bool inPageFaultRetryableSection() const { return _pageFaultRetryableSection != 0; }
         PageFaultRetryableSection* getPageFaultRetryableSection() const { return _pageFaultRetryableSection; }
-        
-        bool hasWrittenThisPass() const { return _hasWrittenThisPass; }
-        void writeHappened() { _hasWrittenThisPass = true; }
-        void newTopLevelRequest() { _hasWrittenThisPass = false; }
-        
+
+        void writeHappened() { _hasWrittenSinceCheckpoint = true; _hasWrittenThisOperation = true; }
+        bool hasWrittenSinceCheckpoint() const { return _hasWrittenSinceCheckpoint; }
+        void checkpointHappened() { _hasWrittenSinceCheckpoint = false; }
+        bool hasWrittenThisOperation() const { return _hasWrittenThisOperation; }
+        void newTopLevelRequest() {
+            _hasWrittenThisOperation = false;
+            _hasWrittenSinceCheckpoint = false;
+        }
+
+        /**
+         * Call this to allow PageFaultExceptions even if writes happened before this was called.
+         * Writes after this is called still prevent PFEs from being thrown.
+         */
+        void clearHasWrittenThisOperation() { _hasWrittenThisOperation = false; }
+
         bool allowedToThrowPageFaultException() const;
 
         LockState& lockState() { return _ls; }
 
+        void setIsWriteCmd(bool newSetting);
+        bool isWriteCmd() const;
+
     private:
-        Client(const char *desc, AbstractMessagingPort *p = 0);
+        Client(const std::string& desc, AbstractMessagingPort *p = 0);
         friend class CurOp;
         ConnectionId _connectionId; // > 0 for things "conn", 0 otherwise
         string _threadId; // "" on non support systems
@@ -126,31 +153,25 @@ namespace mongo {
         BSONObj _handshake;
         BSONObj _remoteId;
 
-        bool _hasWrittenThisPass;
+        bool _hasWrittenThisOperation;
+        bool _hasWrittenSinceCheckpoint;
         PageFaultRetryableSection *_pageFaultRetryableSection;
 
         LockState _ls;
         
         friend class PageFaultRetryableSection; // TEMP
         friend class NoPageFaultsAllowed; // TEMP
+
+        bool _isWriteCmd;
+
     public:
 
-        /* set _god=true temporarily, safely */
-        class GodScope {
-            bool _prev;
-        public:
-            GodScope();
-            ~GodScope();
-        };
-
-        //static void assureDatabaseIsOpen(const string& ns, string path=dbpath);
-        
         /** "read lock, and set my context, all in one operation" 
          *  This handles (if not recursively locked) opening an unopened database.
          */
         class ReadContext : boost::noncopyable { 
         public:
-            ReadContext(const std::string& ns, const std::string& path=dbpath);
+            ReadContext(const std::string& ns, const std::string& path=storageGlobalParams.dbpath);
             Context& ctx() { return *c.get(); }
         private:
             scoped_ptr<Lock::DBRead> lk;
@@ -163,7 +184,8 @@ namespace mongo {
         class Context : boost::noncopyable {
         public:
             /** this is probably what you want */
-            Context(const string& ns, const std::string& path=dbpath, bool doVersion=true);
+            Context(const string& ns, const std::string& path=storageGlobalParams.dbpath,
+                    bool doVersion=true);
 
             /** note: this does not call finishInit -- i.e., does not call 
                       shardVersionOk() for example. 
@@ -178,13 +200,15 @@ namespace mongo {
             Client* getClient() const { return _client; }
             Database* db() const { return _db; }
             const char * ns() const { return _ns.c_str(); }
-            bool equals( const string& ns , const string& path=dbpath ) const { return _ns == ns && _path == path; }
+            bool equals(const string& ns, const string& path=storageGlobalParams.dbpath) const {
+                return _ns == ns && _path == path;
+            }
 
             /** @return if the db was created by this Context */
             bool justCreated() const { return _justCreated; }
 
             /** @return true iff the current Context is using db/path */
-            bool inDB( const string& db , const string& path=dbpath ) const;
+            bool inDB(const string& db, const string& path=storageGlobalParams.dbpath) const;
 
             void _clear() { // this is sort of an "early destruct" indication, _ns can never be uncleared
                 const_cast<string&>(_ns).clear();
@@ -218,7 +242,7 @@ namespace mongo {
 
         class WriteContext : boost::noncopyable {
         public:
-            WriteContext(const string& ns, const std::string& path=dbpath);
+            WriteContext(const string& ns, const std::string& path=storageGlobalParams.dbpath);
             Context& ctx() { return _c; }
         private:
             Lock::DBWrite _lk;
@@ -235,13 +259,6 @@ namespace mongo {
         verify( c );
         return *c;
     }
-
-    inline Client::GodScope::GodScope() {
-        _prev = cc()._god;
-        cc()._god = true;
-    }
-    inline Client::GodScope::~GodScope() { cc()._god = _prev; }
-
 
     inline bool haveClient() { return currentClient.get() > 0; }
 

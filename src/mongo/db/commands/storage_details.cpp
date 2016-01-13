@@ -26,7 +26,8 @@
 #include "mongo/db/db.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/kill_current_op.h"
-#include "mongo/db/namespace_details.h"
+#include "mongo/db/structure/catalog/namespace_details.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -315,7 +316,7 @@ namespace {
                                            std::vector<Privilege>* out) {
             ActionSet actions;
             actions.addAction(ActionType::storageDetails);
-            out->push_back(Privilege(parseNs(dbname, cmdObj), actions));
+            out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
         }
 
     private:
@@ -328,7 +329,7 @@ namespace {
     };
 
     MONGO_INITIALIZER(StorageDetailsCmd)(InitializerContext* context) {
-        if (cmdLine.experimental.storageDetailsCmdEnabled) {
+        if (serverGlobalParams.experimental.storageDetailsCmdEnabled) {
             // Leaked intentionally: a Command registers itself when constructed.
             new StorageDetailsCmd();
         }
@@ -366,11 +367,11 @@ namespace {
     /**
      * @return the requested extent if it exists, otherwise NULL
      */
-    const Extent* getNthExtent(int extentNum, const NamespaceDetails* nsd) {
+    const Extent* getNthExtent(Database* db, int extentNum, const NamespaceDetails* nsd) {
         int curExtent = 0;
-        for (Extent* ex = DataFileMgr::getExtent(nsd->firstExtent);
+        for (Extent* ex = db->getExtentManager().getExtent(nsd->firstExtent());
              ex != NULL;
-             ex = ex->getNextExtent()) {
+             ex = db->getExtentManager().getNextExtent(ex)) {
 
             if (curExtent == extentNum) return ex;
             curExtent++;
@@ -543,8 +544,11 @@ namespace {
             recordsArrayBuilder.reset(new BSONArrayBuilder(result.subarrayStart("records")));
         }
 
+        Database* db = cc().database();
+        ExtentManager& extentManager = db->getExtentManager();
+
         DiskLoc prevDl = ex->firstRecord;
-        for (DiskLoc dl = ex->firstRecord; ! dl.isNull(); dl = r->nextInExtent(dl)) {
+        for (DiskLoc dl = ex->firstRecord; !dl.isNull(); dl = extentManager.getNextRecordInExtent(dl)) {
             r = dl.rec();
             processRecord(dl, prevDl, r, extentOfs, params, sliceData,
                           recordsArrayBuilder.get());
@@ -564,7 +568,7 @@ namespace {
 
         if (processingDeletedRecords) {
             for (int bucketNum = 0; bucketNum < mongo::Buckets; bucketNum++) {
-                DiskLoc dl = nsd->deletedList[bucketNum];
+                DiskLoc dl = nsd->deletedListEntry(bucketNum);
                 while (!dl.isNull()) {
                     DeletedRecord* dr = dl.drec();
                     processDeletedRecord(dl, dr, ex, params, bucketNum, sliceData,
@@ -704,9 +708,11 @@ namespace {
     /**
      * @param ex requested extent; if NULL analyze entire namespace
      */ 
-    bool runInternal(const NamespaceDetails* nsd, const Extent* ex, SubCommand subCommand,
-                     AnalyzeParams& globalParams, string& errmsg, BSONObjBuilder& result) {
-
+    bool runInternal(const Database* db, const Collection* collection, const Extent* ex,
+                     SubCommand subCommand, AnalyzeParams& globalParams,
+                     string& errmsg, BSONObjBuilder& result) {
+        const NamespaceDetails* nsd = collection->details();
+        const ExtentManager& em = db->getExtentManager();
         BSONObjBuilder outputBuilder; // temporary builder to avoid output corruption in case of
                                       // failure
         bool success = false;
@@ -714,22 +720,22 @@ namespace {
             success = analyzeExtent(nsd, ex, subCommand, globalParams, errmsg, outputBuilder);
         }
         else {
-            const DiskLoc dl = nsd->firstExtent;
+            const DiskLoc dl = nsd->firstExtent();
             if (dl.isNull()) {
                 errmsg = "no extents in namespace";
                 return false;
             }
 
-            long long storageSize = nsd->storageSize(NULL, NULL);
+            long long storageSize = collection->storageSize(NULL, NULL);
 
             if (globalParams.numberOfSlices != 0) {
                 globalParams.granularity = ceilingDiv(storageSize, globalParams.numberOfSlices);
             }
 
             BSONArrayBuilder extentsArrayBuilder(outputBuilder.subarrayStart("extents"));
-            for (Extent* curExtent = dl.ext();
+            for (Extent* curExtent = em.getExtent(dl);
                  curExtent != NULL;
-                 curExtent = curExtent->getNextExtent()) {
+                 curExtent = em.getNextExtent(curExtent)) {
 
                 AnalyzeParams extentParams(globalParams);
                 extentParams.numberOfSlices = 0; // use the specified or calculated granularity;
@@ -775,14 +781,18 @@ namespace {
         }
 
         const string ns = dbname + "." + cmdObj.firstElement().valuestrsafe();
-        const NamespaceDetails* nsd = nsdetails(ns);
-        if (!cmdLine.quiet) {
-            tlog() << "CMD: storageDetails " << ns << ", analyze " << subCommandStr << endl;
+
+        if (!serverGlobalParams.quiet) {
+            MONGO_TLOG(0) << "CMD: storageDetails " << ns << ", analyze " << subCommandStr << endl;
         }
-        if (!nsd) {
+
+        Database* db = cc().database();
+        const Collection* collection = db->getCollection( ns );
+        if (!collection) {
             errmsg = "ns not found";
             return false;
         }
+        const NamespaceDetails* nsd = collection->details();
 
         const Extent* extent = NULL;
 
@@ -794,7 +804,7 @@ namespace {
                 return false;
             }
             int extentNum = extentElm.numberInt();
-            extent = getNthExtent(extentNum, nsd);
+            extent = getNthExtent(db, extentNum, nsd);
             if (extent == NULL) {
                 errmsg = str::stream() << "extent " << extentNum << " does not exist";
                 return false;
@@ -850,7 +860,7 @@ namespace {
 
         params.showRecords = cmdObj["showRecords"].trueValue();
 
-        return runInternal(nsd, extent, subCommand, params, errmsg, result);
+        return runInternal(db, collection, extent, subCommand, params, errmsg, result);
     }
 
 }  // namespace

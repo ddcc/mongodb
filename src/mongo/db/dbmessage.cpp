@@ -15,8 +15,9 @@
  *    limitations under the License.
  */
 
-#include "pch.h"
-#include "dbmessage.h"
+#include "mongo/pch.h"
+
+#include "mongo/db/dbmessage.h"
 
 namespace mongo {
 
@@ -82,14 +83,6 @@ namespace mongo {
         return _nsStart;
     }
 
-    long long DbMessage::getInt64(int offsetBytes) const {
-        verify(messageShouldHaveNs());
-        const char* p = _nsStart + _nsLen + 1;
-        checkReadOffset<long long>(p, offsetBytes);
-
-        return ((reinterpret_cast<const long long*>(p + offsetBytes)))[0];
-    }
-
     int DbMessage::getQueryNToReturn() const {
         verify(messageShouldHaveNs());
         const char* p = _nsStart + _nsLen + 1;
@@ -97,24 +90,6 @@ namespace mongo {
 
         return ((reinterpret_cast<const int*>(p)))[1];
     }
-
-
-    int DbMessage::getFlags() const {
-        verify(messageShouldHaveNs());
-        const char* p = _nsStart + _nsLen + 1;
-        checkRead<int>(p, 1);
-
-        return ((reinterpret_cast<const int*>(p)))[0];
-    }
-
-    void DbMessage::setFlags(int value) {
-        verify(messageShouldHaveNs());
-        char* p = const_cast<char*>(_nsStart) + _nsLen + 1;
-        checkRead<int>(p, 1);
-
-        ((reinterpret_cast<int*>(p)))[0] = value;
-    }
-
 
     int DbMessage::pullInt() {
         return readAndAdvance<int>();
@@ -134,7 +109,7 @@ namespace mongo {
             "Client Error: Remaining data too small for BSON object",
             _nextjsobj != NULL && _theEnd - _nextjsobj >= 5);
 
-        if (cmdLine.objcheck) {
+        if (serverGlobalParams.objcheck) {
             Status status = validateBSON(_nextjsobj, _theEnd - _nextjsobj);
             massert(10307,
                 str::stream() << "Client Error: bad object in message: " << status.reason(),
@@ -151,7 +126,7 @@ namespace mongo {
         return js;
     }
 
-    void DbMessage::markReset(const char * toMark) {
+    void DbMessage::markReset(const char * toMark = NULL) {
         if (toMark == NULL) {
             toMark = _mark;
         }
@@ -164,13 +139,6 @@ namespace mongo {
     void DbMessage::checkRead(const char* start, size_t count) const {
         if ((_theEnd - start) < static_cast<int>(sizeof(T) * count)) {
             uassert(18634, "Not enough data to read", false);
-        }
-    }
-
-    template<typename T>
-    void DbMessage::checkReadOffset(const char* start, size_t offset) const {
-        if ((_theEnd - start) < static_cast<int>(offset + sizeof(T))) {
-            uassert(18626, "Not enough data to read", false);
         }
     }
 

@@ -19,6 +19,7 @@
 
 #include <boost/date_time/posix_time/posix_time.hpp>
 
+#include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/string_map.h"
 
 namespace mongo {
@@ -70,7 +71,7 @@ namespace mongo {
         void append( BSONObjBuilder& b );
         void cloneMap(UsageMap& out) const;
         CollectionData getGlobalData() const { return _global; }
-        void collectionDropped( const string& ns );
+        void collectionDropped( const StringData& ns );
 
     public: // static stuff
         static Top global;

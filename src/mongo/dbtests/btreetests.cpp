@@ -15,47 +15,51 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
-#include "pch.h"
+    // QUERY_MIGRATION
+#if 0
 
-#include "../db/db.h"
-#include "mongo/db/btree.h"
-#include "mongo/db/btreecursor.h"
+#include "mongo/pch.h"
+
+#include "mongo/db/structure/btree/btree.h"
+#include "mongo/db/db.h"
 #include "mongo/db/json.h"
-
-#include "dbtests.h"
+#include "mongo/dbtests/dbtests.h"
 
 #define BtreeBucket BtreeBucket<V0>
 #define btree btree<V0>
 #define btreemod btreemod<V0>
-#define Continuation IndexInsertionContinuationImpl<V0>
 #define testName "btree"
 #define BTVERSION 0
 namespace BtreeTests0 {
-#include "btreetests.inl"
+#include "mongo/dbtests/btreetests.inl"
 }
 
 #undef BtreeBucket
 #undef btree
 #undef btreemod
-#undef Continuation
 #define BtreeBucket BtreeBucket<V1>
 #define btree btree<V1>
 #define btreemod btreemod<V1>
-#define Continuation IndexInsertionContinuationImpl<V1>
 #undef testName
 #define testName "btree1"
 #undef BTVERSION
 #define BTVERSION 1
 namespace BtreeTests1 {
-#include "btreetests.inl"
+#include "mongo/dbtests/btreetests.inl"
 }
 
-#undef testName
-#define testName "btree1_twostep"
-#define TESTTWOSTEP 1
-
-namespace BtreeTests2 {
-#include "btreetests.inl"
-}
+#endif

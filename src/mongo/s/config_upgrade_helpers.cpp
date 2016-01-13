@@ -12,18 +12,37 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 #include "mongo/s/config_upgrade_helpers.h"
 
 #include "mongo/client/connpool.h"
-#include "mongo/db/namespacestring.h"
+#include "mongo/db/field_parser.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/write_concern.h"
 #include "mongo/s/cluster_client_internal.h"
+#include "mongo/s/cluster_write.h"
+#include "mongo/s/type_config_version.h"
 #include "mongo/util/timer.h"
 
 namespace mongo {
 
     using mongoutils::str::stream;
+
+    // Custom field used in upgrade state to determine if/where we failed on last upgrade
+    const BSONField<bool> inCriticalSectionField("inCriticalSection", false);
 
     Status checkIdsTheSame(const ConnectionString& configLoc, const string& nsA, const string& nsB)
     {
@@ -31,7 +50,7 @@ namespace mongo {
         auto_ptr<DBClientCursor> cursor;
 
         try {
-            connPtr.reset(ScopedDbConnection::getInternalScopedDbConnection(configLoc, 30));
+            connPtr.reset(new ScopedDbConnection(configLoc, 30));
             ScopedDbConnection& conn = *connPtr;
 
             scoped_ptr<DBClientCursor> cursorA(_safeCursor(conn->query(nsA,
@@ -70,7 +89,7 @@ namespace mongo {
         return Status::OK();
     }
 
-    string _extractHashFor(const BSONObj& dbHashResult, const string& collName) {
+    string _extractHashFor(const BSONObj& dbHashResult, const StringData& collName) {
 
         if (dbHashResult["collections"].type() != Object
             || dbHashResult["collections"].Obj()[collName].type() != String)
@@ -89,23 +108,18 @@ namespace mongo {
         // Check the sizes first, b/c if one collection is empty the hash check will fail
         //
 
-        scoped_ptr<ScopedDbConnection> connPtr;
-
         unsigned long long countA;
         unsigned long long countB;
 
         try {
-            connPtr.reset(ScopedDbConnection::getInternalScopedDbConnection(configLoc, 30));
-            ScopedDbConnection& conn = *connPtr;
-
+            ScopedDbConnection conn(configLoc, 30);
             countA = conn->count(nsA, BSONObj());
             countB = conn->count(nsB, BSONObj());
+            conn.done();
         }
         catch (const DBException& e) {
             return e.toStatus();
         }
-
-        connPtr->done();
 
         if (countA == 0 && countB == 0) {
             return Status::OK();
@@ -127,24 +141,21 @@ namespace mongo {
         NamespaceString nssA(nsA);
 
         try {
-            connPtr.reset(ScopedDbConnection::getInternalScopedDbConnection(configLoc, 30));
-            ScopedDbConnection& conn = *connPtr;
-
-            resultOk = conn->runCommand(nssA.db, BSON("dbHash" << true), result);
+            ScopedDbConnection conn(configLoc, 30);
+            resultOk = conn->runCommand(nssA.db().toString(), BSON("dbHash" << true), result);
+            conn.done();
         }
         catch (const DBException& e) {
             return e.toStatus();
         }
 
-        connPtr->done();
-
         if (!resultOk) {
             return Status(ErrorCodes::UnknownError,
-                          stream() << "could not run dbHash command on " << nssA.db << " db"
+                          stream() << "could not run dbHash command on " << nssA.db() << " db"
                                    << causedBy(result.toString()));
         }
 
-        string hashResultA = _extractHashFor(result, nssA.coll);
+        string hashResultA = _extractHashFor(result, nssA.coll());
 
         if (hashResultA == "") {
             return Status(ErrorCodes::RemoteValidationError,
@@ -159,24 +170,21 @@ namespace mongo {
         NamespaceString nssB(nsB);
 
         try {
-            connPtr.reset(ScopedDbConnection::getInternalScopedDbConnection(configLoc, 30));
-            ScopedDbConnection& conn = *connPtr;
-
-            resultOk = conn->runCommand(nssB.db, BSON("dbHash" << true), result);
+            ScopedDbConnection conn(configLoc, 30);
+            resultOk = conn->runCommand(nssB.db().toString(), BSON("dbHash" << true), result);
+            conn.done();
         }
         catch (const DBException& e) {
             return e.toStatus();
         }
 
-        connPtr->done();
-
         if (!resultOk) {
             return Status(ErrorCodes::UnknownError,
-                          stream() << "could not run dbHash command on " << nssB.db << " db"
+                          stream() << "could not run dbHash command on " << nssB.db() << " db"
                                    << causedBy(result.toString()));
         }
 
-        string hashResultB = _extractHashFor(result, nssB.coll);
+        string hashResultB = _extractHashFor(result, nssB.coll());
 
         if (hashResultB == "") {
             return Status(ErrorCodes::RemoteValidationError,
@@ -193,144 +201,10 @@ namespace mongo {
         return Status::OK();
     }
 
-    Status copyFrozenCollection(const ConnectionString& configLoc,
-                                const string& fromNS,
-                                const string& toNS)
-    {
-        scoped_ptr<ScopedDbConnection> connPtr;
-        auto_ptr<DBClientCursor> cursor;
-
-        // Create new collection
-        bool resultOk;
-        BSONObj createResult;
-
-        try {
-            connPtr.reset(ScopedDbConnection::getInternalScopedDbConnection(configLoc, 30));
-            ScopedDbConnection& conn = *connPtr;
-
-            resultOk = conn->createCollection(toNS, 0, false, 0, &createResult);
-        }
-        catch (const DBException& e) {
-            return e.toStatus("could not create new collection");
-        }
-
-        if (!resultOk) {
-            return Status(ErrorCodes::UnknownError,
-                          stream() << DBClientWithCommands::getLastErrorString(createResult)
-                                   << causedBy(createResult.toString()));
-        }
-
-        NamespaceString fromNSS(fromNS);
-        NamespaceString toNSS(toNS);
-
-        // Copy indexes over
-        try {
-            ScopedDbConnection& conn = *connPtr;
-
-            verify(fromNSS.isValid());
-
-            // TODO: EnsureIndex at some point, if it becomes easier?
-            string indexesNS = fromNSS.db + ".system.indexes";
-            scoped_ptr<DBClientCursor> cursor(_safeCursor(conn->query(indexesNS,
-                                                                      BSON("ns" << fromNS))));
-
-            while (cursor->more()) {
-
-                BSONObj next = cursor->nextSafe();
-
-                BSONObjBuilder newIndexDesc;
-                newIndexDesc.append("ns", toNS);
-                newIndexDesc.appendElementsUnique(next);
-
-                conn->insert(toNSS.db + ".system.indexes", newIndexDesc.done());
-                _checkGLE(conn);
-            }
-        }
-        catch (const DBException& e) {
-            return e.toStatus("could not create indexes in new collection");
-        }
-
-        //
-        // Copy data over in batches. A batch size here is way smaller than the maximum size of
-        // a bsonobj. We want to copy efficiently but we don't need to maximize the object size
-        // here.
-        //
-
-        Timer t;
-        int64_t docCount = 0;
-        const int32_t maxBatchSize = BSONObjMaxUserSize / 16;
-        try {
-            log() << "About to copy " << fromNS << " to " << toNS << endl;
-
-            // Lower the query's batchSize so that we incur in getMore()'s more frequently.
-            // The rationale here is that, if for some reason the config server is extremely
-            // slow, we wouldn't time this cursor out.
-            ScopedDbConnection& conn = *connPtr;
-            scoped_ptr<DBClientCursor> cursor(_safeCursor(conn->query(fromNS,
-                                                                      BSONObj(),
-                                                                      0 /* nToReturn */,
-                                                                      0 /* nToSkip */,
-                                                                      NULL /* fieldsToReturn */,
-                                                                      0 /* queryOptions */,
-                                                                      1024 /* batchSize */)));
-
-            vector<BSONObj> insertBatch;
-            int32_t insertSize = 0;
-            while (cursor->more()) {
-
-                BSONObj next = cursor->nextSafe().getOwned();
-                ++docCount;
-
-                insertBatch.push_back(next);
-                insertSize += next.objsize();
-
-                if (insertSize > maxBatchSize ) {
-                    conn->insert(toNS, insertBatch);
-                    _checkGLE(conn);
-                    insertBatch.clear();
-                    insertSize = 0;
-                }
-
-                if (t.seconds() >= 10) {
-                    t.reset();
-                    log() << "Copied " << docCount << " documents so far from "
-                          << fromNS << " to " << toNS << endl;
-                }
-            }
-
-            if (!insertBatch.empty()) {
-                conn->insert(toNS, insertBatch);
-                _checkGLE(conn);
-            }
-
-            log() << "Finished copying " << docCount << " documents from "
-                  << fromNS << " to " << toNS << endl;
-
-        }
-        catch (const DBException& e) {
-            return e.toStatus("could not copy data into new collection");
-        }
-
-        connPtr->done();
-
-        // Verify indices haven't changed
-        Status indexStatus = checkIdsTheSame(configLoc,
-                                             fromNSS.db + ".system.indexes",
-                                             toNSS.db + ".system.indexes");
-
-        if (!indexStatus.isOK()) {
-            return indexStatus;
-        }
-
-        // Verify data hasn't changed
-        return checkHashesTheSame(configLoc, fromNS, toNS);
-    }
-
     Status overwriteCollection(const ConnectionString& configLoc,
                                const string& fromNS,
                                const string& overwriteNS)
     {
-        scoped_ptr<ScopedDbConnection> connPtr;
 
         // TODO: Also a bit awkward to deal with command results
         bool resultOk;
@@ -338,8 +212,7 @@ namespace mongo {
 
         // Create new collection
         try {
-            connPtr.reset(ScopedDbConnection::getInternalScopedDbConnection(configLoc, 30));
-            ScopedDbConnection& conn = *connPtr;
+            ScopedDbConnection conn(configLoc, 30);
 
             BSONObjBuilder bob;
             bob.append("renameCollection", fromNS);
@@ -348,12 +221,11 @@ namespace mongo {
             BSONObj renameCommand = bob.obj();
 
             resultOk = conn->runCommand("admin", renameCommand, renameResult);
+            conn.done();
         }
         catch (const DBException& e) {
             return e.toStatus();
         }
-
-        connPtr->done();
 
         if (!resultOk) {
             return Status(ErrorCodes::UnknownError,
@@ -371,4 +243,122 @@ namespace mongo {
     string genBackupSuffix(const OID& lastUpgradeId) {
         return "-backup-" + lastUpgradeId.toString();
     }
+
+    Status preUpgradeCheck(const ConnectionString& configServer,
+                           const VersionType& lastVersionInfo,
+                           string minMongosVersion) {
+        if (lastVersionInfo.isUpgradeIdSet() && lastVersionInfo.getUpgradeId().isSet()) {
+            //
+            // Another upgrade failed, so cleanup may be necessary
+            //
+
+            BSONObj lastUpgradeState = lastVersionInfo.getUpgradeState();
+
+            bool inCriticalSection;
+            string errMsg;
+            if (!FieldParser::extract(lastUpgradeState,
+                                      inCriticalSectionField,
+                                      &inCriticalSection,
+                                      &errMsg)) {
+                return Status(ErrorCodes::FailedToParse, causedBy(errMsg));
+            }
+
+            if (inCriticalSection) {
+                // Note: custom message must be supplied by caller
+                return Status(ErrorCodes::ManualInterventionRequired, "");
+            }
+        }
+
+        //
+        // Check the versions of other mongo processes in the cluster before upgrade.
+        // We can't upgrade if there are active pre-v2.4 processes in the cluster
+        //
+        return checkClusterMongoVersions(configServer, string(minMongosVersion));
+    }
+
+    Status startConfigUpgrade(const string& configServer,
+                              int currentVersion,
+                              const OID& upgradeID) {
+        BSONObjBuilder setUpgradeIdObj;
+        setUpgradeIdObj << VersionType::upgradeId(upgradeID);
+        setUpgradeIdObj << VersionType::upgradeState(BSONObj());
+
+        Status result = clusterUpdate(VersionType::ConfigNS,
+                BSON("_id" << 1 << VersionType::currentVersion(currentVersion)),
+                BSON("$set" << setUpgradeIdObj.done()),
+                false, // upsert
+                false, // multi
+                WriteConcernOptions::AllConfigs,
+                NULL);
+
+        if ( !result.isOK() ) {
+            return Status( result.code(),
+                           str::stream() << "could not initialize version info"
+                                         << "for upgrade: " << result.reason() );
+        }
+        return result;
+    }
+
+    Status enterConfigUpgradeCriticalSection(const string& configServer, int currentVersion) {
+        BSONObjBuilder setUpgradeStateObj;
+        setUpgradeStateObj.append(VersionType::upgradeState(), BSON(inCriticalSectionField(true)));
+
+        Status result = clusterUpdate(VersionType::ConfigNS,
+                BSON("_id" << 1 << VersionType::currentVersion(currentVersion)),
+                BSON("$set" << setUpgradeStateObj.done()),
+                false, // upsert
+                false, // multi
+                WriteConcernOptions::AllConfigs,
+                NULL);
+
+        log() << "entered critical section for config upgrade" << endl;
+
+        // No cleanup message here since we're not sure if we wrote or not, and
+        // not dangerous either way except to prevent further updates (at which point
+        // the message is printed)
+
+        if ( !result.isOK() ) {
+            return Status( result.code(), str::stream() << "could not update version info"
+                                                        << "to enter critical update section: "
+                                                        << result.reason() );
+        }
+
+        return result;
+    }
+
+
+    Status commitConfigUpgrade(const string& configServer,
+                               int currentVersion,
+                               int minCompatibleVersion,
+                               int newVersion) {
+
+        // Note: DO NOT CLEAR the config version unless bumping the minCompatibleVersion,
+        // we want to save the excludes that were set.
+
+        BSONObjBuilder setObj;
+        setObj << VersionType::minCompatibleVersion(minCompatibleVersion);
+        setObj << VersionType::version_DEPRECATED(minCompatibleVersion);
+        setObj << VersionType::currentVersion(newVersion);
+
+        BSONObjBuilder unsetObj;
+        unsetObj.append(VersionType::upgradeId(), 1);
+        unsetObj.append(VersionType::upgradeState(), 1);
+
+        Status result = clusterUpdate(VersionType::ConfigNS,
+                BSON("_id" << 1 << VersionType::currentVersion(currentVersion)),
+                BSON("$set" << setObj.done() << "$unset" << unsetObj.done()),
+                false, // upsert
+                false, // multi,
+                WriteConcernOptions::AllConfigs,
+                NULL);
+
+        if ( !result.isOK() ) {
+            return Status( result.code(), str::stream() << "could not write new version info "
+                                                        << " and exit critical upgrade section: "
+                                                        << result.reason() );
+        }
+
+        return result;
+    }
+
 }

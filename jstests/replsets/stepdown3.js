@@ -14,8 +14,8 @@ replTest.awaitReplication();
 // do another write, because the first one might be longer than 10 seconds ago
 // on the secondary (due to starting up), and we need to be within 10 seconds
 // to step down.
-master.getDB("test").foo.insert({x:2});
-master.getDB("test").runCommand({getLastError : 1, w : 2, wtimeout : 30000 });
+var options = { writeConcern: { w: 2, wtimeout: 30000 }};
+assert.writeOK(master.getDB("test").foo.insert({ x: 2 }, options));
 // lock secondary, to pause replication
 print("\nlock secondary");
 var locked = replTest.liveNodes.slaves[0];
@@ -31,9 +31,9 @@ var command = "sleep(4000); tojson(db.adminCommand( { replSetStepDown : 60, forc
 var waitfunc = startParallelShell(command, master.port);
 
 print("getlasterror; should assert or return an error, depending on timing");
-var gleFunction = function() { 
+var gleFunction = function() {
     var result = master.getDB("test").runCommand({getLastError : 1, w: 2 , wtimeout :30000 });
-    if (result.errmsg === "not master") {
+    if (result.errmsg === "not master" || result.code == 10107 ) {
         throw new Error("satisfy assert.throws()");
     }
     print("failed to throw exception; GLE returned: ");

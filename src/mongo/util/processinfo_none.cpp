@@ -15,15 +15,17 @@
  *    limitations under the License.
  */
 
-#include "pch.h"
-#include "processinfo.h"
+#include "mongo/pch.h"
 
 #include <iostream>
+
+#include "mongo/util/processinfo.h"
+
 using namespace std;
 
 namespace mongo {
 
-    ProcessInfo::ProcessInfo( pid_t pid ) {
+    ProcessInfo::ProcessInfo( ProcessId pid ) {
     }
 
     ProcessInfo::~ProcessInfo() {

@@ -6,7 +6,7 @@
 # description: Mongo is a scalable, document-oriented database.
 # processname: mongod
 # config: /etc/mongod.conf
-# pidfile: /var/run/mongo/mongod.pid
+# pidfile: /var/run/mongodb/mongod.pid
 
 . /etc/rc.d/init.d/functions
 
@@ -22,8 +22,10 @@ SYSCONFIG="/etc/sysconfig/mongod"
 # FIXME: 1.9.x has a --shutdown flag that parses the config file and
 # shuts down the correct running pid, but that's unavailable in 1.8
 # for now.  This can go away when this script stops supporting 1.8.
-DBPATH=`awk -F= '/^dbpath\s*=\s*/{print $2}' "$CONFIGFILE"`
-PIDFILE=`awk -F= '/^pidfilepath\s*=\s*/{print $2}' "$CONFIGFILE"`
+DBPATH=`awk -F'[:=]' -v IGNORECASE=1 '/^[[:blank:]]*dbpath[[:blank:]]*[:=][[:blank:]]*/{print $2}' "$CONFIGFILE" | tr -d '[:blank:]'`
+PIDFILE=`awk -F'[:=]' -v IGNORECASE=1 '/^[[:blank:]]*pidfilepath[[:blank:]]*[:=][[:blank:]]*/{print $2}' "$CONFIGFILE" | tr -d '[:blank:]'`
+PIDDIR=`dirname $PIDFILE`
+
 mongod=${MONGOD-/usr/bin/mongod}
 
 MONGO_USER=mongod
@@ -45,8 +47,23 @@ fi
 
 start()
 {
+  # Make sure the default pidfile directory exists
+  if [ ! -d $PIDDIR ]; then
+    install -d -m 0755 -o $MONGO_USER -g $MONGO_GROUP $PIDDIR
+  fi
+
+  # Recommended ulimit values for mongod or mongos
+  # See http://docs.mongodb.org/manual/reference/ulimit/#recommended-settings
+  #
+  ulimit -f unlimited
+  ulimit -t unlimited
+  ulimit -v unlimited
+  ulimit -n 64000
+  ulimit -m unlimited
+  ulimit -u 64000
+
   echo -n $"Starting mongod: "
-  daemon --user "$MONGO_USER" $NUMACTL $mongod $OPTIONS
+  daemon --user "$MONGO_USER" --check $mongod "$NUMACTL $mongod $OPTIONS >/dev/null 2>&1"
   RETVAL=$?
   echo
   [ $RETVAL -eq 0 ] && touch /var/lock/subsys/mongod
@@ -66,7 +83,7 @@ restart () {
 	start
 }
 
-ulimit -n 12000
+
 RETVAL=0
 
 case "$1" in

@@ -14,14 +14,25 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
-#include "pch.h"
-
-#include "mongo/dbtests/dbtests.h"
+#include "mongo/pch.h"
 
 #include "mongo/client/dbclientmockcursor.h"
 #include "mongo/client/parallel.h"
+#include "mongo/dbtests/dbtests.h"
 #include "mongo/s/chunk_diff.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/type_chunk.h"
@@ -100,9 +111,9 @@ namespace ShardingTests {
             _shard.setAddress( _shard.getAddress() );
 
             // Create an index so that diffing works correctly, otherwise no cursors from S&O
-            client().ensureIndex( "config.chunks", // br
-                                  BSON( "ns" << 1 << // br
-                                          "lastmod" << 1 ) );
+            client().ensureIndex( ChunkType::ConfigNS, // br
+                                  BSON( ChunkType::ns() << 1 << // br
+                                          ChunkType::DEPRECATED_lastmod() << 1 ) );
         }
 
         virtual ~ChunkManagerTest() {

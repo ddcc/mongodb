@@ -13,16 +13,36 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/client.h"
 #include "mongo/db/cloner.h"
+#include "mongo/db/dbhelpers.h"
+#include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/ops/update.h"
+#include "mongo/db/ops/update_request.h"
+#include "mongo/db/ops/update_lifecycle_impl.h"
 #include "mongo/db/ops/delete.h"
+#include "mongo/db/query/internal_plans.h"
+#include "mongo/db/query/runner.h"
+#include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/rs.h"
-#include "mongo/db/repl.h"
 
 /* Scenarios
 
@@ -144,19 +164,19 @@ namespace mongo {
                     /* Create collection operation
                        { ts: ..., h: ..., op: "c", ns: "foo.$cmd", o: { create: "abc", ... } }
                     */
-                    string ns = s.db + '.' + o["create"].String(); // -> foo.abc
+                    string ns = s.db().toString() + '.' + o["create"].String(); // -> foo.abc
                     h.toDrop.insert(ns);
                     return;
                 }
                 else if( cmdname == "drop" ) {
-                    string ns = s.db + '.' + first.valuestr();
+                    string ns = s.db().toString() + '.' + first.valuestr();
                     h.collectionsToResync.insert(ns);
                     return;
                 }
                 else if( cmdname == "dropIndexes" || cmdname == "deleteIndexes" ) {
                     /* TODO: this is bad.  we simply full resync the collection here, which could be very slow. */
                     log() << "replSet info rollback of dropIndexes is slow in this version of mongod" << rsLog;
-                    string ns = s.db + '.' + first.valuestr();
+                    string ns = s.db().toString() + '.' + first.valuestr();
                     h.collectionsToResync.insert(ns);
                     return;
                 }
@@ -209,11 +229,16 @@ namespace mongo {
     static void syncRollbackFindCommonPoint(DBClientConnection *them, HowToFixUp& h) {
         verify( Lock::isLocked() );
         Client::Context c(rsoplog);
-        NamespaceDetails *nsd = nsdetails(rsoplog);
-        verify(nsd);
-        ReverseCappedCursor u(nsd);
-        if( !u.ok() )
+
+        boost::scoped_ptr<Runner> runner(
+            InternalPlanner::collectionScan(rsoplog, InternalPlanner::BACKWARD));
+
+        BSONObj ourObj;
+        DiskLoc ourLoc;
+
+        if (Runner::RUNNER_ADVANCED != runner->getNext(&ourObj, &ourLoc)) {
             throw rsfatal("our oplog empty or unreadable");
+        }
 
         const Query q = Query().sort(reverseNaturalObj);
         const bo fields = BSON( "ts" << 1 << "h" << 1 );
@@ -225,7 +250,6 @@ namespace mongo {
 
         if( t.get() == 0 || !t->more() ) throw rsfatal("remote oplog empty or unreadable");
 
-        BSONObj ourObj = u.current();
         OpTime ourTime = ourObj["ts"]._opTime();
         BSONObj theirObj = t->nextSafe();
         OpTime theirTime = theirObj["ts"]._opTime();
@@ -254,7 +278,7 @@ namespace mongo {
                     log() << "replSet rollback found matching events at " << ourTime.toStringPretty() << rsLog;
                     log() << "replSet rollback findcommonpoint scanned : " << scanned << rsLog;
                     h.commonPoint = ourTime;
-                    h.commonPointOurDiskloc = u.currLoc();
+                    h.commonPointOurDiskloc = ourLoc;
                     return;
                 }
 
@@ -270,15 +294,13 @@ namespace mongo {
                 theirObj = t->nextSafe();
                 theirTime = theirObj["ts"]._opTime();
 
-                u.advance();
-                if( !u.ok() ) {
+                if (Runner::RUNNER_ADVANCED != runner->getNext(&ourObj, &ourLoc)) {
                     log() << "replSet rollback error RS101 reached beginning of local oplog" << rsLog;
                     log() << "replSet   them:      " << them->toString() << " scanned: " << scanned << rsLog;
                     log() << "replSet   theirTime: " << theirTime.toStringLong() << rsLog;
                     log() << "replSet   ourTime:   " << ourTime.toStringLong() << rsLog;
                     throw rsfatal("RS101 reached beginning of local oplog [1]");
                 }
-                ourObj = u.current();
                 ourTime = ourObj["ts"]._opTime();
             }
             else if( theirTime > ourTime ) {
@@ -295,15 +317,13 @@ namespace mongo {
             else {
                 // theirTime < ourTime
                 refetch(h, ourObj);
-                u.advance();
-                if( !u.ok() ) {
+                if (Runner::RUNNER_ADVANCED != runner->getNext(&ourObj, &ourLoc)) {
                     log() << "replSet rollback error RS101 reached beginning of local oplog" << rsLog;
                     log() << "replSet   them:      " << them->toString() << " scanned: " << scanned << rsLog;
                     log() << "replSet   theirTime: " << theirTime.toStringLong() << rsLog;
                     log() << "replSet   ourTime:   " << ourTime.toStringLong() << rsLog;
                     throw rsfatal("RS101 reached beginning of local oplog [2]");
                 }
-                ourObj = u.current();
                 ourTime = ourObj["ts"]._opTime();
             }
         }
@@ -387,10 +407,9 @@ namespace mongo {
 
                 Client::Context c(ns);
                 {
-                    bob res;
-                    string errmsg;
-                    dropCollection(ns, errmsg, res);
+                    c.db()->dropCollection(ns);
                     {
+                        string errmsg;
                         dbtemprelease r;
                         bool ok = Cloner::copyCollectionFromRemote(them->getServerAddress(), ns, errmsg);
                         uassert(15909, str::stream() << "replSet rollback error resyncing collection " << ns << ' ' << errmsg, ok);
@@ -433,15 +452,39 @@ namespace mongo {
             sethbmsg("rollback 4.3");
         }
 
+        map<string,shared_ptr<Helpers::RemoveSaver> > removeSavers;
+
         sethbmsg("rollback 4.6");
         /** drop collections to drop before doing individual fixups - that might make things faster below actually if there were subsequent inserts to rollback */
         for( set<string>::iterator i = h.toDrop.begin(); i != h.toDrop.end(); i++ ) {
             Client::Context c(*i);
             try {
-                bob res;
-                string errmsg;
-                LOG(1) << "replSet rollback drop: " << *i << rsLog;
-                dropCollection(*i, errmsg, res);
+                log() << "replSet rollback drop: " << *i << rsLog;
+                shared_ptr<Helpers::RemoveSaver>& removeSaver = removeSavers[*i];
+                if (!removeSaver)
+                    removeSaver.reset(new Helpers::RemoveSaver("rollback", "", *i));
+
+                // perform a collection scan and write all documents in the collection to disk
+                boost::scoped_ptr<Runner> runner(InternalPlanner::collectionScan(*i));
+                BSONObj curObj;
+                Runner::RunnerState runnerState;
+                while (Runner::RUNNER_ADVANCED == (runnerState = runner->getNext(&curObj, NULL))) {
+                    removeSaver->goingToDelete(curObj);
+                }
+                if (runnerState != Runner::RUNNER_EOF) {
+                    if (runnerState == Runner::RUNNER_ERROR) {
+                        severe() << "rolling back createCollection on " << *i
+                            << " failed with " << WorkingSetCommon::toStatusString(curObj)
+                            << ". A full resync is necessary.";
+                    }
+                    else {
+                        severe() << "rolling back createCollection on " << *i
+                            << " failed. A full resync is necessary.";
+                    }
+
+                    throw std::exception();
+                }
+                c.db()->dropCollection(*i);
             }
             catch(...) {
                 log() << "replset rollback error dropping collection " << *i << rsLog;
@@ -450,10 +493,10 @@ namespace mongo {
 
         sethbmsg("rollback 4.7");
         Client::Context c(rsoplog);
-        NamespaceDetails *oplogDetails = nsdetails(rsoplog);
-        uassert(13423, str::stream() << "replSet error in rollback can't find " << rsoplog, oplogDetails);
-
-        map<string,shared_ptr<RemoveSaver> > removeSavers;
+        Collection* oplogCollection = c.db()->getCollection( rsoplog );
+        uassert(13423,
+                str::stream() << "replSet error in rollback can't find " << rsoplog,
+                oplogCollection);
 
         unsigned deletes = 0, updates = 0;
         for( list<pair<DocID,bo> >::iterator i = goodVersions.begin(); i != goodVersions.end(); i++ ) {
@@ -469,9 +512,9 @@ namespace mongo {
                 getDur().commitIfNeeded();
 
                 /* keep an archive of items rolled back */
-                shared_ptr<RemoveSaver>& rs = removeSavers[d.ns];
+                shared_ptr<Helpers::RemoveSaver>& rs = removeSavers[d.ns];
                 if ( ! rs )
-                    rs.reset( new RemoveSaver( "rollback" , "" , d.ns ) );
+                    rs.reset( new Helpers::RemoveSaver( "rollback" , "" , d.ns ) );
 
                 // todo: lots of overhead in context, this can be faster
                 Client::Context c(d.ns);
@@ -490,9 +533,9 @@ namespace mongo {
                     /* TODO1.6 : can't delete from a capped collection.  need to handle that here. */
                     deletes++;
 
-                    NamespaceDetails *nsd = nsdetails(d.ns);
-                    if( nsd ) {
-                        if( nsd->isCapped() ) {
+                    Collection* collection = c.db()->getCollection(d.ns);
+                    if( collection ) {
+                        if( collection->isCapped() ) {
                             /* can't delete from a capped collection - so we truncate instead. if this item must go,
                             so must all successors!!! */
                             try {
@@ -502,6 +545,7 @@ namespace mongo {
                                 DiskLoc loc = Helpers::findOne(d.ns, pattern, false);
                                 if( Listener::getElapsedTimeMillis() - start > 200 )
                                     log() << "replSet warning roll back slow no _id index for " << d.ns << " perhaps?" << rsLog;
+                                NamespaceDetails* nsd = collection->details();
                                 //would be faster but requires index: DiskLoc loc = Helpers::findById(nsd, pattern);
                                 if( !loc.isNull() ) {
                                     try {
@@ -525,23 +569,22 @@ namespace mongo {
                         else {
                             try {
                                 deletes++;
-                                deleteObjects(d.ns, pattern, /*justone*/true, /*logop*/false, /*god*/true, rs.get() );
+                                deleteObjects(d.ns, pattern, /*justone*/true, /*logop*/false, /*god*/true);
                             }
                             catch(...) {
                                 log() << "replSet error rollback delete failed ns:" << d.ns << rsLog;
                             }
                         }
                         // did we just empty the collection?  if so let's check if it even exists on the source.
-                        if( nsd->stats.nrecords == 0 ) {
+                        if( collection->numRecords() == 0 ) {
                             try {
-                                string sys = cc().database()->name + ".system.namespaces";
-                                bo o = them->findOne(sys, QUERY("name"<<d.ns));
-                                if( o.isEmpty() ) {
+                                std::list<BSONObj> lst =
+                                    them->getCollectionInfos( cc().database()->name(),
+                                                              BSON( "name" << nsToCollectionSubstring( d.ns ) ) );
+                                if (lst.empty()) {
                                     // we should drop
                                     try {
-                                        bob res;
-                                        string errmsg;
-                                        dropCollection(d.ns, errmsg, res);
+                                        cc().database()->dropCollection(d.ns);
                                     }
                                     catch(...) {
                                         log() << "replset error rolling back collection " << d.ns << rsLog;
@@ -559,7 +602,19 @@ namespace mongo {
                     // todo faster...
                     OpDebug debug;
                     updates++;
-                    _updateObjects(/*god*/true, d.ns, i->second, pattern, /*upsert=*/true, /*multi=*/false , /*logtheop=*/false , debug, rs.get() );
+
+                    const NamespaceString requestNs(d.ns);
+                    UpdateRequest request(requestNs);
+
+                    request.setQuery(pattern);
+                    request.setUpdates(i->second);
+                    request.setGod();
+                    request.setUpsert();
+                    UpdateLifecycleImpl updateLifecycle(true, requestNs);
+                    request.setLifecycle(&updateLifecycle);
+
+                    update(request, &debug);
+
                 }
             }
             catch(DBException& e) {
@@ -577,7 +632,13 @@ namespace mongo {
         // clean up oplog
         LOG(2) << "replSet rollback truncate oplog after " << h.commonPoint.toStringPretty() << rsLog;
         // todo: fatal error if this throws?
-        oplogDetails->cappedTruncateAfter(rsoplog, h.commonPointOurDiskloc, false);
+        oplogCollection->details()->cappedTruncateAfter(rsoplog, h.commonPointOurDiskloc, false);
+
+        Status status = getGlobalAuthorizationManager()->initialize();
+        if (!status.isOK()) {
+            warning() << "Failed to reinitialize auth data after rollback: " << status;
+            warn = true;
+        }
 
         /* reset cached lastoptimewritten and h value */
         loadLastOpTimeWritten();

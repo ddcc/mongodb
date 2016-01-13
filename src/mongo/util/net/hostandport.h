@@ -18,7 +18,7 @@
 #pragma once
 
 #include "mongo/bson/util/builder.h"
-#include "mongo/db/cmdline.h"
+#include "mongo/db/server_options.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/sock.h"
 
@@ -38,7 +38,7 @@ namespace mongo {
 
         /** @param p port number. -1 is ok to use default. */
         HostAndPort(const std::string& h, int p /*= -1*/) : _host(h), _port(p) { 
-            verify( !str::startsWith(h, '#') );
+            verify(!mongoutils::str::startsWith(h, '#'));
         }
 
         HostAndPort(const SockAddr& sock ) : _host( sock.getAddr() ) , _port( sock.getPort() ) { }
@@ -46,17 +46,14 @@ namespace mongo {
         static HostAndPort me();
 
         bool operator<(const HostAndPort& r) const {
-            string h = host();
-            string rh = r.host();
-            if( h < rh )
-                return true;
-            if( h == rh )
-                return port() < r.port();
-            return false;
+            const int cmp = host().compare(r.host());
+            if (cmp)
+                return cmp < 0;
+            return port() < r.port();
         }
 
         bool operator==(const HostAndPort& r) const { 
-            return host() == r.host() && port() == r.port(); 
+            return host() == r.host() && port() == r.port();
         }
 
         bool operator!=(const HostAndPort& r) const { return !(*this == r); }
@@ -78,13 +75,13 @@ namespace mongo {
         bool empty() const {
             return _host.empty() && _port < 0;
         }
-        string host() const {
+        const string& host() const {
             return _host;
         }
         int port() const {
             if (hasPort())
                 return _port;
-            return CmdLine::DefaultDBPort;
+            return ServerGlobalParams::DefaultDBPort;
         }
         bool hasPort() const {
             return _port >= 0;
@@ -100,7 +97,7 @@ namespace mongo {
     };
 
     inline HostAndPort HostAndPort::me() {
-        const char* ips = cmdLine.bind_ip.c_str();
+        const char* ips = serverGlobalParams.bind_ip.c_str();
         while(*ips) {
             string ip;
             const char * comma = strchr(ips, ',');
@@ -112,7 +109,7 @@ namespace mongo {
                 ip = string(ips);
                 ips = "";
             }
-            HostAndPort h = HostAndPort(ip, cmdLine.port);
+            HostAndPort h = HostAndPort(ip, serverGlobalParams.port);
             if (!h.isLocalHost()) {
                 return h;
             }
@@ -121,7 +118,7 @@ namespace mongo {
         string h = getHostName();
         verify( !h.empty() );
         verify( h != "localhost" );
-        return HostAndPort(h, cmdLine.port);
+        return HostAndPort(h, serverGlobalParams.port);
     }
 
     inline string HostAndPort::toString( bool includePort ) const {
@@ -142,7 +139,7 @@ namespace mongo {
             ss << ':';
 #if defined(_DEBUG)
             if( p >= 44000 && p < 44100 ) {
-                log() << "warning: special debug port 44xxx used" << endl;
+                log() << "warning: special debug port 44xxx used" << std::endl;
                 ss << p+1;
             }
             else
@@ -158,7 +155,7 @@ namespace mongo {
     inline bool HostAndPort::isLocalHost() const {
         string _host = host();
         return (  _host == "localhost"
-               || startsWith(_host.c_str(), "127.")
+               || mongoutils::str::startsWith(_host.c_str(), "127.")
                || _host == "::1"
                || _host == "anonymous unix socket"
                || _host.c_str()[0] == '/' // unix socket

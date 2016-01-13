@@ -24,13 +24,16 @@
 #include <string>
 #include <vector>
 
+#include "mongo/bson/mutable/document.h"
+#include "mongo/db/audit.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/client.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/replutil.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/server_parameters.h"
 
 namespace mongo {
@@ -49,16 +52,22 @@ namespace mongo {
                                                            false);
     }
 
-    string Command::parseNsFullyQualified(const string& dbname, const BSONObj& cmdObj) const { 
-        string s = cmdObj.firstElement().valuestr();
-        NamespaceString nss(s);
-        // these are for security, do not remove:
-        massert(15962, "need to specify namespace" , !nss.db.empty() );
-        massert(15966, str::stream() << "dbname not ok in Command::parseNsFullyQualified: " << dbname , dbname == nss.db || dbname == "admin" );
-        return s;
+    string Command::parseNsFullyQualified(const string& dbname, const BSONObj& cmdObj) const {
+        BSONElement first = cmdObj.firstElement();
+        uassert(17005,
+                mongoutils::str::stream() << "Main argument to " << first.fieldNameStringData() <<
+                        " must be a fully qualified namespace string.  Found: " <<
+                        first.toString(false),
+                first.type() == mongo::String &&
+                NamespaceString::validCollectionComponent(first.valuestr()));
+        return first.String();
     }
 
     /*virtual*/ string Command::parseNs(const string& dbname, const BSONObj& cmdObj) const {
+        BSONElement first = cmdObj.firstElement();
+        if (first.type() != mongo::String)
+            return dbname;
+
         string coll = cmdObj.firstElement().valuestr();
 #if defined(CLC)
         DEV if( mongoutils::str::startsWith(coll, dbname+'.') ) { 
@@ -71,6 +80,16 @@ namespace mongo {
 #endif
         return dbname + '.' + coll;
     }
+
+    ResourcePattern Command::parseResourcePattern(const std::string& dbname,
+                                                  const BSONObj& cmdObj) const {
+        std::string ns = parseNs(dbname, cmdObj);
+        if (ns.find('.') == std::string::npos) {
+            return ResourcePattern::forDatabaseName(ns);
+        }
+        return ResourcePattern::forExactNamespace(NamespaceString(ns));
+    }
+
 
     void Command::htmlHelp(stringstream& ss) const {
         string helpStr;
@@ -140,7 +159,7 @@ namespace mongo {
         ss << "</tr>\n";
     }
 
-    Command::Command(const char *_name, bool web, const char *oldName) : name(_name) {
+    Command::Command(StringData _name, bool web, StringData oldName) : name(_name.toString()) {
         // register ourself.
         if ( _commands == 0 )
             _commands = new map<string,Command*>;
@@ -158,12 +177,17 @@ namespace mongo {
             (*_webCommands)[name] = this;
         }
 
-        if( oldName )
-            (*_commands)[oldName] = this;
+        if( !oldName.empty() )
+            (*_commands)[oldName.toString()] = this;
     }
 
     void Command::help( stringstream& help ) const {
         help << "no help defined";
+    }
+
+    std::vector<BSONObj> Command::stopIndexBuilds(Database* db,
+                                                  const BSONObj& cmdObj) {
+        return std::vector<BSONObj>();
     }
 
     Command* Command::findCommand( const string& name ) {
@@ -180,6 +204,15 @@ namespace mongo {
         return c->locktype();
     }
 
+    bool Command::appendCommandStatus(BSONObjBuilder& result, const Status& status) {
+        appendCommandStatus(result, status.isOK(), status.reason());
+        BSONObj tmp = result.asTempObj();
+        if (!status.isOK() && !tmp.hasField("code")) {
+            result.append("code", status.code());
+        }
+        return status.isOK();
+    }
+
     void Command::appendCommandStatus(BSONObjBuilder& result, bool ok, const std::string& errmsg) {
         BSONObj tmp = result.asTempObj();
         bool have_ok = tmp.hasField("ok");
@@ -193,20 +226,110 @@ namespace mongo {
         }
     }
 
+    Status Command::getStatusFromCommandResult(const BSONObj& result) {
+        BSONElement okElement = result["ok"];
+        BSONElement codeElement = result["code"];
+        BSONElement errmsgElement = result["errmsg"];
+        if (okElement.eoo()) {
+            return Status(ErrorCodes::CommandResultSchemaViolation,
+                          mongoutils::str::stream() << "No \"ok\" field in command result " <<
+                          result);
+        }
+        if (okElement.trueValue()) {
+            return Status::OK();
+        }
+        int code = codeElement.numberInt();
+        if (0 == code)
+            code = ErrorCodes::UnknownError;
+        std::string errmsg;
+        if (errmsgElement.type() == String) {
+            errmsg = errmsgElement.String();
+        }
+        else if (!errmsgElement.eoo()) {
+            errmsg = errmsgElement.toString();
+        }
+        return Status(ErrorCodes::Error(code), errmsg);
+    }
+
+    Status Command::checkAuthForCommand(ClientBasic* client,
+                                        const std::string& dbname,
+                                        const BSONObj& cmdObj) {
+        std::vector<Privilege> privileges;
+        this->addRequiredPrivileges(dbname, cmdObj, &privileges);
+        if (client->getAuthorizationSession()->isAuthorizedForPrivileges(privileges))
+            return Status::OK();
+        return Status(ErrorCodes::Unauthorized, "unauthorized");
+    }
+
+    void Command::redactForLogging(mutablebson::Document* cmdObj) {}
+
     void Command::logIfSlow( const Timer& timer, const string& msg ) {
         int ms = timer.millis();
-        if ( ms > cmdLine.slowMS ) {
+        if (ms > serverGlobalParams.slowMS) {
             out() << msg << " took " << ms << " ms." << endl;
         }
     }
 
+    static Status _checkAuthorizationImpl(Command* c,
+                                          ClientBasic* client,
+                                          const std::string& dbname,
+                                          const BSONObj& cmdObj,
+                                          bool fromRepl) {
+        namespace mmb = mutablebson;
+        if ( c->adminOnly() && ! fromRepl && dbname != "admin" ) {
+            return Status(ErrorCodes::Unauthorized, str::stream() << c->name <<
+                          " may only be run against the admin database.");
+        }
+        if (client->getAuthorizationSession()->getAuthorizationManager().isAuthEnabled()) {
+            Status status = c->checkAuthForCommand(client, dbname, cmdObj);
+            if (status == ErrorCodes::Unauthorized) {
+                mmb::Document cmdToLog(cmdObj, mmb::Document::kInPlaceDisabled);
+                c->redactForLogging(&cmdToLog);
+                return Status(ErrorCodes::Unauthorized,
+                              str::stream() << "not authorized on " << dbname <<
+                              " to execute command " << cmdToLog.toString());
+            }
+            if (!status.isOK()) {
+                return status;
+            }
+        }
+        else if (c->adminOnly() &&
+                 c->localHostOnlyIfNoAuth(cmdObj) &&
+                 !client->getIsLocalHostConnection()) {
+
+            return Status(ErrorCodes::Unauthorized, str::stream() << c->name <<
+                          " must run from localhost when running db without auth");
+        }
+        return Status::OK();
+    }
+
+    Status Command::_checkAuthorization(Command* c,
+                                        ClientBasic* client,
+                                        const std::string& dbname,
+                                        const BSONObj& cmdObj,
+                                        bool fromRepl) {
+        namespace mmb = mutablebson;
+        Status status = _checkAuthorizationImpl(c, client, dbname, cmdObj, fromRepl);
+        if (!status.isOK()) {
+            log() << status << std::endl;
+        }
+        mmb::Document cmdToLog(cmdObj, mmb::Document::kInPlaceDisabled);
+        c->redactForLogging(&cmdToLog);
+        audit::logCommandAuthzCheck(client,
+                                    NamespaceString(c->parseNs(dbname, cmdObj)),
+                                    cmdToLog,
+                                    status.code());
+        return status;
+    }
 }
 
-#include "../client/connpool.h"
+#include "mongo/client/connpool.h"
 
 namespace mongo {
 
     extern DBConnectionPool pool;
+    // This is mainly used by the internal writes using write commands.
+    extern DBConnectionPool shardConnectionPool;
 
     class PoolFlushCmd : public Command {
     public:
@@ -218,9 +341,11 @@ namespace mongo {
                                            std::vector<Privilege>* out) {
             ActionSet actions;
             actions.addAction(ActionType::connPoolSync);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
+
         virtual bool run(const string&, mongo::BSONObj&, int, std::string&, mongo::BSONObjBuilder& result, bool) {
+            shardConnectionPool.flush();
             pool.flush();
             return true;
         }
@@ -240,7 +365,7 @@ namespace mongo {
                                            std::vector<Privilege>* out) {
             ActionSet actions;
             actions.addAction(ActionType::connPoolStats);
-            out->push_back(Privilege(AuthorizationManager::SERVER_RESOURCE_NAME, actions));
+            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
         }
         virtual bool run(const string&, mongo::BSONObj&, int, std::string&, mongo::BSONObjBuilder& result, bool) {
             pool.appendInfo( result );

@@ -14,19 +14,32 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects
+*    for all of the code used other than as permitted herein. If you modify
+*    file(s) with this exception, you may extend this exception to your
+*    version of the file(s), but you are not obligated to do so. If you do not
+*    wish to do so, delete this exception statement from your version. If you
+*    delete this exception statement from all source files in the program,
+*    then also delete it in the license file.
 */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include "pcrecpp.h"
 
 #include "mongo/client/connpool.h"
 #include "mongo/client/dbclientcursor.h"
-#include "mongo/client/model.h"
-#include "mongo/db/cmdline.h"
+#include "mongo/db/lasterror.h"
 #include "mongo/db/pdfile.h"
+#include "mongo/db/write_concern.h"
 #include "mongo/s/chunk.h"
 #include "mongo/s/chunk_version.h"
+#include "mongo/s/cluster_write.h"
 #include "mongo/s/config.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/server.h"
@@ -92,19 +105,34 @@ namespace mongo {
         _key = BSONObj();
     }
 
-    void DBConfig::CollectionInfo::save( const string& ns , DBClientBase* conn ) {
+    void DBConfig::CollectionInfo::save( const string& ns ) {
         BSONObj key = BSON( "_id" << ns );
 
         BSONObjBuilder val;
         val.append(CollectionType::ns(), ns);
-        val.appendDate(CollectionType::DEPRECATED_lastmod(), time(0));
+        val.appendDate(CollectionType::DEPRECATED_lastmod(), jsTime());
         val.appendBool(CollectionType::dropped(), _dropped);
-        if ( _cm )
+        if ( _cm ) {
+            // This also appends the lastmodEpoch.
             _cm->getInfo( val );
+        }
+        else {
+            // lastmodEpoch is a required field so we also need to do it here.
+            val.append(CollectionType::DEPRECATED_lastmodEpoch(), ChunkVersion::DROPPED().epoch());
+        }
 
-        conn->update(CollectionType::ConfigNS, key, val.obj(), true);
-        string err = conn->getLastError();
-        uassert( 13473 , (string)"failed to save collection (" + ns + "): " + err , err.size() == 0 );
+        Status result = clusterUpdate(CollectionType::ConfigNS,
+                                      key,
+                                      val.obj(),
+                                      true /* upsert */,
+                                      false /* multi */,
+                                      WriteConcernOptions::AllConfigs,
+                                      NULL);
+
+        if ( !result.isOK() ) {
+            uasserted( 13473, str::stream() << "failed to save collection (" << ns
+                                            << "): " <<  result.reason() );
+        }
 
         _dirty = false;
     }
@@ -173,6 +201,25 @@ namespace mongo {
 
             log() << "enable sharding on: " << ns << " with shard key: " << fieldsAndOrder << endl;
 
+            // Record start in changelog
+            BSONObjBuilder collectionDetail;
+            collectionDetail.append("shardKey", fieldsAndOrder.key());
+            collectionDetail.append("collection", ns);
+            collectionDetail.append("primary", getPrimary().toString());
+            BSONArray a;
+            if (initShards == NULL)
+                a = BSONArray();
+            else {
+                BSONArrayBuilder b;
+                for (unsigned i = 0; i < initShards->size(); i++) {
+                    b.append((*initShards)[i].getName());
+                }
+                a = b.arr();
+            }
+            collectionDetail.append("initShards", a);
+            collectionDetail.append("numChunks", (int)(initPoints->size() + 1));
+            configServer.logChange("shardCollection.start", ns, collectionDetail.obj());
+
             ChunkManager* cm = new ChunkManager( ns, fieldsAndOrder, unique );
             cm->createFirstChunks( configServer.getPrimary().getConnString(),
                                    getPrimary(), initPoints, initShards );
@@ -205,6 +252,11 @@ namespace mongo {
             }
             sleepsecs( i );
         }
+
+        // Record finish in changelog
+        BSONObjBuilder finishDetail;
+        finishDetail.append("version", manager->getVersion().toString());
+        configServer.logChange("shardCollection", ns, finishDetail.obj());
 
         return manager;
     }
@@ -280,6 +332,10 @@ namespace mongo {
 
 
     ChunkManagerPtr DBConfig::getChunkManagerIfExists( const string& ns, bool shouldReload, bool forceReload ){
+	
+        // Don't report exceptions here as errors in GetLastError
+        LastError::Disabled ignoreForGLE(lastError.get(false));
+         
         try{
             return getChunkManager( ns, shouldReload, forceReload );
         }
@@ -324,11 +380,11 @@ namespace mongo {
 
         BSONObj newest;
         if ( oldVersion.isSet() && ! forceReload ) {
-            scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getInternalScopedDbConnection(
-                    configServer.modelServer(), 30.0 ) );
-            newest = conn->get()->findOne(ChunkType::ConfigNS,
-                                          Query(BSON(ChunkType::ns(ns))).sort(ChunkType::DEPRECATED_lastmod(), -1));
-            conn->done();
+            ScopedDbConnection conn(configServer.modelServer(), 30.0);
+            newest = conn->findOne(ChunkType::ConfigNS,
+                                   Query(BSON(ChunkType::ns(ns))).sort(
+                                           ChunkType::DEPRECATED_lastmod(), -1));
+            conn.done();
             
             if ( ! newest.isEmpty() ) {
                 ChunkVersion v = ChunkVersion::fromBSON(newest, ChunkType::DEPRECATED_lastmod());
@@ -457,14 +513,13 @@ namespace mongo {
     }
 
     bool DBConfig::_load() {
-        scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getInternalScopedDbConnection(
-                configServer.modelServer(), 30.0 ) );
+        ScopedDbConnection conn(configServer.modelServer(), 30.0);
 
-        BSONObj dbObj = conn->get()->findOne( DatabaseType::ConfigNS,
-                                              BSON( DatabaseType::name( _name ) ) );
+        BSONObj dbObj = conn->findOne( DatabaseType::ConfigNS,
+                                       BSON( DatabaseType::name( _name ) ) );
 
         if ( dbObj.isEmpty() ) {
-            conn->done();
+            conn.done();
             return false;
         }
 
@@ -477,7 +532,7 @@ namespace mongo {
         int numCollsErased = 0;
         int numCollsSharded = 0;
 
-        auto_ptr<DBClientCursor> cursor = conn->get()->query(CollectionType::ConfigNS, b.obj());
+        auto_ptr<DBClientCursor> cursor = conn->query(CollectionType::ConfigNS, b.obj());
         verify( cursor.get() );
         while ( cursor->more() ) {
 
@@ -505,15 +560,12 @@ namespace mongo {
         LOG(2) << "found " << numCollsErased << " dropped collections and "
                << numCollsSharded << " sharded collections for database " << _name << endl;
 
-        conn->done();
+        conn.done();
 
         return true;
     }
 
     void DBConfig::_save( bool db, bool coll ) {
-        scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getInternalScopedDbConnection(
-                configServer.modelServer(), 30.0 ) );
-
         if( db ){
 
             BSONObj n;
@@ -523,10 +575,19 @@ namespace mongo {
                 n = b.obj();
             }
 
-            conn->get()->update( DatabaseType::ConfigNS , BSON( DatabaseType::name( _name ) ) , n , true );
-            string err = conn->get()->getLastError();
-            uassert( 13396 , (string)"DBConfig save failed: " + err , err.size() == 0 );
+            BatchedCommandResponse response;
+            Status result = clusterUpdate( DatabaseType::ConfigNS,
+                                           BSON( DatabaseType::name( _name )),
+                                           n,
+                                           true, // upsert
+                                           false, // multi
+                                           WriteConcernOptions::AllConfigs,
+                                           &response );
 
+            if ( !result.isOK() ) {
+                uasserted( 13396, str::stream() << "DBConfig save failed: "
+                                                << response.toBSON() );
+            }
         }
 
         if( coll ){
@@ -534,12 +595,10 @@ namespace mongo {
             for ( Collections::iterator i=_collections.begin(); i!=_collections.end(); ++i ) {
                 if ( ! i->second.isDirty() )
                     continue;
-                i->second.save( i->first , conn->get() );
+                i->second.save( i->first );
             }
 
         }
-
-        conn->done();
     }
 
     bool DBConfig::reload() {
@@ -585,18 +644,16 @@ namespace mongo {
 
         // 2
         grid.removeDB( _name );
-        {
-            scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getInternalScopedDbConnection(
-                    configServer.modelServer(), 30.0 ) );
-            conn->get()->remove( DatabaseType::ConfigNS , BSON( DatabaseType::name( _name ) ) );
-            errmsg = conn->get()->getLastError();
-            if ( ! errmsg.empty() ) {
-                log() << "could not drop '" << _name << "': " << errmsg << endl;
-                conn->done();
-                return false;
-            }
+        Status result = clusterDelete( DatabaseType::ConfigNS,
+                                       BSON( DatabaseType::name( _name )),
+                                       0 /* limit */,
+                                       WriteConcernOptions::AllConfigs,
+                                       NULL );
 
-            conn->done();
+        if ( !result.isOK() ) {
+            errmsg = result.reason();
+            log() << "could not drop '" << _name << "': " << errmsg << endl;
+            return false;
         }
 
         if ( ! configServer.allUp( errmsg ) ) {
@@ -619,26 +676,24 @@ namespace mongo {
 
         // 4
         {
-            scoped_ptr<ScopedDbConnection> conn(
-                    ScopedDbConnection::getScopedDbConnection( _primary.getConnString(), 30.0 ) );
+            ScopedDbConnection conn(_primary.getConnString(), 30.0);
             BSONObj res;
-                if ( ! conn->get()->dropDatabase( _name , &res ) ) {
+                if ( ! conn->dropDatabase( _name , &res ) ) {
                 errmsg = res.toString();
                 return 0;
             }
-            conn->done();
+            conn.done();
         }
 
         // 5
         for ( set<Shard>::iterator i=allServers.begin(); i!=allServers.end(); i++ ) {
-            scoped_ptr<ScopedDbConnection> conn(
-                    ScopedDbConnection::getScopedDbConnection( i->getConnString(), 30.0 ) );
+            ScopedDbConnection conn(i->getConnString(), 30.0);
             BSONObj res;
-            if ( ! conn->get()->dropDatabase( _name , &res ) ) {
+            if ( ! conn->dropDatabase( _name , &res ) ) {
                 errmsg = res.toString();
                 return 0;
             }
-            conn->done();
+            conn.done();
         }
 
         LOG(1) << "\t dropped primary db for: " << _name << endl;
@@ -742,7 +797,15 @@ namespace mongo {
         }
 
         for ( set<string>::iterator i=hosts.begin(); i!=hosts.end(); i++ ) {
+
             string host = *i;
+
+            // If this is a CUSTOM connection string (for testing) don't do DNS resolution
+            string errMsg;
+            if ( ConnectionString::parse( host, errMsg ).type() == ConnectionString::CUSTOM ) {
+                continue;
+            }
+
             bool ok = false;
             for ( int x=10; x>0; x-- ) {
                 if ( ! hostbyname( host.c_str() ).empty() ) {
@@ -758,11 +821,38 @@ namespace mongo {
 
         _config = configHosts;
 
+        string errmsg;
+        if( ! checkHostsAreUnique(configHosts, &errmsg) ) {
+            error() << errmsg << endl;;
+            return false;
+        }
+
         string fullString;
         joinStringDelim( configHosts, &fullString, ',' );
         _primary.setAddress( ConnectionString( fullString , ConnectionString::SYNC ) );
         LOG(1) << " config string : " << fullString << endl;
 
+        return true;
+    }
+
+    bool ConfigServer::checkHostsAreUnique( const vector<string>& configHosts, string* errmsg ) {
+
+        //If we have one host, its always unique
+        if ( configHosts.size() == 1 ) {
+            return true;
+        }
+
+        //Compare each host with all other hosts.
+        set<string> hostsTest;
+        pair<set<string>::iterator,bool> ret;
+        for ( size_t x=0; x < configHosts.size(); x++) {
+            ret = hostsTest.insert( configHosts[x] );
+            if ( ret.second == false ) {
+               *errmsg = str::stream() << "config servers " << configHosts[x]
+                                       << " exists twice in config listing.";
+               return false;
+            }
+        }
         return true;
     }
 
@@ -781,12 +871,15 @@ namespace mongo {
             scoped_ptr<ScopedDbConnection> conn;
 
             try {
-                conn.reset( ScopedDbConnection::getInternalScopedDbConnection( _config[i], 30.0 ) );
+                conn.reset( new ScopedDbConnection( _config[i], 30.0 ) );
 
                 if ( ! conn->get()->runCommand( "config",
                                                 BSON( "dbhash" << 1 <<
                                                       "collections" << BSON_ARRAY( "chunks" <<
-                                                                                   "databases" ) ),
+                                                                                   "databases" <<
+                                                                                   "collections" <<
+                                                                                   "shards" <<
+                                                                                   "version" )),
                                                 result ) ) {
 
                     // TODO: Make this a helper
@@ -830,7 +923,7 @@ namespace mongo {
         }
 
         if ( up == 1 ) {
-            LOG( LL_WARNING ) << "only 1 config server reachable, continuing" << endl;
+            warning() << "only 1 config server reachable, continuing" << endl;
             return true;
         }
 
@@ -839,20 +932,34 @@ namespace mongo {
             if ( res[i].isEmpty() )
                 continue;
 
-            string c1 = base.getFieldDotted( "collections.chunks" );
-            string c2 = res[i].getFieldDotted( "collections.chunks" );
+            string chunksHash1 = base.getFieldDotted( "collections.chunks" );
+            string chunksHash2 = res[i].getFieldDotted( "collections.chunks" );
 
-            string d1 = base.getFieldDotted( "collections.databases" );
-            string d2 = res[i].getFieldDotted( "collections.databases" );
+            string databaseHash1 = base.getFieldDotted( "collections.databases" );
+            string databaseHash2 = res[i].getFieldDotted( "collections.databases" );
 
-            if ( c1 == c2 && d1 == d2 )
+            string collectionsHash1 = base.getFieldDotted( "collections.collections" );
+            string collectionsHash2 = res[i].getFieldDotted( "collections.collections" );
+
+            string shardHash1 = base.getFieldDotted( "collections.shards" );
+            string shardHash2 = res[i].getFieldDotted( "collections.shards" );
+
+            string versionHash1 = base.getFieldDotted( "collections.version" );
+            string versionHash2 = res[i].getFieldDotted( "collections.version" );
+
+            if ( chunksHash1 == chunksHash2 &&
+                    databaseHash1 == databaseHash2 &&
+                    collectionsHash1 == collectionsHash2 &&
+                    shardHash1 == shardHash2 &&
+                    versionHash1 == versionHash2 ) {
                 continue;
+            }
 
             stringstream ss;
             ss << "config servers " << _config[firstGood] << " and " << _config[i] << " differ";
-            LOG( LL_WARNING ) << ss.str() << endl;
+            warning() << ss.str() << endl;
             if ( tries <= 1 ) {
-                ss << "\n" << c1 << "\t" << c2 << "\n" << d1 << "\t" << d2;
+                ss << ": " << base["collections"].Obj() << " vs " << res[i]["collections"].Obj();
                 errmsg = ss.str();
                 return false;
             }
@@ -870,7 +977,7 @@ namespace mongo {
         if ( checkConsistency ) {
             string errmsg;
             if ( ! checkConfigServersConsistent( errmsg ) ) {
-                LOG( LL_ERROR ) << "could not verify that config servers are in sync" << causedBy(errmsg) << warnings;
+                error() << "could not verify that config servers are in sync" << causedBy(errmsg) << warnings;
                 return false;
             }
         }
@@ -885,11 +992,9 @@ namespace mongo {
 
     bool ConfigServer::allUp( string& errmsg ) {
         try {
-            scoped_ptr<ScopedDbConnection> conn(
-                    ScopedDbConnection::getInternalScopedDbConnection( _primary.getConnString(),
-                                                                       30.0 ) );
-            conn->get()->getLastError();
-            conn->done();
+            ScopedDbConnection conn(_primary.getConnString(), 30.0);
+            conn->getLastError();
+            conn.done();
             return true;
         }
         catch ( DBException& ) {
@@ -901,11 +1006,9 @@ namespace mongo {
     }
 
     int ConfigServer::dbConfigVersion() {
-        scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getInternalScopedDbConnection( _primary.getConnString(),
-                                                                   30.0 ) );
-        int version = dbConfigVersion( conn->conn() );
-        conn->done();
+        ScopedDbConnection conn(_primary.getConnString(), 30.0);
+        int version = dbConfigVersion( conn.conn() );
+        conn.done();
         return version;
     }
 
@@ -929,13 +1032,11 @@ namespace mongo {
     void ConfigServer::reloadSettings() {
         set<string> got;
 
-        scoped_ptr<ScopedDbConnection> conn(
-                ScopedDbConnection::getInternalScopedDbConnection( _primary.getConnString(),
-                                                                   30.0 ) );
+        ScopedDbConnection conn(_primary.getConnString(), 30.0);
         
         try {
             
-            auto_ptr<DBClientCursor> c = conn->get()->query( SettingsType::ConfigNS , BSONObj() );
+            auto_ptr<DBClientCursor> c = conn->query( SettingsType::ConfigNS , BSONObj() );
             verify( c.get() );
             while ( c->more() ) {
                 
@@ -964,43 +1065,104 @@ namespace mongo {
                     log() << "warning: unknown setting [" << name << "]" << endl;
                 }
             }
-
-            if ( ! got.count( "chunksize" ) ) {
-                conn->get()->insert(SettingsType::ConfigNS,
-                                     BSON(SettingsType::key("chunksize") <<
-                                          SettingsType::chunksize(Chunk::MaxChunkSize /
-                                                                    (1024 * 1024))));
-            }
-
-            // indexes
-            conn->get()->ensureIndex(ChunkType::ConfigNS,
-                                     BSON(ChunkType::ns() << 1 << ChunkType::min() << 1 ), true);
-
-            conn->get()->ensureIndex(ChunkType::ConfigNS,
-                                     BSON(ChunkType::ns() << 1 <<
-                                          ChunkType::shard() << 1 <<
-                                          ChunkType::min() << 1 ), true);
-
-            conn->get()->ensureIndex(ChunkType::ConfigNS,
-                                     BSON(ChunkType::ns() << 1 <<
-                                          ChunkType::DEPRECATED_lastmod() << 1 ), true );
-
-            conn->get()->ensureIndex(ShardType::ConfigNS, BSON(ShardType::host() << 1), true);
-
-            conn->get()->ensureIndex(LocksType::ConfigNS, 
-                                     BSON( LocksType::lockID() << 1 ), true);
-
-            conn->get()->ensureIndex(LockpingsType::ConfigNS, 
-                                     BSON( LockpingsType::ping() << 1 ), false);
-
-            conn->get()->ensureIndex(LocksType::ConfigNS, 
-                                     BSON( LocksType::state() << 1 << 
-                                           LocksType::process() << 1 ), false);
-
-            conn->done();
         }
         catch ( DBException& e ) {
-            warning() << "couldn't load settings or create indexes on config db: " << e.what() << endl;
+            warning() << "couldn't load settings on config db: "
+                      << e.what() << endl;
+        }
+
+        if ( ! got.count( "chunksize" ) ) {
+            const int chunkSize = Chunk::MaxChunkSize / (1024 * 1024);
+            Status result = clusterInsert( SettingsType::ConfigNS,
+                                           BSON( SettingsType::key("chunksize") <<
+                                                 SettingsType::chunksize(chunkSize)),
+                                           WriteConcernOptions::AllConfigs,
+                                           NULL );
+            if ( !result.isOK() ) {
+                warning() << "couldn't set chunkSize on config db: " << result.reason() << endl;
+            }
+        }
+
+        // indexes
+        Status result = clusterCreateIndex( ChunkType::ConfigNS,
+                                            BSON( ChunkType::ns() << 1 << ChunkType::min() << 1 ),
+                                            true, // unique
+                                            WriteConcernOptions::AllConfigs,
+                                            NULL );
+
+        if ( !result.isOK() ) {
+            warning() << "couldn't create ns_1_min_1 index on config db: "
+                      << result.reason() << endl;
+        }
+
+        result = clusterCreateIndex( ChunkType::ConfigNS,
+                                     BSON( ChunkType::ns() << 1 <<
+                                           ChunkType::shard() << 1 <<
+                                           ChunkType::min() << 1 ),
+                                     true, // unique
+                                     WriteConcernOptions::AllConfigs,
+                                     NULL );
+
+        if ( !result.isOK() ) {
+            warning() << "couldn't create ns_1_shard_1_min_1 index on config db: "
+                      << result.reason() << endl;
+        }
+
+        result = clusterCreateIndex( ChunkType::ConfigNS,
+                                     BSON( ChunkType::ns() << 1 <<
+                                           ChunkType::DEPRECATED_lastmod() << 1 ),
+                                     true, // unique
+                                     WriteConcernOptions::AllConfigs,
+                                     NULL );
+
+        if ( !result.isOK() ) {
+            warning() << "couldn't create ns_1_lastmod_1 index on config db: "
+                      << result.reason() << endl;
+        }
+
+        result = clusterCreateIndex( ShardType::ConfigNS,
+                                     BSON( ShardType::host() << 1 ),
+                                     true, // unique
+                                     WriteConcernOptions::AllConfigs,
+                                     NULL );
+
+        if ( !result.isOK() ) {
+            warning() << "couldn't create host_1 index on config db: "
+                      << result.reason() << endl;
+        }
+
+        result = clusterCreateIndex( LocksType::ConfigNS,
+                                     BSON( LocksType::lockID() << 1 ),
+                                     true, // unique
+                                     WriteConcernOptions::AllConfigs,
+                                     NULL );
+
+        if ( !result.isOK() ) {
+            warning() << "couldn't create lock id index on config db: "
+                      << result.reason() << endl;
+        }
+
+        result = clusterCreateIndex( LocksType::ConfigNS,
+                                     BSON( LocksType::state() << 1 <<
+                                           LocksType::process() << 1 ),
+                                     false, // unique
+                                     WriteConcernOptions::AllConfigs,
+                                     NULL );
+
+        if ( !result.isOK() ) {
+            warning() << "couldn't create state and process id index on config db: "
+                      << result.reason() << endl;
+        }
+
+        result = clusterCreateIndex( LockpingsType::ConfigNS,
+                                     BSON( LockpingsType::ping() << 1 ),
+                                     false, // unique
+                                     WriteConcernOptions::AllConfigs,
+                                     NULL );
+
+        if ( !result.isOK() ) {
+            warning() << "couldn't create lockping ping time index on config db: "
+                      << result.reason() << endl;
         }
     }
 
@@ -1013,7 +1175,7 @@ namespace mongo {
 
         if ( withPort ) {
             stringstream ss;
-            ss << name << ":" << CmdLine::ConfigServerPort;
+            ss << name << ":" << ServerGlobalParams::ConfigServerPort;
             return ss.str();
         }
 
@@ -1043,14 +1205,12 @@ namespace mongo {
 
             verify( _primary.ok() );
 
-            scoped_ptr<ScopedDbConnection> conn(
-                    ScopedDbConnection::getInternalScopedDbConnection( _primary.getConnString(),
-                                                                       30.0 ) );
+            ScopedDbConnection conn(_primary.getConnString(), 30.0);
 
             static bool createdCapped = false;
             if ( ! createdCapped ) {
                 try {
-                    conn->get()->createCollection( ChangelogType::ConfigNS , 1024 * 1024 * 10 , true );
+                    conn->createCollection( ChangelogType::ConfigNS , 1024 * 1024 * 10 , true );
                 }
                 catch ( UserException& e ) {
                     LOG(1) << "couldn't create changelog (like race condition): " << e << endl;
@@ -1059,10 +1219,17 @@ namespace mongo {
                 createdCapped = true;
             }
 
-            conn->get()->insert( ChangelogType::ConfigNS , msg );
+            conn.done();
 
-            conn->done();
+            Status result = clusterInsert( ChangelogType::ConfigNS,
+                                           msg,
+                                           WriteConcernOptions::AllConfigs,
+                                           NULL );
 
+            if ( !result.isOK() ) {
+                log() << "Error encountered while logging config change with ID: " << changeID
+                      << result.reason() << endl;
+            }
         }
 
         catch ( std::exception& e ) {
@@ -1071,24 +1238,36 @@ namespace mongo {
         }
     }
 
-    void ConfigServer::replicaSetChange( const ReplicaSetMonitor * monitor ) {
+    void ConfigServer::replicaSetChange(const string& setName, const string& newConnectionString) {
+        // This is run in it's own thread. Exceptions escaping would result in a call to terminate.
+        Client::initThread("replSetChange");
         try {
-            Shard s = Shard::lookupRSName(monitor->getName());
+            Shard s = Shard::lookupRSName(setName);
             if (s == Shard::EMPTY) {
-                LOG(1) << "replicaSetChange: shard not found for set: " << monitor->getServerAddress() << endl;
+                LOG(1) << "shard not found for set: " << newConnectionString;
                 return;
             }
-            scoped_ptr<ScopedDbConnection> conn( ScopedDbConnection::getInternalScopedDbConnection(
-                    configServer.getConnectionString().toString(), 30.0 ) );
-            conn->get()->update(ShardType::ConfigNS,
-                                BSON(ShardType::name(s.getName())),
-                                BSON("$set" <<
-                                     BSON(ShardType::host(monitor->getServerAddress()))));
-            conn->done();
+
+            Status result = clusterUpdate(ShardType::ConfigNS,
+                    BSON(ShardType::name(s.getName())),
+                    BSON("$set" << BSON(ShardType::host(newConnectionString))),
+                    false, // upsert
+                    false, // multi
+                    WriteConcernOptions::AllConfigs,
+                    NULL);
+
+            if ( !result.isOK() ) {
+                error() << "RSChangeWatcher: could not update config db for set: "
+                        << setName
+                        << " to: " << newConnectionString
+                        << ": " << result.reason() << endl;
+            }
         }
-        catch (DBException& e) {
-            error() << "RSChangeWatcher: could not update config db for set: " << monitor->getName()
-                    << " to: " << monitor->getServerAddress() << causedBy(e) << endl;
+        catch (const std::exception& e) {
+            log() << "caught exception while updating config servers: " << e.what();
+        }
+        catch (...) {
+            log() << "caught unknown exception while updating config servers";
         }
     }
 

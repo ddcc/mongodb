@@ -8,7 +8,7 @@ var nodes = replTest.nodeList();
 var conns = replTest.startSet();
 var r = replTest.initiate({ "_id": "rollback5",
                             "members": [
-                                { "_id": 0, "host": nodes[0] },
+                                { "_id": 0, "host": nodes[0], priority: 3 },
                                 { "_id": 1, "host": nodes[1] },
                                 { "_id": 2, "host": nodes[2], arbiterOnly: true}]
                           });
@@ -23,8 +23,8 @@ var A = a_conn.getDB("test");
 var B = b_conn.getDB("test");
 var AID = replTest.getNodeId(a_conn);
 var BID = replTest.getNodeId(b_conn);
-var Apath = "/data/db/rollback5-0/";
-var Bpath = "/data/db/rollback5-1/";
+var Apath = MongoRunner.dataDir + "/rollback5-0/";
+var Bpath = MongoRunner.dataDir + "/rollback5-1/";
 assert(master == conns[0], "conns[0] assumed to be master");
 assert(a_conn.host == master.host);
 
@@ -34,20 +34,20 @@ assert.soon(function () {
     return res.myState == 7;
 }, "Arbiter failed to initialize.");
 
-A.foo.update({key:'value1'}, {$set: {req: 'req'}}, true);
-A.foo.runCommand({getLastError : 1, w : 2, wtimeout : 60000});
+var options = { writeConcern: { w: 2, wtimeout: 60000 }, upsert: true };
+assert.writeOK(A.foo.update({ key: 'value1' }, { $set: { req: 'req' }}, options));
 replTest.stop(AID);
 
 master = replTest.getMaster();
 assert(b_conn.host == master.host);
-B.foo.update({key:'value1'}, {$set: {res: 'res'}}, true);
-B.foo.runCommand({getLastError : 1, w : 1, wtimeout : 60000});
+options = { writeConcern: { w: 1, wtimeout: 60000 }, upsert: true };
+assert.writeOK(B.foo.update({key:'value1'}, {$set: {res: 'res'}}, options));
 replTest.stop(BID);
 replTest.restart(AID);
 master = replTest.getMaster();
 assert(a_conn.host == master.host);
-A.foo.update({key:'value2'}, {$set: {req: 'req'}}, true);
-A.foo.runCommand({getLastError : 1, w : 1, wtimeout : 60000});
+options = { writeConcern: { w: 1, wtimeout: 60000 }, upsert: true };
+assert.writeOK(A.foo.update({ key: 'value2' }, { $set: { req: 'req' }}, options));
 replTest.restart(BID); // should rollback
 reconnect(B);
 

@@ -15,18 +15,35 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 // Where IndexDetails defined.
-#include "pch.h"
-#include "../db/namespace.h"
+#include "mongo/pch.h"
 
-#include "../db/db.h"
-#include "../db/json.h"
-#include "mongo/db/hashindex.h"
+#include "mongo/db/db.h"
+#include "mongo/db/index/btree_key_generator.h"
+#include "mongo/db/index/hash_key_generator.h"
+#include "mongo/db/index_legacy.h"
+#include "mongo/db/index_names.h"
+#include "mongo/db/json.h"
+#include "mongo/db/query/internal_plans.h"
 #include "mongo/db/queryutil.h"
+#include "mongo/db/structure/catalog/namespace.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/dbtests/dbtests.h"
 
-#include "dbtests.h"
 
 namespace NamespaceTests {
 
@@ -34,36 +51,53 @@ namespace NamespaceTests {
 
     namespace IndexDetailsTests {
         class Base {
-            Lock::GlobalWrite lk;
-            Client::Context _context;
         public:
-            Base() : _context(ns()) {
+            Base() {
             }
             virtual ~Base() {
-                if ( id_.info.isNull() )
-                    return;
-                theDataFileMgr.deleteRecord( ns(), id_.info.rec(), id_.info );
-                ASSERT( theDataFileMgr.findAll( ns() )->eof() );
             }
         protected:
             void create( bool sparse = false ) {
-                NamespaceDetailsTransient::get( ns() ).deletedIndex();
+
                 BSONObjBuilder builder;
                 builder.append( "ns", ns() );
                 builder.append( "name", "testIndex" );
                 builder.append( "key", key() );
                 builder.append( "sparse", sparse );
+
                 BSONObj bobj = builder.done();
-                id_.info = theDataFileMgr.insert( ns(), bobj.objdata(), bobj.objsize() );
-                // head not needed for current tests
-                // idx_.head = BtreeBucket::addHead( id_ );
+
+                _index.reset( new IndexDescriptor( NULL, IndexNames::BTREE, bobj ) );
+
+                _keyPattern = key().getOwned();
+
+                // The key generation wants these values.
+                vector<const char*> fieldNames;
+                vector<BSONElement> fixed;
+
+                BSONObjIterator it(_keyPattern);
+                while (it.more()) {
+                    BSONElement elt = it.next();
+                    fieldNames.push_back(elt.fieldName());
+                    fixed.push_back(BSONElement());
+                }
+
+                _keyGen.reset(new BtreeKeyGeneratorV1(fieldNames, fixed, sparse));
             }
+
             static const char* ns() {
                 return "unittests.indexdetailstests";
             }
-            IndexDetails& id() {
-                return id_;
+
+            IndexDescriptor* id() {
+                return _index.get();
             }
+
+            // TODO: This is testing Btree key creation, not IndexDetails.
+            void getKeysFromObject(const BSONObj& obj, BSONObjSet& out) {
+                _keyGen->getKeys(obj, &out);
+            }
+
             virtual BSONObj key() const {
                 BSONObjBuilder k;
                 k.append( "a", 1 );
@@ -109,17 +143,19 @@ namespace NamespaceTests {
                 return b.obj();
             }
         private:
-            Lock::GlobalWrite lk_;
-            IndexDetails id_;
+            scoped_ptr<BtreeKeyGenerator> _keyGen;
+            BSONObj _keyPattern;
+            scoped_ptr<IndexDescriptor> _index;
+
         };
 
         class Create : public Base {
         public:
             void run() {
                 create();
-                ASSERT_EQUALS( "testIndex", id().indexName() );
-                ASSERT_EQUALS( ns(), id().parentNS() );
-                assertEquals( key(), id().keyPattern() );
+                ASSERT_EQUALS( "testIndex", id()->indexName() );
+                ASSERT_EQUALS( ns(), id()->parentNS() );
+                assertEquals( key(), id()->keyPattern() );
             }
         };
 
@@ -132,7 +168,7 @@ namespace NamespaceTests {
                 b.append( "a", 5 );
                 e.append( "", 5 );
                 BSONObjSet keys;
-                id().getKeysFromObject( b.done(), keys );
+                getKeysFromObject( b.done(), keys );
                 checkSize( 1, keys );
                 assertEquals( e.obj(), *keys.begin() );
             }
@@ -148,7 +184,7 @@ namespace NamespaceTests {
                 a.append( "c", "foo" );
                 e.append( "", 4 );
                 BSONObjSet keys;
-                id().getKeysFromObject( a.done(), keys );
+                getKeysFromObject( a.done(), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( e.obj(), *keys.begin() );
             }
@@ -166,7 +202,7 @@ namespace NamespaceTests {
                 b.append( "a", shortArray()) ;
 
                 BSONObjSet keys;
-                id().getKeysFromObject( b.done(), keys );
+                getKeysFromObject( b.done(), keys );
                 checkSize( 3, keys );
                 int j = 1;
                 for ( BSONObjSet::iterator i = keys.begin(); i != keys.end(); ++i, ++j ) {
@@ -186,7 +222,7 @@ namespace NamespaceTests {
                 b.append( "b", 2 );
 
                 BSONObjSet keys;
-                id().getKeysFromObject( b.done(), keys );
+                getKeysFromObject( b.done(), keys );
                 checkSize( 3, keys );
                 int j = 1;
                 for ( BSONObjSet::iterator i = keys.begin(); i != keys.end(); ++i, ++j ) {
@@ -211,7 +247,7 @@ namespace NamespaceTests {
                 b.append( "a", shortArray()) ;
 
                 BSONObjSet keys;
-                id().getKeysFromObject( b.done(), keys );
+                getKeysFromObject( b.done(), keys );
                 checkSize( 3, keys );
                 int j = 1;
                 for ( BSONObjSet::iterator i = keys.begin(); i != keys.end(); ++i, ++j ) {
@@ -240,7 +276,7 @@ namespace NamespaceTests {
                 a.append( "a", b.done() );
 
                 BSONObjSet keys;
-                id().getKeysFromObject( a.done(), keys );
+                getKeysFromObject( a.done(), keys );
                 checkSize( 3, keys );
                 int j = 1;
                 for ( BSONObjSet::iterator i = keys.begin(); i != keys.end(); ++i, ++j ) {
@@ -264,7 +300,7 @@ namespace NamespaceTests {
                 b.append( "b", shortArray() );
 
                 BSONObjSet keys;
-                ASSERT_THROWS( id().getKeysFromObject( b.done(), keys ),
+                ASSERT_THROWS( getKeysFromObject( b.done(), keys ),
                                   UserException );
             }
         private:
@@ -284,7 +320,7 @@ namespace NamespaceTests {
                 b.append( "a", elts );
 
                 BSONObjSet keys;
-                id().getKeysFromObject( b.done(), keys );
+                getKeysFromObject( b.done(), keys );
                 checkSize( 3, keys );
                 int j = 1;
                 for ( BSONObjSet::iterator i = keys.begin(); i != keys.end(); ++i, ++j ) {
@@ -311,7 +347,7 @@ namespace NamespaceTests {
                 b.append( "d", 99 );
 
                 BSONObjSet keys;
-                id().getKeysFromObject( b.done(), keys );
+                getKeysFromObject( b.done(), keys );
                 checkSize( 3, keys );
                 int j = 1;
                 for ( BSONObjSet::iterator i = keys.begin(); i != keys.end(); ++i, ++j ) {
@@ -345,7 +381,7 @@ namespace NamespaceTests {
                 BSONObj obj = b.obj();
                 
                 BSONObjSet keys;
-                id().getKeysFromObject( obj, keys );
+                getKeysFromObject( obj, keys );
                 checkSize( 4, keys );
                 BSONObjSet::iterator i = keys.begin();
                 assertEquals( nullObj(), *i++ ); // see SERVER-3377
@@ -374,7 +410,7 @@ namespace NamespaceTests {
                 b.append( "a", elts );
 
                 BSONObjSet keys;
-                id().getKeysFromObject( b.done(), keys );
+                getKeysFromObject( b.done(), keys );
                 checkSize( 1, keys );
                 assertEquals( nullObj(), *keys.begin() );
             }
@@ -389,7 +425,7 @@ namespace NamespaceTests {
             void run() {
                 create();
                 BSONObjSet keys;
-                id().getKeysFromObject( BSON( "b" << 1 ), keys );
+                getKeysFromObject( BSON( "b" << 1 ), keys );
                 checkSize( 1, keys );
                 assertEquals( nullObj(), *keys.begin() );
             }
@@ -404,7 +440,7 @@ namespace NamespaceTests {
             void run() {
                 create();
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[1,2]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[1,2]}" ), keys );
                 checkSize( 1, keys );
                 assertEquals( nullObj(), *keys.begin() );
             }
@@ -421,14 +457,14 @@ namespace NamespaceTests {
 
                 {
                     BSONObjSet keys;
-                    id().getKeysFromObject( fromjson( "{x:'a',y:'b'}" ) , keys );
+                    getKeysFromObject( fromjson( "{x:'a',y:'b'}" ) , keys );
                     checkSize( 1 , keys );
                     assertEquals( BSON( "" << "a" << "" << "b" ) , *keys.begin() );
                 }
 
                 {
                     BSONObjSet keys;
-                    id().getKeysFromObject( fromjson( "{x:'a'}" ) , keys );
+                    getKeysFromObject( fromjson( "{x:'a'}" ) , keys );
                     checkSize( 1 , keys );
                     BSONObjBuilder b;
                     b.append( "" , "a" );
@@ -450,7 +486,7 @@ namespace NamespaceTests {
             void run() {
                 create();
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[{b:[2]}]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[{b:[2]}]}" ), keys );
                 checkSize( 1, keys );
                 assertEquals( BSON( "" << 2 ), *keys.begin() );
             }
@@ -465,7 +501,7 @@ namespace NamespaceTests {
             void run() {
                 create();
                 BSONObjSet keys;
-                ASSERT_THROWS( id().getKeysFromObject( fromjson( "{a:[{b:[1],c:[2]}]}" ), keys ),
+                ASSERT_THROWS( getKeysFromObject( fromjson( "{a:[{b:[1],c:[2]}]}" ), keys ),
                                   UserException );
             }
         private:
@@ -479,7 +515,7 @@ namespace NamespaceTests {
             void run() {
                 create();
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[{b:1},{c:2}]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[{b:1},{c:2}]}" ), keys );
                 checkSize( 2, keys );
                 BSONObjSet::iterator i = keys.begin();
                 {
@@ -507,7 +543,7 @@ namespace NamespaceTests {
             void run() {
                 create();
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[{b:1},{b:[1,2,3]}]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[{b:1},{b:[1,2,3]}]}" ), keys );
                 checkSize( 3, keys );
             }
         private:
@@ -522,19 +558,19 @@ namespace NamespaceTests {
                 create();
 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[1,2]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[1,2]}" ), keys );
                 checkSize(2, keys );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[1]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[1]}" ), keys );
                 checkSize(1, keys );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:null}" ), keys );
+                getKeysFromObject( fromjson( "{a:null}" ), keys );
                 checkSize(1, keys );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[]}" ), keys );
                 checkSize(1, keys );
                 ASSERT_EQUALS( Undefined, keys.begin()->firstElement().type() );
                 keys.clear();
@@ -547,7 +583,7 @@ namespace NamespaceTests {
              	create();   
                 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[1,2]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[1,2]}" ), keys );
                 checkSize(2, keys );
                 BSONObjSet::const_iterator i = keys.begin();
                 ASSERT_EQUALS( BSON( "" << 1 << "" << 1 ), *i );
@@ -568,7 +604,7 @@ namespace NamespaceTests {
              	create();   
 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[]}" ), keys );
                 checkSize(1, keys );
                 ASSERT_EQUALS( fromjson( "{'':undefined,'':undefined}" ), *keys.begin() );
                 keys.clear();
@@ -586,20 +622,20 @@ namespace NamespaceTests {
                 create();
 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:1,b:[1,2]}" ), keys );
+                getKeysFromObject( fromjson( "{a:1,b:[1,2]}" ), keys );
                 checkSize(2, keys );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:1,b:[1]}" ), keys );
+                getKeysFromObject( fromjson( "{a:1,b:[1]}" ), keys );
                 checkSize(1, keys );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:1,b:null}" ), keys );
+                getKeysFromObject( fromjson( "{a:1,b:null}" ), keys );
                 //cout << "YO : " << *(keys.begin()) << endl;
                 checkSize(1, keys );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:1,b:[]}" ), keys );
+                getKeysFromObject( fromjson( "{a:1,b:[]}" ), keys );
                 checkSize(1, keys );
                 //cout << "YO : " << *(keys.begin()) << endl;
                 BSONObjIterator i( *keys.begin() );
@@ -620,7 +656,7 @@ namespace NamespaceTests {
              	create();
                 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':null}" ), *keys.begin() );
                 keys.clear();
@@ -635,7 +671,7 @@ namespace NamespaceTests {
              	create();
                 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':null,'':null}" ), *keys.begin() );
                 keys.clear();
@@ -650,17 +686,17 @@ namespace NamespaceTests {
              	create();
                 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':undefined,'':null}" ), *keys.begin() );
                 keys.clear();
                 
-                id().getKeysFromObject( fromjson( "{a:[{b:1}]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[{b:1}]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':{b:1},'':1}" ), *keys.begin() );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[{b:[]}]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[{b:[]}]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':{b:[]},'':undefined}" ), *keys.begin() );
                 keys.clear();
@@ -675,7 +711,7 @@ namespace NamespaceTests {
              	create();
                 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':null,'':undefined}" ), *keys.begin() );
                 keys.clear();
@@ -690,7 +726,7 @@ namespace NamespaceTests {
              	create( true );
                 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':null,'':undefined}" ), *keys.begin() );
                 keys.clear();
@@ -705,15 +741,15 @@ namespace NamespaceTests {
              	create( true );
                 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:1}" ), keys );
+                getKeysFromObject( fromjson( "{a:1}" ), keys );
                 checkSize( 0, keys );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[]}" ), keys );
                 checkSize( 0, keys );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[{c:1}]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[{c:1}]}" ), keys );
                 checkSize( 0, keys );
                 keys.clear();
             }
@@ -727,15 +763,15 @@ namespace NamespaceTests {
              	create( true );
                 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:1}" ), keys );
+                getKeysFromObject( fromjson( "{a:1}" ), keys );
                 checkSize( 0, keys );
                 keys.clear();
                 
-                id().getKeysFromObject( fromjson( "{a:[]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[]}" ), keys );
                 checkSize( 0, keys );
                 keys.clear();
                 
-                id().getKeysFromObject( fromjson( "{a:[{c:1}]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[{c:1}]}" ), keys );
                 checkSize( 0, keys );
                 keys.clear();
             }
@@ -749,17 +785,17 @@ namespace NamespaceTests {
              	create();
                 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':null}" ), *keys.begin() );
                 keys.clear();
                 
-                id().getKeysFromObject( fromjson( "{a:[1]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[1]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':null}" ), *keys.begin() );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[1,{b:1}]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[1,{b:1}]}" ), keys );
                 checkSize( 2, keys );
                 BSONObjSet::const_iterator c = keys.begin();
                 ASSERT_EQUALS( fromjson( "{'':null}" ), *c );
@@ -777,15 +813,15 @@ namespace NamespaceTests {
              	create( true );
                 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[]}" ), keys );
                 checkSize( 0, keys );
                 keys.clear();
                 
-                id().getKeysFromObject( fromjson( "{a:[1]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[1]}" ), keys );
                 checkSize( 0, keys );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[1,{b:1}]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[1,{b:1}]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':1}" ), *keys.begin() );
                 keys.clear();
@@ -800,29 +836,29 @@ namespace NamespaceTests {
              	create();
                 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[1]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[1]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( BSON( "" << 1 ), *keys.begin() );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[[1]]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[[1]]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':[1]}" ), *keys.begin() );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[[]]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[[]]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':undefined}" ), *keys.begin() );
                 keys.clear();
                 
-                id().getKeysFromObject( fromjson( "{a:{'0':1}}" ), keys );
+                getKeysFromObject( fromjson( "{a:{'0':1}}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( BSON( "" << 1 ), *keys.begin() );
                 keys.clear();
 
-                ASSERT_THROWS( id().getKeysFromObject( fromjson( "{a:[{'0':1}]}" ), keys ), UserException );
+                ASSERT_THROWS( getKeysFromObject( fromjson( "{a:[{'0':1}]}" ), keys ), UserException );
 
-                ASSERT_THROWS( id().getKeysFromObject( fromjson( "{a:[1,{'0':2}]}" ), keys ), UserException );
+                ASSERT_THROWS( getKeysFromObject( fromjson( "{a:[1,{'0':2}]}" ), keys ), UserException );
             }
         protected:
             BSONObj key() const { return BSON( "a.0" << 1 ); }
@@ -834,22 +870,22 @@ namespace NamespaceTests {
              	create();
                 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[[1]]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[[1]]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':1}" ), *keys.begin() );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[[]]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[[]]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':null}" ), *keys.begin() );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':null}" ), *keys.begin() );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[[[]]]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[[[]]]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':undefined}" ), *keys.begin() );
                 keys.clear();
@@ -864,37 +900,37 @@ namespace NamespaceTests {
              	create();
                 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[{b:1}]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[{b:1}]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':1}" ), *keys.begin() );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[{b:[1]}]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[{b:[1]}]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':1}" ), *keys.begin() );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[{b:[[1]]}]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[{b:[[1]]}]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':[1]}" ), *keys.begin() );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[[{b:1}]]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[[{b:1}]]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':1}" ), *keys.begin() );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[[{b:[1]}]]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[[{b:[1]}]]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':1}" ), *keys.begin() );
                 keys.clear();
 
-                id().getKeysFromObject( fromjson( "{a:[[{b:[[1]]}]]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[[{b:[[1]]}]]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':[1]}" ), *keys.begin() );
                 keys.clear();
                 
-                id().getKeysFromObject( fromjson( "{a:[[{b:[]}]]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[[{b:[]}]]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':undefined}" ), *keys.begin() );
                 keys.clear();
@@ -909,7 +945,7 @@ namespace NamespaceTests {
              	create();
                 
                 BSONObjSet keys;
-                id().getKeysFromObject( fromjson( "{a:[{b:[1]}]}" ), keys );
+                getKeysFromObject( fromjson( "{a:[{b:[1]}]}" ), keys );
                 checkSize( 1, keys );
                 ASSERT_EQUALS( fromjson( "{'':1}" ), *keys.begin() );
                 keys.clear();
@@ -922,40 +958,14 @@ namespace NamespaceTests {
         
     } // namespace IndexDetailsTests
 
-    namespace IndexSpecTests {
-        
-        class Suitability {
-        public:
-            void run() {
-                IndexSpec spec( BSON( "a" << 1 ), BSONObj() );
-                FieldRangeSet frs1( "", BSON( "a" << 2 << "b" << 3 ), true , true );
-                ASSERT_EQUALS( HELPFUL, spec.suitability( frs1 , BSONObj() ) );
-                FieldRangeSet frs2( "", BSON( "b" << 3 ), true , true );
-                ASSERT_EQUALS( USELESS, spec.suitability( frs2, BSONObj() ) );
-                ASSERT_EQUALS( HELPFUL, spec.suitability( frs2, BSON( "a" << 1 ) ) );
-            }
-        };
-        
-        /** Lexical rather than numeric comparison should be used to determine index suitability. */
-        class NumericFieldSuitability {
-        public:
-            void run() {
-                IndexSpec spec( BSON( "1" << 1 ), BSONObj() );
-                FieldRangeSet frs1( "", BSON( "1" << 2 ), true , true );
-                ASSERT_EQUALS( HELPFUL, spec.suitability( frs1, BSONObj() ) );
-                FieldRangeSet frs2( "", BSON( "01" << 3), true , true );
-                ASSERT_EQUALS( USELESS, spec.suitability( frs2, BSON( "01" << 1 ) ) );
-                FieldRangeSet frs3( "", BSONObj() , true , true );
-                ASSERT_EQUALS( HELPFUL, spec.suitability( frs3, BSON( "1" << 1 ) ) );
-            }
-        };
+    namespace MissingFieldTests {
 
         /** A missing field is represented as null in a btree index. */
         class BtreeIndexMissingField {
         public:
             void run() {
-                IndexSpec spec( BSON( "a" << 1 ) );
-                ASSERT_EQUALS( jstNULL, spec.missingField().type() );
+                BSONObj spec( BSON("key" << BSON( "a" << 1 ) ));
+                ASSERT_EQUALS(jstNULL, IndexLegacy::getMissingField(NULL,spec).firstElement().type());
             }
         };
         
@@ -963,24 +973,30 @@ namespace NamespaceTests {
         class TwoDIndexMissingField {
         public:
             void run() {
-                IndexSpec spec( BSON( "a" << "2d" ) );
-                ASSERT_EQUALS( jstNULL, spec.missingField().type() );
+                BSONObj spec( BSON("key" << BSON( "a" << "2d" ) ));
+                ASSERT_EQUALS(jstNULL, IndexLegacy::getMissingField(NULL,spec).firstElement().type());
             }
         };
-        
+
         /** A missing field is represented with the hash of null in a hashed index. */
         class HashedIndexMissingField {
         public:
             void run() {
-                IndexSpec spec( BSON( "a" << "hashed" ) );
+                BSONObj spec( BSON("key" << BSON( "a" << "hashed" ) ));
                 BSONObj nullObj = BSON( "a" << BSONNULL );
+
+                // Call getKeys on the nullObj.
                 BSONObjSet nullFieldKeySet;
-                spec.getKeys( nullObj, nullFieldKeySet );
+                HashKeyGenerator gen( "a", 0, 0, false );
+                gen.getKeys( nullObj, &nullFieldKeySet);
                 BSONElement nullFieldFromKey = nullFieldKeySet.begin()->firstElement();
-                ASSERT_EQUALS( HashedIndexType::makeSingleKey( nullObj.firstElement(), 0 ),
+
+                ASSERT_EQUALS( HashKeyGenerator::makeSingleHashKey( nullObj.firstElement(), 0, 0 ),
                                nullFieldFromKey.Long() );
-                ASSERT_EQUALS( NumberLong, spec.missingField().type() );
-                ASSERT_EQUALS( nullFieldFromKey, spec.missingField() );
+
+                BSONObj missingField = IndexLegacy::getMissingField(NULL,spec);
+                ASSERT_EQUALS( NumberLong, missingField.firstElement().type() );
+                ASSERT_EQUALS( nullFieldFromKey, missingField.firstElement());
             }
         };
 
@@ -991,19 +1007,26 @@ namespace NamespaceTests {
         class HashedIndexMissingFieldAlternateSeed {
         public:
             void run() {
-                IndexSpec spec( BSON( "a" << "hashed" ), BSON( "seed" << 0x5eed ) );
+                BSONObj spec( BSON("key" << BSON( "a" << "hashed" ) <<  "seed" << 0x5eed ));
                 BSONObj nullObj = BSON( "a" << BSONNULL );
+
                 BSONObjSet nullFieldKeySet;
-                spec.getKeys( BSONObj(), nullFieldKeySet );
+                HashKeyGenerator gen( "a", 0x5eed, 0, false );
+                gen.getKeys(nullObj, &nullFieldKeySet);
                 BSONElement nullFieldFromKey = nullFieldKeySet.begin()->firstElement();
-                ASSERT_EQUALS( HashedIndexType::makeSingleKey( nullObj.firstElement(), 0x5eed ),
+
+                ASSERT_EQUALS( HashKeyGenerator::makeSingleHashKey( nullObj.firstElement(), 0x5eed, 0 ),
                                nullFieldFromKey.Long() );
-                ASSERT_EQUALS( NumberLong, spec.missingField().type() );
-                ASSERT_EQUALS( nullFieldFromKey, spec.missingField() );
+
+                // Ensure that getMissingField recognizes that the seed is different (and returns
+                // the right key).
+                BSONObj missingField = IndexLegacy::getMissingField(NULL,spec);
+                ASSERT_EQUALS( NumberLong, missingField.firstElement().type());
+                ASSERT_EQUALS( nullFieldFromKey, missingField.firstElement());
             }
         };
         
-    } // namespace IndexSpecTests
+    } // namespace MissingFieldTests
     
     namespace NamespaceDetailsTests {
 
@@ -1016,10 +1039,7 @@ namespace NamespaceTests {
             virtual ~Base() {
                 if ( !nsd() )
                     return;
-                string s( ns() );
-                string errmsg;
-                BSONObjBuilder result;
-                dropCollection( s, errmsg, result );
+                cc().database()->dropCollection( ns() );
             }
         protected:
             void create() {
@@ -1032,7 +1052,7 @@ namespace NamespaceTests {
             }
             int nRecords() const {
                 int count = 0;
-                for ( DiskLoc i = nsd()->firstExtent; !i.isNull(); i = i.ext()->xnext ) {
+                for ( DiskLoc i = nsd()->firstExtent(); !i.isNull(); i = i.ext()->xnext ) {
                     int fileNo = i.ext()->firstRecord.a();
                     if ( fileNo == -1 )
                         continue;
@@ -1041,12 +1061,12 @@ namespace NamespaceTests {
                         ++count;
                     }
                 }
-                ASSERT_EQUALS( count, nsd()->stats.nrecords );
+                ASSERT_EQUALS( count, nsd()->numRecords() );
                 return count;
             }
             int nExtents() const {
                 int count = 0;
-                for ( DiskLoc i = nsd()->firstExtent; !i.isNull(); i = i.ext()->xnext )
+                for ( DiskLoc i = nsd()->firstExtent(); !i.isNull(); i = i.ext()->xnext )
                     ++count;
                 return count;
             }
@@ -1059,16 +1079,62 @@ namespace NamespaceTests {
             NamespaceDetails *nsd() const {
                 return nsdetails( ns() )->writingWithExtra();
             }
-            NamespaceDetailsTransient &nsdt() const {
-                return NamespaceDetailsTransient::get( ns() );
+            Collection* collection() const {
+                Collection* c =  _context.db()->getCollection( ns() );
+                verify(c);
+                return c;
             }
-            static BSONObj bigObj(bool bGenID=false) {
+            IndexCatalog* indexCatalog() const { 
+                return collection()->getIndexCatalog();
+            }
+            CollectionInfoCache* infoCache() const {
+                return collection()->infoCache();
+            }
+
+            static BSONObj bigObj() {
                 BSONObjBuilder b;
-				if (bGenID)
-					b.appendOID("_id", 0, true);
+                b.appendOID("_id", 0, true);
                 string as( 187, 'a' );
                 b.append( "a", as );
                 return b.obj();
+            }
+
+            /** Return the smallest DeletedRecord in deletedList, or DiskLoc() if none. */
+            DiskLoc smallestDeletedRecord() {
+                for( int i = 0; i < Buckets; ++i ) {
+                    if ( !nsd()->deletedListEntry( i ).isNull() ) {
+                        return nsd()->deletedListEntry( i );
+                    }
+                }
+                return DiskLoc();
+            }
+
+            /**
+             * 'cook' the deletedList by shrinking the smallest deleted record to size
+             * 'newDeletedRecordSize'.
+             */
+            void cookDeletedList( int newDeletedRecordSize ) {
+
+                // Extract the first DeletedRecord from the deletedList.
+                DiskLoc deleted;
+                for( int i = 0; i < Buckets; ++i ) {
+                    if ( !nsd()->deletedListEntry( i ).isNull() ) {
+                        deleted = nsd()->deletedListEntry( i );
+                        nsd()->deletedListEntry( i ).writing().Null();
+                        break;
+                    }
+                }
+                ASSERT( !deleted.isNull() );
+
+                // Shrink the DeletedRecord's size to newDeletedRecordSize.
+                ASSERT_GREATER_THAN_OR_EQUALS( deleted.drec()->lengthWithHeaders(),
+                                               newDeletedRecordSize );
+                getDur().writingInt( deleted.drec()->lengthWithHeaders() ) = newDeletedRecordSize;
+
+                // Re-insert the DeletedRecord into the deletedList bucket appropriate for its
+                // new size.
+                nsd()->deletedListEntry( NamespaceDetails::bucket( newDeletedRecordSize ) ).writing() =
+                        deleted;
             }
         };
 
@@ -1078,10 +1144,10 @@ namespace NamespaceTests {
                 create();
                 ASSERT( nsd() );
                 ASSERT_EQUALS( 0, nRecords() );
-                ASSERT( nsd()->firstExtent == nsd()->capExtent );
+                ASSERT( nsd()->firstExtent() == nsd()->capExtent() );
                 DiskLoc initial = DiskLoc();
                 initial.setInvalid();
-                ASSERT( initial == nsd()->capFirstNewRecord );
+                ASSERT( initial == nsd()->capFirstNewRecord() );
             }
         };
 
@@ -1090,7 +1156,7 @@ namespace NamespaceTests {
             void run() {
                 create();
                 BSONObj b = bigObj();
-                ASSERT( !theDataFileMgr.insert( ns(), b.objdata(), b.objsize() ).isNull() );
+                ASSERT( collection()->insertDocument( b, true ).isOK() );
                 ASSERT_EQUALS( 1, nRecords() );
             }
         };
@@ -1104,8 +1170,10 @@ namespace NamespaceTests {
                 const int Q = 16; // these constants depend on the size of the bson object, the extent size allocated by the system too
                 DiskLoc l[ N ];
                 for ( int i = 0; i < N; ++i ) {
-					BSONObj b = bigObj(true);
-                    l[ i ] = theDataFileMgr.insert( ns(), b.objdata(), b.objsize() );
+                    BSONObj b = bigObj();
+                    StatusWith<DiskLoc> status = collection()->insertDocument( b, true );
+                    ASSERT( status.isOK() );
+                    l[ i ] = status.getValue();
                     ASSERT( !l[ i ].isNull() );
                     ASSERT( nRecords() <= Q );
                     //ASSERT_EQUALS( 1 + i % 2, nRecords() );
@@ -1121,11 +1189,11 @@ namespace NamespaceTests {
                 create();
                 ASSERT_EQUALS( 2, nExtents() );
 
-                BSONObj b = bigObj();
-
                 DiskLoc l[ 8 ];
                 for ( int i = 0; i < 8; ++i ) {
-                    l[ i ] = theDataFileMgr.insert( ns(), b.objdata(), b.objsize() );
+                    StatusWith<DiskLoc> status = collection()->insertDocument( bigObj(), true );
+                    ASSERT( status.isOK() );
+                    l[ i ] = status.getValue();
                     ASSERT( !l[ i ].isNull() );
                     //ASSERT_EQUALS( i < 2 ? i + 1 : 3 + i % 2, nRecords() );
                     //if ( i > 3 )
@@ -1135,9 +1203,11 @@ namespace NamespaceTests {
 
                 // Too big
                 BSONObjBuilder bob;
+                bob.appendOID( "_id", NULL, true );
                 bob.append( "a", string( MinExtentSize + 500, 'a' ) ); // min extent size is now 4096
                 BSONObj bigger = bob.done();
-                ASSERT( theDataFileMgr.insert( ns(), bigger.objdata(), bigger.objsize() ).isNull() );
+                StatusWith<DiskLoc> status = collection()->insertDocument( bigger, false );
+                ASSERT( !status.isOK() );
                 ASSERT_EQUALS( 0, nRecords() );
             }
         private:
@@ -1216,6 +1286,295 @@ namespace NamespaceTests {
             }
         };
 
+        /**
+         * Except for the largest bucket, quantizePowerOf2AllocationSpace quantizes to the nearest
+         * bucket size.
+         */
+        class QuantizePowerOf2ToBucketSize : public Base {
+        public:
+            void run() {
+                create();
+                for( int iBucket = 0; iBucket < MaxBucket - 1; ++iBucket ) {
+                    int bucketSize = bucketSizes[ iBucket ];
+                    int nextBucketSize = bucketSizes[ iBucket + 1 ];
+
+                    // bucketSize - 1 is quantized to bucketSize.
+                    ASSERT_EQUALS( bucketSize,
+                                   NamespaceDetails::quantizePowerOf2AllocationSpace
+                                           ( bucketSize - 1 ) );
+
+                    // bucketSize is quantized to nextBucketSize.
+                    // Descriptive rather than normative test.
+                    // SERVER-8311 A pre quantized size is rounded to the next quantum level.
+                    ASSERT_EQUALS( nextBucketSize,
+                                   NamespaceDetails::quantizePowerOf2AllocationSpace
+                                           ( bucketSize ) );
+
+                    // bucketSize + 1 is quantized to nextBucketSize.
+                    ASSERT_EQUALS( nextBucketSize,
+                                   NamespaceDetails::quantizePowerOf2AllocationSpace
+                                           ( bucketSize + 1 ) );
+                }
+
+                // The next to largest bucket size - 1 is quantized to the next to largest bucket
+                // size.
+                ASSERT_EQUALS( bucketSizes[ MaxBucket - 1 ],
+                               NamespaceDetails::quantizePowerOf2AllocationSpace
+                                       ( bucketSizes[ MaxBucket - 1 ] - 1 ) );
+            }
+        };
+
+        /**
+         * Within the largest bucket, quantizePowerOf2AllocationSpace quantizes to the nearest
+         * megabyte boundary.
+         */
+        class QuantizeLargePowerOf2ToMegabyteBoundary : public Base {
+        public:
+            void run() {
+                create();
+                
+                // Iterate iSize over all 1mb boundaries from the size of the next to largest bucket
+                // to the size of the largest bucket + 1mb.
+                for( int iSize = bucketSizes[ MaxBucket - 1 ];
+                     iSize <= bucketSizes[ MaxBucket ] + 0x100000;
+                     iSize += 0x100000 ) {
+
+                    // iSize - 1 is quantized to iSize.
+                    ASSERT_EQUALS( iSize,
+                                   NamespaceDetails::quantizePowerOf2AllocationSpace( iSize - 1 ) );
+
+                    // iSize is quantized to iSize + 1mb.
+                    // Descriptive rather than normative test.
+                    // SERVER-8311 A pre quantized size is rounded to the next quantum level.
+                    ASSERT_EQUALS( iSize + 0x100000,
+                                   NamespaceDetails::quantizePowerOf2AllocationSpace( iSize ) );
+
+                    // iSize + 1 is quantized to iSize + 1mb.
+                    ASSERT_EQUALS( iSize + 0x100000,
+                                   NamespaceDetails::quantizePowerOf2AllocationSpace( iSize + 1 ) );
+                }
+            }
+        };
+
+        /** getRecordAllocationSize() returns its argument when the padding factor is 1.0. */
+        class GetRecordAllocationSizeNoPadding : public Base {
+        public:
+            void run() {
+                create();
+                ASSERT( nsd()->clearUserFlag( NamespaceDetails::Flag_UsePowerOf2Sizes ) );
+                ASSERT_EQUALS( 1.0, nsd()->paddingFactor() );
+                ASSERT_EQUALS( 300, nsd()->getRecordAllocationSize( 300 ) );
+            }
+            virtual string spec() const { return ""; }
+        };
+
+        /** getRecordAllocationSize() multiplies by a padding factor > 1.0. */
+        class GetRecordAllocationSizeWithPadding : public Base {
+        public:
+            void run() {
+                create();
+                double paddingFactor = 1.2;
+                nsd()->setPaddingFactor( paddingFactor );
+                ASSERT( nsd()->clearUserFlag( NamespaceDetails::Flag_UsePowerOf2Sizes ) );
+                ASSERT_EQUALS( paddingFactor, nsd()->paddingFactor() );
+                ASSERT_EQUALS( static_cast<int>( 300 * paddingFactor ),
+                               nsd()->getRecordAllocationSize( 300 ) );
+            }
+            virtual string spec() const { return ""; }
+        };
+
+        /**
+         * getRecordAllocationSize() quantizes to the nearest power of 2 when Flag_UsePowerOf2Sizes
+         * is set.
+         */
+        class GetRecordAllocationSizePowerOf2 : public Base {
+        public:
+            void run() {
+                create();
+                ASSERT( nsd()->isUserFlagSet( NamespaceDetails::Flag_UsePowerOf2Sizes ) );
+                ASSERT_EQUALS( 512, nsd()->getRecordAllocationSize( 300 ) );
+            }
+            virtual string spec() const { return ""; }
+        };
+
+        
+        /**
+         * getRecordAllocationSize() quantizes to the nearest power of 2 when Flag_UsePowerOf2Sizes
+         * is set, ignoring the padding factor.
+         */
+        class GetRecordAllocationSizePowerOf2PaddingIgnored : public Base {
+        public:
+            void run() {
+                create();
+                ASSERT( nsd()->isUserFlagSet( NamespaceDetails::Flag_UsePowerOf2Sizes ) );
+                nsd()->setPaddingFactor( 2.0 );
+                ASSERT_EQUALS( 2.0, nsd()->paddingFactor() );
+                ASSERT_EQUALS( 512, nsd()->getRecordAllocationSize( 300 ) );
+            }
+            virtual string spec() const { return ""; }
+        };
+
+        /** alloc() quantizes the requested size using quantizeAllocationSpace() rules. */
+        class AllocQuantized : public Base {
+        public:
+            void run() {
+                create();
+                DiskLoc actualLocation = nsd()->alloc( NULL, ns(), 300 );
+
+                // The length of the allocated record is quantized.
+                ASSERT_EQUALS( 320, actualLocation.rec()->lengthWithHeaders() );
+            }
+            virtual string spec() const { return ""; }
+        };
+
+        /** alloc() does not quantize records in capped collections. */
+        class AllocCappedNotQuantized : public Base {
+        public:
+            void run() {
+                create();
+                ASSERT( nsd()->isCapped() );
+                ASSERT( !nsd()->isUserFlagSet( NamespaceDetails::Flag_UsePowerOf2Sizes ) );
+                DiskLoc loc = nsd()->alloc( collection(), ns(), 300 );
+                ASSERT_EQUALS( 300, loc.rec()->lengthWithHeaders() );
+            }
+            virtual string spec() const { return "{capped:true,size:2048}"; }
+        };
+
+        /**
+         * alloc() does not quantize records in index collections using quantizeAllocationSpace()
+         * rules.
+         */
+        class AllocIndexNamespaceNotQuantized : public Base {
+        public:
+            void run() {
+                create();
+
+                // Find the indexNamespace name and indexNsd metadata pointer.
+                IndexDescriptor* desc = indexCatalog()->findIdIndex();
+                string indexNamespace = desc->indexNamespace();
+                ASSERT( !NamespaceString::normal( indexNamespace ) );
+                NamespaceDetails* indexNsd = nsdetails( indexNamespace );
+
+                // Check that no quantization is performed.
+                DiskLoc actualLocation = indexNsd->alloc( NULL, indexNamespace.c_str(), 300 );
+                ASSERT_EQUALS( 300, actualLocation.rec()->lengthWithHeaders() );
+            }
+        };
+
+        /** alloc() quantizes records in index collections to the nearest multiple of 4. */
+        class AllocIndexNamespaceSlightlyQuantized : public Base {
+        public:
+            void run() {
+                create();
+
+                // Find the indexNamespace name and indexNsd metadata pointer.
+                IndexDescriptor* desc = indexCatalog()->findIdIndex();
+                string indexNamespace = desc->indexNamespace();
+                ASSERT( !NamespaceString::normal( indexNamespace.c_str() ) );
+                NamespaceDetails* indexNsd = nsdetails( indexNamespace.c_str() );
+
+                // Check that multiple of 4 quantization is performed.
+                DiskLoc actualLocation = indexNsd->alloc( NULL, indexNamespace.c_str(), 298 );
+                ASSERT_EQUALS( 300, actualLocation.rec()->lengthWithHeaders() );
+            }
+        };
+
+        /** alloc() returns a non quantized record larger than the requested size. */
+        class AllocUseNonQuantizedDeletedRecord : public Base {
+        public:
+            void run() {
+                create();
+                cookDeletedList( 310 );
+                DiskLoc actualLocation = nsd()->alloc( NULL, ns(), 300 );
+                ASSERT_EQUALS( 310, actualLocation.rec()->lengthWithHeaders() );
+
+                // No deleted records remain after alloc returns the non quantized record.
+                ASSERT_EQUALS( DiskLoc(), smallestDeletedRecord() );
+            }
+            virtual string spec() const { return ""; }
+        };
+
+        /** alloc() returns a non quantized record equal to the requested size. */
+        class AllocExactSizeNonQuantizedDeletedRecord : public Base {
+        public:
+            void run() {
+                create();
+                cookDeletedList( 300 );
+                DiskLoc actualLocation = nsd()->alloc( NULL, ns(), 300 );
+                ASSERT_EQUALS( 300, actualLocation.rec()->lengthWithHeaders() );
+                ASSERT_EQUALS( DiskLoc(), smallestDeletedRecord() );
+            }
+            virtual string spec() const { return ""; }
+        };
+
+        /**
+         * alloc() returns a non quantized record equal to the quantized size plus some extra space
+         * too small to make a DeletedRecord.
+         */
+        class AllocQuantizedWithExtra : public Base {
+        public:
+            void run() {
+                create();
+                cookDeletedList( 343 );
+                DiskLoc actualLocation = nsd()->alloc( NULL, ns(), 300 );
+                ASSERT_EQUALS( 343, actualLocation.rec()->lengthWithHeaders() );
+                ASSERT_EQUALS( DiskLoc(), smallestDeletedRecord() );
+            }
+            virtual string spec() const { return ""; }
+        };
+        
+        /**
+         * alloc() returns a quantized record when the extra space in the reclaimed deleted record
+         * is large enough to form a new deleted record.
+         */
+        class AllocQuantizedWithoutExtra : public Base {
+        public:
+            void run() {
+                create();
+                cookDeletedList( 344 );
+                DiskLoc actualLocation = nsd()->alloc( NULL, ns(), 300 );
+
+                // The returned record is quantized from 300 to 320.
+                ASSERT_EQUALS( 320, actualLocation.rec()->lengthWithHeaders() );
+
+                // A new 24 byte deleted record is split off.
+                ASSERT_EQUALS( 24, smallestDeletedRecord().drec()->lengthWithHeaders() );
+            }
+            virtual string spec() const { return ""; }
+        };
+
+        /**
+         * A non quantized deleted record within 1/8 of the requested size is returned as is, even
+         * if a quantized portion of the deleted record could be used instead.
+         */
+        class AllocNotQuantizedNearDeletedSize : public Base {
+        public:
+            void run() {
+                create();
+                cookDeletedList( 344 );
+                DiskLoc actualLocation = nsd()->alloc( NULL, ns(), 319 );
+
+                // Even though 319 would be quantized to 320 and 344 - 320 == 24 could become a new
+                // deleted record, the entire deleted record is returned because
+                // ( 344 - 320 ) < ( 320 >> 3 ).
+                ASSERT_EQUALS( 344, actualLocation.rec()->lengthWithHeaders() );
+                ASSERT_EQUALS( DiskLoc(), smallestDeletedRecord() );
+            }
+            virtual string spec() const { return ""; }
+        };
+
+        /** An attempt to allocate a record larger than the largest deleted record fails. */
+        class AllocFailsWithTooSmallDeletedRecord : public Base {
+        public:
+            void run() {
+                create();
+                cookDeletedList( 299 );
+
+                ASSERT( nsd()->alloc( NULL, ns(), 300 ).isNull() );
+            }
+            virtual string spec() const { return ""; }
+        };
+
         /* test  NamespaceDetails::cappedTruncateAfter(const char *ns, DiskLoc loc)
         */
         class TruncateCapped : public Base {
@@ -1226,7 +1585,7 @@ namespace NamespaceTests {
                 create();
                 ASSERT_EQUALS( 2, nExtents() );
 
-                BSONObj b = bigObj(true);
+                BSONObj b = bigObj();
 
                 int N = MinExtentSize / b.objsize() * nExtents() + 5;
                 int T = N - 4;
@@ -1234,8 +1593,10 @@ namespace NamespaceTests {
                 DiskLoc truncAt;
                 //DiskLoc l[ 8 ];
                 for ( int i = 0; i < N; ++i ) {
-					BSONObj bb = bigObj(true);
-                    DiskLoc a = theDataFileMgr.insert( ns(), bb.objdata(), bb.objsize() );
+                    BSONObj bb = bigObj();
+                    StatusWith<DiskLoc> status = collection()->insertDocument( bb, true );
+                    ASSERT( status.isOK() );
+                    DiskLoc a = status.getValue();
                     if( T == i )
                         truncAt = a;
                     ASSERT( !a.isNull() );
@@ -1249,36 +1610,45 @@ namespace NamespaceTests {
 
                 DiskLoc last, first;
                 {
-                    ReverseCappedCursor c(nsd);
-                    last = c.currLoc();
+                    auto_ptr<Runner> runner(
+                        InternalPlanner::collectionScan(ns(), InternalPlanner::BACKWARD));
+                    runner->getNext(NULL, &last);
                     ASSERT( !last.isNull() );
                 }
                 {
-                    scoped_ptr<ForwardCappedCursor> c( ForwardCappedCursor::make( nsd ) );
-                    first = c->currLoc();
+                    auto_ptr<Runner> runner(
+                        InternalPlanner::collectionScan(ns(), InternalPlanner::FORWARD));
+                    runner->getNext(NULL, &first);
                     ASSERT( !first.isNull() );
                     ASSERT( first != last ) ;
                 }
 
                 nsd->cappedTruncateAfter(ns(), truncAt, false);
-                ASSERT_EQUALS( nsd->stats.nrecords , 28 );
+                ASSERT_EQUALS( nsd->numRecords() , 28 );
 
                 {
-                    scoped_ptr<ForwardCappedCursor> c( ForwardCappedCursor::make( nsd ) );
-                    ASSERT( first == c->currLoc() );
+                    DiskLoc loc;
+                    auto_ptr<Runner> runner(
+                        InternalPlanner::collectionScan(ns(), InternalPlanner::FORWARD));
+                    runner->getNext(NULL, &loc);
+                    ASSERT( first == loc);
                 }
                 {
-                    ReverseCappedCursor c(nsd);
-                    ASSERT( last != c.currLoc() ); // old last should be deleted
+                    auto_ptr<Runner> runner(
+                        InternalPlanner::collectionScan(ns(), InternalPlanner::BACKWARD));
+                    DiskLoc loc;
+                    runner->getNext(NULL, &loc);
+                    ASSERT( last != loc );
                     ASSERT( !last.isNull() );
                 }
 
                 // Too big
                 BSONObjBuilder bob;
-				bob.appendOID("_id", 0, true);
+                bob.appendOID("_id", 0, true);
                 bob.append( "a", string( MinExtentSize + 300, 'a' ) );
                 BSONObj bigger = bob.done();
-                ASSERT( theDataFileMgr.insert( ns(), bigger.objdata(), bigger.objsize() ).isNull() );
+                StatusWith<DiskLoc> status = collection()->insertDocument( bigger, true );
+                ASSERT( !status.isOK() );
                 ASSERT_EQUALS( 0, nRecords() );
             }
         public:
@@ -1292,18 +1662,18 @@ namespace NamespaceTests {
         public:
             void run() {
                 create();
-                nsd()->deletedList[ 2 ] = nsd()->cappedListOfAllDeletedRecords().drec()->nextDeleted().drec()->nextDeleted();
+                nsd()->deletedListEntry( 2 ) = nsd()->cappedListOfAllDeletedRecords().drec()->nextDeleted().drec()->nextDeleted();
                 nsd()->cappedListOfAllDeletedRecords().drec()->nextDeleted().drec()->nextDeleted().writing() = DiskLoc();
                 nsd()->cappedLastDelRecLastExtent().Null();
                 NamespaceDetails *d = nsd();
-                zero( &d->capExtent );
-                zero( &d->capFirstNewRecord );
+                zero( &d->capExtent() );
+                zero( &d->capFirstNewRecord() );
 
                 nsd();
 
-                ASSERT( nsd()->firstExtent == nsd()->capExtent );
-                ASSERT( nsd()->capExtent.getOfs() != 0 );
-                ASSERT( !nsd()->capFirstNewRecord.isValid() );
+                ASSERT( nsd()->firstExtent() == nsd()->capExtent() );
+                ASSERT( nsd()->capExtent().getOfs() != 0 );
+                ASSERT( !nsd()->capFirstNewRecord().isValid() );
                 int nDeleted = 0;
                 for ( DiskLoc i = nsd()->cappedListOfAllDeletedRecords(); !i.isNull(); i = i.drec()->nextDeleted(), ++nDeleted );
                 ASSERT_EQUALS( 10, nDeleted );
@@ -1330,7 +1700,7 @@ namespace NamespaceTests {
         //        private:
         //            virtual string spec() const {
         //                // NOTE 256 added to size in _userCreateNS()
-        //                long long big = MongoDataFile::maxSize() - DataFileHeader::HeaderSize;
+        //                long long big = DataFile::maxSize() - DataFileHeader::HeaderSize;
         //                stringstream ss;
         //                ss << "{\"capped\":true,\"size\":" << big << "}";
         //                return ss.str();
@@ -1344,50 +1714,6 @@ namespace NamespaceTests {
             }
         };
         
-        class CachedPlanBase : public Base {
-        public:
-            CachedPlanBase() :
-                _fieldRangeSet( ns(), BSON( "a" << 1 ), true, true ),
-                _pattern( _fieldRangeSet, BSONObj() ) {
-                create();
-            }
-        protected:
-            void assertCachedIndexKey( const BSONObj &indexKey ) const {
-                ASSERT_EQUALS( indexKey,
-                              nsdt().cachedQueryPlanForPattern( _pattern ).indexKey() );
-            }
-            void registerIndexKey( const BSONObj &indexKey ) {
-                nsdt().registerCachedQueryPlanForPattern
-                        ( _pattern,
-                         CachedQueryPlan( indexKey, 1, CandidatePlanCharacter( true, false ) ) );                
-            }
-            FieldRangeSet _fieldRangeSet;
-            QueryPattern _pattern;
-        };
-        
-        /**
-         * setIndexIsMultikey() sets the multikey flag for an index and clears the query plan
-         * cache.
-         */
-        class SetIndexIsMultikey : public CachedPlanBase {
-        public:
-            void run() {
-                DBDirectClient client;
-                client.ensureIndex( ns(), BSON( "a" << 1 ) );
-                registerIndexKey( BSON( "a" << 1 ) );
-                
-                ASSERT( !nsd()->isMultikey( 1 ) );
-                
-                nsd()->setIndexIsMultikey( ns(), 1 );
-                ASSERT( nsd()->isMultikey( 1 ) );
-                assertCachedIndexKey( BSONObj() );
-                
-                registerIndexKey( BSON( "a" << 1 ) );
-                nsd()->setIndexIsMultikey( ns(), 1 );
-                assertCachedIndexKey( BSON( "a" << 1 ) );
-            }
-        };
-
         class SwapIndexEntriesTest : public Base {
         public:
             void run() {
@@ -1395,26 +1721,26 @@ namespace NamespaceTests {
                 NamespaceDetails *nsd = nsdetails(ns());
 
                 // Set 2 & 54 as multikey
-                nsd->setIndexIsMultikey(ns(), 2, true);
-                nsd->setIndexIsMultikey(ns(), 54, true);
+                nsd->setIndexIsMultikey(2, true);
+                nsd->setIndexIsMultikey(54, true);
                 ASSERT(nsd->isMultikey(2));
                 ASSERT(nsd->isMultikey(54));
 
                 // Flip 2 & 47
-                nsd->setIndexIsMultikey(ns(), 2, false);
-                nsd->setIndexIsMultikey(ns(), 47, true);
+                nsd->setIndexIsMultikey(2, false);
+                nsd->setIndexIsMultikey(47, true);
                 ASSERT(!nsd->isMultikey(2));
                 ASSERT(nsd->isMultikey(47));
 
                 // Reset entries that are already true
-                nsd->setIndexIsMultikey(ns(), 54, true);
-                nsd->setIndexIsMultikey(ns(), 47, true);
+                nsd->setIndexIsMultikey(54, true);
+                nsd->setIndexIsMultikey(47, true);
                 ASSERT(nsd->isMultikey(54));
                 ASSERT(nsd->isMultikey(47));
 
                 // Two non-multi-key
-                nsd->setIndexIsMultikey(ns(), 2, false);
-                nsd->setIndexIsMultikey(ns(), 43, false);
+                nsd->setIndexIsMultikey(2, false);
+                nsd->setIndexIsMultikey(43, false);
                 ASSERT(!nsd->isMultikey(2));
                 ASSERT(nsd->isMultikey(54));
                 ASSERT(nsd->isMultikey(47));
@@ -1424,24 +1750,6 @@ namespace NamespaceTests {
 
     } // namespace NamespaceDetailsTests
 
-    namespace NamespaceDetailsTransientTests {
-        
-        /** clearQueryCache() clears the query plan cache. */
-        class ClearQueryCache : public NamespaceDetailsTests::CachedPlanBase {
-        public:
-            void run() {
-                // Register a query plan in the query plan cache.
-                registerIndexKey( BSON( "a" << 1 ) );
-                assertCachedIndexKey( BSON( "a" << 1 ) );
-                
-                // The query plan is cleared.
-                nsdt().clearQueryCache();
-                assertCachedIndexKey( BSONObj() );
-            }
-        };                                                                                         
-        
-    } // namespace NamespaceDetailsTransientTests
-                                                                                 
     class All : public Suite {
     public:
         All() : Suite( "namespace" ) {
@@ -1484,26 +1792,38 @@ namespace NamespaceTests {
             add< IndexDetailsTests::MissingField >();
             add< IndexDetailsTests::SubobjectMissing >();
             add< IndexDetailsTests::CompoundMissing >();
-            add< IndexSpecTests::Suitability >();
-            add< IndexSpecTests::NumericFieldSuitability >();
-            add< IndexSpecTests::BtreeIndexMissingField >();
-            add< IndexSpecTests::TwoDIndexMissingField >();
-            add< IndexSpecTests::HashedIndexMissingField >();
-            add< IndexSpecTests::HashedIndexMissingFieldAlternateSeed >();
             add< NamespaceDetailsTests::Create >();
             add< NamespaceDetailsTests::SingleAlloc >();
             add< NamespaceDetailsTests::Realloc >();
             add< NamespaceDetailsTests::QuantizeMinMaxBound >();
             add< NamespaceDetailsTests::QuantizeFixedBuckets >();
             add< NamespaceDetailsTests::QuantizeRecordBoundary >();
+            add< NamespaceDetailsTests::QuantizePowerOf2ToBucketSize >();
+            add< NamespaceDetailsTests::QuantizeLargePowerOf2ToMegabyteBoundary >();
+            add< NamespaceDetailsTests::GetRecordAllocationSizeNoPadding >();
+            add< NamespaceDetailsTests::GetRecordAllocationSizeWithPadding >();
+            add< NamespaceDetailsTests::GetRecordAllocationSizePowerOf2 >();
+            add< NamespaceDetailsTests::GetRecordAllocationSizePowerOf2PaddingIgnored >();
+            add< NamespaceDetailsTests::AllocQuantized >();
+            add< NamespaceDetailsTests::AllocCappedNotQuantized >();
+            add< NamespaceDetailsTests::AllocIndexNamespaceNotQuantized >();
+            add< NamespaceDetailsTests::AllocIndexNamespaceSlightlyQuantized >();
+            add< NamespaceDetailsTests::AllocUseNonQuantizedDeletedRecord >();
+            add< NamespaceDetailsTests::AllocExactSizeNonQuantizedDeletedRecord >();
+            add< NamespaceDetailsTests::AllocQuantizedWithExtra >();
+            add< NamespaceDetailsTests::AllocQuantizedWithoutExtra >();
+            add< NamespaceDetailsTests::AllocNotQuantizedNearDeletedSize >();
+            add< NamespaceDetailsTests::AllocFailsWithTooSmallDeletedRecord >();
             add< NamespaceDetailsTests::TwoExtent >();
             add< NamespaceDetailsTests::TruncateCapped >();
             add< NamespaceDetailsTests::Migrate >();
             add< NamespaceDetailsTests::SwapIndexEntriesTest >();
             //            add< NamespaceDetailsTests::BigCollection >();
             add< NamespaceDetailsTests::Size >();
-            add< NamespaceDetailsTests::SetIndexIsMultikey >();
-            add< NamespaceDetailsTransientTests::ClearQueryCache >();
+            add< MissingFieldTests::BtreeIndexMissingField >();
+            add< MissingFieldTests::TwoDIndexMissingField >();
+            add< MissingFieldTests::HashedIndexMissingField >();
+            add< MissingFieldTests::HashedIndexMissingFieldAlternateSeed >();
         }
     } myall;
 } // namespace NamespaceTests

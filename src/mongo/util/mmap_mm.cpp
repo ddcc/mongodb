@@ -15,14 +15,15 @@
  *    limitations under the License.
  */
 
-#include "pch.h"
-#include "mmap.h"
+#include "mongo/pch.h"
+
+#include "mongo/util/mmap.h"
 
 /* in memory (no file) version */
 
 namespace mongo {
 
-    MemoryMappedFile::MemoryMappedFile() {
+    MemoryMappedFile::MemoryMappedFile() : _uniqueId(0) {
         fd = 0;
         maphandle = 0;
         view = 0;

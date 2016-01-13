@@ -30,11 +30,10 @@
 
 #include "mongo/db/commands/dbhash.h"
 
-#include "mongo/db/btreecursor.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/database.h"
-#include "mongo/db/pdfile.h"
+#include "mongo/db/catalog/database.h"
+#include "mongo/db/query/internal_plans.h"
 #include "mongo/util/md5.hpp"
 #include "mongo/util/timer.h"
 
@@ -46,7 +45,9 @@ namespace mongo {
     void logOpForDbHash( const char* opstr,
                          const char* ns,
                          const BSONObj& obj,
-                         BSONObj* patt ) {
+                         BSONObj* patt,
+                         const BSONObj* fullObj,
+                         bool forMigrateCleanup ) {
         dbhashCmd.wipeCacheForCollection( ns );
     }
 
@@ -62,7 +63,7 @@ namespace mongo {
                                           std::vector<Privilege>* out) {
         ActionSet actions;
         actions.addAction(ActionType::dbHash);
-        out->push_back(Privilege(dbname, actions));
+        out->push_back(Privilege(ResourcePattern::forDatabaseName(dbname), actions));
     }
 
     string DBHashCmd::hashCollection( const string& fullCollectionName, bool* fromCache ) {
@@ -79,35 +80,24 @@ namespace mongo {
         }
 
         *fromCache = false;
-        NamespaceDetails * nsd = nsdetails( fullCollectionName );
-        verify( nsd );
+        Collection* collection = cc().database()->getCollection( fullCollectionName );
+        if ( !collection )
+            return "";
 
-        // debug SERVER-761
-        NamespaceDetails::IndexIterator ii = nsd->ii();
-        while( ii.more() ) {
-            const IndexDetails &idx = ii.next();
-            if ( !idx.head.isValid() || !idx.info.isValid() ) {
-                log() << "invalid index for ns: " << fullCollectionName << " " << idx.head << " " << idx.info;
-                if ( idx.info.isValid() )
-                    log() << " " << idx.info.obj();
-                log() << endl;
-            }
+        IndexDescriptor* desc = collection->getIndexCatalog()->findIdIndex();
+
+        auto_ptr<Runner> runner;
+        if ( desc ) {
+            runner.reset(InternalPlanner::indexScan(collection,
+                                                    desc,
+                                                    BSONObj(),
+                                                    BSONObj(),
+                                                    false,
+                                                    InternalPlanner::FORWARD,
+                                                    InternalPlanner::IXSCAN_FETCH));
         }
-
-        int idNum = nsd->findIdIndex();
-
-        shared_ptr<Cursor> cursor;
-
-        if ( idNum >= 0 ) {
-            cursor.reset( BtreeCursor::make( nsd,
-                                             nsd->idx( idNum ),
-                                             BSONObj(),
-                                             BSONObj(),
-                                             false,
-                                             1 ) );
-        }
-        else if ( nsd->isCapped() ) {
-            cursor = findTableScan( fullCollectionName.c_str() , BSONObj() );
+        else if ( collection->details()->isCapped() ) {
+            runner.reset(InternalPlanner::collectionScan(fullCollectionName));
         }
         else {
             log() << "can't find _id index for: " << fullCollectionName << endl;
@@ -118,14 +108,16 @@ namespace mongo {
         md5_init(&st);
 
         long long n = 0;
-
-        while ( cursor->ok() ) {
-            BSONObj c = cursor->current();
+        Runner::RunnerState state;
+        BSONObj c;
+        verify(NULL != runner.get());
+        while (Runner::RUNNER_ADVANCED == (state = runner->getNext(&c, NULL))) {
             md5_append( &st , (const md5_byte_t*)c.objdata() , c.objsize() );
             n++;
-            cursor->advance();
         }
-
+        if (Runner::RUNNER_EOF != state) {
+            warning() << "error while hashing, db dropped? ns=" << fullCollectionName << endl;
+        }
         md5digest d;
         md5_finish(&st, d);
         string hash = digestToString( d );
@@ -156,7 +148,7 @@ namespace mongo {
         list<string> colls;
         Database* db = cc().database();
         if ( db )
-            db->namespaceIndex.getNamespaces( colls );
+            db->namespaceIndex().getNamespaces( colls );
         colls.sort();
 
         result.appendNumber( "numCollections" , (long long)colls.size() );
@@ -170,6 +162,10 @@ namespace mongo {
         BSONObjBuilder bb( result.subobjStart( "collections" ) );
         for ( list<string>::iterator i=colls.begin(); i != colls.end(); i++ ) {
             string fullCollectionName = *i;
+            if ( fullCollectionName.size() -1 <= dbname.size() ) {
+                errmsg  = str::stream() << "weird fullCollectionName [" << fullCollectionName << "]";
+                return false;
+            }
             string shortCollectionName = fullCollectionName.substr( dbname.size() + 1 );
 
             if ( shortCollectionName.find( "system." ) == 0 )

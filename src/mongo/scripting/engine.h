@@ -25,6 +25,7 @@ namespace mongo {
     typedef map<string, ScriptingFunction> FunctionCacheMap;
 
     class DBClientWithCommands;
+    class DBClientBase;
 
     struct JSFile {
         const char* name;
@@ -57,7 +58,7 @@ namespace mongo {
 
         virtual void setElement(const char* field, const BSONElement& e) = 0;
         virtual void setNumber(const char* field, double val) = 0;
-        virtual void setString(const char* field, const char* val) = 0;
+        virtual void setString(const char* field, const StringData& val) = 0;
         virtual void setObject(const char* field, const BSONObj& obj, bool readOnly=true) = 0;
         virtual void setBoolean(const char* field, bool val) = 0;
         virtual void setFunction(const char* field, const char* code) = 0;
@@ -245,4 +246,5 @@ namespace mongo {
     const char* jsSkipWhiteSpace(const char* raw);
 
     extern ScriptEngine* globalScriptEngine;
+    extern DBClientBase* directDBClient;
 }

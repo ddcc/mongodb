@@ -4,15 +4,15 @@
 //mongod whether it is hosted with "localhost" or a hostname.
 
 var baseName = "auth_server-6591";
-var dbpath = "/data/db/" + baseName;
+var dbpath = MongoRunner.dataPath + baseName;
 var username = "foo";
 var password = "bar";
 var port = allocatePorts(1)[0];
 var host = "localhost:" + port;
 
-var addUser = function(mongo) {
+var createUser = function(mongo) {
     print("============ adding a user.");
-    mongo.getDB("admin").addUser(username, password);
+    mongo.getDB("admin").createUser({user:username,pwd:  password, roles: jsTest.adminUserRoles});
 };
 
 var assertCannotRunCommands = function(mongo) {
@@ -21,16 +21,12 @@ var assertCannotRunCommands = function(mongo) {
     var test = mongo.getDB("test");
     assert.throws( function() { test.system.users.findOne(); });
 
-    test.foo.save({_id:0});
-    assert(test.getLastError());
-    
+    assert.writeError(test.foo.save({ _id: 0 }));
+
     assert.throws( function() { test.foo.findOne({_id:0}); });
-    
-    test.foo.update({_id:0}, {$set:{x:20}});
-    assert(test.getLastError());
-    
-    test.foo.remove({_id:0});
-    assert(test.getLastError());
+
+    assert.writeError(test.foo.update({ _id: 0 }, { $set: { x: 20 }}));
+    assert.writeError(test.foo.remove({ _id: 0 }));
 
     assert.throws(function() { 
         test.foo.mapReduce(
@@ -47,15 +43,10 @@ var assertCanRunCommands = function(mongo) {
     // will throw on failure
     test.system.users.findOne();
 
-    test.foo.save({_id: 0});
-    assert(test.getLastError() == null);
-    
-    test.foo.update({_id: 0}, {$set:{x:20}});
-    assert(test.getLastError() == null);
-    
-    test.foo.remove({_id: 0});
-    assert(test.getLastError() == null);
-    
+    assert.writeOK(test.foo.save({ _id: 0 }));
+    assert.writeOK(test.foo.update({ _id: 0 }, { $set: { x: 20 }}));
+    assert.writeOK(test.foo.remove({ _id: 0 }));
+
     test.foo.mapReduce(
         function() { emit(1, 1); }, 
         function(id, count) { return Array.sum(count); },
@@ -83,7 +74,7 @@ var runTest = function(useHostName) {
 
     assertCanRunCommands(mongo);
 
-    addUser(mongo);
+    createUser(mongo);
 
     assertCannotRunCommands(mongo);
 

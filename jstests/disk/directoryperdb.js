@@ -1,7 +1,7 @@
 var baseDir = "jstests_disk_directoryper";
 var baseName = "directoryperdb"
 port = allocatePorts( 1 )[ 0 ];
-dbpath = "/data/db/" + baseDir + "/";
+dbpath = MongoRunner.dataPath + baseDir + "/";
 
 var m = startMongodTest(port, baseDir, false, {directoryperdb : "", nohttpinterface : "", bind_ip : "127.0.0.1"});
 db = m.getDB( baseName );
@@ -35,19 +35,15 @@ assert( m.getDBs().totalSize > 0, "bad size calc" );
 // repair
 db.runCommand( {repairDatabase:1, backupOriginalFiles:true} );
 checkDir( dbpath );
-files = listFiles( dbpath );
-for( f in files ) {
-    if ( new RegExp( "^" + dbpath + "backup_" ).test( files[ f ].name ) ) {
-        backupDir = files[ f ].name + "/";
-    }
-}
+// data directory is always cleared by startMongodTest()
+var backupDir = dbpath + "/backup_repairDatabase_0/";
 checkDir( backupDir );
 assert.eq( 1, db[ baseName ].count() , "C" );
 
 // tool test
 stopMongod( port );
 
-externalPath = "/data/db/" + baseDir + "_external/";
+externalPath = MongoRunner.dataPath + baseDir + "_external/";
 
 runMongoProgram( "mongodump", "--dbpath", dbpath, "--directoryperdb", "--out", externalPath );
 resetDbpath( dbpath );

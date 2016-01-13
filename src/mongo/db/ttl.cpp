@@ -14,19 +14,34 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
-#include "pch.h"
+#include "mongo/pch.h"
 
 #include "mongo/db/ttl.h"
 
 #include "mongo/base/counter.h"
+#include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/auth/user_name.h"
+#include "mongo/db/client.h"
 #include "mongo/db/commands/fsync.h"
 #include "mongo/db/commands/server_status.h"
-#include "mongo/db/databaseholder.h"
+#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/ops/delete.h"
-#include "mongo/db/replutil.h"
+#include "mongo/db/repl/is_master.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/util/background.h"
 
@@ -51,11 +66,7 @@ namespace mongo {
         
         void doTTLForDB( const string& dbName ) {
 
-            //check isMaster before becoming god
             bool isMaster = isMasterNs( dbName.c_str() );
-
-            Client::GodScope god;
-
             vector<BSONObj> indexes;
             {
                 auto_ptr<DBClientCursor> cursor =
@@ -82,9 +93,9 @@ namespace mongo {
                     continue;
                 }
                 if (!idx[secondsExpireField].isNumber()) {
-                    error() << "ttl indexes require the " << secondsExpireField << " field to be "
+                    log() << "ttl indexes require the " << secondsExpireField << " field to be "
                           << "numeric but received a type of: "
-                          << typeName(idx[secondsExpireField].type()) << endl;
+                          << typeName(idx[secondsExpireField].type());
                     continue;
                 }
 
@@ -94,27 +105,37 @@ namespace mongo {
                     b.appendDate( "$lt" , curTimeMillis64() - ( 1000 * idx[secondsExpireField].numberLong() ) );
                     query = BSON( key.firstElement().fieldName() << b.obj() );
                 }
-                
+
                 LOG(1) << "TTL: " << key << " \t " << query << endl;
-                
+
                 long long n = 0;
                 {
                     string ns = idx["ns"].String();
                     Client::WriteContext ctx( ns );
-                    NamespaceDetails* nsd = nsdetails( ns );
-                    if ( ! nsd ) {
+                    Collection* collection = ctx.ctx().db()->getCollection( ns );
+                    if ( !collection ) {
                         // collection was dropped
                         continue;
                     }
+
+                    NamespaceDetails* nsd = collection->details();
                     if ( nsd->setUserFlag( NamespaceDetails::Flag_UsePowerOf2Sizes ) ) {
+                        // TODO: wish there was a cleaner way to do this
                         nsd->syncUserFlags( ns );
                     }
+
                     // only do deletes if on master
                     if ( ! isMaster ) {
                         continue;
                     }
 
-                    n = deleteObjects( ns.c_str() , query , false , true );
+                    if ( collection->getIndexCatalog()->findIndexByKeyPattern( key ) == NULL ) {
+                        // index not finished yet
+                        LOG(1) << " skipping index because not finished";
+                        continue;
+                    }
+
+                    n = deleteObjects( ns , query , false , true );
                     ttlDeletedDocuments.increment( n );
                 }
 
@@ -126,6 +147,7 @@ namespace mongo {
 
         virtual void run() {
             Client::initThread( name().c_str() );
+            cc().getAuthorizationSession()->grantInternalAuthorization();
 
             while ( ! inShutdown() ) {
                 sleepsecs( 60 );

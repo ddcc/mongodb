@@ -13,6 +13,18 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 #include "mongo/pch.h"
@@ -24,12 +36,15 @@
 
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/client/dbclientinterface.h"
+#include "mongo/platform/unordered_set.h"
 #include "mongo/scripting/bench.h"
 #include "mongo/util/file.h"
+#include "mongo/util/text.h"
 
 namespace mongo {
     long long Scope::_lastVersion = 1;
     static const unsigned kMaxJsFileLength = std::numeric_limits<unsigned>::max() - 1;
+    DBClientBase* directDBClient;
 
     ScriptEngine::ScriptEngine() : _scopeInitCallback() {
     }
@@ -94,8 +109,11 @@ namespace mongo {
 
     bool Scope::execFile(const string& filename, bool printResult, bool reportError,
                          int timeoutMs) {
-
+#ifdef _WIN32
+        boost::filesystem::path p(toWideString(filename.c_str()));
+#else
         boost::filesystem::path p(filename);
+#endif
         if (!exists(p)) {
             log() << "file [" << filename << "] doesn't exist" << endl;
             return false;
@@ -111,7 +129,7 @@ namespace mongo {
                 boost::filesystem::path sub(*it);
                 if (!endsWith(sub.string().c_str(), ".js"))
                     continue;
-                if (!execFile(sub.string().c_str(), printResult, reportError, timeoutMs))
+                if (!execFile(sub.string(), printResult, reportError, timeoutMs))
                     return false;
             }
 
@@ -125,6 +143,10 @@ namespace mongo {
 
         File f;
         f.open(filename.c_str(), true);
+        
+        if (!f.is_open() || f.bad())
+            return false;
+        
         fileofs fo = f.len();
         if (fo > kMaxJsFileLength) {
             warning() << "attempted to execute javascript file larger than 2GB" << endl;
@@ -170,8 +192,8 @@ namespace mongo {
         _loadedVersion = _lastVersion;
         string coll = _localDBName + ".system.js";
 
-        static DBClientBase* db = createDirectClient();
-        auto_ptr<DBClientCursor> c = db->query(coll, Query(), 0, 0, NULL, QueryOption_SlaveOk, 0);
+        auto_ptr<DBClientCursor> c = directDBClient->query(coll, Query(), 0, 0, NULL,
+            QueryOption_SlaveOk, 0);
         massert(16669, "unable to get db client cursor from query", c.get());
 
         set<string> thisTime;
@@ -237,8 +259,10 @@ namespace mongo {
         extern const JSFile mongo;
         extern const JSFile mr;
         extern const JSFile query;
+        extern const JSFile upgrade_check;
         extern const JSFile utils;
         extern const JSFile utils_sh;
+        extern const JSFile bulk_api;
     }
 
     void Scope::execCoreFiles() {
@@ -248,7 +272,9 @@ namespace mongo {
         execSetup(JSFiles::mongo);
         execSetup(JSFiles::mr);
         execSetup(JSFiles::query);
+        execSetup(JSFiles::bulk_api);
         execSetup(JSFiles::collection);
+        execSetup(JSFiles::upgrade_check);
     }
 
     /** install BenchRunner suite */
@@ -353,7 +379,7 @@ namespace {
         bool getBoolean(const char* field) { return _real->getBoolean(field); }
         BSONObj getObject(const char* field) { return _real->getObject(field); }
         void setNumber(const char* field, double val) { _real->setNumber(field, val); }
-        void setString(const char* field, const char* val) { _real->setString(field, val); }
+        void setString(const char* field, const StringData& val) { _real->setString(field, val); }
         void setElement(const char* field, const BSONElement& val) {
             _real->setElement(field, val);
         }
@@ -422,8 +448,24 @@ namespace {
         if (x == string::npos)
             return false;
 
-        return (x == 0 || !isalpha(code[x-1])) &&
-               !isalpha(code[x+6]);
+        int quoteCount = 0;
+        int singleQuoteCount = 0;
+        for (size_t i = 0; i < x; i++) {
+            if (code[i] == '"') {
+                quoteCount++;
+            } else if(code[i] == '\'') {
+                singleQuoteCount++;
+            }
+        }
+        // if we are in either single quotes or double quotes return false
+        if (quoteCount % 2 != 0 || singleQuoteCount % 2 != 0) {
+            return false;
+        }
+
+        // return is at start OR preceded by space
+        // AND return is not followed by digit or letter
+        return (x == 0 || isspace(code[x-1])) &&
+               !(isalpha(code[x+6]) || isdigit(code[x+6]));
     }
 
     const char* jsSkipWhiteSpace(const char* raw) {

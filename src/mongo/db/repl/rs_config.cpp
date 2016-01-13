@@ -14,18 +14,32 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
-#include "pch.h"
-#include "rs.h"
-#include "../../client/syncclusterconnection.h"
-#include "../../util/net/hostandport.h"
-#include "../dbhelpers.h"
-#include "connections.h"
-#include "../oplog.h"
-#include "../instance.h"
-#include "../../util/text.h"
+#include "mongo/pch.h"
+
 #include <boost/algorithm/string.hpp>
+
+#include "mongo/db/dbhelpers.h"
+#include "mongo/db/instance.h"
+#include "mongo/db/repl/connections.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/replication_server_status.h"  // replSettings
+#include "mongo/db/repl/rs.h"
+#include "mongo/util/net/hostandport.h"
+#include "mongo/util/text.h"
 
 using namespace bson;
 
@@ -34,6 +48,7 @@ namespace mongo {
     mongo::mutex ReplSetConfig::groupMx("RS tag group");
     const int ReplSetConfig::DEFAULT_HB_TIMEOUT = 10;
 
+    static AtomicUInt _warnedAboutVotes = 0;
     void logOpInitiate(const bo&);
 
     void assertOnlyHas(BSONObj o, const set<string>& fields) {
@@ -58,20 +73,21 @@ namespace mongo {
     /* comment MUST only be set when initiating the set by the initiator */
     void ReplSetConfig::saveConfigLocally(bo comment) {
         checkRsConfig();
-        log() << "replSet info saving a newer config version to local.system.replset" << rsLog;
+
+        BSONObj newConfigBSON = asBson();
+
+        log() << "replSet info saving a newer config version to local.system.replset: "
+              << newConfigBSON << rsLog;
         {
-            Lock::GlobalWrite lk; // TODO: does this really need to be a global lock?
-            Client::Context cx( rsConfigNs );
-            cx.db()->flushFiles(true);
+            Client::WriteContext cx( rsConfigNs );
 
             //theReplSet->lastOpTimeWritten = ??;
             //rather than above, do a logOp()? probably
-            BSONObj o = asBson();
-            Helpers::putSingletonGod(rsConfigNs.c_str(), o, false/*logOp=false; local db so would work regardless...*/);
+            Helpers::putSingletonGod(rsConfigNs.c_str(),
+                                     newConfigBSON,
+                                     false/*logOp=false; local db so would work regardless...*/);
             if( !comment.isEmpty() && (!theReplSet || theReplSet->isPrimary()) )
                 logOpInitiate(comment);
-
-            cx.db()->flushFiles(true);
         }
         log() << "replSet saveConfigLocally done" << rsLog;
     }
@@ -336,8 +352,9 @@ namespace mongo {
 
     void ReplSetConfig::checkRsConfig() const {
         uassert(13132,
-                str::stream() << "nonmatching repl set name in _id field: " << _id << " vs. " << cmdLine.ourSetName(),
-                _id == cmdLine.ourSetName());
+                str::stream() << "nonmatching repl set name in _id field: " << _id << " vs. "
+                              << replSettings.ourSetName(),
+                _id == replSettings.ourSetName());
         uassert(13308, "replSet bad config version #", version > 0);
         uassert(13133, "replSet bad config no members", members.size() >= 1);
         uassert(13309, "replSet bad config maximum number of members is 12", members.size() <= 12);
@@ -534,6 +551,16 @@ namespace mongo {
                     m.priority = mobj["priority"].Number();
                 if( mobj.hasElement("votes") )
                     m.votes = (unsigned) mobj["votes"].Number();
+                if (m.votes > 1 && !_warnedAboutVotes) {
+                    log() << "\t\tWARNING: Having more than 1 vote on a single replicaset member is"
+                          << startupWarningsLog;
+                    log() << "\t\tdeprecated, as it causes issues with majority write concern. For"
+                          << startupWarningsLog;
+                    log() << "\t\tmore information, see "
+                          << "http://dochub.mongodb.org/core/replica-set-votes-deprecated"
+                          << startupWarningsLog;
+                    _warnedAboutVotes.set(1);
+                }
                 if( mobj.hasElement("tags") ) {
                     const BSONObj &t = mobj["tags"].Obj();
                     for (BSONObj::iterator c = t.begin(); c.more(); c.next()) {
@@ -666,7 +693,7 @@ namespace mongo {
             }
             else {
                 /* first, make sure other node is configured to be a replset. just to be safe. */
-                string setname = cmdLine.ourSetName();
+                string setname = replSettings.ourSetName();
                 BSONObj cmd = BSON( "replSetHeartbeat" << setname );
                 int theirVersion;
                 BSONObj info;
