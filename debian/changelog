@@ -1,3 +1,86 @@
+mongodb (1:2.6.11-1~~exp1) experimental; urgency=medium
+
+  * New upstream release (closes: #748490).
+  * Drop patches merged upstream:
+    + 0003-All-platforms-but-Windows-find-hash-in-std-tr1.patch
+    + 0005-ARM-support-for-ASM-operations-in-MongoDB.patch
+    + 0008-Use-system-libstemmer.patch
+    + 0010-fix-integer-signs.patch
+    + 0011-Use-a-signed-char-to-store-BSONType-enumerations.patch
+    + 0013-pymongo.patch
+  * Drop 0007-Use-TIME_UTC_-macro.patch: essentially no-op with Jessie's boost
+    version.
+  * Drop 0009-ignore-unused-local-typedefs.patch: it only patches v8's
+    SConstruct for 2.6.11, but we use the system's v8 library anyway.
+  * Replace no-unused-variable.patch with Ubuntu's version, which also
+    specifies the (required) -Wno-maybe-uninitialized option.
+  * Refresh remaining patches.
+  * d/control:
+    + Add myself to Uploaders.
+    + Remove ancient g++ version B-D.
+    + Move adduser from Pre-Depends to Depends.
+    + Use HTTPS for all URLs.
+    + Remove XS-Testsuite: autopkgtest; it is added automatically.
+    + Drop the mongodb-dev binary package. The C++ client library is now
+      developed separately from the mongo database server.
+    + Lower libboost-dev B-D version requirement to (>> 1.50) to ease backports.
+    + Remove the libsnappy-dev B-D version restriction.
+  * d/rules: various fixes:
+    + Replace the individual --use-system-x scons arguments with a
+      single --use-system-all.
+    + Create -dbgsym packages by default, can be disabled using
+      DEB_BUILD_OPTIONS=nodbgsym (Warning: -dbgsym packages are about 1GB big
+      in total).
+    + lint: use filter instead of findstring.
+    + Really pass the hardening flags to scons through environment variables;
+      introduced a new patch for SConstruct.
+    + Honour the nocheck build option.
+    + Use dh_install --list-missing.
+    + Move dh_clean handling to debian/clean and override dh_auto_clean
+      instead.
+    + Use a dedicated override for dh_systemd_enable.
+  * Use system YAML:
+    + d/control: B-D on libyaml-cpp-dev
+    + Include a patch from Ubuntu fixing yaml-cpp detection.
+  * tests: update basic1.js' location.
+  * mongodb.service: specify RuntimeDirectory and RuntimeDirectoryMode to have
+    systemd create /run/mongodb.
+  * upstart: create /run/mongodb
+  * mongodb-server.postinst:
+    + Do not create /run/mongodb on installation; this is a
+      runtime directory created by the initscript, the systemd unit and the
+      upstart job.
+    + Use dpkg-statoverride to set directory permissions. Also do not
+      create /var/lib/mongodb and /var/log/mongodb, they are already created
+      using dh_installdirs.
+    + Refactor user creation; create the mongodb system user with
+      mongodb as primary group and with disabled login and shell.
+  * Drop mongodb-server.{prerm,postrm}; they are essentially dh_make
+    boilerplate.
+  * mongodb.service: source /etc/default/mongodb and use $CONF and $DAEMON_OPTS.
+  * Remove obsolete mongodb maintainer scripts, initscript, upstart job and
+    dirs.
+  * Remove old xulrunner-related lintian overrides.
+  * Remove duplicate manpages from debian/.
+  * Enable arm64 and ppc64el builds (closes: #791935):
+    + Add a patch from Ubuntu to allow disabling javascript during build.
+    + Disable javascript for arm64 and ppc64el builds, as V8 is not available
+      on these architectures.
+    + d/control: mark packages additionally as arm64 and ppc64el.
+    + Drop the mongo shell from the arm64 and ppc64el packages, as it is
+      broken without scripting support.
+  * Use the tcmalloc allocator on supported architectures (amd64, i386, armhf,
+    ppc64el).
+  * Add debian/source/lintian-overrides, overriding false positive and
+    irrelevant warnings/errors.
+  * Remove debian/mongodb-clients.lintian-overrides: overrides were not used.
+  * d/copyright: convert to Format 1.0.
+  * Bump standards to 3.9.7; no changes needed.
+  * d/watch: check for 2.6 stable releases.
+  * Add NEWS entry with hints about the upgrade to 2.6.
+
+ -- Apollon Oikonomopoulos <apoikos@debian.org>  Sat, 16 Jan 2016 01:44:26 +0200
+
 mongodb (1:2.4.14-3) unstable; urgency=low
 
   * Fix FTBFS with newer g++ 5.2 versions (closes: #794931).

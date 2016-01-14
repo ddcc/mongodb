@@ -1,4 +1,4 @@
-mongodb (1:2.6.11-0.1) UNRELEASED; urgency=medium
+mongodb (1:2.6.11-1~~exp1) experimental; urgency=medium
 
   When upgrading MongoDB to 2.6, keep in mind that only upgrades from 2.4 are
   supported. If you wish to upgrade from previous MongoDB versions, you have
