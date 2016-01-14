@@ -22,14 +22,15 @@ COMMON_OPTIONS = --use-system-snappy --use-system-pcre \
   --use-system-boost --use-system-v8 --use-system-yaml --ssl \
   $(DEB_SCONS_OPTIONS)
 
-gperftools_archs = amd64 i386 armhf
+gperftools_archs = amd64 i386 armhf ppc64el
 ifneq (,$(filter $(DEB_HOST_ARCH), $(gperftools_archs)))
 COMMON_OPTIONS += --allocator=tcmalloc --use-system-tcmalloc
 else
 COMMON_OPTIONS += --allocator=system
 endif
 
-ifeq ($(DEB_HOST_ARCH), arm64)
+no_v8_archs = arm64 ppc64el
+ifneq (,$(filter $(DEB_HOST_ARCH), $(no_v8_archs)))
 COMMON_OPTIONS += --disable-scripting
 endif
 
@@ -65,7 +66,7 @@ override_dh_systemd_enable:
 override_dh_installinit:
 	dh_installinit -pmongodb-server --name=mongodb
 
-ifeq ($(DEB_HOST_ARCH), arm64)
+ifneq (,$(filter $(DEB_HOST_ARCH), $(no_v8_archs)))
 # mongo shell is broken without scripting so drop it from
 # the binary
 override_dh_install:
