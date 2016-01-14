@@ -6,20 +6,9 @@ Last-Update: 2013-10-13
 
 ---
 
---- mongodb-2.4.6.orig/src/mongo/db/auth/privilege_set.cpp
-+++ mongodb-2.4.6/src/mongo/db/auth/privilege_set.cpp
-@@ -79,7 +79,7 @@ namespace mongo {
-         resourceSearchList[1] = nsToDatabaseSubstring(desiredPrivilege.getResource());
- 
-         ActionSet unmetRequirements = desiredPrivilege.getActions();
--        for (int i = 0; i < boost::size(resourceSearchList); ++i) {
-+        for (unsigned int i = 0; i < boost::size(resourceSearchList); ++i) {
-             ResourcePrivilegeCacheEntry* entry = _lookupEntry(resourceSearchList[i]);
-             if (NULL == entry)
-                 continue;
---- mongodb-2.4.6.orig/src/mongo/db/cmdline_test.cpp
-+++ mongodb-2.4.6/src/mongo/db/cmdline_test.cpp
-@@ -71,7 +71,7 @@ namespace {
+--- a/src/mongo/util/cmdline_utils/censor_cmdline_test.cpp
++++ b/src/mongo/util/cmdline_utils/censor_cmdline_test.cpp
+@@ -85,7 +85,7 @@
              "KEEP",
              "--servicePasswordFake=KEEP"
          };
@@ -28,7 +17,7 @@ Last-Update: 2013-10-13
          testCensoringArgv(argv, argv, argc);
      }
  
-@@ -88,7 +88,7 @@ namespace {
+@@ -102,7 +102,7 @@
              "--servicePassword",
              "get out of dodge"
          };
@@ -37,7 +26,7 @@ Last-Update: 2013-10-13
  
          const char* const expected[] = {
              "first",
-@@ -120,7 +120,7 @@ namespace {
+@@ -134,7 +134,7 @@
              "-servicePassword",
              "get out of dodge"
          };
@@ -46,7 +35,7 @@ Last-Update: 2013-10-13
  
          const char* const expected[] = {
              "first",
-@@ -152,7 +152,7 @@ namespace {
+@@ -166,7 +166,7 @@
              "KEEP",
              "--servicePasswordFake=KEEP"
          };
@@ -55,7 +44,7 @@ Last-Update: 2013-10-13
          testCensoringVector(argv, argv, argc);
      }
  
-@@ -169,7 +169,7 @@ namespace {
+@@ -183,7 +183,7 @@
              "--servicePassword",
              "get out of dodge"
          };
@@ -64,7 +53,7 @@ Last-Update: 2013-10-13
  
          const char* const expected[] = {
              "first",
-@@ -201,7 +201,7 @@ namespace {
+@@ -215,7 +215,7 @@
              "-servicePassword",
              "get out of dodge"
          };

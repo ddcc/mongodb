@@ -11,8 +11,6 @@ Last-Update: 2013-03-15
  src/mongo/db/key.cpp         |  2 +-
  2 files changed, 16 insertions(+), 2 deletions(-)
 
-diff --git a/src/mongo/bson/bsonelement.h b/src/mongo/bson/bsonelement.h
-index f094ab9..1ecb47f 100644
 --- a/src/mongo/bson/bsonelement.h
 +++ b/src/mongo/bson/bsonelement.h
 @@ -17,7 +17,7 @@
@@ -24,7 +22,7 @@ index f094ab9..1ecb47f 100644
  #include <string>
  #include <vector>
  
-@@ -529,13 +529,27 @@ namespace mongo {
+@@ -550,13 +550,27 @@
      }
  
      inline double BSONElement::numberDouble() const {
@@ -52,11 +50,9 @@ index f094ab9..1ecb47f 100644
          default:
              return 0;
          }
-diff --git a/src/mongo/db/key.cpp b/src/mongo/db/key.cpp
-index 3d9eaa7..95959d8 100644
---- a/src/mongo/db/key.cpp
-+++ b/src/mongo/db/key.cpp
-@@ -406,7 +406,7 @@ namespace mongo {
+--- a/src/mongo/db/structure/btree/key.cpp
++++ b/src/mongo/db/structure/btree/key.cpp
+@@ -418,7 +418,7 @@
                      p += 8;
                      break;
                  case cdouble:

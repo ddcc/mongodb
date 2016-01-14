@@ -6,11 +6,18 @@ Subject: Create kfreebsd like linux in most respects
  SConstruct | 4 +++-
  1 file changed, 3 insertions(+), 1 deletion(-)
 
-diff --git a/SConstruct b/SConstruct
-index 5fb0e83..f3ac3f9 100644
 --- a/SConstruct
 +++ b/SConstruct
-@@ -344,6 +344,8 @@ libdeps.setup_environment( env )
+@@ -66,7 +66,7 @@
+ if "darwin" == platform:
+     darwin = True
+     platform = "osx" # prettier than darwin
+-elif platform.startswith("linux"):
++elif platform.startswith("linux") or platform.startswith("gnukfreebsd"):
+     linux = True
+     platform = "linux"
+ elif "sunos5" == platform:
+@@ -526,6 +526,8 @@
  
  if env['PYSYSPLATFORM'] == 'linux3':
      env['PYSYSPLATFORM'] = 'linux2'
@@ -18,13 +25,4 @@ index 5fb0e83..f3ac3f9 100644
 +    env['PYSYSPLATFORM'] = 'linux2'
  if 'freebsd' in env['PYSYSPLATFORM']:
      env['PYSYSPLATFORM'] = 'freebsd'
- 
-@@ -524,7 +526,7 @@ if "darwin" == os.sys.platform:
-        env.Append( EXTRACPPPATH=filterExists(["/sw/include" , "/opt/local/include"]) )
-        env.Append( EXTRALIBPATH=filterExists(["/sw/lib/", "/opt/local/lib"]) )
- 
--elif os.sys.platform.startswith("linux"):
-+elif os.sys.platform.startswith("linux") or os.sys.platform.startswith("gnukfreebsd"):
-     linux = True
-     platform = "linux"
  

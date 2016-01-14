@@ -7,9 +7,9 @@ Last-Update: 2015-07-04
 
 ---
 
---- mongodb-2.4.14.orig/SConstruct
-+++ mongodb-2.4.14/SConstruct
-@@ -714,6 +714,7 @@ if nix:
+--- a/SConstruct
++++ b/SConstruct
+@@ -826,6 +826,7 @@
                           "-Wall",
                           "-Wsign-compare",
                           "-Wno-unused-function",

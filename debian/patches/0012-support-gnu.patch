@@ -1,6 +1,15 @@
---- a/SConstruct	2014-05-09 00:54:25.000000000 +0200
-+++ b/SConstruct	2014-05-09 13:27:08.000000000 +0200
-@@ -348,6 +348,8 @@
+--- a/SConstruct
++++ b/SConstruct
+@@ -66,7 +66,7 @@
+ if "darwin" == platform:
+     darwin = True
+     platform = "osx" # prettier than darwin
+-elif platform.startswith("linux") or platform.startswith("gnukfreebsd"):
++elif platform.startswith("linux") or platform.startswith("gnukfreebsd") or platform.startswith("gnu0"):
+     linux = True
+     platform = "linux"
+ elif "sunos5" == platform:
+@@ -530,6 +530,8 @@
      env['PYSYSPLATFORM'] = 'linux2'
  if 'freebsd' in env['PYSYSPLATFORM']:
      env['PYSYSPLATFORM'] = 'freebsd'
@@ -9,17 +18,8 @@
  
  if os.sys.platform == 'win32':
      env['OS_FAMILY'] = 'win'
-@@ -526,7 +528,7 @@
-        env.Append( EXTRACPPPATH=filterExists(["/sw/include" , "/opt/local/include"]) )
-        env.Append( EXTRALIBPATH=filterExists(["/sw/lib/", "/opt/local/lib"]) )
- 
--elif os.sys.platform.startswith("linux") or os.sys.platform.startswith("gnukfreebsd"):
-+elif os.sys.platform.startswith("linux") or os.sys.platform.startswith("gnukfreebsd") or os.sys.platform.startswith("gnu0"):
-     linux = True
-     platform = "linux"
- 
---- a/src/mongo/platform/random.cpp	2014-05-09 00:54:25.000000000 +0200
-+++ b/src/mongo/platform/random.cpp	2014-05-09 01:30:24.000000000 +0200
+--- a/src/mongo/platform/random.cpp
++++ b/src/mongo/platform/random.cpp
 @@ -105,7 +105,7 @@
          return new WinSecureRandom();
      }

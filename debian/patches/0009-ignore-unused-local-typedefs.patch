@@ -5,21 +5,11 @@ Description: Disable unused-local-typedefs errors
 Author: James Page <james.page@ubuntu.com>
 Origin: https://github.com/mongodb/mongo/commit/2d30f0b562c1925a52670e767c2c0222189fb8f0
 
---- mongodb-2.4.14.orig/SConstruct
-+++ mongodb-2.4.14/SConstruct
-@@ -723,6 +723,7 @@ if nix:
-             env.Append( CCFLAGS=["-Werror"] )
-         if not has_option('clang'):
-             env.Append( CCFLAGS=["-fno-builtin-memcmp"] ) # glibc's memcmp is faster than gcc's
-+            env.Append( CXXFLAGS=["-Wno-unused-local-typedefs"] ) # New in gcc 4.8
- 
-     env.Append( CPPDEFINES=["_FILE_OFFSET_BITS=64"] )
-     env.Append( CXXFLAGS=["-Wnon-virtual-dtor", "-Woverloaded-virtual"] )
---- mongodb-2.4.14.orig/src/third_party/v8/SConscript
-+++ mongodb-2.4.14/src/third_party/v8/SConscript
-@@ -51,7 +51,8 @@ LIBRARY_FLAGS = {
-                        '-W',
-                        '-Wno-unused-parameter',
+--- a/src/third_party/v8/SConscript
++++ b/src/third_party/v8/SConscript
+@@ -48,7 +48,8 @@
+     'all': {
+       'CCFLAGS':      ['-Wno-unused-parameter',
                         '-Woverloaded-virtual',
 -                       '-Wnon-virtual-dtor']
 +                       '-Wnon-virtual-dtor',

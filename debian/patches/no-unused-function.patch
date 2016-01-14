@@ -6,9 +6,9 @@ Bug-Debian: http://bugs.debian.org/746887
 Forwarded: no
 Last-Update: 2014-06-16
 
---- mongodb-2.4.10.orig/SConstruct
-+++ mongodb-2.4.10/SConstruct
-@@ -708,6 +708,7 @@ if nix:
+--- a/SConstruct
++++ b/SConstruct
+@@ -825,6 +825,7 @@
                           "-pthread",
                           "-Wall",
                           "-Wsign-compare",

@@ -1,8 +1,6 @@
-diff --git a/src/mongo/util/logfile.cpp b/src/mongo/util/logfile.cpp
-index fa53690..28562b2 100644
 --- a/src/mongo/util/logfile.cpp
 +++ b/src/mongo/util/logfile.cpp
-@@ -26,6 +26,7 @@
+@@ -38,6 +38,7 @@
  #include "mongo/util/startup_test.h"
  #include "mongo/util/text.h"
  
@@ -10,7 +8,7 @@ index fa53690..28562b2 100644
  
  using namespace mongoutils;
  
-@@ -36,16 +41,16 @@ namespace mongo {
+@@ -48,16 +49,16 @@
              if( 0 && debug ) {
                  try {
                      LogFile f("logfile_test");
@@ -33,15 +31,14 @@ index fa53690..28562b2 100644
                      free(p);
                  }
                  catch(DBException& e ) {
-@@ -226,7 +231,11 @@ namespace mongo {
+@@ -238,7 +239,11 @@
  
          fassert( 16144, charsToWrite >= 0 );
          fassert( 16142, _fd >= 0 );
--        fassert( 16143, reinterpret_cast<ssize_t>( buf ) % g_minOSPageSizeBytes == 0 );  // aligned
 +
 +// Disabling alignment test on PPC64 due to a 64kB page size on PPC64 instead of 4kB on x86
 +#ifndef __PPC64__
-+        fassert( 16143, reinterpret_cast<ssize_t>( buf ) % g_minOSPageSizeBytes == 0 );  // aligned
+         fassert( 16143, reinterpret_cast<ssize_t>( buf ) % g_minOSPageSizeBytes == 0 );  // aligned
 +#endif
  
  #ifdef POSIX_FADV_DONTNEED
