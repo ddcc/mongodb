@@ -18,9 +18,16 @@ endif
 
 HARDENING_OPTIONS = CC="$(CC)" CFLAGS="$(CFLAGS)" \
   CXX="$(CXX)" CXXFLAGS="$(CXXFLAGS)"
-COMMON_OPTIONS = --use-system-snappy --use-system-tcmalloc --use-system-pcre \
+COMMON_OPTIONS = --use-system-snappy --use-system-pcre \
   --use-system-boost --use-system-v8 --use-system-yaml --ssl \
   $(DEB_SCONS_OPTIONS)
+
+gperftools_archs = amd64 i386 armhf
+ifneq (,$(filter $(DEB_HOST_ARCH), $(gperftools_archs)))
+COMMON_OPTIONS += --allocator=tcmalloc --use-system-tcmalloc
+else
+COMMON_OPTIONS += --allocator=system
+endif
 
 ifeq ($(DEB_HOST_ARCH), arm64)
 COMMON_OPTIONS += --disable-scripting
