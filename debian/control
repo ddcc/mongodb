@@ -26,7 +26,6 @@ Standards-Version: 3.9.6
 Vcs-Git: git://anonscm.debian.org/collab-maint/mongodb.git
 Vcs-Browser: http://anonscm.debian.org/cgit/collab-maint/mongodb.git/
 Homepage: http://www.mongodb.org
-XS-Testsuite: autopkgtest
 
 Package: mongodb
 Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 hurd-any armhf
