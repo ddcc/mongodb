@@ -19,5 +19,5 @@ done
 echo "mongod listening"
 
 echo "Performing basic test using mongo client: "
-mongo --verbose jstests/basic1.js 2>&1
+mongo --verbose jstests/core/basic1.js 2>&1
 echo "OK"
