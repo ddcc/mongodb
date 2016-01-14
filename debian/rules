@@ -47,12 +47,15 @@ override_dh_auto_test:
 override_dh_auto_install:
 	scons $(DEB_SCONS_INSTALL)
 
+override_dh_systemd_enable:
+	dh_systemd_enable -pmongodb-server --name=mongodb
+
 override_dh_installinit:
-	dh_systemd_enable --name=mongodb
 	dh_installinit -pmongodb-server --name=mongodb
 
 %:
 	dh $@ --parallel --with=systemd
 
 .PHONY: override_dh_clean override_dh_auto_build override_dh_auto_test \
-	override_dh_auto_install override_dh_installinit
+	override_dh_auto_install override_dh_installinit \
+	override_dh_systemd_enable
