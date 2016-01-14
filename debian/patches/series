@@ -9,5 +9,5 @@
 0004-Support-ppc64el-builds.patch
 0012-support-gnu.patch
 no-unused-function.patch
-no-unused-variable.patch
+disable-warnings.patch
 0014-Fix-GCC-5-FTBFS.patch
