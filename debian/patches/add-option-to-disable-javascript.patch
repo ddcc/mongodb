@@ -1,0 +1,76 @@
+Description: Add option to disable script integration
+Origin: https://github.com/mongodb/mongo/pull/591
+
+--- a/SConstruct
++++ b/SConstruct
+@@ -228,6 +228,9 @@
+ add_option( "usev8" , "use v8 for javascript" , 0 , True )
+ add_option( "libc++", "use libc++ (experimental, requires clang)", 0, True )
+ 
++# disable scripting
++add_option( "disable-scripting" , "do not build support for javascript" , 0 , True )
++
+ # mongo feature options
+ add_option( "noshell", "don't build shell" , 0 , True )
+ add_option( "safeshell", "don't let shell scripts run programs (still, don't run untrusted scripts)" , 0 , True )
+@@ -446,6 +449,8 @@
+ 
+ usev8 = has_option( "usev8" )
+ 
++disable_scripting = has_option( "disable-scripting" )
++
+ asio = has_option( "asio" )
+ 
+ usePCH = has_option( "usePCH" )
+@@ -607,7 +612,10 @@
+ if has_option( "durableDefaultOff" ):
+     env.Append( CPPDEFINES=[ "_DURABLEDEFAULTOFF" ] )
+ 
+-usev8 = True
++if disable_scripting:
++    usev8 = False
++else:
++    usev8 = True
+ 
+ extraLibPlaces = []
+ 
+@@ -1709,6 +1717,7 @@
+ Export("has_option use_system_version_of_library")
+ Export("mongoCodeVersion")
+ Export("usev8")
++Export("disable_scripting")
+ Export("darwin windows solaris linux freebsd nix")
+ Export('module_sconscripts')
+ Export("debugBuild optBuild")
+--- a/src/mongo/scripting/engine_none.cpp
++++ b/src/mongo/scripting/engine_none.cpp
+@@ -33,4 +33,8 @@
+     void ScriptEngine::setup() {
+         // noop
+     }
++
++    std::string ScriptEngine::getInterpreterVersionString() {
++        return "none";
++    }
+ }
+--- a/src/mongo/SConscript
++++ b/src/mongo/SConscript
+@@ -12,6 +12,7 @@
+ Import("has_option")
+ Import("get_option")
+ Import("usev8")
++Import("disable_scripting")
+ Import("enforce_glibc")
+ Import("darwin windows solaris linux nix")
+ 
+@@ -1065,7 +1066,9 @@
+                     [ f for f in Glob("dbtests/*.cpp")
+                       if not str(f).endswith('framework.cpp') and
+                          not str(f).endswith('framework_options.cpp') and
+-                         not str(f).endswith('framework_options_init.cpp') ],
++                         not str(f).endswith('framework_options_init.cpp') and
++                         not (str(f).endswith('jstests.cpp') and disable_scripting) and
++                         not (str(f).endswith('matchertests.cpp') and disable_scripting) ],
+                     LIBDEPS = [
+                        "mutable_bson_test_utils",
+                        "mongocommon",
