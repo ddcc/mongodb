@@ -12,6 +12,7 @@ Build-Depends:
  libboost-program-options-dev,
  libboost-thread-dev,
  libgoogle-perftools-dev [linux-amd64 linux-i386 armhf],
+ libyaml-cpp-dev,
  libpcap-dev,
  libpcre3-dev,
  libreadline-dev,

@@ -11,3 +11,4 @@
 no-unused-function.patch
 disable-warnings.patch
 0014-Fix-GCC-5-FTBFS.patch
+fix-yaml-detection.patch

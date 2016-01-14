@@ -1,0 +1,18 @@
+Description: Fixup detection of yaml-cpp library
+ The --use-system-yaml flag incorrectly searches for 'yaml' not 'yaml-cpp'.
+ Update the search to look for the correct library name.
+Author: James Page <james.page@ubuntu.com>
+Forwarded: https://github.com/mongodb/mongo/pull/707
+Bug: https://jira.mongodb.org/browse/SERVER-14388
+
+--- a/SConstruct
++++ b/SConstruct
+@@ -1359,7 +1359,7 @@ def doConfigure(myenv):
+         conf.FindSysLibDep("stemmer", ["stemmer"])
+ 
+     if use_system_version_of_library("yaml"):
+-        conf.FindSysLibDep("yaml", ["yaml"])
++        conf.FindSysLibDep("yaml", ["yaml-cpp"])
+ 
+     if use_system_version_of_library("boost"):
+         if not conf.CheckCXXHeader( "boost/filesystem/operations.hpp" ):
