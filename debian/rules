@@ -22,6 +22,10 @@ COMMON_OPTIONS = --use-system-snappy --use-system-tcmalloc --use-system-pcre \
   --use-system-boost --use-system-v8 --use-system-yaml --ssl \
   $(DEB_SCONS_OPTIONS)
 
+ifeq ($(DEB_HOST_ARCH), arm64)
+COMMON_OPTIONS += --disable-scripting
+endif
+
 DEB_SCONS_CLEAN = --directory="." $(HARDENING_OPTIONS) . --keep-going --clean \
   $(COMMON_OPTIONS)
 DEB_SCONS_BUILD = --directory="." $(HARDENING_OPTIONS) all $(COMMON_OPTIONS)
@@ -53,6 +57,15 @@ override_dh_systemd_enable:
 
 override_dh_installinit:
 	dh_installinit -pmongodb-server --name=mongodb
+
+ifeq ($(DEB_HOST_ARCH), arm64)
+# mongo shell is broken without scripting so drop it from
+# the binary
+override_dh_install:
+	dh_install
+	rm -f $(CURDIR)/tmp/mongodb-clients/usr/bin/mongo
+.PHONY: override_dh_install
+endif
 
 %:
 	dh $@ --parallel --with=systemd
