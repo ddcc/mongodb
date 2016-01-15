@@ -4,7 +4,6 @@
 0006-Fix-ARM-alignment-problems.patch
 0007-Use-TIME_UTC_-macro.patch
 0009-ignore-unused-local-typedefs.patch
-0010-fix-integer-signs.patch
 0099-Pagesize-hacks.patch
 0004-Support-ppc64el-builds.patch
 0012-support-gnu.patch
