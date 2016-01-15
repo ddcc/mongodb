@@ -1,0 +1,8 @@
+# Test data has no actual source
+mongodb source: source-is-missing jstests/core/*
+
+# Bundled PCRE not used during build
+mongodb source: outdated-autotools-helper-file src/third_party/pcre-8.30/config.*
+
+# Bundled PCRE not used during build
+mongodb source: configure-generated-file-in-source src/third_party/pcre-8.30/config.status
