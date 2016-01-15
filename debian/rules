@@ -16,8 +16,6 @@ ifneq (,$(findstring parallel,$(DEB_BUILD_OPTIONS)))
        DEB_SCONS_OPTIONS += -j$(PROCS)
 endif
 
-HARDENING_OPTIONS = CC="$(CC)" CFLAGS="$(CFLAGS)" \
-  CXX="$(CXX)" CXXFLAGS="$(CXXFLAGS)"
 COMMON_OPTIONS = --use-system-snappy --use-system-pcre \
   --use-system-boost --use-system-v8 --use-system-yaml --ssl \
   $(DEB_SCONS_OPTIONS)
@@ -34,13 +32,11 @@ ifneq (,$(filter $(DEB_HOST_ARCH), $(no_v8_archs)))
 COMMON_OPTIONS += --disable-scripting
 endif
 
-DEB_SCONS_CLEAN = --directory="." $(HARDENING_OPTIONS) . --keep-going --clean \
-  $(COMMON_OPTIONS)
-DEB_SCONS_BUILD = --directory="." $(HARDENING_OPTIONS) all $(COMMON_OPTIONS)
+DEB_SCONS_CLEAN = . --keep-going --clean $(COMMON_OPTIONS)
+DEB_SCONS_BUILD = all $(COMMON_OPTIONS)
 DEB_SCONS_CHECK = --smokedbprefix=$(CURDIR)/debian/tmp-test smoke \
   $(COMMON_OPTIONS)
-DEB_SCONS_INSTALL = --directory="." $(HARDENING_OPTIONS) \
-  --prefix=$(CURDIR)/debian/tmp/usr install $(COMMON_OPTIONS)
+DEB_SCONS_INSTALL = --prefix=$(CURDIR)/debian/tmp/usr install $(COMMON_OPTIONS)
 
 override_dh_clean:
 	scons $(DEB_SCONS_CLEAN)
