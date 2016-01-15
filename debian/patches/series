@@ -2,7 +2,6 @@
 0002-kfreebsd-has-dev-urandom.patch
 0004-kfreebsd-does-not-have-sys-prctl.h.patch
 0006-Fix-ARM-alignment-problems.patch
-0007-Use-TIME_UTC_-macro.patch
 0099-Pagesize-hacks.patch
 0004-Support-ppc64el-builds.patch
 0012-support-gnu.patch
