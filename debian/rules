@@ -40,7 +40,7 @@ DEB_SCONS_BUILD = --directory="." $(HARDENING_OPTIONS) all $(COMMON_OPTIONS)
 DEB_SCONS_CHECK = --smokedbprefix=$(CURDIR)/debian/tmp-test smoke \
   $(COMMON_OPTIONS)
 DEB_SCONS_INSTALL = --directory="." $(HARDENING_OPTIONS) \
-  --prefix=$(CURDIR)/debian/tmp/usr install --full $(COMMON_OPTIONS)
+  --prefix=$(CURDIR)/debian/tmp/usr install $(COMMON_OPTIONS)
 
 override_dh_clean:
 	scons $(DEB_SCONS_CLEAN)
