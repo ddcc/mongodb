@@ -16,13 +16,11 @@ ifneq (,$(findstring parallel,$(DEB_BUILD_OPTIONS)))
        DEB_SCONS_OPTIONS += -j$(PROCS)
 endif
 
-COMMON_OPTIONS = --use-system-snappy --use-system-pcre \
-  --use-system-boost --use-system-v8 --use-system-yaml --ssl \
-  $(DEB_SCONS_OPTIONS)
+COMMON_OPTIONS = --use-system-all --ssl $(DEB_SCONS_OPTIONS)
 
 gperftools_archs = amd64 i386 armhf ppc64el
 ifneq (,$(filter $(DEB_HOST_ARCH), $(gperftools_archs)))
-COMMON_OPTIONS += --allocator=tcmalloc --use-system-tcmalloc
+COMMON_OPTIONS += --allocator=tcmalloc
 else
 COMMON_OPTIONS += --allocator=system
 endif
