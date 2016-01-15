@@ -16,7 +16,7 @@ Build-Depends:
  libpcap-dev,
  libpcre3-dev,
  libreadline-dev,
- libsnappy-dev (>= 1.1.3-2),
+ libsnappy-dev,
  libstemmer-dev,
  libssl-dev,
  libv8-dev (>= 3.12) [!arm64 !ppc64el],
