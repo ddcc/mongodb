@@ -48,8 +48,10 @@ override_dh_clean:
 override_dh_auto_build:
 	scons $(DEB_SCONS_BUILD)
 
+ifeq (,$(findstring nocheck,$(DEB_BUILD_OPTIONS)))
 override_dh_auto_test:
 	scons $(DEB_SCONS_CHECK)
+endif
 
 override_dh_auto_install:
 	scons $(DEB_SCONS_INSTALL)
