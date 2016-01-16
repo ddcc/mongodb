@@ -51,10 +51,9 @@ Description: object/document-oriented database (metapackage)
 
 Package: mongodb-server
 Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 hurd-any armhf arm64 ppc64el
-Pre-Depends:
- adduser
 Depends:
  mongodb-clients,
+ adduser,
  ${misc:Depends},
  ${shlibs:Depends}
 Replaces:
