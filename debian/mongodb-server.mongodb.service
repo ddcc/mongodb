@@ -5,6 +5,7 @@ Documentation=man:mongod(1)
 [Service]
 User=mongodb
 RuntimeDirectory=mongodb
+RuntimeDirectoryMode=0755
 ExecStart=/usr/bin/mongod --config /etc/mongodb.conf
 
 [Install]
