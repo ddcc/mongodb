@@ -4,9 +4,13 @@ Documentation=man:mongod(1)
 
 [Service]
 User=mongodb
+Group=mongodb
 RuntimeDirectory=mongodb
 RuntimeDirectoryMode=0755
-ExecStart=/usr/bin/mongod --config /etc/mongodb.conf
+EnvironmentFile=-/etc/default/mongodb
+Environment=CONF=/etc/mongodb.conf
+Environment=SOCKETPATH=/run/mongodb
+ExecStart=/usr/bin/mongod --unixSocketPrefix=${SOCKETPATH} --config ${CONF} $DAEMON_OPTS
 
 [Install]
 WantedBy=multi-user.target
