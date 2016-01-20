@@ -1,0 +1,32 @@
+mongodb (1:2.6.11-0.1) UNRELEASED; urgency=medium
+
+  When upgrading MongoDB to 2.6, keep in mind that only upgrades from 2.4 are
+  supported. If you wish to upgrade from previous MongoDB versions, you have
+  to upgrade to 2.4 first.
+
+  Furthermore, MongoDB 2.6 now enforces document constraints in a more strict
+  manner, specifically:
+
+    * Index key length limit: 2.6 implements a stronger enforcement of the
+      limit on index key. Index creation, document inserts and updates may
+      fail if an index entry exceeds the limit.
+
+    * Field name restrictions: Updates no longer support saving field names
+      containing a dot ('.'), or beginning with a dollar sign ('$'). Note that
+      these restrictions on field names have been introduced in MongoDB 2.2.
+
+  To check your existing database for compatibility with MongoDB 2.6, run
+
+    $ db.upgradeCheckAllDBs()
+
+  on a MongoDB 2.6 client connected to your existing MongoDB 2.4 database.
+
+  Additionally, MongoDB 2.6 introduces a new authorization model, which
+  requires manual action to migrate to.
+
+  For a full list of changes as well as instructions on how to upgrade
+  standalone servers and replica sets, see:
+
+      https://docs.mongodb.org/manual/release-notes/2.6-upgrade/
+
+ -- Apollon Oikonomopoulos <apoikos@debian.org>  Wed, 20 Jan 2016 13:45:29 +0200
