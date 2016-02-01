@@ -18,7 +18,11 @@ ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
        DEB_SCONS_OPTIONS += -j$(PROCS)
 endif
 
-COMMON_OPTIONS = --use-system-all --ssl $(DEB_SCONS_OPTIONS)
+COMMON_OPTIONS = --use-system-tcmalloc --use-system-pcre \
+		 --use-system-boost --use-system-snappy \
+		 --use-system-zlib --use-system-v8 \
+		 --use-system-stemmer --use-system-yaml \
+		 --ssl $(DEB_SCONS_OPTIONS)
 
 gperftools_archs = amd64 i386 armhf
 ifneq (,$(filter $(DEB_HOST_ARCH), $(gperftools_archs)))
