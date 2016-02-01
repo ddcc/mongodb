@@ -1,12 +1,3 @@
-debian/tmp/usr/bin/bsondump
 debian/tmp/usr/bin/mongo
-debian/tmp/usr/bin/mongodump
-debian/tmp/usr/bin/mongoexport
-debian/tmp/usr/bin/mongofiles
-debian/tmp/usr/bin/mongoimport
-debian/tmp/usr/bin/mongooplog
 debian/tmp/usr/bin/mongoperf
-debian/tmp/usr/bin/mongorestore
 debian/tmp/usr/bin/mongosniff
-debian/tmp/usr/bin/mongostat
-debian/tmp/usr/bin/mongotop
