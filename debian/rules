@@ -29,7 +29,7 @@ endif
 
 no_v8_archs = arm64 ppc64el
 ifneq (,$(filter $(DEB_HOST_ARCH), $(no_v8_archs)))
-COMMON_OPTIONS += --disable-scripting
+COMMON_OPTIONS += --js-engine=none
 endif
 
 override_dh_auto_clean:

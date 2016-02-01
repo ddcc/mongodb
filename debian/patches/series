@@ -6,6 +6,5 @@
 0012-support-gnu.patch
 no-unused-function.patch
 disable-warnings.patch
-add-option-to-disable-javascript.patch
 hardened-build.patch
 fix-gcc-6-ftbfs.patch
