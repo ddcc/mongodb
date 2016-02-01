@@ -21,6 +21,7 @@ Build-Depends:
  libstemmer-dev,
  libssl-dev,
  libv8-dev (>= 3.12) [!arm64 !ppc64el],
+ zlib1g-dev,
  python-pymongo,
  scons
 Standards-Version: 3.9.8
