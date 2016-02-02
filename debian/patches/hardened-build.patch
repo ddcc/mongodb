@@ -1,16 +1,14 @@
 --- a/SConstruct
 +++ b/SConstruct
-@@ -484,7 +484,12 @@
- 
-                    PCRE_VERSION='8.37',
-                    CONFIGUREDIR = '#' + scons_data_dir + '/sconf_temp',
--                   CONFIGURELOG = '#' + scons_data_dir + '/config.log'
-+                   CONFIGURELOG = '#' + scons_data_dir + '/config.log',
+@@ -831,6 +831,11 @@
+                INSTALL_DIR=installDir,
+                CONFIG_HEADER_DEFINES={},
+                LIBDEPS_TAG_EXPANSIONS=[],
 +
-+                   CFLAGS=os.environ.get("CFLAGS", "-O3").split(),
-+                   CXXFLAGS=os.environ.get("CXXFLAGS", "-O3").split(),
-+                   CPPFLAGS=os.environ.get("CPPFLAGS", "").split(),
-+                   LINKFLAGS=os.environ.get("LDFLAGS", "").split(),
-                    )
++               CFLAGS=os.environ.get("CFLAGS", "-O3").split(),
++               CXXFLAGS=os.environ.get("CXXFLAGS", "-O3").split(),
++               CPPFLAGS=os.environ.get("CPPFLAGS", "").split(),
++               LINKFLAGS=os.environ.get("LDFLAGS", "").split(),
+                )
  
- # Report any unknown variables as an error.
+ env = Environment(variables=env_vars, **envDict)
