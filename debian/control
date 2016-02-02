@@ -20,7 +20,6 @@ Build-Depends:
  libsnappy-dev,
  libstemmer-dev,
  libssl-dev,
- libv8-dev (>= 3.12) [!arm64 !ppc64el],
  zlib1g-dev,
  python-pymongo,
  python,
