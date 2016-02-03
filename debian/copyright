@@ -1,15 +1,12 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: mongo
 Source: https://www.mongodb.org/dl/src/
-Comment: Parts of MongoDB are licensed under AGPL 3.0 with OpenSSL exception
-         and other parts are licensed under the Apache 2.0 license.
-         .
-	 src/third_party includes additional third-party libraries; wherever
+Comment: src/third_party includes additional third-party libraries; wherever
          possible, the Debian packages (if available) are used instead.
 
 Files: *
 Copyright: 2008 - 2013 10gen Inc.
-           2013 - 2014 MongoDB Inc.
+           2013 - 2015 MongoDB Inc.
 Comment: 10gen Inc. changed its name to MongoDB Inc. on Aug 27 2013, see
          https://www.mongodb.com/press/10gen-announces-company-name-change-mongodb-inc
 License: AGPL-3.0-OpenSSL
@@ -23,437 +20,17 @@ Copyright: 2009 - 2010 Kristina Chodorow <kristina@10gen.com>
 License: Apache-2.0
 
 Files: 
- src/mongo/base/counter_test.cpp
- src/mongo/base/disallow_copying.h
- src/mongo/base/generate_error_codes.py
- src/mongo/base/global_initializer.cpp
- src/mongo/base/global_initializer.h
- src/mongo/base/global_initializer_registerer.cpp
- src/mongo/base/global_initializer_registerer.h
- src/mongo/base/init.cpp
- src/mongo/base/init.h
- src/mongo/base/initializer.cpp
- src/mongo/base/initializer.h
- src/mongo/base/initializer_context.cpp
- src/mongo/base/initializer_context.h
- src/mongo/base/initializer_dependency_graph.cpp
- src/mongo/base/initializer_dependency_graph.h
- src/mongo/base/initializer_dependency_graph_test.cpp
- src/mongo/base/initializer_function.h
- src/mongo/base/initializer_test.cpp
- src/mongo/base/make_string_vector.cpp
- src/mongo/base/make_string_vector.h
- src/mongo/base/owned_pointer_map.h
- src/mongo/base/owned_pointer_map_test.cpp
- src/mongo/base/owned_pointer_vector.h
- src/mongo/base/owned_pointer_vector_test.cpp
- src/mongo/base/parse_number.cpp
- src/mongo/base/parse_number.h
- src/mongo/base/status-inl.h
- src/mongo/base/status.cpp
- src/mongo/base/status.h
- src/mongo/base/status_with.h
- src/mongo/base/string_data-inl.h
- src/mongo/base/string_data.cpp
- src/mongo/base/string_data.h
- src/mongo/bson/bson-inl.h
- src/mongo/bson/bson.h
- src/mongo/bson/bson_builder_base.h
- src/mongo/bson/bson_db.h
- src/mongo/bson/bson_field.h
- src/mongo/bson/bson_field_test.cpp
- src/mongo/bson/bson_obj_test.cpp
- src/mongo/bson/bson_validate.cpp
- src/mongo/bson/bson_validate.h
- src/mongo/bson/bson_validate_test.cpp
- src/mongo/bson/bsondemo/bsondemo.cpp
- src/mongo/bson/bsonelement.h
- src/mongo/bson/bsonmisc.h
- src/mongo/bson/bsonobj.h
- src/mongo/bson/bsonobjbuilder.h
- src/mongo/bson/bsonobjiterator.h
- src/mongo/bson/bsontypes.h
- src/mongo/bson/inline_decls.h
- src/mongo/bson/mutable/algorithm.h
- src/mongo/bson/mutable/const_element-inl.h
- src/mongo/bson/mutable/const_element.h
- src/mongo/bson/mutable/damage_vector.h
- src/mongo/bson/mutable/document-inl.h
- src/mongo/bson/mutable/document.cpp
- src/mongo/bson/mutable/document.h
- src/mongo/bson/mutable/element-inl.h
- src/mongo/bson/mutable/element.cpp
- src/mongo/bson/mutable/element.h
- src/mongo/bson/mutable/mutable_bson_algo_test.cpp
- src/mongo/bson/mutable/mutable_bson_test.cpp
- src/mongo/bson/mutable/mutable_bson_test_utils.cpp
- src/mongo/bson/mutable/mutable_bson_test_utils.h
- src/mongo/bson/oid.cpp
- src/mongo/bson/oid.h
- src/mongo/bson/optime.cpp
- src/mongo/bson/optime.h
- src/mongo/bson/ordering.h
- src/mongo/bson/util/atomic_int.h
- src/mongo/bson/util/bson_extract.cpp
- src/mongo/bson/util/bson_extract.h
- src/mongo/bson/util/bson_extract_test.cpp
- src/mongo/bson/util/builder.h
- src/mongo/bson/util/builder_test.cpp
- src/mongo/bson/util/misc.h
- src/mongo/client/auth_helpers.cpp
- src/mongo/client/auth_helpers.h
- src/mongo/client/clientAndShell.cpp
- src/mongo/client/clientOnly-private.h
- src/mongo/client/clientOnly.cpp
- src/mongo/client/connpool.cpp
- src/mongo/client/connpool.h
- src/mongo/client/constants.h
- src/mongo/client/dbclient.cpp
- src/mongo/client/dbclient.h
- src/mongo/client/dbclient_rs.cpp
- src/mongo/client/dbclient_rs.h
- src/mongo/client/dbclientcursor.cpp
- src/mongo/client/dbclientcursor.h
- src/mongo/client/dbclientinterface.h
- src/mongo/client/dbclientmockcursor.h
- src/mongo/client/examples/authTest.cpp
- src/mongo/client/examples/clientTest.cpp
- src/mongo/client/examples/first.cpp
- src/mongo/client/examples/httpClientTest.cpp
- src/mongo/client/examples/insert_demo.cpp
- src/mongo/client/examples/mongoperf.cpp
- src/mongo/client/examples/rs.cpp
- src/mongo/client/examples/second.cpp
- src/mongo/client/examples/tail.cpp
- src/mongo/client/examples/tutorial.cpp
- src/mongo/client/examples/whereExample.cpp
- src/mongo/client/export_macros.h
- src/mongo/client/gridfs.cpp
- src/mongo/client/gridfs.h
- src/mongo/client/include_bsonh_test.cpp
- src/mongo/client/include_dbclienth_test.cpp
- src/mongo/client/init.cpp
- src/mongo/client/init.h
- src/mongo/client/parallel.cpp
- src/mongo/client/parallel.h
- src/mongo/client/redef_macros.h
- src/mongo/client/replica_set_monitor.cpp
- src/mongo/client/replica_set_monitor.h
- src/mongo/client/replica_set_monitor_internal.h
- src/mongo/client/sasl_client_authenticate.cpp
- src/mongo/client/sasl_client_authenticate.h
- src/mongo/client/sasl_client_authenticate_impl.cpp
- src/mongo/client/sasl_client_session.cpp
- src/mongo/client/sasl_client_session.h
- src/mongo/client/sasl_sspi.cpp
- src/mongo/client/scoped_db_conn_test.cpp
- src/mongo/client/simple_client_demo.cpp
- src/mongo/client/syncclusterconnection.cpp
- src/mongo/client/syncclusterconnection.h
- src/mongo/client/undef_macros.h
- src/mongo/db/auth/action_set.cpp
- src/mongo/db/auth/action_set.h
- src/mongo/db/auth/action_set_test.cpp
- src/mongo/db/auth/authentication_session.h
- src/mongo/db/auth/authorization_manager_test.cpp
- src/mongo/db/auth/authorization_session_test.cpp
- src/mongo/db/auth/generate_action_types.py
- src/mongo/db/auth/mongo_authentication_session.cpp
- src/mongo/db/auth/mongo_authentication_session.h
- src/mongo/db/auth/privilege.cpp
- src/mongo/db/auth/privilege.h
- src/mongo/db/auth/user.cpp
- src/mongo/db/auth/user.h
- src/mongo/db/auth/user_cache_invalidator_job.cpp
- src/mongo/db/auth/user_cache_invalidator_job.h
- src/mongo/db/auth/user_document_parser_test.cpp
- src/mongo/db/auth/user_name.cpp
- src/mongo/db/auth/user_name.h
- src/mongo/db/auth/user_name_hash.h
- src/mongo/db/auth/user_set.cpp
- src/mongo/db/auth/user_set.h
- src/mongo/db/auth/user_set_test.cpp
- src/mongo/db/commands.cpp
- src/mongo/db/commands.h
- src/mongo/db/commands/index_stats.cpp
- src/mongo/db/commands/storage_details.cpp
- src/mongo/db/dbmessage.cpp
- src/mongo/db/field_ref_set_test.cpp
- src/mongo/db/field_ref_test.cpp
- src/mongo/db/jsobj.cpp
- src/mongo/db/jsobj.h
- src/mongo/db/json.cpp
- src/mongo/db/lasterror.cpp
- src/mongo/db/lasterror.h
- src/mongo/db/namespace_string_test.cpp
- src/mongo/db/ops/field_checker_test.cpp
- src/mongo/db/ops/log_builder_test.cpp
- src/mongo/db/ops/path_support_test.cpp
- src/mongo/db/projection.cpp
- src/mongo/db/projection.h
- src/mongo/db/query/lite_parsed_query.cpp
- src/mongo/db/query/lite_parsed_query.h
- src/mongo/db/queryutil-inl.h
- src/mongo/db/queryutil.cpp
- src/mongo/db/queryutil.h
- src/mongo/db/server_options.cpp
- src/mongo/db/server_options.h
- src/mongo/db/server_options_test.cpp
- src/mongo/db/stats/timer_stats.cpp
- src/mongo/db/stats/timer_stats.h
- src/mongo/db/stats/top.h
- src/mongo/db/structure/catalog/hashtab.h
- src/mongo/db/update_index_data_test.cpp
- src/mongo/dbtests/macrotests.cpp
- src/mongo/dbtests/mock/mock_dbclient_connection.cpp
- src/mongo/dbtests/mock/mock_dbclient_connection.h
- src/mongo/dbtests/mock/mock_dbclient_cursor.cpp
- src/mongo/dbtests/mock/mock_dbclient_cursor.h
- src/mongo/dbtests/mock/mock_remote_db_server.cpp
- src/mongo/dbtests/mock/mock_remote_db_server.h
- src/mongo/dbtests/mock/mock_replica_set.cpp
- src/mongo/dbtests/mock/mock_replica_set.h
- src/mongo/dbtests/mock_dbclient_conn_test.cpp
- src/mongo/dbtests/mock_replica_set_test.cpp
- src/mongo/dbtests/perf/btreeperf.cpp
- src/mongo/logger/appender.h
- src/mongo/logger/console.cpp
- src/mongo/logger/console.h
- src/mongo/logger/console_appender.h
- src/mongo/logger/encoder.h
- src/mongo/logger/labeled_level.h
- src/mongo/logger/log_domain-impl.h
- src/mongo/logger/log_domain.h
- src/mongo/logger/log_manager.cpp
- src/mongo/logger/log_manager.h
- src/mongo/logger/log_severity-inl.h
- src/mongo/logger/log_severity.cpp
- src/mongo/logger/log_severity.h
- src/mongo/logger/log_test.cpp
- src/mongo/logger/logger.cpp
- src/mongo/logger/logger.h
- src/mongo/logger/logstream_builder.cpp
- src/mongo/logger/logstream_builder.h
- src/mongo/logger/message_event.h
- src/mongo/logger/message_event_utf8_encoder.cpp
- src/mongo/logger/message_event_utf8_encoder.h
- src/mongo/logger/message_log_domain.cpp
- src/mongo/logger/message_log_domain.h
- src/mongo/logger/ramlog.cpp
- src/mongo/logger/ramlog.h
- src/mongo/logger/rotatable_file_appender.h
- src/mongo/logger/rotatable_file_manager.cpp
- src/mongo/logger/rotatable_file_manager.h
- src/mongo/logger/rotatable_file_writer.cpp
- src/mongo/logger/rotatable_file_writer.h
- src/mongo/logger/rotatable_file_writer_test.cpp
- src/mongo/logger/syslog_appender.h
- src/mongo/logger/tee.h
- src/mongo/pch.cpp
- src/mongo/pch.h
- src/mongo/platform/atomic_intrinsics.h
- src/mongo/platform/atomic_intrinsics_gcc_generic.h
- src/mongo/platform/atomic_intrinsics_gcc_intel.h
- src/mongo/platform/atomic_intrinsics_win32.h
- src/mongo/platform/atomic_word.h
- src/mongo/platform/atomic_word_test.cpp
- src/mongo/platform/backtrace.cpp
- src/mongo/platform/backtrace.h
- src/mongo/platform/basic.h
- src/mongo/platform/bits.h
- src/mongo/platform/bits_test.cpp
- src/mongo/platform/compiler.h
- src/mongo/platform/compiler_gcc.h
- src/mongo/platform/compiler_msvc.h
- src/mongo/platform/cstdint.h
- src/mongo/platform/float_utils.h
- src/mongo/platform/hash_namespace.h
- src/mongo/platform/posix_fadvise.cpp
- src/mongo/platform/posix_fadvise.h
- src/mongo/platform/process_id.cpp
- src/mongo/platform/process_id.h
- src/mongo/platform/process_id_test.cpp
- src/mongo/platform/random.cpp
- src/mongo/platform/random.h
- src/mongo/platform/random_test.cpp
- src/mongo/platform/strcasestr.cpp
- src/mongo/platform/strcasestr.h
- src/mongo/platform/unordered_map.h
- src/mongo/platform/unordered_set.h
- src/mongo/platform/windows_basic.h
- src/mongo/s/balancer_policy_tests.cpp
- src/mongo/s/distlock.cpp
- src/mongo/s/distlock.h
- src/mongo/s/distlock_test.cpp
- src/mongo/s/s_only.cpp
- src/mongo/s/shard_conn_test.cpp
- src/mongo/scripting/bench.h
- src/mongo/scripting/bson_template_evaluator.h
- src/mongo/scripting/engine.h
- src/mongo/scripting/engine_v8.h
- src/mongo/scripting/v8_db.h
- src/mongo/scripting/v8_deadline_monitor.h
- src/mongo/scripting/v8_profiler.h
- src/mongo/scripting/v8_utils.h
- src/mongo/shell/createCPPfromJavaScriptFiles.js
- src/mongo/shell/dbshell.cpp
- src/mongo/shell/linenoise_utf8.cpp
- src/mongo/shell/linenoise_utf8.h
- src/mongo/shell/shell_utils.cpp
- src/mongo/shell/shell_utils.h
- src/mongo/shell/shell_utils_extended.cpp
- src/mongo/shell/shell_utils_extended.h
- src/mongo/shell/shell_utils_launcher.cpp
- src/mongo/shell/shell_utils_launcher.h
- src/mongo/tools/tool_logger.cpp
- src/mongo/tools/tool_logger.h
- src/mongo/unittest/unittest_main.cpp
- src/mongo/util/allocator.h
- src/mongo/util/array.h
- src/mongo/util/assert_util.cpp
- src/mongo/util/assert_util.h
- src/mongo/util/background.cpp
- src/mongo/util/background.h
- src/mongo/util/background_job_test.cpp
- src/mongo/util/base64.cpp
- src/mongo/util/base64.h
- src/mongo/util/bson_util.h
- src/mongo/util/concurrency/mutex.h
- src/mongo/util/concurrency/mutexdebugger.cpp
- src/mongo/util/concurrency/mvar.h
- src/mongo/util/concurrency/spin_lock.cpp
- src/mongo/util/concurrency/synchronization.cpp
- src/mongo/util/concurrency/synchronization.h
- src/mongo/util/concurrency/task.cpp
- src/mongo/util/concurrency/thread_name.cpp
- src/mongo/util/concurrency/thread_name.h
- src/mongo/util/concurrency/thread_pool.cpp
- src/mongo/util/concurrency/thread_pool.h
- src/mongo/util/concurrency/ticketholder.h
- src/mongo/util/debug_util.cpp
- src/mongo/util/debug_util.h
- src/mongo/util/descriptive_stats-inl.h
- src/mongo/util/descriptive_stats.h
- src/mongo/util/embedded_builder.h
- src/mongo/util/exit_code.h
- src/mongo/util/file.cpp
- src/mongo/util/file.h
- src/mongo/util/file_allocator.cpp
- src/mongo/util/file_allocator.h
- src/mongo/util/goodies.h
- src/mongo/util/hex.cpp
- src/mongo/util/hex.h
- src/mongo/util/log.cpp
- src/mongo/util/log.h
- src/mongo/util/lruishmap.h
- src/mongo/util/map_util.h
- src/mongo/util/md5.hpp
- src/mongo/util/md5_test.cpp
- src/mongo/util/mmap.cpp
- src/mongo/util/mmap.h
- src/mongo/util/mmap_mm.cpp
- src/mongo/util/mmap_posix.cpp
- src/mongo/util/mmap_win.cpp
- src/mongo/util/mongoutils/checksum.h
- src/mongo/util/mongoutils/hash.h
- src/mongo/util/mongoutils/str.h
- src/mongo/util/mongoutils/test.cpp
- src/mongo/util/moveablebuffer.h
- src/mongo/util/net/hostandport.h
- src/mongo/util/net/httpclient.cpp
- src/mongo/util/net/httpclient.h
- src/mongo/util/net/listen.cpp
- src/mongo/util/net/listen.h
- src/mongo/util/net/message.cpp
- src/mongo/util/net/message.h
- src/mongo/util/net/message_port.cpp
- src/mongo/util/net/message_port.h
- src/mongo/util/net/message_server.h
- src/mongo/util/net/message_server_asio.cpp
- src/mongo/util/net/message_server_port.cpp
- src/mongo/util/net/miniwebserver.cpp
- src/mongo/util/net/miniwebserver.h
- src/mongo/util/net/sock.cpp
- src/mongo/util/net/sock.h
- src/mongo/util/net/socket_poll.cpp
- src/mongo/util/net/socket_poll.h
- src/mongo/util/net/ssl_manager.cpp
- src/mongo/util/net/ssl_manager.h
- src/mongo/util/net/ssl_options.cpp
- src/mongo/util/net/ssl_options.h
- src/mongo/util/ntservice.cpp
- src/mongo/util/ntservice.h
- src/mongo/util/ntservice_test.cpp
- src/mongo/util/options_parser/constraints.cpp
- src/mongo/util/options_parser/constraints.h
- src/mongo/util/options_parser/environment.cpp
- src/mongo/util/options_parser/environment.h
- src/mongo/util/options_parser/environment_test.cpp
- src/mongo/util/options_parser/option_description.cpp
- src/mongo/util/options_parser/option_description.h
- src/mongo/util/options_parser/option_section.cpp
- src/mongo/util/options_parser/option_section.h
- src/mongo/util/options_parser/options_parser.cpp
- src/mongo/util/options_parser/options_parser.h
- src/mongo/util/options_parser/options_parser_test.cpp
- src/mongo/util/options_parser/startup_option_init.cpp
- src/mongo/util/options_parser/startup_option_init.h
- src/mongo/util/options_parser/value.cpp
- src/mongo/util/options_parser/value.h
- src/mongo/util/password.cpp
- src/mongo/util/password.h
- src/mongo/util/paths.cpp
- src/mongo/util/paths.h
- src/mongo/util/processinfo.cpp
- src/mongo/util/processinfo.h
- src/mongo/util/processinfo_darwin.cpp
- src/mongo/util/processinfo_freebsd.cpp
- src/mongo/util/processinfo_linux2.cpp
- src/mongo/util/processinfo_none.cpp
- src/mongo/util/processinfo_sunos5.cpp
- src/mongo/util/processinfo_win32.cpp
- src/mongo/util/progress_meter.cpp
- src/mongo/util/progress_meter.h
- src/mongo/util/queue.h
- src/mongo/util/ramlog.h
- src/mongo/util/safe_num-inl.h
- src/mongo/util/safe_num.cpp
- src/mongo/util/safe_num.h
- src/mongo/util/safe_num_test.cpp
- src/mongo/util/sequence_util.h
- src/mongo/util/stack_introspect.h
- src/mongo/util/stacktrace.cpp
- src/mongo/util/stacktrace.h
- src/mongo/util/startup_test.h
- src/mongo/util/string_map.h
- src/mongo/util/string_map_test.cpp
- src/mongo/util/stringutils.cpp
- src/mongo/util/stringutils.h
- src/mongo/util/stringutils_test.cpp
- src/mongo/util/tcmalloc_server_status_section.cpp
- src/mongo/util/text.cpp
- src/mongo/util/text.h
- src/mongo/util/text_startuptest.cpp
- src/mongo/util/text_test.cpp
- src/mongo/util/time_support.cpp
- src/mongo/util/time_support.h
- src/mongo/util/time_support_test.cpp
- src/mongo/util/timer-generic-inl.h
- src/mongo/util/timer-inl.h
- src/mongo/util/timer-posixclock-inl.h
- src/mongo/util/timer-win32-inl.h
- src/mongo/util/timer.cpp
- src/mongo/util/timer.h
- src/mongo/util/touch_pages.cpp
- src/mongo/util/touch_pages.h
- src/mongo/util/unordered_fast_key_table.h
- src/mongo/util/unordered_fast_key_table_internal.h
- src/mongo/util/util.cpp
- src/mongo/util/version.cpp
- src/mongo/util/version_reporting.cpp
- src/mongo/util/version_test.cpp
-Copyright: 2008 - 2013 10gen Inc.
-           2013 - 2014 MongoDB Inc.
+ src/mongo/crypto/tom/tomcrypt.h
+ src/mongo/crypto/tom/tomcrypt_argchk.h
+ src/mongo/crypto/tom/tomcrypt_cfg.h
+ src/mongo/crypto/tom/tomcrypt_cipher.h
+ src/mongo/crypto/tom/tomcrypt_custom.h
+ src/mongo/crypto/tom/tomcrypt_hash.h
+ src/mongo/crypto/tom/tomcrypt_mac.h
+ src/mongo/crypto/tom/tomcrypt_macros.h
+ src/mongo/crypto/tom/tomcrypt_misc.h
+Copyright: 2012 - 2014 10gen Inc.
+           2014 MongoDB Inc.
 License: Apache-2.0
 
 Files: src/mongo/shell/linenoise.cpp src/mongo/shell/linenoise.h
@@ -489,15 +66,29 @@ License: loki
  The author makes no representations about the suitability of this software for
  any purpose. It is provided "as is" without express or implied warranty.
 
-Files: src/third_party/boost/*
+Files: src/third_party/asio*
+Copyright: 2003-2015 Christopher M. Kohlhoff (chris at kohlhoff dot com)
+           2008 Roelof Naude (roelof.naude at gmail dot com)
+           2005 Stefan Arentz (stefan at soze dot com)
+           2008 Rep Invariant Systems, Inc. (info@repinvariant.com)
+           2011 Boris Schaeling (boris@highscore.de)
+           2014 Oliver Kowalke (oliver dot kowalke at gmail dot com)
+           2005 Voipster / Indrek dot Juhani at voipster dot com
+License: BSL-1.0
+
+Files: src/third_party/boost*
 Copyright: boost library contributors
 Comment: Not used; the source is built with the Debian boost libraries.
 License: BSL-1.0
 
-Files: src/third_party/gperftools-2.0/*
+Files: src/third_party/gperftools-2.2/*
 Copyright: 2002 - 2013 Google Inc.
 Comment: Not used; the source is built with the Debian gperftools libraries.
 License: BSD-3-google
+
+Files: src/third_party/IntelRDFPMathLib20U1/*
+Copyright: 2007-2011, Intel Corp.
+License: BSD-3-intel
 
 Files: src/third_party/libstemmer_c/*
 Copyright: 2001-2014, Dr Martin Porter and Richard Boulton
@@ -520,8 +111,8 @@ Files: src/third_party/s2/*
 Copyright: 1999-2010 Google Inc.
 License: Apache-2.0
 
-Files: src/third_party/snappy/*
-Copyright: 2001, Google Inc.
+Files: src/third_party/snappy*
+Copyright: 2005-2011, Google Inc.
 Comment: Not used; the source is built with the Debian snappy libraries.
 License: BSD-3-google
 
@@ -531,15 +122,93 @@ License: public-domain
  This file is in the public domain, so clarified as of 1996-06-05 by Arthur
  David Olson.
 
-Files: src/third_party/v8/*
-Copyright: 2006-2012 the V8 project authors
-Comment: Not used; the source is built with the Debian v8 libraries.
-License: BSD-3-google
+Files: src/third_party/wiredtiger/*
+Copyright: 2008-2014 WiredTiger, Inc.
+           2014-2015 MongoDB, Inc.
+License: GPL-2-or-3
+
+Files:
+ src/third_party/wiredtiger/bench/wtperf/config.c
+ src/third_party/wiredtiger/bench/wtperf/config_opt.h
+ src/third_party/wiredtiger/bench/wtperf/doxy.c
+ src/third_party/wiredtiger/bench/wtperf/misc.c
+ src/third_party/wiredtiger/bench/wtperf/runners/get_ckpt.py
+ src/third_party/wiredtiger/bench/wtperf/track.c
+ src/third_party/wiredtiger/bench/wtperf/wtperf.c
+ src/third_party/wiredtiger/bench/wtperf/wtperf.h
+ src/third_party/wiredtiger/bench/wtperf/wtperf_opt.i
+ src/third_party/wiredtiger/bench/wtperf/wtperf_truncate.c
+ src/third_party/wiredtiger/dist/s_copyright
+ src/third_party/wiredtiger/ext/collators/reverse/reverse_collator.c
+ src/third_party/wiredtiger/ext/compressors/lz4/lz4_compress.c
+ src/third_party/wiredtiger/ext/compressors/nop/nop_compress.c
+ src/third_party/wiredtiger/ext/compressors/snappy/snappy_compress.c
+ src/third_party/wiredtiger/ext/compressors/zlib/zlib_compress.c
+ src/third_party/wiredtiger/ext/datasources/helium/helium.c
+ src/third_party/wiredtiger/lang/java/src/com/wiredtiger/db/AsyncCallback.java
+ src/third_party/wiredtiger/lang/java/src/com/wiredtiger/db/PackFormatInputStream.java
+ src/third_party/wiredtiger/lang/java/src/com/wiredtiger/db/PackInputStream.java
+ src/third_party/wiredtiger/lang/java/src/com/wiredtiger/db/PackOutputStream.java
+ src/third_party/wiredtiger/lang/java/src/com/wiredtiger/db/PackUtil.java
+ src/third_party/wiredtiger/lang/java/src/com/wiredtiger/db/WiredTigerException.java
+ src/third_party/wiredtiger/lang/java/src/com/wiredtiger/db/WiredTigerPackingException.java
+ src/third_party/wiredtiger/lang/java/src/com/wiredtiger/db/WiredTigerPanicException.java
+ src/third_party/wiredtiger/lang/java/src/com/wiredtiger/db/WiredTigerRollbackException.java
+ src/third_party/wiredtiger/lang/java/wiredtiger.i
+ src/third_party/wiredtiger/lang/python/setup.py
+ src/third_party/wiredtiger/lang/python/wiredtiger.i
+ src/third_party/wiredtiger/lang/python/wiredtiger/fpacking.py
+ src/third_party/wiredtiger/lang/python/wiredtiger/intpacking.py
+ src/third_party/wiredtiger/lang/python/wiredtiger/packing.py
+ src/third_party/wiredtiger/src/support/cksum.c
+ src/third_party/wiredtiger/src/support/hash_fnv.c
+ src/third_party/wiredtiger/src/support/pow.c
+ src/third_party/wiredtiger/src/support/rand.c
+ src/third_party/wiredtiger/tools/wtstats/wtstats.py
+Copyright: Public Domain 2008-2014 WiredTiger, Inc.
+           Public Domain 2014-2015 MongoDB, Inc.
+License: public-domain
+ This is free and unencumbered software released into the public domain.
+ .
+ Anyone is free to copy, modify, publish, use, compile, sell, or
+ distribute this software, either in source code form or as a compiled
+ binary, for any purpose, commercial or non-commercial, and by any
+ means.
+ .
+ In jurisdictions that recognize copyright laws, the author or authors
+ of this software dedicate any and all copyright interest in the
+ software to the public domain. We make this dedication for the benefit
+ of the public at large and to the detriment of our heirs and
+ successors. We intend this dedication to be an overt act of
+ relinquishment in perpetuity of all present and future rights to this
+ software under copyright law.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+ OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ OTHER DEALINGS IN THE SOFTWARE.
+
+Files: src/third_party/wiredtiger/src/include/bitstring.i
+       src/third_party/wiredtiger/src/include/queue.h
+Copyright: 1987-1994 The Regents of the University of California
+License: BSD-3-clause
+
+Files: src/third_party/wiredtiger/src/support/hash_city.c
+Copyright: 2011 Google, Inc.
+License: Expat
 
 Files: src/third_party/yaml-cpp-0.5.1/*
 Copyright: 2008 Jesse Beder
 Comment: Not used; the source is built with the Debian yaml-cpp libraries.
-License: MIT
+License: Expat
+
+Files: src/third_party/zlib-1.2.8
+Copyright: 1995-2013 Jean-loup Gailly
+           1995-2013 Mark Adler
+License: zlib
 
 License: AGPL-3.0-OpenSSL
  This program is free software: you can redistribute it and/or  modify
@@ -582,6 +251,30 @@ License: Apache-2.0
  On Debian systems, the complete text of the Apache License, Version 2.0 can be
  found in "/usr/share/common-licenses/Apache-2.0".
 
+License: BSD-3-clause
+ Redistribution and use in source and binary forms, with or without
+ modification, are permitted provided that the following conditions
+ are met:
+ 1. Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+ 2. Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in the
+    documentation and/or other materials provided with the distribution.
+ 4. Neither the name of the University nor the names of its contributors
+    may be used to endorse or promote products derived from this software
+    without specific prior written permission.
+ .
+ THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+ ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+ FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ SUCH DAMAGE.
 
 License: BSD-3-PCRE
  Redistribution and use in source and binary forms, with or without
@@ -637,6 +330,31 @@ License: BSD-3-google
  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+License: BSD-3-intel
+ Redistribution and use in source and binary forms, with or without modification,
+ are permitted provided that the following conditions are met:
+ .
+    * Redistributions of source code must retain the above copyright notice, this
+      list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright notice,
+      his list of conditions and the following disclaimer in the documentation
+      and/or other materials provided with the distribution.
+    * Neither the name of Intel Corporation nor the names of its contributors
+      may be used to endorse or promote products derived from this software
+      without specific prior written permission.
+ .
+ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ DISCLAIMED.
+ IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+ INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+ OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 License: BSD-3-snowball
  Redistribution and use in source and binary forms, with or without
@@ -711,7 +429,21 @@ License: BSL-1.0
  ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  DEALINGS IN THE SOFTWARE.
 
-License: MIT
+License: GPL-2-or-3
+ This program is free software: you can redistribute it and/or modify it under
+ the terms of either version 2 or version 3 of the GNU General Public License
+ as published by the Free Software Foundation.
+ .
+ This program is distributed in the hope that it will be useful, but WITHOUT
+ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+ details.
+ .
+ On Debian systems the complete text of the GNU General Public License versions
+ 2 and 3 can be found in "/usr/share/common-licenses/GPL-2" and
+ "/usr/share/common-licenses/GPL-3" respectively.
+
+License: Expat
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
  in the Software without restriction, including without limitation the rights
