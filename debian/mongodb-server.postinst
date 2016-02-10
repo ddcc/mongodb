@@ -25,13 +25,11 @@ case "$1" in
 		--home /var/lib/mongodb --no-create-home \
 		--quiet --group mongodb
 
-	# create db -- note: this should agree with dbpath in mongodb.conf
-	mkdir -p /var/lib/mongodb
-	chown -R mongodb:mongodb /var/lib/mongodb
-
-	# create logdir -- note: this should agree with logpath in mongodb.conf
-	mkdir -p /var/log/mongodb
-	chown -R mongodb:mongodb /var/log/mongodb
+	for dir in /var/lib/mongodb /var/log/mongodb; do
+		if ! dpkg-statoverride --list "$dir" >/dev/null 2>&1; then
+			dpkg-statoverride --update --add mongodb mongodb 0755 "$dir"
+		fi
+	done
     ;;
 
     abort-upgrade|abort-remove|abort-deconfigure)
