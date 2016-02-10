@@ -9,8 +9,7 @@ limit nofile 64000 64000
 kill timeout 300 # wait 300s between SIGTERM and SIGKILL.
 
 pre-start script
-    mkdir -p /var/lib/mongodb/
-    mkdir -p /var/log/mongodb/
+    [ -e /var/run/mongodb ] || install -m 755 -o mongodb -g mongodb -d /var/run/mongodb
 end script
 
 script
