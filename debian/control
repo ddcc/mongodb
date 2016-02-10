@@ -23,9 +23,9 @@ Build-Depends:
  python-pymongo,
  scons
 Standards-Version: 3.9.7
-Vcs-Git: git://anonscm.debian.org/collab-maint/mongodb.git
-Vcs-Browser: http://anonscm.debian.org/cgit/collab-maint/mongodb.git/
-Homepage: http://www.mongodb.org
+Vcs-Git: https://anonscm.debian.org/git/collab-maint/mongodb.git
+Vcs-Browser: https://anonscm.debian.org/cgit/collab-maint/mongodb.git/
+Homepage: https://www.mongodb.org
 
 Package: mongodb
 Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 hurd-any armhf arm64 ppc64el
