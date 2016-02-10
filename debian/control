@@ -2,7 +2,8 @@ Source: mongodb
 Section: database
 Priority: optional
 Maintainer: Laszlo Boszormenyi (GCS) <gcs@debian.org>
-Uploaders: Jérémy Lal <kapouer@melix.org>
+Uploaders: Jérémy Lal <kapouer@melix.org>,
+           Apollon Oikonomopoulos <apoikos@debian.org>
 Build-Depends:
  debhelper (>= 9),
  dh-systemd (>= 1.5),
