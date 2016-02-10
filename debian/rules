@@ -32,14 +32,8 @@ ifneq (,$(filter $(DEB_HOST_ARCH), $(no_v8_archs)))
 COMMON_OPTIONS += --disable-scripting
 endif
 
-override_dh_clean:
+override_dh_auto_clean:
 	scons --keep-going --clean $(COMMON_OPTIONS) .
-	find $(CURDIR)/ -name "*.pyc" -delete
-	rm -rf $(CURDIR)/debian/tmp-test/
-	rm -rf $(CURDIR)/.scons/
-	rm -rf $(CURDIR)/build/
-	rm -f $(CURDIR)/failfile.smoke $(CURDIR)/smoke-last.json
-	dh_clean
 
 override_dh_auto_build:
 	scons $(COMMON_OPTIONS) core tools
@@ -72,6 +66,6 @@ endif
 %:
 	dh $@ --parallel --with=systemd
 
-.PHONY: override_dh_clean override_dh_auto_build \
+.PHONY: override_dh_auto_clean override_dh_auto_build \
 	override_dh_auto_install override_dh_installinit \
 	override_dh_systemd_enable override_dh_install

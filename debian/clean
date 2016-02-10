@@ -1,0 +1,8 @@
+debian/tmp-test/
+.scons/
+build/
+failfile.smoke
+smoke-last.json
+buildscripts/*.pyc
+site_scons/*.pyc
+site_scons/site_tools/*.pyc
