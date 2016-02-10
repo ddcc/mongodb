@@ -16,11 +16,4 @@ Binds only to localhost
   default. You can change this behavior in /etc/mongodb.conf by
   editing/removing/commenting out bind_ip line.
 
-Why only for x86 and amd64?
-
-  The mongodb server depends on both little-endianness and unaligned memory
-  access, which I believe means it can only work on i386 and amd64. We believe
-  that the mongodb will be useful even it is not available for all Debian
-  supported platforms.
-
  -- Rogério Brito <rbrito@ime.usp.br>, Fri, 12 Apr 2013 22:10:41 -0300
