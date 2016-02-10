@@ -1,4 +1,2 @@
-etc
-usr/bin
 var/lib/mongodb
 var/log/mongodb
