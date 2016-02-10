@@ -32,14 +32,8 @@ ifneq (,$(filter $(DEB_HOST_ARCH), $(no_v8_archs)))
 COMMON_OPTIONS += --disable-scripting
 endif
 
-DEB_SCONS_CLEAN = . --keep-going --clean $(COMMON_OPTIONS)
-DEB_SCONS_BUILD = all $(COMMON_OPTIONS)
-DEB_SCONS_CHECK = --smokedbprefix=$(CURDIR)/debian/tmp-test smoke \
-  $(COMMON_OPTIONS)
-DEB_SCONS_INSTALL = --prefix=$(CURDIR)/debian/tmp/usr install $(COMMON_OPTIONS)
-
 override_dh_clean:
-	scons $(DEB_SCONS_CLEAN)
+	scons --keep-going --clean $(COMMON_OPTIONS) .
 	find $(CURDIR)/ -name "*.pyc" -delete
 	rm -rf $(CURDIR)/debian/tmp-test/
 	rm -rf $(CURDIR)/.scons/
@@ -48,15 +42,18 @@ override_dh_clean:
 	dh_clean
 
 override_dh_auto_build:
-	scons $(DEB_SCONS_BUILD)
+	scons $(COMMON_OPTIONS) core tools
 
-ifeq (,$(findstring nocheck,$(DEB_BUILD_OPTIONS)))
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
 override_dh_auto_test:
-	scons $(DEB_SCONS_CHECK)
+	scons $(COMMON_OPTIONS) \
+		--smokedbprefix=$(CURDIR)/debian/tmp-test \
+		test unittests moduletests smoke
+.PHONY: override_dh_auto_test
 endif
 
 override_dh_auto_install:
-	scons $(DEB_SCONS_INSTALL)
+	scons $(COMMON_OPTIONS) --prefix=$(CURDIR)/debian/tmp/usr install
 
 override_dh_systemd_enable:
 	dh_systemd_enable -pmongodb-server --name=mongodb
@@ -75,6 +72,6 @@ endif
 %:
 	dh $@ --parallel --with=systemd
 
-.PHONY: override_dh_clean override_dh_auto_build override_dh_auto_test \
+.PHONY: override_dh_clean override_dh_auto_build \
 	override_dh_auto_install override_dh_installinit \
 	override_dh_systemd_enable override_dh_install
