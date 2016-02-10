@@ -64,13 +64,12 @@ override_dh_systemd_enable:
 override_dh_installinit:
 	dh_installinit -pmongodb-server --name=mongodb
 
-ifneq (,$(filter $(DEB_HOST_ARCH), $(no_v8_archs)))
-# mongo shell is broken without scripting so drop it from
-# the binary
 override_dh_install:
-	dh_install
+	dh_install --list-missing
+ifneq (,$(filter $(DEB_HOST_ARCH), $(no_v8_archs)))
+	# mongo shell is broken without scripting so drop it from
+	# the binary
 	rm -f $(CURDIR)/tmp/mongodb-clients/usr/bin/mongo
-.PHONY: override_dh_install
 endif
 
 %:
@@ -78,4 +77,4 @@ endif
 
 .PHONY: override_dh_clean override_dh_auto_build override_dh_auto_test \
 	override_dh_auto_install override_dh_installinit \
-	override_dh_systemd_enable
+	override_dh_systemd_enable override_dh_install
