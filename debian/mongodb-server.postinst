@@ -21,11 +21,9 @@ set -e
 case "$1" in
     configure)
 	# create a mongodb group and user
-        if ! grep -q mongodb /etc/passwd; then
-		adduser --system --home /var/lib/mongodb --no-create-home mongodb
-		addgroup --system mongodb
-		adduser mongodb mongodb
-        fi
+	adduser --system --disabled-password --disabled-login \
+		--home /var/lib/mongodb --no-create-home \
+		--quiet --group mongodb
 
 	# create db -- note: this should agree with dbpath in mongodb.conf
 	mkdir -p /var/lib/mongodb
