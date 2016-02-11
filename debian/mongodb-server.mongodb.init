@@ -55,7 +55,7 @@ DESC=database
 # Default defaults.  Can be overridden by the /etc/default/$NAME
 NAME=mongodb
 CONF=/etc/mongodb.conf
-RUNDIR=/var/run/mongodb
+RUNDIR=/run/mongodb
 PIDFILE=$RUNDIR/$NAME.pid
 ENABLE_MONGODB=yes
 
