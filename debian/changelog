@@ -1,4 +1,4 @@
-mongodb (1:2.6.11-1~~exp1) experimental; urgency=medium
+mongodb (1:2.6.11-1) experimental; urgency=medium
 
   * New upstream release (closes: #748490).
   * Drop patches merged upstream:
@@ -79,7 +79,7 @@ mongodb (1:2.6.11-1~~exp1) experimental; urgency=medium
   * d/watch: check for 2.6 stable releases.
   * Add NEWS entry with hints about the upgrade to 2.6.
 
- -- Apollon Oikonomopoulos <apoikos@debian.org>  Sat, 16 Jan 2016 01:44:26 +0200
+ -- Apollon Oikonomopoulos <apoikos@debian.org>  Tue, 15 Mar 2016 14:32:18 +0000
 
 mongodb (1:2.4.14-3) unstable; urgency=low
 
