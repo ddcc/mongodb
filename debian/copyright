@@ -18,7 +18,8 @@ Files: debian/*
 Copyright: 2009 - 2010 Kristina Chodorow <kristina@10gen.com>
            2010 - 2013 Antonin Kral <A.Kral@sh.cvut.cz>
            2010 - 2013 Roberto C. Sanchez <roberto@connexer.com>
-           2013 - 2015 Laszlo Boszormenyi (GCS) <gcs@debian.org>
+           2013 - 2016 Laszlo Boszormenyi (GCS) <gcs@debian.org>
+           2016        Apollon Oikonomopoulos <apoikos@debian.org>
 License: Apache-2.0
 
 Files: 
