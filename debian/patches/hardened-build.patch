@@ -1,8 +1,6 @@
-Index: mongodb-2.6.11/SConstruct
-===================================================================
---- mongodb-2.6.11.orig/SConstruct	2016-01-15 17:29:08.000000000 +0200
-+++ mongodb-2.6.11/SConstruct	2016-01-15 17:37:54.000000000 +0200
-@@ -474,7 +474,12 @@
+--- a/SConstruct
++++ b/SConstruct
+@@ -484,7 +484,12 @@
  
                     PCRE_VERSION='8.37',
                     CONFIGUREDIR = '#' + scons_data_dir + '/sconf_temp',
@@ -15,4 +13,4 @@ Index: mongodb-2.6.11/SConstruct
 +                   LINKFLAGS=os.environ.get("LDFLAGS", "").split(),
                     )
  
- if has_option("cache"):
+ # Report any unknown variables as an error.
