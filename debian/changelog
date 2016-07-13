@@ -1,3 +1,16 @@
+mongodb (1:2.6.12-1) unstable; urgency=medium
+
+  [ Apollon Oikonomopoulos ]
+  * New upstream release
+  * Upload to unstable
+  * Fix FTBFS with GCC6 (Closes: #811606)
+
+  [ Laszlo Boszormenyi ]
+  * Bump standards to 3.9.8; no changes needed
+  * Refresh hardened-build.patch
+
+ -- Apollon Oikonomopoulos <apoikos@debian.org>  Wed, 13 Jul 2016 12:38:13 +0300
+
 mongodb (1:2.6.11-1) experimental; urgency=medium
 
   * New upstream release (closes: #748490).
