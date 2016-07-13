@@ -923,6 +923,7 @@ tasks:
           ${python|python} buildscripts/smoke.py --nopreallocj --with-cleanbb --mongod ./mongod --mongo ./mongo --report-file report.json ${test_flags|} tool
 
 - name: push
+  patchable: false
   depends_on:
   - name: "*"
   stepback: false
@@ -939,7 +940,7 @@ tasks:
         silent: true
         script: |
           set -o errexit
-          echo "${signing_auth_token}" > signing_auth_token
+          echo "${signing_auth_token_26}" > signing_auth_token
     - command: shell.exec
       params:
         working_dir: src
@@ -1643,7 +1644,7 @@ buildvariants:
   display_name: Windows 64-bit
   modules: ~
   run_on:
-  - windows-64-test
+  - windows-64-vs2010-test
   expansions:
     push_path: win32
     push_bucket: downloads.mongodb.org
@@ -1657,7 +1658,7 @@ buildvariants:
   tasks:
   - name: compile
     distros:
-    - windows-64-compile
+    - windows-64-vs2010-compile
   - name: aggregation
   - name: auth
   - name: core
@@ -1688,7 +1689,7 @@ buildvariants:
   display_name: Windows 64-bit DEBUG
   modules: ~
   run_on:
-  - windows-64-test
+  - windows-64-vs2010-test
   expansions:
     push_path: win32
     push_bucket: downloads.mongodb.org
@@ -1701,7 +1702,7 @@ buildvariants:
   tasks:
   - name: compile
     distros:
-    - windows-64-compile
+    - windows-64-vs2010-compile
   - name: aggregation
   - name: auth
   - name: core
@@ -1725,7 +1726,7 @@ buildvariants:
   display_name: Windows 64-bit 2008R2+
   modules: ~
   run_on:
-  - windows-64-test
+  - windows-64-vs2010-test
   expansions:
     push_path: win32
     push_bucket: downloads.mongodb.org
@@ -1739,7 +1740,7 @@ buildvariants:
   tasks:
   - name: compile
     distros:
-    - windows-64-compile
+    - windows-64-vs2010-compile
   - name: aggregation
   - name: auth
   - name: core
@@ -1768,7 +1769,7 @@ buildvariants:
   display_name: Windows 64-bit 2008R2+ DEBUG
   modules: ~
   run_on:
-  - windows-64-test
+  - windows-64-vs2010-test
   expansions:
     push_path: win32
     push_bucket: downloads.mongodb.org
@@ -1781,7 +1782,7 @@ buildvariants:
   tasks:
   - name: compile
     distros:
-    - windows-64-compile
+    - windows-64-vs2010-compile
   - name: aggregation
   - name: auth
   - name: core
@@ -1806,7 +1807,7 @@ buildvariants:
   modules:
   - enterprise
   run_on:
-  - windows-64-test
+  - windows-64-vs2010-test
   expansions:
     push_path: win32
     push_bucket: downloads.10gen.com
@@ -1820,7 +1821,7 @@ buildvariants:
   tasks:
   - name: compile
     distros:
-    - windows-64-compile
+    - windows-64-vs2010-compile
   - name: audit
   - name: jsCore_auth
   - name: replicasets_auth
@@ -1851,7 +1852,7 @@ buildvariants:
   tasks:
   - name: compile
     distros:
-    - windows-64-compile
+    - windows-64-vs2010-compile
   - name: aggregation
   - name: auth
   - name: core
