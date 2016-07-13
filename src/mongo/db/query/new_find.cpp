@@ -269,34 +269,20 @@ namespace mongo {
             // to getNext(...) might just return EOF).
             bool saveClientCursor = false;
 
-            if (Runner::RUNNER_DEAD == state || Runner::RUNNER_ERROR == state) {
-                // Propagate this error to caller.
-                if (Runner::RUNNER_ERROR == state) {
-                    // Stats are helpful when errors occur.
-                    TypeExplain* bareExplain;
-                    Status res = runner->getInfo(&bareExplain, NULL);
-                    if (res.isOK()) {
-                        boost::scoped_ptr<TypeExplain> errorExplain(bareExplain);
-                        error() << "Runner error, stats:\n"
-                                << errorExplain->stats.jsonString(Strict, true);
-                    }
-
-                    uasserted(17406, "getMore runner error: " +
-                              WorkingSetCommon::toStatusString(obj));
+            if (Runner::RUNNER_ERROR == state) {
+                // Stats are helpful when errors occur.
+                TypeExplain* bareExplain;
+                Status res = runner->getInfo(&bareExplain, NULL);
+                if (res.isOK()) {
+                    boost::scoped_ptr<TypeExplain> errorExplain(bareExplain);
+                    error() << "getMore runner error, stats:\n"
+                            << errorExplain->stats.jsonString(Strict, true);
                 }
-
-                // If we're dead there's no way to get more results.
-                saveClientCursor = false;
-
-                // In the old system tailable capped cursors would be killed off at the
-                // cursorid level.  If a tailable capped cursor is nuked the cursorid
-                // would vanish.
-                // 
-                // In the new system they die and are cleaned up later (or time out).
-                // So this is where we get to remove the cursorid.
-                if (0 == numResults) {
-                    resultFlags = ResultFlag_CursorNotFound;
-                }
+                uasserted(17406, "getMore runner error: " +
+                          WorkingSetCommon::toStatusString(obj));
+            }
+            else if (Runner::RUNNER_DEAD == state) {
+                uasserted(28617, "Runner killed during getMore");
             }
             else if (Runner::RUNNER_EOF == state) {
                 // EOF is also end of the line unless it's tailable.
@@ -670,17 +656,16 @@ namespace mongo {
             Status res = runner->getInfo(&bareExplain, NULL);
             if (res.isOK()) {
                 boost::scoped_ptr<TypeExplain> errorExplain(bareExplain);
-                error() << "Runner error, stats:\n"
+                error() << "Runner error during find, stats:\n"
                         << errorExplain->stats.jsonString(Strict, true);
             }
-            uasserted(17144, "Runner error: " + WorkingSetCommon::toStatusString(obj));
+            uasserted(17144, "Runner error during find: " + WorkingSetCommon::toStatusString(obj));
+        }
+        else if (Runner::RUNNER_DEAD == state) {
+            uasserted(28616, "Runner killed during find");
         }
 
-        // Why save a dead runner?
-        if (Runner::RUNNER_DEAD == state) {
-            saveClientCursor = false;
-        }
-        else if (pq.hasOption(QueryOption_CursorTailable)) {
+        if (pq.hasOption(QueryOption_CursorTailable)) {
             // If we're tailing a capped collection, we don't bother saving the cursor if the
             // collection is empty. Otherwise, the semantics of the tailable cursor is that the
             // client will keep trying to read from it. So we'll keep it around.
