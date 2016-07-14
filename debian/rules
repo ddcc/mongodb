@@ -20,7 +20,7 @@ endif
 
 COMMON_OPTIONS = --use-system-all --ssl $(DEB_SCONS_OPTIONS)
 
-gperftools_archs = amd64 i386 armhf ppc64el
+gperftools_archs = amd64 i386 armhf
 ifneq (,$(filter $(DEB_HOST_ARCH), $(gperftools_archs)))
 COMMON_OPTIONS += --allocator=tcmalloc
 else
