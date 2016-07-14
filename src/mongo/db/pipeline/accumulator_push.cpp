@@ -26,54 +26,59 @@
  * it in the license file.
  */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/value.h"
 
 namespace mongo {
-    void AccumulatorPush::processInternal(const Value& input, bool merging) {
-        if (!merging) {
-            if (!input.missing()) {
-                vpValue.push_back(input);
-                _memUsageBytes += input.getApproximateSize();
-            }
+
+using boost::intrusive_ptr;
+using std::vector;
+
+REGISTER_ACCUMULATOR(push, AccumulatorPush::create);
+
+const char* AccumulatorPush::getOpName() const {
+    return "$push";
+}
+
+void AccumulatorPush::processInternal(const Value& input, bool merging) {
+    if (!merging) {
+        if (!input.missing()) {
+            vpValue.push_back(input);
+            _memUsageBytes += input.getApproximateSize();
         }
-        else {
-            // If we're merging, we need to take apart the arrays we
-            // receive and put their elements into the array we are collecting.
-            // If we didn't, then we'd get an array of arrays, with one array
-            // from each merge source.
-            verify(input.getType() == Array);
-            
-            const vector<Value>& vec = input.getArray();
-            vpValue.insert(vpValue.end(), vec.begin(), vec.end());
+    } else {
+        // If we're merging, we need to take apart the arrays we
+        // receive and put their elements into the array we are collecting.
+        // If we didn't, then we'd get an array of arrays, with one array
+        // from each merge source.
+        verify(input.getType() == Array);
 
-            for (size_t i=0; i < vec.size(); i++) {
-                _memUsageBytes += vec[i].getApproximateSize();
-            }
+        const vector<Value>& vec = input.getArray();
+        vpValue.insert(vpValue.end(), vec.begin(), vec.end());
+
+        for (size_t i = 0; i < vec.size(); i++) {
+            _memUsageBytes += vec[i].getApproximateSize();
         }
     }
+}
 
-    Value AccumulatorPush::getValue(bool toBeMerged) const {
-        return Value(vpValue);
-    }
+Value AccumulatorPush::getValue(bool toBeMerged) const {
+    return Value(vpValue);
+}
 
-    AccumulatorPush::AccumulatorPush() {
-        _memUsageBytes = sizeof(*this);
-    }
+AccumulatorPush::AccumulatorPush() {
+    _memUsageBytes = sizeof(*this);
+}
 
-    void AccumulatorPush::reset() {
-        vector<Value>().swap(vpValue);
-        _memUsageBytes = sizeof(*this);
-    }
+void AccumulatorPush::reset() {
+    vector<Value>().swap(vpValue);
+    _memUsageBytes = sizeof(*this);
+}
 
-    intrusive_ptr<Accumulator> AccumulatorPush::create() {
-        return new AccumulatorPush();
-    }
-
-    const char *AccumulatorPush::getOpName() const {
-        return "$push";
-    }
+intrusive_ptr<Accumulator> AccumulatorPush::create() {
+    return new AccumulatorPush();
+}
 }

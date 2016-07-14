@@ -26,7 +26,9 @@
  * it in the license file.
  */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/pipeline/document.h"
@@ -36,114 +38,83 @@
 
 namespace mongo {
 
-    const char DocumentSourceProject::projectName[] = "$project";
+using boost::intrusive_ptr;
+using std::string;
+using std::vector;
 
-    DocumentSourceProject::DocumentSourceProject(const intrusive_ptr<ExpressionContext>& pExpCtx,
-                                                 const intrusive_ptr<ExpressionObject>& exprObj)
-        : DocumentSource(pExpCtx)
-        , pEO(exprObj)
-    { }
+DocumentSourceProject::DocumentSourceProject(const intrusive_ptr<ExpressionContext>& pExpCtx,
+                                             const intrusive_ptr<ExpressionObject>& exprObj)
+    : DocumentSource(pExpCtx), pEO(exprObj) {}
 
-    const char *DocumentSourceProject::getSourceName() const {
-        return projectName;
-    }
+REGISTER_DOCUMENT_SOURCE(project, DocumentSourceProject::createFromBson);
 
-    boost::optional<Document> DocumentSourceProject::getNext() {
-        pExpCtx->checkForInterrupt();
+const char* DocumentSourceProject::getSourceName() const {
+    return "$project";
+}
 
-        boost::optional<Document> input = pSource->getNext();
-        if (!input)
-            return boost::none;
+boost::optional<Document> DocumentSourceProject::getNext() {
+    pExpCtx->checkForInterrupt();
 
-        /* create the result document */
-        const size_t sizeHint = pEO->getSizeHint();
-        MutableDocument out (sizeHint);
-        out.copyMetaDataFrom(*input);
+    boost::optional<Document> input = pSource->getNext();
+    if (!input)
+        return boost::none;
 
-        /*
-          Use the ExpressionObject to create the base result.
+    /* create the result document */
+    const size_t sizeHint = pEO->getSizeHint();
+    MutableDocument out(sizeHint);
+    out.copyMetaDataFrom(*input);
 
-          If we're excluding fields at the top level, leave out the _id if
-          it is found, because we took care of it above.
-        */
-        _variables->setRoot(*input);
-        pEO->addToDocument(out, *input, _variables.get());
-        _variables->clearRoot();
+    /*
+      Use the ExpressionObject to create the base result.
 
-#if defined(_DEBUG)
-        if (!_simpleProjection.getSpec().isEmpty()) {
-            // Make sure we return the same results as Projection class
+      If we're excluding fields at the top level, leave out the _id if
+      it is found, because we took care of it above.
+    */
+    _variables->setRoot(*input);
+    pEO->addToDocument(out, *input, _variables.get());
+    _variables->clearRoot();
 
-            BSONObj inputBson = input->toBson();
-            BSONObj outputBson = out.peek().toBson();
+    return out.freeze();
+}
 
-            BSONObj projected = _simpleProjection.transform(inputBson);
+intrusive_ptr<DocumentSource> DocumentSourceProject::optimize() {
+    intrusive_ptr<Expression> pE(pEO->optimize());
+    pEO = boost::dynamic_pointer_cast<ExpressionObject>(pE);
+    return this;
+}
 
-            if (projected != outputBson) {
-                log() << "$project applied incorrectly: " << getRaw() << endl;
-                log() << "input:  " << inputBson << endl;
-                log() << "out: " << outputBson << endl;
-                log() << "projected: " << projected << endl;
-                verify(false); // exits in _DEBUG builds
-            }
-        }
-#endif
+Value DocumentSourceProject::serialize(bool explain) const {
+    return Value(DOC(getSourceName() << pEO->serialize(explain)));
+}
 
-        return out.freeze();
-    }
+intrusive_ptr<DocumentSource> DocumentSourceProject::createFromBson(
+    BSONElement elem, const intrusive_ptr<ExpressionContext>& pExpCtx) {
+    /* validate */
+    uassert(15969, "$project specification must be an object", elem.type() == Object);
 
-    void DocumentSourceProject::optimize() {
-        intrusive_ptr<Expression> pE(pEO->optimize());
-        pEO = dynamic_pointer_cast<ExpressionObject>(pE);
-    }
+    Expression::ObjectCtx objectCtx(Expression::ObjectCtx::DOCUMENT_OK |
+                                    Expression::ObjectCtx::TOP_LEVEL |
+                                    Expression::ObjectCtx::INCLUSION_OK);
 
-    Value DocumentSourceProject::serialize(bool explain) const {
-        return Value(DOC(getSourceName() << pEO->serialize(explain)));
-    }
+    VariablesIdGenerator idGenerator;
+    VariablesParseState vps(&idGenerator);
+    intrusive_ptr<Expression> parsed = Expression::parseObject(elem.Obj(), &objectCtx, vps);
+    ExpressionObject* exprObj = dynamic_cast<ExpressionObject*>(parsed.get());
+    massert(16402, "parseObject() returned wrong type of Expression", exprObj);
+    uassert(16403, "$projection requires at least one output field", exprObj->getFieldCount());
 
-    intrusive_ptr<DocumentSource> DocumentSourceProject::createFromBson(
-            BSONElement elem,
-            const intrusive_ptr<ExpressionContext> &pExpCtx) {
+    intrusive_ptr<DocumentSourceProject> pProject(new DocumentSourceProject(pExpCtx, exprObj));
+    pProject->_variables.reset(new Variables(idGenerator.getIdCount()));
 
-        /* validate */
-        uassert(15969, str::stream() << projectName <<
-                " specification must be an object",
-                elem.type() == Object);
+    BSONObj projectObj = elem.Obj();
+    pProject->_raw = projectObj.getOwned();
 
-        Expression::ObjectCtx objectCtx(
-              Expression::ObjectCtx::DOCUMENT_OK
-            | Expression::ObjectCtx::TOP_LEVEL
-            | Expression::ObjectCtx::INCLUSION_OK
-            );
+    return pProject;
+}
 
-        VariablesIdGenerator idGenerator;
-        VariablesParseState vps(&idGenerator);
-        intrusive_ptr<Expression> parsed = Expression::parseObject(elem.Obj(), &objectCtx, vps);
-        ExpressionObject* exprObj = dynamic_cast<ExpressionObject*>(parsed.get());
-        massert(16402, "parseObject() returned wrong type of Expression", exprObj);
-        uassert(16403, "$projection requires at least one output field", exprObj->getFieldCount());
-
-        intrusive_ptr<DocumentSourceProject> pProject(new DocumentSourceProject(pExpCtx, exprObj));
-        pProject->_variables.reset(new Variables(idGenerator.getIdCount()));
-
-        BSONObj projectObj = elem.Obj();
-        pProject->_raw = projectObj.getOwned();
-
-#if defined(_DEBUG)
-        if (exprObj->isSimple()) {
-            DepsTracker deps;
-            vector<string> path;
-            exprObj->addDependencies(&deps, &path);
-            pProject->_simpleProjection.init(deps.toProjection());
-        }
-#endif
-
-        return pProject;
-    }
-
-    DocumentSource::GetDepsReturn DocumentSourceProject::getDependencies(DepsTracker* deps) const {
-        vector<string> path; // empty == top-level
-        pEO->addDependencies(deps, &path);
-        return EXHAUSTIVE_FIELDS;
-    }
+DocumentSource::GetDepsReturn DocumentSourceProject::getDependencies(DepsTracker* deps) const {
+    vector<string> path;  // empty == top-level
+    pEO->addDependencies(deps, &path);
+    return EXHAUSTIVE_FIELDS;
+}
 }

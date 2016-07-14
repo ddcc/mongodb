@@ -26,113 +26,101 @@
  *    then also delete it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
+
+#include "mongo/platform/basic.h"
+
 #include "mongo/dbtests/config_server_fixture.h"
 
 #include <list>
 
-#include "mongo/s/config.h"
-#include "mongo/s/distlock.h"
-#include "mongo/s/type_changelog.h"
-#include "mongo/s/type_chunk.h"
-#include "mongo/s/type_collection.h"
-#include "mongo/s/type_config_version.h"
-#include "mongo/s/type_database.h"
-#include "mongo/s/type_mongos.h"
-#include "mongo/s/type_shard.h"
+#include "mongo/dbtests/dbtests.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/s/sharding_state.h"
+#include "mongo/s/catalog/type_chunk.h"
+#include "mongo/s/catalog/legacy/legacy_dist_lock_manager.h"
+#include "mongo/s/catalog/type_config_version.h"
+#include "mongo/s/client/shard_connection.h"
+#include "mongo/stdx/memory.h"
+#include "mongo/util/log.h"
 
 namespace mongo {
 
-    using std::list;
+using std::unique_ptr;
+using std::list;
+using std::string;
 
-    void ConfigServerFixture::setUp() {
-        DBException::traceExceptions = true;
+ConfigServerFixture::ConfigServerFixture() : _client(&_txn), _connectHook(NULL) {}
 
-        // Make all connections redirect to the direct client
-        _connectHook = new CustomConnectHook();
-        ConnectionString::setConnectionHook(_connectHook);
-        // Disable the lock pinger
-        setLockPingerEnabled(false);
+string ConfigServerFixture::shardName() {
+    return "TestShardName";
+}
 
-        // Create the default config database before querying, necessary for direct connections
-        clearServer();
-        client().insert("config.test", BSON( "hello" << "world" ));
-        client().dropCollection("config.test");
+void ConfigServerFixture::setUp() {
+    shardConnectionPool.clear();
+    DBException::traceExceptions = true;
 
-        // Create an index over the chunks, to allow correct diffing
-        client().ensureIndex( ChunkType::ConfigNS, // br
-                              BSON( ChunkType::ns() << 1 << // br
-                                      ChunkType::DEPRECATED_lastmod() << 1 ) );
+    // Make all connections redirect to the direct client
+    _connectHook = new CustomConnectHook(&_txn);
+    ConnectionString::setConnectionHook(_connectHook);
 
-        configServer.init(configSvr().toString());
-    }
+    // Create the default config database before querying, necessary for direct connections
+    clearServer();
+    _client.insert("config.test",
+                   BSON("hello"
+                        << "world"));
+    _client.dropCollection("config.test");
 
-    void ConfigServerFixture::clearServer() {
-        client().dropDatabase("config");
-    }
+    // Create an index over the chunks, to allow correct diffing
+    ASSERT_OK(
+        dbtests::createIndex(&_txn,
+                             ChunkType::ConfigNS,
+                             BSON(ChunkType::ns() << 1 << ChunkType::DEPRECATED_lastmod() << 1)));
 
-    void ConfigServerFixture::clearVersion() {
-        client().dropCollection(VersionType::ConfigNS);
-    }
+    const ConnectionString connStr(uassertStatusOK(ConnectionString::parse("$dummy:10000")));
 
-    void ConfigServerFixture::clearShards() {
-        client().dropCollection(ShardType::ConfigNS);
-    }
+    ShardingState::get(&_txn)->initialize(&_txn, connStr.toString());
+    ShardingState::get(&_txn)->setShardName(shardName());
+}
 
-    void ConfigServerFixture::clearDatabases() {
-        client().dropCollection(DatabaseType::ConfigNS);
-    }
+void ConfigServerFixture::clearServer() {
+    _client.dropDatabase("config");
+}
 
-    void ConfigServerFixture::clearCollections() {
-        client().dropCollection(CollectionType::ConfigNS);
-    }
+void ConfigServerFixture::clearVersion() {
+    _client.dropCollection(VersionType::ConfigNS);
+}
 
-    void ConfigServerFixture::clearChunks() {
-        client().dropCollection(ChunkType::ConfigNS);
-    }
+void ConfigServerFixture::dumpServer() {
+    log() << "Dumping virtual config server to log...";
 
-    void ConfigServerFixture::clearPings() {
-        client().dropCollection(MongosType::ConfigNS);
-    }
+    list<string> collectionNames(_client.getCollectionNames("config"));
 
-    void ConfigServerFixture::clearChangelog() {
-        client().dropCollection(ChangelogType::ConfigNS);
-    }
+    for (list<string>::iterator it = collectionNames.begin(); it != collectionNames.end(); ++it) {
+        const string& collection = *it;
 
-    void ConfigServerFixture::dumpServer() {
+        unique_ptr<DBClientCursor> cursor(_client.query(collection, BSONObj()).release());
+        ASSERT(cursor.get() != NULL);
 
-        log() << "Dumping virtual config server to log..." << endl;
+        log() << "Dumping collection " << collection;
 
-        list<string> collectionNames(client().getCollectionNames("config"));
-
-        for (list<string>::iterator it = collectionNames.begin(); it != collectionNames.end(); ++it)
-        {
-            const string& collection = *it;
-
-            scoped_ptr<DBClientCursor> cursor(client().query(collection, BSONObj()).release());
-            ASSERT(cursor.get() != NULL);
-
-            log() << "Dumping collection " << collection << endl;
-
-            while (cursor->more()) {
-                BSONObj obj = cursor->nextSafe();
-                log() << obj.toString() << endl;
-            }
+        while (cursor->more()) {
+            BSONObj obj = cursor->nextSafe();
+            log() << obj.toString();
         }
     }
-
-    void ConfigServerFixture::tearDown() {
-
-        clearServer();
-
-        // Reset the pinger
-        setLockPingerEnabled(true);
-
-        // Make all connections redirect to the direct client
-        ConnectionString::setConnectionHook(NULL);
-        delete _connectHook;
-        _connectHook = NULL;
-
-        DBException::traceExceptions = false;
-    }
-
 }
+
+void ConfigServerFixture::tearDown() {
+    ShardingState::get(&_txn)->clearCollectionMetadata();
+    clearServer();
+
+    // Make all connections redirect to the direct client
+    ConnectionString::setConnectionHook(NULL);
+    delete _connectHook;
+    _connectHook = NULL;
+
+    DBException::traceExceptions = false;
+}
+
+}  // namespace mongo

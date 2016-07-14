@@ -32,16 +32,12 @@
 
 namespace mongo {
 
-    // Gets the singleton AuthorizationManager object for this server process.
-    AuthorizationManager* getGlobalAuthorizationManager();
+/**
+ * Name of the server parameter used to report the auth schema version (via getParameter).
+ */
+extern const std::string authSchemaVersionServerParameter;
 
-    // Sets the singleton AuthorizationManager object for this server process.
-    // Must be called once at startup and then never again (unless clearGlobalAuthorizationManager
-    // is called, at which point this can be called again, but should only happen in tests).
-    void setGlobalAuthorizationManager(AuthorizationManager* authManager);
+// Gets the singleton AuthorizationManager object for this server process.
+AuthorizationManager* getGlobalAuthorizationManager();
 
-    // Sets the singleton AuthorizationManager object for this server process to NULL.
-    // Should only be used in tests.
-    void clearGlobalAuthorizationManager();
-
-} // namespace mongo
+}  // namespace mongo

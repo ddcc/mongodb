@@ -26,68 +26,83 @@
  *    then also delete it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kBridge
+
 #include "mongo/tools/mongobridge_options.h"
 
+#include <algorithm>
+#include <iostream>
+
 #include "mongo/base/status.h"
+#include "mongo/platform/random.h"
+#include "mongo/util/log.h"
 #include "mongo/util/options_parser/startup_options.h"
 
 namespace mongo {
 
-    MongoBridgeGlobalParams mongoBridgeGlobalParams;
+MongoBridgeGlobalParams mongoBridgeGlobalParams;
 
-    Status addMongoBridgeOptions(moe::OptionSection* options) {
+Status addMongoBridgeOptions(moe::OptionSection* options) {
+    options->addOptionChaining("help", "help", moe::Switch, "show this usage information");
 
-        options->addOptionChaining("help", "help", moe::Switch, "produce help message");
+    options->addOptionChaining("port", "port", moe::Int, "port to listen on for MongoDB messages");
 
+    options->addOptionChaining("seed", "seed", moe::Long, "random seed to use");
 
-        options->addOptionChaining("port", "port", moe::Int, "port to listen for mongo messages");
+    options->addOptionChaining("dest", "dest", moe::String, "URI of remote MongoDB process");
 
+    options->addOptionChaining("verbose", "verbose", moe::String, "log more verbose output")
+        .setImplicit(moe::Value(std::string("v")));
 
-        options->addOptionChaining("dest", "dest", moe::String, "uri of remote mongod instance");
+    return Status::OK();
+}
 
+void printMongoBridgeHelp(std::ostream* out) {
+    *out << "Usage: mongobridge --port <port> --dest <dest> [ --seed <seed> ] [ --verbose <vvv> ]"
+            " [ --help ]" << std::endl;
+    *out << moe::startupOptions.helpString();
+    *out << std::flush;
+}
 
-        options->addOptionChaining("delay", "delay", moe::Int,
-                "transfer delay in milliseconds (default = 0)")
-                                  .setDefault(moe::Value(0));
+bool handlePreValidationMongoBridgeOptions(const moe::Environment& params) {
+    if (params.count("help")) {
+        printMongoBridgeHelp(&std::cout);
+        return false;
+    }
+    return true;
+}
 
-
-        return Status::OK();
+Status storeMongoBridgeOptions(const moe::Environment& params,
+                               const std::vector<std::string>& args) {
+    if (!params.count("port")) {
+        return {ErrorCodes::BadValue, "Missing required option: --port"};
     }
 
-    void printMongoBridgeHelp(std::ostream* out) {
-        *out << "Usage: mongobridge --port <port> --dest <dest> [ --delay <ms> ] [ --help ]"
-             << std::endl;
-        *out << moe::startupOptions.helpString();
-        *out << std::flush;
+    if (!params.count("dest")) {
+        return {ErrorCodes::BadValue, "Missing required option: --dest"};
     }
 
-    bool handlePreValidationMongoBridgeOptions(const moe::Environment& params) {
-        if (params.count("help")) {
-            printMongoBridgeHelp(&std::cout);
-            return false;
-        }
-        return true;
+    mongoBridgeGlobalParams.port = params["port"].as<int>();
+    mongoBridgeGlobalParams.destUri = params["dest"].as<std::string>();
+
+    if (!params.count("seed")) {
+        std::unique_ptr<SecureRandom> seedSource{SecureRandom::create()};
+        mongoBridgeGlobalParams.seed = seedSource->nextInt64();
+    } else {
+        mongoBridgeGlobalParams.seed = static_cast<int64_t>(params["seed"].as<long>());
     }
 
-    Status storeMongoBridgeOptions(const moe::Environment& params,
-                                   const std::vector<std::string>& args) {
-
-        if (!params.count("port")) {
-            return Status(ErrorCodes::BadValue, "Missing required option: \"--port\"");
+    if (params.count("verbose")) {
+        std::string verbosity = params["verbose"].as<std::string>();
+        if (std::any_of(verbosity.cbegin(), verbosity.cend(), [](char ch) { return ch != 'v'; })) {
+            return {ErrorCodes::BadValue,
+                    "The string for the --verbose option cannot contain characters other than 'v'"};
         }
-
-        if (!params.count("dest")) {
-            return Status(ErrorCodes::BadValue, "Missing required option: \"--dest\"");
-        }
-
-        mongoBridgeGlobalParams.port = params["port"].as<int>();
-        mongoBridgeGlobalParams.destUri = params["dest"].as<std::string>();
-
-        if (params.count("delay")) {
-            mongoBridgeGlobalParams.delay = params["delay"].as<int>();
-        }
-
-        return Status::OK();
+        logger::globalLogDomain()->setMinimumLoggedSeverity(
+            logger::LogSeverity::Debug(verbosity.length()));
     }
 
-} // namespace mongo
+    return Status::OK();
+}
+
+}  // namespace mongo

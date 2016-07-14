@@ -26,26 +26,38 @@
  * it in the license file.
  */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/pipeline/value.h"
 
+#include <cmath>
+#include <limits>
 #include <boost/functional/hash.hpp>
 
+#include "mongo/base/compare_numbers.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/pipeline/document.h"
+#include "mongo/platform/decimal128.h"
+#include "mongo/util/hex.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
-    using namespace mongoutils;
+using namespace mongoutils;
+using boost::intrusive_ptr;
+using std::min;
+using std::numeric_limits;
+using std::ostream;
+using std::string;
+using std::stringstream;
+using std::vector;
 
-    void ValueStorage::verifyRefCountingIfShould() const {
-        switch (type) {
+void ValueStorage::verifyRefCountingIfShould() const {
+    switch (type) {
         case MinKey:
         case MaxKey:
         case jstOID:
         case Date:
-        case Timestamp:
+        case bsonTimestamp:
         case EOO:
         case jstNULL:
         case Undefined:
@@ -65,8 +77,9 @@ namespace mongo {
             verify(refCounter == !shortStr);
             break;
 
-        case BinData: // TODO this should probably support short-string optimization
-        case Array: // TODO this should probably support empty-is-NULL optimization
+        case NumberDecimal:
+        case BinData:  // TODO this should probably support short-string optimization
+        case Array:    // TODO this should probably support empty-is-NULL optimization
         case DBRef:
         case CodeWScope:
             // the above types always reference external data.
@@ -78,61 +91,60 @@ namespace mongo {
             // Objects either hold a NULL ptr or should be ref-counting
             verify(refCounter == bool(genericRCPtr));
             break;
-        }
     }
+}
 
-    void ValueStorage::putString(const StringData& s) {
-        // Note: this also stores data portion of BinData
-        const size_t sizeNoNUL = s.size();
-        if (sizeNoNUL <= sizeof(shortStrStorage)) {
-            shortStr = true;
-            shortStrSize = s.size();
-            s.copyTo(shortStrStorage, false); // no NUL
+void ValueStorage::putString(StringData s) {
+    // Note: this also stores data portion of BinData
+    const size_t sizeNoNUL = s.size();
+    if (sizeNoNUL <= sizeof(shortStrStorage)) {
+        shortStr = true;
+        shortStrSize = s.size();
+        s.copyTo(shortStrStorage, false);  // no NUL
 
-            // All memory is zeroed before this is called.
-            // Note this may be past end of shortStrStorage and into nulTerminator
-            dassert(shortStrStorage[sizeNoNUL] == '\0');
-        }
-        else {
-            putRefCountable(RCString::create(s));
-        }
+        // All memory is zeroed before this is called.
+        // Note this may be past end of shortStrStorage and into nulTerminator
+        dassert(shortStrStorage[sizeNoNUL] == '\0');
+    } else {
+        putRefCountable(RCString::create(s));
     }
+}
 
-    void ValueStorage::putDocument(const Document& d) {
-        putRefCountable(d._storage);
-    }
+void ValueStorage::putDocument(const Document& d) {
+    putRefCountable(d._storage);
+}
 
-    void ValueStorage::putVector(const RCVector* vec) {
-        fassert(16485, vec);
-        putRefCountable(vec);
-    }
+void ValueStorage::putVector(const RCVector* vec) {
+    fassert(16485, vec);
+    putRefCountable(vec);
+}
 
-    void ValueStorage::putRegEx(const BSONRegEx& re) {
-        const size_t patternLen = re.pattern.size();
-        const size_t flagsLen = re.flags.size();
-        const size_t totalLen = patternLen + 1/*middle NUL*/ + flagsLen;
+void ValueStorage::putRegEx(const BSONRegEx& re) {
+    const size_t patternLen = re.pattern.size();
+    const size_t flagsLen = re.flags.size();
+    const size_t totalLen = patternLen + 1 /*middle NUL*/ + flagsLen;
 
-        // Need to copy since putString doesn't support scatter-gather.
-        boost::scoped_array<char> buf (new char[totalLen]);
-        re.pattern.copyTo(buf.get(), true);
-        re.flags.copyTo(buf.get() + patternLen + 1, false); // no NUL
-        putString(StringData(buf.get(), totalLen));
-    }
+    // Need to copy since putString doesn't support scatter-gather.
+    std::unique_ptr<char[]> buf(new char[totalLen]);
+    re.pattern.copyTo(buf.get(), true);
+    re.flags.copyTo(buf.get() + patternLen + 1, false);  // no NUL
+    putString(StringData(buf.get(), totalLen));
+}
 
-    Document ValueStorage::getDocument() const {
-        if (!genericRCPtr)
-            return Document();
+Document ValueStorage::getDocument() const {
+    if (!genericRCPtr)
+        return Document();
 
-        dassert(typeid(*genericRCPtr) == typeid(const DocumentStorage));
-        const DocumentStorage* documentPtr = static_cast<const DocumentStorage*>(genericRCPtr);
-        return Document(documentPtr);
-    }
+    dassert(typeid(*genericRCPtr) == typeid(const DocumentStorage));
+    const DocumentStorage* documentPtr = static_cast<const DocumentStorage*>(genericRCPtr);
+    return Document(documentPtr);
+}
 
-    // not in header because document is fwd declared
-    Value::Value(const BSONObj& obj) : _storage(Object, Document(obj)) {}
+// not in header because document is fwd declared
+Value::Value(const BSONObj& obj) : _storage(Object, Document(obj)) {}
 
-    Value::Value(const BSONElement& elem) : _storage(elem.type()) {
-        switch(elem.type()) {
+Value::Value(const BSONElement& elem) : _storage(elem.type()) {
+    switch (elem.type()) {
         // These are all type-only, no data
         case EOO:
         case MinKey:
@@ -148,7 +160,7 @@ namespace mongo {
         case Code:
         case Symbol:
         case String:
-            _storage.putString(StringData(elem.valuestr(), elem.valuestrsize()-1));
+            _storage.putString(elem.valueStringData());
             break;
 
         case Object: {
@@ -157,7 +169,7 @@ namespace mongo {
         }
 
         case Array: {
-            intrusive_ptr<RCVector> vec (new RCVector);
+            intrusive_ptr<RCVector> vec(new RCVector);
             BSONForEach(sub, elem.embeddedObject()) {
                 vec->vec.push_back(Value(sub));
             }
@@ -166,8 +178,9 @@ namespace mongo {
         }
 
         case jstOID:
-            BOOST_STATIC_ASSERT(sizeof(_storage.oid) == sizeof(OID));
-            memcpy(_storage.oid, elem.OID().getData(), sizeof(OID));
+            static_assert(sizeof(_storage.oid) == OID::kOIDSize,
+                          "sizeof(_storage.oid) == OID::kOIDSize");
+            memcpy(_storage.oid, elem.OID().view().view(), OID::kOIDSize);
             break;
 
         case Bool:
@@ -175,8 +188,7 @@ namespace mongo {
             break;
 
         case Date:
-            // this is really signed but typed as unsigned for historical reasons
-            _storage.dateValue = static_cast<long long>(elem.date().millis);
+            _storage.dateValue = elem.date().toMillisSinceEpoch();
             break;
 
         case RegEx: {
@@ -188,17 +200,20 @@ namespace mongo {
             _storage.intValue = elem.numberInt();
             break;
 
-        case Timestamp:
-            // asDate is a poorly named function that returns a ReplTime
-            _storage.timestampValue = elem._opTime().asDate();
+        case bsonTimestamp:
+            _storage.timestampValue = elem.timestamp().asULL();
             break;
 
         case NumberLong:
             _storage.longValue = elem.numberLong();
             break;
 
+        case NumberDecimal:
+            _storage.putDecimal(elem.numberDecimal());
+            break;
+
         case CodeWScope: {
-            StringData code (elem.codeWScopeCode(), elem.codeWScopeCodeLen()-1);
+            StringData code(elem.codeWScopeCode(), elem.codeWScopeCodeLen() - 1);
             _storage.putCodeWScope(BSONCodeWScope(code, elem.codeWScopeObject()));
             break;
         }
@@ -213,83 +228,116 @@ namespace mongo {
         case DBRef:
             _storage.putDBRef(BSONDBRef(elem.dbrefNS(), elem.dbrefOID()));
             break;
-        }
+    }
+}
+
+Value::Value(const BSONArray& arr) : _storage(Array) {
+    intrusive_ptr<RCVector> vec(new RCVector);
+    BSONForEach(sub, arr) {
+        vec->vec.push_back(Value(sub));
+    }
+    _storage.putVector(vec.get());
+}
+
+Value Value::createIntOrLong(long long longValue) {
+    int intValue = longValue;
+    if (intValue != longValue) {
+        // it is too large to be an int and should remain a long
+        return Value(longValue);
     }
 
-    Value::Value(const BSONArray& arr) : _storage(Array) {
-        intrusive_ptr<RCVector> vec (new RCVector);
-        BSONForEach(sub, arr) {
-            vec->vec.push_back(Value(sub));
-        }
-        _storage.putVector(vec.get());
-    }
+    // should be an int since all arguments were int and it fits
+    return Value(intValue);
+}
 
-    Value Value::createIntOrLong(long long longValue) {
-        int intValue = longValue;
-        if (intValue != longValue) {
-            // it is too large to be an int and should remain a long
-            return Value(longValue);
-        }
+Decimal128 Value::getDecimal() const {
+    BSONType type = getType();
+    if (type == NumberInt)
+        return Decimal128(_storage.intValue);
+    if (type == NumberLong)
+        return Decimal128(_storage.longValue);
+    if (type == NumberDouble)
+        return Decimal128(_storage.doubleValue);
+    invariant(type == NumberDecimal);
+    return _storage.getDecimal();
+}
 
-        // should be an int since all arguments were int and it fits
-        return Value(intValue);
-    }
+double Value::getDouble() const {
+    BSONType type = getType();
+    if (type == NumberInt)
+        return _storage.intValue;
+    if (type == NumberLong)
+        return static_cast<double>(_storage.longValue);
+    if (type == NumberDecimal)
+        return _storage.getDecimal().toDouble();
 
-    double Value::getDouble() const {
-        BSONType type = getType();
-        if (type == NumberInt)
-            return _storage.intValue;
-        if (type == NumberLong)
-            return static_cast< double >( _storage.longValue );
+    verify(type == NumberDouble);
+    return _storage.doubleValue;
+}
 
-        verify(type == NumberDouble);
-        return _storage.doubleValue;
-    }
+Document Value::getDocument() const {
+    verify(getType() == Object);
+    return _storage.getDocument();
+}
 
-    Document Value::getDocument() const {
-        verify(getType() == Object);
-        return _storage.getDocument();
-    }
+Value Value::operator[](size_t index) const {
+    if (getType() != Array || index >= getArrayLength())
+        return Value();
 
-    Value Value::operator[] (size_t index) const {
-        if (getType() != Array || index >= getArrayLength())
-            return Value();
+    return getArray()[index];
+}
 
-        return getArray()[index];
-    }
+Value Value::operator[](StringData name) const {
+    if (getType() != Object)
+        return Value();
 
-    Value Value::operator[] (StringData name) const {
-        if (getType() != Object)
-            return Value();
+    return getDocument()[name];
+}
 
-        return getDocument()[name];
-    }
-
-    BSONObjBuilder& operator << (BSONObjBuilderValueStream& builder, const Value& val) {
-        switch(val.getType()) {
-        case EOO:          return builder.builder(); // nothing appended
-        case MinKey:       return builder << MINKEY;
-        case MaxKey:       return builder << MAXKEY;
-        case jstNULL:      return builder << BSONNULL;
-        case Undefined:    return builder << BSONUndefined;
-        case jstOID:       return builder << val.getOid();
-        case NumberInt:    return builder << val.getInt();
-        case NumberLong:   return builder << val.getLong();
-        case NumberDouble: return builder << val.getDouble();
-        case String:       return builder << val.getStringData();
-        case Bool:         return builder << val.getBool();
-        case Date:         return builder << Date_t(val.getDate());
-        case Timestamp:    return builder << val.getTimestamp();
-        case Object:       return builder << val.getDocument();
-        case Symbol:       return builder << BSONSymbol(val.getStringData());
-        case Code:         return builder << BSONCode(val.getStringData());
-        case RegEx:        return builder << BSONRegEx(val.getRegex(), val.getRegexFlags());
+BSONObjBuilder& operator<<(BSONObjBuilderValueStream& builder, const Value& val) {
+    switch (val.getType()) {
+        case EOO:
+            return builder.builder();  // nothing appended
+        case MinKey:
+            return builder << MINKEY;
+        case MaxKey:
+            return builder << MAXKEY;
+        case jstNULL:
+            return builder << BSONNULL;
+        case Undefined:
+            return builder << BSONUndefined;
+        case jstOID:
+            return builder << val.getOid();
+        case NumberInt:
+            return builder << val.getInt();
+        case NumberLong:
+            return builder << val.getLong();
+        case NumberDouble:
+            return builder << val.getDouble();
+        case NumberDecimal:
+            return builder << val.getDecimal();
+        case String:
+            return builder << val.getStringData();
+        case Bool:
+            return builder << val.getBool();
+        case Date:
+            return builder << Date_t::fromMillisSinceEpoch(val.getDate());
+        case bsonTimestamp:
+            return builder << val.getTimestamp();
+        case Object:
+            return builder << val.getDocument();
+        case Symbol:
+            return builder << BSONSymbol(val.getStringData());
+        case Code:
+            return builder << BSONCode(val.getStringData());
+        case RegEx:
+            return builder << BSONRegEx(val.getRegex(), val.getRegexFlags());
 
         case DBRef:
             return builder << BSONDBRef(val._storage.getDBRef()->ns, val._storage.getDBRef()->oid);
 
         case BinData:
-            return builder << BSONBinData(val.getStringData().rawData(), // looking for void*
+            return builder << BSONBinData(val.getStringData().rawData(),  // looking for void*
                                           val.getStringData().size(),
                                           val._storage.binDataType());
 
@@ -301,29 +349,29 @@ namespace mongo {
             const vector<Value>& array = val.getArray();
             const size_t n = array.size();
             BSONArrayBuilder arrayBuilder(builder.subarrayStart());
-            for(size_t i = 0; i < n; i++) {
+            for (size_t i = 0; i < n; i++) {
                 array[i].addToBsonArray(&arrayBuilder);
             }
             arrayBuilder.doneFast();
             return builder.builder();
         }
-        }
-        verify(false);
     }
+    verify(false);
+}
 
-    void Value::addToBsonObj(BSONObjBuilder* pBuilder, StringData fieldName) const {
-        *pBuilder << fieldName << *this;
+void Value::addToBsonObj(BSONObjBuilder* pBuilder, StringData fieldName) const {
+    *pBuilder << fieldName << *this;
+}
+
+void Value::addToBsonArray(BSONArrayBuilder* pBuilder) const {
+    if (!missing()) {  // don't want to increment builder's counter
+        *pBuilder << *this;
     }
+}
 
-    void Value::addToBsonArray(BSONArrayBuilder* pBuilder) const {
-        if (!missing()) { // don't want to increment builder's counter
-            *pBuilder << *this;
-        }
-    }
-
-    bool Value::coerceToBool() const {
-        // TODO Unify the implementation with BSONElement::trueValue().
-        switch(getType()) {
+bool Value::coerceToBool() const {
+    // TODO Unify the implementation with BSONElement::trueValue().
+    switch (getType()) {
         case CodeWScope:
         case MinKey:
         case DBRef:
@@ -337,7 +385,7 @@ namespace mongo {
         case Date:
         case RegEx:
         case Symbol:
-        case Timestamp:
+        case bsonTimestamp:
             return true;
 
         case EOO:
@@ -345,16 +393,22 @@ namespace mongo {
         case Undefined:
             return false;
 
-        case Bool: return _storage.boolValue;
-        case NumberInt: return _storage.intValue;
-        case NumberLong: return _storage.longValue;
-        case NumberDouble: return _storage.doubleValue;
-        }
-        verify(false);
+        case Bool:
+            return _storage.boolValue;
+        case NumberInt:
+            return _storage.intValue;
+        case NumberLong:
+            return _storage.longValue;
+        case NumberDouble:
+            return _storage.doubleValue;
+        case NumberDecimal:
+            return !_storage.getDecimal().isZero();
     }
+    verify(false);
+}
 
-    int Value::coerceToInt() const {
-        switch(getType()) {
+int Value::coerceToInt() const {
+    switch (getType()) {
         case NumberInt:
             return _storage.intValue;
 
@@ -364,16 +418,19 @@ namespace mongo {
         case NumberDouble:
             return static_cast<int>(_storage.doubleValue);
 
-        default:
-            uassert(16003, str::stream() <<
-                    "can't convert from BSON type " << typeName(getType()) <<
-                    " to int",
-                    false);
-        } // switch(getType())
-    }
+        case NumberDecimal:
+            return (_storage.getDecimal()).toInt();
 
-    long long Value::coerceToLong() const {
-        switch(getType()) {
+        default:
+            uassert(16003,
+                    str::stream() << "can't convert from BSON type " << typeName(getType())
+                                  << " to int",
+                    false);
+    }  // switch(getType())
+}
+
+long long Value::coerceToLong() const {
+    switch (getType()) {
         case NumberLong:
             return _storage.longValue;
 
@@ -383,16 +440,19 @@ namespace mongo {
         case NumberDouble:
             return static_cast<long long>(_storage.doubleValue);
 
-        default:
-            uassert(16004, str::stream() <<
-                    "can't convert from BSON type " << typeName(getType()) <<
-                    " to long",
-                    false);
-        } // switch(getType())
-    }
+        case NumberDecimal:
+            return (_storage.getDecimal()).toLong();
 
-    double Value::coerceToDouble() const {
-        switch(getType()) {
+        default:
+            uassert(16004,
+                    str::stream() << "can't convert from BSON type " << typeName(getType())
+                                  << " to long",
+                    false);
+    }  // switch(getType())
+}
+
+double Value::coerceToDouble() const {
+    switch (getType()) {
         case NumberDouble:
             return _storage.doubleValue;
 
@@ -402,82 +462,108 @@ namespace mongo {
         case NumberLong:
             return static_cast<double>(_storage.longValue);
 
-        default:
-            uassert(16005, str::stream() <<
-                    "can't convert from BSON type " << typeName(getType()) <<
-                    " to double",
-                    false);
-        } // switch(getType())
-    }
+        case NumberDecimal:
+            return (_storage.getDecimal()).toDouble();
 
-    long long Value::coerceToDate() const {
-        switch(getType()) {
+        default:
+            uassert(16005,
+                    str::stream() << "can't convert from BSON type " << typeName(getType())
+                                  << " to double",
+                    false);
+    }  // switch(getType())
+}
+
+Decimal128 Value::coerceToDecimal() const {
+    switch (getType()) {
+        case NumberDecimal:
+            return _storage.getDecimal();
+
+        case NumberInt:
+            return Decimal128(_storage.intValue);
+
+        case NumberLong:
+            return Decimal128(_storage.longValue);
+
+        case NumberDouble:
+            return Decimal128(_storage.doubleValue);
+
+        default:
+            uassert(16008,
+                    str::stream() << "can't convert from BSON type " << typeName(getType())
+                                  << " to decimal",
+                    false);
+    }  // switch(getType())
+}
+
+long long Value::coerceToDate() const {
+    switch (getType()) {
         case Date:
             return getDate();
 
-        case Timestamp:
+        case bsonTimestamp:
             return getTimestamp().getSecs() * 1000LL;
 
         default:
-            uassert(16006, str::stream() <<
-                    "can't convert from BSON type " << typeName(getType()) << " to Date",
+            uassert(16006,
+                    str::stream() << "can't convert from BSON type " << typeName(getType())
+                                  << " to Date",
                     false);
-        } // switch(getType())
-    }
+    }  // switch(getType())
+}
 
-    time_t Value::coerceToTimeT() const {
-        long long millis = coerceToDate();
-        if (millis < 0) {
-            // We want the division below to truncate toward -inf rather than 0
-            // eg Dec 31, 1969 23:59:58.001 should be -2 seconds rather than -1
-            // This is needed to get the correct values from coerceToTM
-            if ( -1999 / 1000 != -2) { // this is implementation defined
-                millis -= 1000-1;
-            }
+time_t Value::coerceToTimeT() const {
+    long long millis = coerceToDate();
+    if (millis < 0) {
+        // We want the division below to truncate toward -inf rather than 0
+        // eg Dec 31, 1969 23:59:58.001 should be -2 seconds rather than -1
+        // This is needed to get the correct values from coerceToTM
+        if (-1999 / 1000 != -2) {  // this is implementation defined
+            millis -= 1000 - 1;
         }
-        const long long seconds = millis / 1000;
-
-        uassert(16421, "Can't handle date values outside of time_t range",
-               seconds >= std::numeric_limits<time_t>::min() &&
-               seconds <= std::numeric_limits<time_t>::max());
-
-        return static_cast<time_t>(seconds);
     }
-    tm Value::coerceToTm() const {
-        // See implementation in Date_t.
-        // Can't reuse that here because it doesn't support times before 1970
-        time_t dtime = coerceToTimeT();
-        tm out;
+    const long long seconds = millis / 1000;
 
-#if defined(_WIN32) // Both the argument order and the return values differ
-        bool itWorked = gmtime_s(&out, &dtime) == 0;
+    uassert(16421,
+            "Can't handle date values outside of time_t range",
+            seconds >= std::numeric_limits<time_t>::min() &&
+                seconds <= std::numeric_limits<time_t>::max());
+
+    return static_cast<time_t>(seconds);
+}
+tm Value::coerceToTm() const {
+    // See implementation in Date_t.
+    // Can't reuse that here because it doesn't support times before 1970
+    time_t dtime = coerceToTimeT();
+    tm out;
+
+#if defined(_WIN32)  // Both the argument order and the return values differ
+    bool itWorked = gmtime_s(&out, &dtime) == 0;
 #else
-        bool itWorked = gmtime_r(&dtime, &out) != NULL;
+    bool itWorked = gmtime_r(&dtime, &out) != NULL;
 #endif
 
-        if (!itWorked) {
-            if (dtime < 0) {
-                // Windows docs say it doesn't support these, but empirically it seems to work
-                uasserted(16422, "gmtime failed - your system doesn't support dates before 1970");
-            }
-            else {
-                uasserted(16423, str::stream() << "gmtime failed to convert time_t of " << dtime);
-            }
+    if (!itWorked) {
+        if (dtime < 0) {
+            // Windows docs say it doesn't support these, but empirically it seems to work
+            uasserted(16422, "gmtime failed - your system doesn't support dates before 1970");
+        } else {
+            uasserted(16423, str::stream() << "gmtime failed to convert time_t of " << dtime);
         }
-
-        return out;
     }
 
-    static string tmToISODateString(const tm& time) {
-        char buf[128];
-        size_t len = strftime(buf, 128, "%Y-%m-%dT%H:%M:%S", &time);
-        verify(len > 0);
-        verify(len < 128);
-        return buf;
-    }
+    return out;
+}
 
-    string Value::coerceToString() const {
-        switch(getType()) {
+static string tmToISODateString(const tm& time) {
+    char buf[128];
+    size_t len = strftime(buf, 128, "%Y-%m-%dT%H:%M:%S", &time);
+    verify(len > 0);
+    verify(len < 128);
+    return buf;
+}
+
+string Value::coerceToString() const {
+    switch (getType()) {
         case NumberDouble:
             return str::stream() << _storage.doubleValue;
 
@@ -487,12 +573,15 @@ namespace mongo {
         case NumberLong:
             return str::stream() << _storage.longValue;
 
+        case NumberDecimal:
+            return str::stream() << _storage.getDecimal().toString();
+
         case Code:
         case Symbol:
         case String:
             return getStringData().toString();
 
-        case Timestamp:
+        case bsonTimestamp:
             return getTimestamp().toStringPretty();
 
         case Date:
@@ -504,70 +593,53 @@ namespace mongo {
             return "";
 
         default:
-            uassert(16007, str::stream() <<
-                    "can't convert from BSON type " << typeName(getType()) <<
-                    " to String",
+            uassert(16007,
+                    str::stream() << "can't convert from BSON type " << typeName(getType())
+                                  << " to String",
                     false);
-        } // switch(getType())
-    }
+    }  // switch(getType())
+}
 
-    OpTime Value::coerceToTimestamp() const {
-        switch(getType()) {
-        case Timestamp:
+Timestamp Value::coerceToTimestamp() const {
+    switch (getType()) {
+        case bsonTimestamp:
             return getTimestamp();
 
         default:
-            uassert(16378, str::stream() <<
-                    "can't convert from BSON type " << typeName(getType()) <<
-                    " to timestamp",
+            uassert(16378,
+                    str::stream() << "can't convert from BSON type " << typeName(getType())
+                                  << " to timestamp",
                     false);
-        } // switch(getType())
-    }
+    }  // switch(getType())
+}
 
-    // Helper function for Value::compare.
-    // Better than l-r for cases where difference > MAX_INT
-    template <typename T>
-    inline static int cmp(const T& left, const T& right) {
-        if (left < right) {
-            return -1;
-        }
-        else if (left == right) {
-            return 0;
-        }
-        else {
-            dassert(left > right);
-            return 1;
-        }
-    }
-
-    // Special case for double since it needs special NaN handling
-    inline static int cmp(double left, double right) {
-        // The following is lifted directly from compareElementValues
-        // to ensure identical handling of NaN
-        if (left < right) 
-            return -1;
-        if (left == right)
-            return 0;
-        if (isNaN(left))
-            return isNaN(right) ? 0 : -1;
+// Helper function for Value::compare.
+// Better than l-r for cases where difference > MAX_INT
+template <typename T>
+inline static int cmp(const T& left, const T& right) {
+    if (left < right) {
+        return -1;
+    } else if (left == right) {
+        return 0;
+    } else {
+        dassert(left > right);
         return 1;
     }
+}
 
-    int Value::compare(const Value& rL, const Value& rR) {
-        // Note, this function needs to behave identically to BSON's compareElementValues().
-        // Additionally, any changes here must be replicated in hash_combine().
-        BSONType lType = rL.getType();
-        BSONType rType = rR.getType();
+int Value::compare(const Value& rL, const Value& rR) {
+    // Note, this function needs to behave identically to BSON's compareElementValues().
+    // Additionally, any changes here must be replicated in hash_combine().
+    BSONType lType = rL.getType();
+    BSONType rType = rR.getType();
 
-        int ret = lType == rType
-                    ? 0 // fast-path common case
-                    : cmp(canonicalizeBSONType(lType),
-                          canonicalizeBSONType(rType));
+    int ret = lType == rType ? 0  // fast-path common case
+                             : cmp(canonicalizeBSONType(lType), canonicalizeBSONType(rType));
 
-        if (ret)
-            return ret;
+    if (ret)
+        return ret;
 
-        switch(lType) {
+    switch (lType) {
         // Order of types is the same as in compareElementValues() to make it easier to verify
 
         // These are valueless types
@@ -581,26 +653,80 @@ namespace mongo {
         case Bool:
             return rL.getBool() - rR.getBool();
 
-        // WARNING: Timestamp and Date have same canonical type, but compare differently.
-        // Maintaining behavior from normal BSON.
-        case Timestamp: // unsigned
+        case bsonTimestamp:  // unsigned
             return cmp(rL._storage.timestampValue, rR._storage.timestampValue);
-        case Date: // signed
+
+        case Date:  // signed
             return cmp(rL._storage.dateValue, rR._storage.dateValue);
 
         // Numbers should compare by equivalence even if different types
-        case NumberLong:
-        case NumberInt:
-        case NumberDouble:
-            switch (getWidestNumeric(lType, rType)) {
-            case NumberDouble: return cmp(rL.getDouble(), rR.getDouble());
-            case NumberLong:   return cmp(rL.getLong(),   rR.getLong());
-            case NumberInt:    return cmp(rL.getInt(),    rR.getInt());
-            default: verify(false);
+
+        case NumberDecimal: {
+            switch (rType) {
+                case NumberDecimal:
+                    return compareDecimals(rL._storage.getDecimal(), rR._storage.getDecimal());
+                case NumberInt:
+                    return compareDecimalToInt(rL._storage.getDecimal(), rR._storage.intValue);
+                case NumberLong:
+                    return compareDecimalToLong(rL._storage.getDecimal(), rR._storage.longValue);
+                case NumberDouble:
+                    return compareDecimalToDouble(rL._storage.getDecimal(),
+                                                  rR._storage.doubleValue);
+                default:
+                    invariant(false);
             }
+        }
+
+        case NumberInt: {
+            // All types can precisely represent all NumberInts, so it is safe to simply convert to
+            // whatever rhs's type is.
+            switch (rType) {
+                case NumberInt:
+                    return compareInts(rL._storage.intValue, rR._storage.intValue);
+                case NumberLong:
+                    return compareLongs(rL._storage.intValue, rR._storage.longValue);
+                case NumberDouble:
+                    return compareDoubles(rL._storage.intValue, rR._storage.doubleValue);
+                case NumberDecimal:
+                    return compareIntToDecimal(rL._storage.intValue, rR._storage.getDecimal());
+                default:
+                    invariant(false);
+            }
+        }
+
+        case NumberLong: {
+            switch (rType) {
+                case NumberLong:
+                    return compareLongs(rL._storage.longValue, rR._storage.longValue);
+                case NumberInt:
+                    return compareLongs(rL._storage.longValue, rR._storage.intValue);
+                case NumberDouble:
+                    return compareLongToDouble(rL._storage.longValue, rR._storage.doubleValue);
+                case NumberDecimal:
+                    return compareLongToDecimal(rL._storage.longValue, rR._storage.getDecimal());
+                default:
+                    invariant(false);
+            }
+        }
+
+        case NumberDouble: {
+            switch (rType) {
+                case NumberDouble:
+                    return compareDoubles(rL._storage.doubleValue, rR._storage.doubleValue);
+                case NumberInt:
+                    return compareDoubles(rL._storage.doubleValue, rR._storage.intValue);
+                case NumberLong:
+                    return compareDoubleToLong(rL._storage.doubleValue, rR._storage.longValue);
+                case NumberDecimal:
+                    return compareDoubleToDecimal(rL._storage.doubleValue,
+                                                  rR._storage.getDecimal());
+                default:
+                    invariant(false);
+            }
+        }
 
         case jstOID:
-            return memcmp(rL._storage.oid, rR._storage.oid, sizeof(OID));
+            return memcmp(rL._storage.oid, rR._storage.oid, OID::kOIDSize);
 
         case Code:
         case Symbol:
@@ -614,15 +740,15 @@ namespace mongo {
             const vector<Value>& lArr = rL.getArray();
             const vector<Value>& rArr = rR.getArray();
 
-            const size_t elems = min(lArr.size(), rArr.size());
-            for (size_t i = 0; i < elems; i++ ) {
+            const size_t elems = std::min(lArr.size(), rArr.size());
+            for (size_t i = 0; i < elems; i++) {
                 // compare the two corresponding elements
                 ret = Value::compare(lArr[i], rArr[i]);
                 if (ret)
-                    return ret; // values are unequal
+                    return ret;  // values are unequal
             }
 
-            // if we get here we are either equal or one is prefix of the other 
+            // if we get here we are either equal or one is prefix of the other
             return cmp(lArr.size(), rArr.size());
         }
 
@@ -649,38 +775,29 @@ namespace mongo {
             return rL.getStringData().compare(rR.getStringData());
         }
 
-        case RegEx: // same as String in this impl but keeping order same as compareElementValues
+        case RegEx:  // same as String in this impl but keeping order same as compareElementValues
             return rL.getStringData().compare(rR.getStringData());
 
         case CodeWScope: {
-            // This case crazy, but identical to how they are compared in BSON (SERVER-7804)
-
             intrusive_ptr<const RCCodeWScope> l = rL._storage.getCodeWScope();
             intrusive_ptr<const RCCodeWScope> r = rR._storage.getCodeWScope();
-
-            // This triggers two bugs in codeWScope.
-            // Since this is a very rare case I'm not handling it here.
-            uassert(16557, "can't compare CodeWScope values containing a NUL byte in the code.",
-                    strlen(l->code.c_str()) == l->code.size()
-                 && strlen(r->code.c_str()) == r->code.size());
 
             ret = l->code.compare(r->code);
             if (ret)
                 return ret;
 
-            // SERVER-7804
-            return strcmp(l->scope.objdata(), r->scope.objdata());
+            return l->scope.woCompare(r->scope);
         }
-        }
-        verify(false);
     }
+    verify(false);
+}
 
-    void Value::hash_combine(size_t &seed) const {
-        BSONType type = getType();
+void Value::hash_combine(size_t& seed) const {
+    BSONType type = getType();
 
-        boost::hash_combine(seed, canonicalizeBSONType(type));
+    boost::hash_combine(seed, canonicalizeBSONType(type));
 
-        switch (type) {
+    switch (type) {
         // Order of types is the same as in Value::compare() and compareElementValues().
 
         // These are valueless types
@@ -695,30 +812,42 @@ namespace mongo {
             boost::hash_combine(seed, getBool());
             break;
 
-        case Timestamp:
+        case bsonTimestamp:
         case Date:
-            BOOST_STATIC_ASSERT(sizeof(_storage.dateValue) == sizeof(_storage.timestampValue));
+            static_assert(sizeof(_storage.dateValue) == sizeof(_storage.timestampValue),
+                          "sizeof(_storage.dateValue) == sizeof(_storage.timestampValue)");
             boost::hash_combine(seed, _storage.dateValue);
             break;
 
-            /*
-              Numbers whose values are equal need to hash to the same thing
-              as well.  Note that Value::compare() promotes numeric values to
-              their largest common form in order for comparisons to work.
-              We must hash all numeric values as if they are doubles so that
-              things like grouping work.  We don't know what values will come
-              down the pipe later, but if we start out with int representations
-              of a value, and later see double representations of it, they need
-              to end up in the same buckets.
-             */
+        case mongo::NumberDecimal: {
+            const Decimal128 dcml = getDecimal();
+            if (dcml.toAbs().isGreater(Decimal128(std::numeric_limits<double>::max())) &&
+                !dcml.isInfinite() && !dcml.isNaN()) {
+                // Normalize our decimal to force equivalent decimals
+                // in the same cohort to hash to the same value
+                Decimal128 dcmlNorm(dcml.normalize());
+                boost::hash_combine(seed, dcmlNorm.getValue().low64);
+                boost::hash_combine(seed, dcmlNorm.getValue().high64);
+                break;
+            }
+            // Else, fall through and convert the decimal to a double and hash.
+            // At this point the decimal fits into the range of doubles, is infinity, or is NaN,
+            // which doubles have a cheaper representation for.
+        }
+        // This converts all numbers to doubles, which ignores the low-order bits of
+        // NumberLongs > 2**53 and precise decimal numbers without double representations,
+        // but that is ok since the hash will still be the same for equal numbers and is
+        // still likely to be different for different numbers. (Note: this issue only
+        // applies for decimals when they are inside of the valid double range. See
+        // the above case.)
+        // SERVER-16851
         case NumberDouble:
         case NumberLong:
         case NumberInt: {
             const double dbl = getDouble();
-            if (isNaN(dbl)) {
+            if (std::isnan(dbl)) {
                 boost::hash_combine(seed, numeric_limits<double>::quiet_NaN());
-            }
-            else {
+            } else {
                 boost::hash_combine(seed, dbl);
             }
             break;
@@ -742,7 +871,7 @@ namespace mongo {
 
         case Array: {
             const vector<Value>& vec = getArray();
-            for (size_t i=0; i < vec.size(); i++)
+            for (size_t i = 0; i < vec.size(); i++)
                 vec[i].hash_combine(seed);
             break;
         }
@@ -767,19 +896,20 @@ namespace mongo {
         }
 
         case CodeWScope: {
-            // SERVER-7804
-            const char * code = _storage.getCodeWScope()->code.c_str();
-            boost::hash_range(seed, code, (code + strlen(code)));
-            // Not going to bother hashing scope. Too many edge cases. Will fall back to
-            // Value::compare when code is same, so this is ok.
+            intrusive_ptr<const RCCodeWScope> cws = _storage.getCodeWScope();
+            boost::hash_combine(seed, StringData::Hasher()(cws->code));
+            boost::hash_combine(seed, BSONObj::Hasher()(cws->scope));
             break;
         }
-        }
     }
+}
 
-    BSONType Value::getWidestNumeric(BSONType lType, BSONType rType) {
-        if (lType == NumberDouble) {
-            switch(rType) {
+BSONType Value::getWidestNumeric(BSONType lType, BSONType rType) {
+    if (lType == NumberDouble) {
+        switch (rType) {
+            case NumberDecimal:
+                return NumberDecimal;
+
             case NumberDouble:
             case NumberLong:
             case NumberInt:
@@ -787,10 +917,12 @@ namespace mongo {
 
             default:
                 break;
-            }
         }
-        else if (lType == NumberLong) {
-            switch(rType) {
+    } else if (lType == NumberLong) {
+        switch (rType) {
+            case NumberDecimal:
+                return NumberDecimal;
+
             case NumberDouble:
                 return NumberDouble;
 
@@ -800,10 +932,12 @@ namespace mongo {
 
             default:
                 break;
-            }
         }
-        else if (lType == NumberInt) {
-            switch(rType) {
+    } else if (lType == NumberInt) {
+        switch (rType) {
+            case NumberDecimal:
+                return NumberDecimal;
+
             case NumberDouble:
                 return NumberDouble;
 
@@ -815,22 +949,51 @@ namespace mongo {
 
             default:
                 break;
-            }
         }
+    } else if (lType == NumberDecimal) {
+        switch (rType) {
+            case NumberInt:
+            case NumberLong:
+            case NumberDouble:
+            case NumberDecimal:
+                return NumberDecimal;
 
-        // Reachable, but callers must subsequently err out in this case.
-        return Undefined;
+            default:
+                break;
+        }
     }
 
-    size_t Value::getApproximateSize() const {
-        switch(getType()) {
+    // Reachable, but callers must subsequently err out in this case.
+    return Undefined;
+}
+
+// TODO: Add Decimal128 support to Value::integral()
+// SERVER-19735
+bool Value::integral() const {
+    switch (getType()) {
+        case NumberInt:
+            return true;
+        case NumberLong:
+            return (_storage.longValue <= numeric_limits<int>::max() &&
+                    _storage.longValue >= numeric_limits<int>::min());
+        case NumberDouble:
+            return (_storage.doubleValue <= numeric_limits<int>::max() &&
+                    _storage.doubleValue >= numeric_limits<int>::min() &&
+                    _storage.doubleValue == static_cast<int>(_storage.doubleValue));
+        default:
+            return false;
+    }
+}
+
+size_t Value::getApproximateSize() const {
+    switch (getType()) {
         case Code:
         case RegEx:
         case Symbol:
         case BinData:
         case String:
             return sizeof(Value) + (_storage.shortStr
-                                        ? 0 // string stored inline, so no extra mem usage
+                                        ? 0  // string stored inline, so no extra mem usage
                                         : sizeof(RCString) + _storage.getString().size());
 
         case Object:
@@ -840,18 +1003,21 @@ namespace mongo {
             size_t size = sizeof(Value);
             size += sizeof(RCVector);
             const size_t n = getArray().size();
-            for(size_t i = 0; i < n; ++i) {
+            for (size_t i = 0; i < n; ++i) {
                 size += getArray()[i].getApproximateSize();
             }
             return size;
         }
 
         case CodeWScope:
-            return sizeof(Value) + sizeof(RCCodeWScope) + _storage.getCodeWScope()->code.size()
-                                                        + _storage.getCodeWScope()->scope.objsize();
+            return sizeof(Value) + sizeof(RCCodeWScope) + _storage.getCodeWScope()->code.size() +
+                _storage.getCodeWScope()->scope.objsize();
 
         case DBRef:
             return sizeof(Value) + sizeof(RCDBRef) + _storage.getDBRef()->ns.size();
+
+        case NumberDecimal:
+            return sizeof(Value) + sizeof(RCDecimal);
 
         // These types are always contained within the Value
         case EOO:
@@ -862,45 +1028,64 @@ namespace mongo {
         case Bool:
         case Date:
         case NumberInt:
-        case Timestamp:
+        case bsonTimestamp:
         case NumberLong:
         case jstNULL:
         case Undefined:
             return sizeof(Value);
-        }
-        verify(false);
     }
+    verify(false);
+}
 
-    string Value::toString() const {
-        // TODO use StringBuilder when operator << is ready
-        stringstream out;
-        out << *this;
-        return out.str();
-    }
+string Value::toString() const {
+    // TODO use StringBuilder when operator << is ready
+    stringstream out;
+    out << *this;
+    return out.str();
+}
 
-    ostream& operator << (ostream& out, const Value& val) {
-        switch(val.getType()) {
-        case EOO: return out << "MISSING";
-        case MinKey: return out << "MinKey";
-        case MaxKey: return out << "MaxKey";
-        case jstOID: return out << val.getOid();
-        case String: return out << '"' << val.getString() << '"';
-        case RegEx: return out << '/' << val.getRegex() << '/' << val.getRegexFlags();
-        case Symbol: return out << "Symbol(\"" << val.getSymbol() << "\")";
-        case Code: return out << "Code(\"" << val.getCode() << "\")";
-        case Bool: return out << (val.getBool() ? "true" : "false");
-        case NumberDouble: return out << val.getDouble();
-        case NumberLong: return out << val.getLong();
-        case NumberInt: return out << val.getInt();
-        case jstNULL: return out << "null";
-        case Undefined: return out << "undefined";
-        case Date: return out << tmToISODateString(val.coerceToTm());
-        case Timestamp: return out << val.getTimestamp().toString();
-        case Object: return out << val.getDocument().toString();
+ostream& operator<<(ostream& out, const Value& val) {
+    switch (val.getType()) {
+        case EOO:
+            return out << "MISSING";
+        case MinKey:
+            return out << "MinKey";
+        case MaxKey:
+            return out << "MaxKey";
+        case jstOID:
+            return out << val.getOid();
+        case String:
+            return out << '"' << val.getString() << '"';
+        case RegEx:
+            return out << '/' << val.getRegex() << '/' << val.getRegexFlags();
+        case Symbol:
+            return out << "Symbol(\"" << val.getSymbol() << "\")";
+        case Code:
+            return out << "Code(\"" << val.getCode() << "\")";
+        case Bool:
+            return out << (val.getBool() ? "true" : "false");
+        case NumberDecimal:
+            return out << val.getDecimal().toString();
+        case NumberDouble:
+            return out << val.getDouble();
+        case NumberLong:
+            return out << val.getLong();
+        case NumberInt:
+            return out << val.getInt();
+        case jstNULL:
+            return out << "null";
+        case Undefined:
+            return out << "undefined";
+        case Date:
+            return out << tmToISODateString(val.coerceToTm());
+        case bsonTimestamp:
+            return out << val.getTimestamp().toString();
+        case Object:
+            return out << val.getDocument().toString();
         case Array: {
             out << "[";
             const size_t n = val.getArray().size();
-            for(size_t i = 0; i < n; i++) {
+            for (size_t i = 0; i < n; i++) {
                 if (i)
                     out << ", ";
                 out << val.getArray()[i];
@@ -911,26 +1096,25 @@ namespace mongo {
 
         case CodeWScope:
             return out << "CodeWScope(\"" << val._storage.getCodeWScope()->code << "\", "
-                                          << val._storage.getCodeWScope()->scope << ')';
+                       << val._storage.getCodeWScope()->scope << ')';
 
-        case BinData: 
+        case BinData:
             return out << "BinData(" << val._storage.binDataType() << ", \""
-                                     << toHex(val._storage.getString().rawData()
-                                             ,val._storage.getString().size())
-                                     << "\")";
+                       << toHex(val._storage.getString().rawData(), val._storage.getString().size())
+                       << "\")";
 
         case DBRef:
             return out << "DBRef(\"" << val._storage.getDBRef()->ns << "\", "
-                                     << val._storage.getDBRef()->oid << ')';
-        }
-
-        // Not in default case to trigger better warning if a case is missing
-        verify(false);
+                       << val._storage.getDBRef()->oid << ')';
     }
 
-    void Value::serializeForSorter(BufBuilder& buf) const {
-        buf.appendChar(getType());
-        switch(getType()) {
+    // Not in default case to trigger better warning if a case is missing
+    verify(false);
+}
+
+void Value::serializeForSorter(BufBuilder& buf) const {
+    buf.appendChar(getType());
+    switch (getType()) {
         // type-only types
         case EOO:
         case MinKey:
@@ -940,13 +1124,30 @@ namespace mongo {
             break;
 
         // simple types
-        case jstOID:       buf.appendStruct(_storage.oid); break;
-        case NumberInt:    buf.appendNum(_storage.intValue); break;
-        case NumberLong:   buf.appendNum(_storage.longValue); break;
-        case NumberDouble: buf.appendNum(_storage.doubleValue); break;
-        case Bool:         buf.appendChar(_storage.boolValue); break;
-        case Date:         buf.appendNum(_storage.dateValue); break;
-        case Timestamp:    buf.appendStruct(getTimestamp()); break;
+        case jstOID:
+            buf.appendStruct(_storage.oid);
+            break;
+        case NumberInt:
+            buf.appendNum(_storage.intValue);
+            break;
+        case NumberLong:
+            buf.appendNum(_storage.longValue);
+            break;
+        case NumberDouble:
+            buf.appendNum(_storage.doubleValue);
+            break;
+        case NumberDecimal:
+            buf.appendNum(_storage.getDecimal());
+            break;
+        case Bool:
+            buf.appendChar(_storage.boolValue);
+            break;
+        case Date:
+            buf.appendNum(_storage.dateValue);
+            break;
+        case bsonTimestamp:
+            buf.appendStruct(getTimestamp());
+            break;
 
         // types that are like strings
         case String:
@@ -986,7 +1187,7 @@ namespace mongo {
             buf.appendStr(cws->code, /*NUL byte*/ false);
             cws->scope.serializeForSorter(buf);
             break;
-         }
+        }
 
         case Array: {
             const vector<Value>& array = getArray();
@@ -996,12 +1197,12 @@ namespace mongo {
                 array[i].serializeForSorter(buf);
             break;
         }
-        }
     }
+}
 
-    Value Value::deserializeForSorter(BufReader& buf, const SorterDeserializeSettings& settings) {
-        const BSONType type = BSONType(buf.read<signed char>()); // need sign extension for MinKey
-        switch(type) {
+Value Value::deserializeForSorter(BufReader& buf, const SorterDeserializeSettings& settings) {
+    const BSONType type = BSONType(buf.read<signed char>());  // need sign extension for MinKey
+    switch (type) {
         // type-only types
         case EOO:
         case MinKey:
@@ -1011,13 +1212,22 @@ namespace mongo {
             return Value(ValueStorage(type));
 
         // simple types
-        case jstOID:       return Value(buf.read<OID>());
-        case NumberInt:    return Value(buf.read<int>());
-        case NumberLong:   return Value(buf.read<long long>());
-        case NumberDouble: return Value(buf.read<double>());
-        case Bool:         return Value(bool(buf.read<char>()));
-        case Date:         return Value(Date_t(buf.read<long long>()));
-        case Timestamp:    return Value(buf.read<OpTime>());
+        case jstOID:
+            return Value(OID::from(buf.skip(OID::kOIDSize)));
+        case NumberInt:
+            return Value(buf.read<int>());
+        case NumberLong:
+            return Value(buf.read<long long>());
+        case NumberDouble:
+            return Value(buf.read<double>());
+        case NumberDecimal:
+            return Value(buf.read<Decimal128>());
+        case Bool:
+            return Value(bool(buf.read<char>()));
+        case Date:
+            return Value(Date_t::fromMillisSinceEpoch(buf.read<long long>()));
+        case bsonTimestamp:
+            return Value(buf.read<Timestamp>());
 
         // types that are like strings
         case String:
@@ -1042,11 +1252,11 @@ namespace mongo {
         }
 
         case Object:
-            return Value(Document::deserializeForSorter(buf,
-                                                        Document::SorterDeserializeSettings()));
+            return Value(
+                Document::deserializeForSorter(buf, Document::SorterDeserializeSettings()));
 
         case DBRef: {
-            OID oid = buf.read<OID>();
+            OID oid = OID::from(buf.skip(OID::kOIDSize));
             StringData ns = buf.readCStr();
             return Value(BSONDBRef(ns, oid));
         }
@@ -1056,7 +1266,7 @@ namespace mongo {
             const char* str = static_cast<const char*>(buf.skip(size));
             BSONObj bson = BSONObj::deserializeForSorter(buf, BSONObj::SorterDeserializeSettings());
             return Value(BSONCodeWScope(StringData(str, size), bson));
-         }
+        }
 
         case Array: {
             const int numElems = buf.read<int>();
@@ -1064,9 +1274,9 @@ namespace mongo {
             array.reserve(numElems);
             for (int i = 0; i < numElems; i++)
                 array.push_back(deserializeForSorter(buf, settings));
-            return Value::consume(array);
+            return Value(std::move(array));
         }
-        }
-        verify(false);
     }
+    verify(false);
+}
 }

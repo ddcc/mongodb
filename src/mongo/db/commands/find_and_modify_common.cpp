@@ -37,36 +37,42 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
+#include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/jsobj.h"
 
 namespace mongo {
 namespace find_and_modify {
 
-        void addPrivilegesRequiredForFindAndModify(Command* commandTemplate,
-                                                   const std::string& dbname,
-                                                   const BSONObj& cmdObj,
-                                                   std::vector<Privilege>* out) {
-            bool update = cmdObj["update"].trueValue();
-            bool upsert = cmdObj["upsert"].trueValue();
-            bool remove = cmdObj["remove"].trueValue();
+void addPrivilegesRequiredForFindAndModify(Command* commandTemplate,
+                                           const std::string& dbname,
+                                           const BSONObj& cmdObj,
+                                           std::vector<Privilege>* out) {
+    bool update = cmdObj["update"].trueValue();
+    bool upsert = cmdObj["upsert"].trueValue();
+    bool remove = cmdObj["remove"].trueValue();
+    bool bypassDocumentValidation = shouldBypassDocumentValidationForCommand(cmdObj);
 
-            ActionSet actions;
-            actions.addAction(ActionType::find);
-            if (update) {
-                actions.addAction(ActionType::update);
-            }
-            if (upsert) {
-                actions.addAction(ActionType::insert);
-            }
-            if (remove) {
-                actions.addAction(ActionType::remove);
-            }
-            ResourcePattern resource(commandTemplate->parseResourcePattern(dbname, cmdObj));
-            uassert(17137, "Invalid target namespace " + resource.toString(),
-                    resource.isExactNamespacePattern());
-            out->push_back(Privilege(resource, actions));
-        }
+    ActionSet actions;
+    actions.addAction(ActionType::find);
+    if (update) {
+        actions.addAction(ActionType::update);
+    }
+    if (upsert) {
+        actions.addAction(ActionType::insert);
+    }
+    if (remove) {
+        actions.addAction(ActionType::remove);
+    }
+    if (bypassDocumentValidation) {
+        actions.addAction(ActionType::bypassDocumentValidation);
+    }
+    ResourcePattern resource(commandTemplate->parseResourcePattern(dbname, cmdObj));
+    uassert(17137,
+            "Invalid target namespace " + resource.toString(),
+            resource.isExactNamespacePattern());
+    out->push_back(Privilege(resource, actions));
+}
 
-} // namespace find_and_modify
-} // namespace mongo
+}  // namespace find_and_modify
+}  // namespace mongo

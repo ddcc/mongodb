@@ -26,87 +26,86 @@
  *    then also delete it in the license file.
  */
 
-#include <boost/thread/thread.hpp>
-
+#include "mongo/stdx/functional.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/concurrency/spin_lock.h"
 #include "mongo/util/timer.h"
 
 namespace {
 
-    using mongo::SpinLock;
-    using mongo::Timer;
+using mongo::SpinLock;
+using mongo::Timer;
 
-    class LockTester {
-    public:
-        LockTester( SpinLock* spin, int* counter )
-            : _spin(spin), _counter(counter), _requests(0) {}
+namespace stdx = mongo::stdx;
 
-        ~LockTester() {
-            delete _t;
-        }
+class LockTester {
+public:
+    LockTester(SpinLock* spin, int* counter) : _spin(spin), _counter(counter), _requests(0) {}
 
-        void start( int increments ) {
-            _t = new boost::thread( boost::bind(&LockTester::test, this, increments) );
-        }
-
-        void join() {
-            if ( _t ) _t->join();
-        }
-
-        int requests() const {
-            return _requests;
-        }
-
-    private:
-        SpinLock*      _spin;     // not owned here
-        int*           _counter;  // not owned here
-        int            _requests;
-        boost::thread* _t;
-
-        void test( int increments ) {
-            while ( increments-- > 0 ) {
-                _spin->lock();
-                ++(*_counter);
-                ++_requests;
-                _spin->unlock();
-            }
-        }
-
-        LockTester( LockTester& );
-        LockTester& operator=( LockTester& );
-    };
-
-
-    TEST(Concurrency, ConcurrentIncs) {
-        SpinLock spin;
-        int counter = 0;
-
-        const int threads = 64;
-        const int incs = 50000;
-        LockTester* testers[threads];
-
-        Timer timer;
-
-        for ( int i = 0; i < threads; i++ ) {
-            testers[i] = new LockTester( &spin, &counter );
-        }
-        for ( int i = 0; i < threads; i++ ) {
-            testers[i]->start( incs );
-        }
-        for ( int i = 0; i < threads; i++ ) {
-            testers[i]->join();
-            ASSERT_EQUALS( testers[i]->requests(), incs );
-            delete testers[i];
-        }
-
-        int ms = timer.millis();
-        mongo::unittest::log() << "spinlock ConcurrentIncs time: " << ms << std::endl;
-
-        ASSERT_EQUALS( counter, threads*incs );
-#if defined(__linux__)
-        ASSERT( SpinLock::isfast() );
-#endif
+    ~LockTester() {
+        delete _t;
     }
 
-} // namespace
+    void start(int increments) {
+        _t = new stdx::thread(mongo::stdx::bind(&LockTester::test, this, increments));
+    }
+
+    void join() {
+        if (_t)
+            _t->join();
+    }
+
+    int requests() const {
+        return _requests;
+    }
+
+private:
+    SpinLock* _spin;  // not owned here
+    int* _counter;    // not owned here
+    int _requests;
+    stdx::thread* _t;
+
+    void test(int increments) {
+        while (increments-- > 0) {
+            _spin->lock();
+            ++(*_counter);
+            ++_requests;
+            _spin->unlock();
+        }
+    }
+
+    LockTester(LockTester&);
+    LockTester& operator=(LockTester&);
+};
+
+
+TEST(Concurrency, ConcurrentIncs) {
+    SpinLock spin;
+    int counter = 0;
+
+    const int threads = 64;
+    const int incs = 50000;
+    LockTester* testers[threads];
+
+    Timer timer;
+
+    for (int i = 0; i < threads; i++) {
+        testers[i] = new LockTester(&spin, &counter);
+    }
+    for (int i = 0; i < threads; i++) {
+        testers[i]->start(incs);
+    }
+    for (int i = 0; i < threads; i++) {
+        testers[i]->join();
+        ASSERT_EQUALS(testers[i]->requests(), incs);
+        delete testers[i];
+    }
+
+    int ms = timer.millis();
+    mongo::unittest::log() << "spinlock ConcurrentIncs time: " << ms << std::endl;
+
+    ASSERT_EQUALS(counter, threads * incs);
+}
+
+}  // namespace

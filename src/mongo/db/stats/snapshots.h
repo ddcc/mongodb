@@ -29,9 +29,11 @@
 */
 
 #pragma once
-#include "mongo/pch.h"
+
+#include "mongo/base/status_with.h"
 #include "mongo/db/jsobj.h"
-#include "top.h"
+#include "mongo/db/stats/top.h"
+#include "mongo/platform/basic.h"
 #include "mongo/util/background.h"
 
 /**
@@ -39,88 +41,76 @@
  */
 namespace mongo {
 
-    class SnapshotThread;
+class StatsSnapshotThread;
 
-    /**
-     * stores a point in time snapshot
-     * i.e. all counters at a given time
-     */
-    class SnapshotData {
-        void takeSnapshot();
+/**
+ * stores a point in time snapshot
+ * i.e. all counters at a given time
+ */
+class SnapshotData {
+    void takeSnapshot();
 
-        unsigned long long _created;
-        Top::CollectionData _globalUsage;
-        unsigned long long _totalWriteLockedTime; // micros of total time locked
-        Top::UsageMap _usage;
+    unsigned long long _created;
+    Top::UsageMap _usage;
 
-        friend class SnapshotThread;
-        friend class SnapshotDelta;
-        friend class Snapshots;
-    };
+    friend class StatsSnapshotThread;
+    friend class SnapshotDelta;
+    friend class Snapshots;
+};
 
-    /**
-     * contains performance information for a time period
-     */
-    class SnapshotDelta {
-    public:
-        SnapshotDelta( const SnapshotData& older , const SnapshotData& newer );
+/**
+ * contains performance information for a time period
+ */
+class SnapshotDelta {
+public:
+    SnapshotDelta(const SnapshotData& older, const SnapshotData& newer);
 
-        unsigned long long start() const {
-            return _older._created;
-        }
+    unsigned long long elapsed() const {
+        return _elapsed;
+    }
 
-        unsigned long long elapsed() const {
-            return _elapsed;
-        }
+    Top::UsageMap collectionUsageDiff();
 
-        unsigned long long timeInWriteLock() const {
-            return _newer._totalWriteLockedTime - _older._totalWriteLockedTime;
-        }
-        double percentWriteLocked() const {
-            double e = (double) elapsed();
-            double w = (double) timeInWriteLock();
-            return w/e;
-        }
+private:
+    const SnapshotData& _older;
+    const SnapshotData& _newer;
 
-        Top::CollectionData globalUsageDiff();
-        Top::UsageMap collectionUsageDiff();
+    unsigned long long _elapsed;
+};
 
-    private:
-        const SnapshotData& _older;
-        const SnapshotData& _newer;
+struct SnapshotDiff {
+    Top::UsageMap usageDiff;
+    unsigned long long timeElapsed;
 
-        unsigned long long _elapsed;
-    };
+    SnapshotDiff() = default;
+    SnapshotDiff(Top::UsageMap map, unsigned long long elapsed)
+        : usageDiff(std::move(map)), timeElapsed(elapsed) {}
+};
 
-    class Snapshots {
-    public:
-        Snapshots(int n=100);
+class Snapshots {
+public:
+    Snapshots();
 
-        const SnapshotData* takeSnapshot();
+    const SnapshotData* takeSnapshot();
 
-        int numDeltas() const { return _stored-1; }
+    StatusWith<SnapshotDiff> computeDelta();
 
-        const SnapshotData& getPrev( int numBack = 0 );
-        auto_ptr<SnapshotDelta> computeDelta( int numBack = 0 );
+private:
+    stdx::mutex _lock;
+    static const int kNumSnapshots = 2;
+    SnapshotData _snapshots[kNumSnapshots];
+    int _loc;
+    int _stored;
+};
 
+class StatsSnapshotThread : public BackgroundJob {
+public:
+    virtual std::string name() const {
+        return "statsSnapshot";
+    }
+    void run();
+};
 
-        void outputLockInfoHTML( stringstream& ss );
-    private:
-        mongo::mutex _lock;
-        int _n;
-        boost::scoped_array<SnapshotData> _snapshots;
-        int _loc;
-        int _stored;
-    };
-
-    class SnapshotThread : public BackgroundJob {
-    public:
-        virtual string name() const { return "snapshot"; }
-        void run();
-    };
-
-    extern Snapshots statsSnapshots;
-    extern SnapshotThread snapshotThread;
-
-
+extern Snapshots statsSnapshots;
+extern StatsSnapshotThread statsSnapshotThread;
 }

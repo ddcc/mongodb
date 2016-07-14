@@ -28,121 +28,109 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <string>
 #include <vector>
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/s/bson_serializable.h"
-#include "mongo/s/chunk_version.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/s/write_ops/batched_delete_document.h"
-#include "mongo/s/write_ops/batched_request_metadata.h"
 
 namespace mongo {
 
+/**
+ * This class represents the layout and content of a batched delete runCommand,
+ * the request side.
+ */
+class BatchedDeleteRequest {
+    MONGO_DISALLOW_COPYING(BatchedDeleteRequest);
+
+public:
+    //
+    // schema declarations
+    //
+
+    // Name used for the batched delete invocation.
+    static const std::string BATCHED_DELETE_REQUEST;
+
+    // Field names and types in the batched delete command type.
+    static const BSONField<std::string> collName;
+    static const BSONField<std::vector<BatchedDeleteDocument*>> deletes;
+    static const BSONField<BSONObj> writeConcern;
+    static const BSONField<bool> ordered;
+
+    //
+    // construction / destruction
+    //
+
+    BatchedDeleteRequest();
+    ~BatchedDeleteRequest();
+
+    /** Copies all the fields present in 'this' to 'other'. */
+    void cloneTo(BatchedDeleteRequest* other) const;
+
+    bool isValid(std::string* errMsg) const;
+    BSONObj toBSON() const;
+    bool parseBSON(StringData dbName, const BSONObj& source, std::string* errMsg);
+    void clear();
+    std::string toString() const;
+
+    //
+    // individual field accessors
+    //
+
+    void setNS(NamespaceString ns);
+    const NamespaceString& getNS() const;
+
+    void setDeletes(const std::vector<BatchedDeleteDocument*>& deletes);
+
     /**
-     * This class represents the layout and content of a batched delete runCommand,
-     * the request side.
+     * deletes ownership is transferred to here.
      */
-    class BatchedDeleteRequest : public BSONSerializable {
-        MONGO_DISALLOW_COPYING(BatchedDeleteRequest);
-    public:
+    void addToDeletes(BatchedDeleteDocument* deletes);
+    void unsetDeletes();
+    bool isDeletesSet() const;
+    std::size_t sizeDeletes() const;
+    const std::vector<BatchedDeleteDocument*>& getDeletes() const;
+    const BatchedDeleteDocument* getDeletesAt(std::size_t pos) const;
 
-        //
-        // schema declarations
-        //
+    void setWriteConcern(const BSONObj& writeConcern);
+    void unsetWriteConcern();
+    bool isWriteConcernSet() const;
+    const BSONObj& getWriteConcern() const;
 
-        // Name used for the batched delete invocation.
-        static const std::string BATCHED_DELETE_REQUEST;
+    void setOrdered(bool ordered);
+    void unsetOrdered();
+    bool isOrderedSet() const;
+    bool getOrdered() const;
 
-        // Field names and types in the batched delete command type.
-        static const BSONField<std::string> collName;
-        static const BSONField<std::vector<BatchedDeleteDocument*> > deletes;
-        static const BSONField<BSONObj> writeConcern;
-        static const BSONField<bool> ordered;
-        static const BSONField<BSONObj> metadata;
+    /**
+     * These are no-ops since delete never validates documents. They only exist to fulfill the
+     * unified API.
+     */
+    void setShouldBypassValidation(bool newVal) {}
+    bool shouldBypassValidation() const {
+        return false;
+    }
 
-        //
-        // construction / destruction
-        //
+private:
+    // Convention: (M)andatory, (O)ptional
 
-        BatchedDeleteRequest();
-        virtual ~BatchedDeleteRequest();
+    // (M)  collection we're deleting from
+    NamespaceString _ns;
+    bool _isNSSet;
 
-        /** Copies all the fields present in 'this' to 'other'. */
-        void cloneTo(BatchedDeleteRequest* other) const;
+    // (M)  array of individual deletes
+    std::vector<BatchedDeleteDocument*> _deletes;
+    bool _isDeletesSet;
 
-        //
-        // bson serializable interface implementation
-        //
+    // (O)  to be issued after the batch applied
+    BSONObj _writeConcern;
+    bool _isWriteConcernSet;
 
-        virtual bool isValid(std::string* errMsg) const;
-        virtual BSONObj toBSON() const;
-        virtual bool parseBSON(const BSONObj& source, std::string* errMsg);
-        virtual void clear();
-        virtual std::string toString() const;
+    // (O)  whether batch is issued in parallel or not
+    bool _ordered;
+    bool _isOrderedSet;
+};
 
-        //
-        // individual field accessors
-        //
-
-        void setCollName(const StringData& collName);
-        void unsetCollName();
-        bool isCollNameSet() const;
-        const std::string& getCollName() const;
-
-        void setDeletes(const std::vector<BatchedDeleteDocument*>& deletes);
-
-        /**
-         * deletes ownership is transferred to here.
-         */
-        void addToDeletes(BatchedDeleteDocument* deletes);
-        void unsetDeletes();
-        bool isDeletesSet() const;
-        std::size_t sizeDeletes() const;
-        const std::vector<BatchedDeleteDocument*>& getDeletes() const;
-        const BatchedDeleteDocument* getDeletesAt(std::size_t pos) const;
-
-        void setWriteConcern(const BSONObj& writeConcern);
-        void unsetWriteConcern();
-        bool isWriteConcernSet() const;
-        const BSONObj& getWriteConcern() const;
-
-        void setOrdered(bool ordered);
-        void unsetOrdered();
-        bool isOrderedSet() const;
-        bool getOrdered() const;
-
-        /*
-         * metadata ownership will be transferred to this.
-         */
-        void setMetadata(BatchedRequestMetadata* metadata);
-        void unsetMetadata();
-        bool isMetadataSet() const;
-        BatchedRequestMetadata* getMetadata() const;
-
-    private:
-        // Convention: (M)andatory, (O)ptional
-
-        // (M)  collection we're deleting from
-        std::string _collName;
-        bool _isCollNameSet;
-
-        // (M)  array of individual deletes
-        std::vector<BatchedDeleteDocument*> _deletes;
-        bool _isDeletesSet;
-
-        // (O)  to be issued after the batch applied
-        BSONObj _writeConcern;
-        bool _isWriteConcernSet;
-
-        // (O)  whether batch is issued in parallel or not
-        bool _ordered;
-        bool _isOrderedSet;
-
-        // (O)  metadata associated with this request for internal use.
-        scoped_ptr<BatchedRequestMetadata> _metadata;
-    };
-
-} // namespace mongo
+}  // namespace mongo

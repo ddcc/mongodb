@@ -30,32 +30,27 @@
 
 #pragma once
 
-#include "mongo/db/fts/fts_query.h"
-#include "mongo/db/matcher/expression.h"
-#include "mongo/db/matcher/expression_leaf.h"
+#include "mongo/db/fts/fts_query_impl.h"
+#include "mongo/db/matcher/expression_text_base.h"
+#include "mongo/db/namespace_string.h"
 
 namespace mongo {
 
-    class TextMatchExpression : public LeafMatchExpression {
-    public:
-        TextMatchExpression() : LeafMatchExpression( TEXT ) {}
-        virtual ~TextMatchExpression() {}
+class NamespaceString;
+class OperationContext;
 
-        Status init( const std::string& query, const std::string& language );
+class TextMatchExpression : public TextMatchExpressionBase {
+public:
+    Status init(OperationContext* txn, const NamespaceString& nss, TextParams params);
 
-        virtual bool matchesSingleElement( const BSONElement& e ) const;
+    const fts::FTSQuery& getFTSQuery() const final {
+        return _ftsQuery;
+    }
 
-        virtual void debugString( StringBuilder& debug, int level = 0 ) const;
+    std::unique_ptr<MatchExpression> shallowClone() const final;
 
-        virtual bool equivalent( const MatchExpression* other ) const;
+private:
+    fts::FTSQueryImpl _ftsQuery;
+};
 
-        virtual LeafMatchExpression* shallowClone() const;
-
-        const string& getQuery() const { return _query; }
-        const string& getLanguage() const { return _language; }
-    private:
-        std::string _query;
-        std::string _language;
-    };
-
-} // namespace mongo
+}  // namespace mongo

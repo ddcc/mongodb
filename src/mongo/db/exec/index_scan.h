@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2013-2014 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -28,146 +28,148 @@
 
 #pragma once
 
+
 #include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/diskloc.h"
-#include "mongo/db/index/btree_index_cursor.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/query/index_bounds.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/storage/index_entry_comparison.h"
+#include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/platform/unordered_set.h"
 
 namespace mongo {
 
-    class IndexAccessMethod;
-    class IndexCursor;
-    class IndexDescriptor;
-    class WorkingSet;
+class IndexAccessMethod;
+class IndexDescriptor;
+class WorkingSet;
 
-    struct IndexScanParams {
-        IndexScanParams() : descriptor(NULL),
-                            direction(1),
-                            doNotDedup(false),
-                            maxScan(0),
-                            addKeyMetadata(false) { }
+struct IndexScanParams {
+    IndexScanParams()
+        : descriptor(NULL), direction(1), doNotDedup(false), maxScan(0), addKeyMetadata(false) {}
 
-        const IndexDescriptor* descriptor;
+    const IndexDescriptor* descriptor;
 
-        IndexBounds bounds;
+    IndexBounds bounds;
 
-        int direction;
+    int direction;
 
-        bool doNotDedup;
+    bool doNotDedup;
 
-        // How many keys will we look at?
-        size_t maxScan;
+    // How many keys will we look at?
+    size_t maxScan;
 
-        // Do we want to add the key as metadata?
-        bool addKeyMetadata;
-    };
+    // Do we want to add the key as metadata?
+    bool addKeyMetadata;
+};
 
+/**
+ * Stage scans over an index from startKey to endKey, returning results that pass the provided
+ * filter.  Internally dedups on RecordId.
+ *
+ * Sub-stage preconditions: None.  Is a leaf and consumes no stage data.
+ */
+class IndexScan final : public PlanStage {
+public:
     /**
-     * Stage scans over an index from startKey to endKey, returning results that pass the provided
-     * filter.  Internally dedups on DiskLoc.
-     *
-     * TODO: we probably should split this into 2 stages: one btree-only "fast" ixscan and one that
-     * strictly talks through the index API.  Need to figure out what we really want to ship down
-     * through that API predicate-wise though, currently the language is a BSONObj but that's
-     * clearly not enough (or we need different index scan exec nodes per index type?). See
-     * SERVER-12397 for tracking.
-     *
-     * Sub-stage preconditions: None.  Is a leaf and consumes no stage data.
+     * Keeps track of what this index scan is currently doing so that it
+     * can do the right thing on the next call to work().
      */
-    class IndexScan : public PlanStage {
-    public:
+    enum ScanState {
+        // Need to initialize the underlying index traversal machinery.
+        INITIALIZING,
 
-        /**
-         * Keeps track of what this index scan is currently doing so that it
-         * can do the right thing on the next call to work().
-         */
-        enum ScanState {
-            // Need to initialize the underlying index traversal machinery.
-            INITIALIZING,
+        // Skipping keys as directed by the _checker.
+        NEED_SEEK,
 
-            // Skipping keys in order to check whether we have reached the end.
-            CHECKING_END,
+        // Retrieving the next key, and applying the filter if necessary.
+        GETTING_NEXT,
 
-            // Retrieving the next key, and applying the filter if necessary.
-            GETTING_NEXT,
-
-            // The index scan is finished.
-            HIT_END
-        };
-
-        IndexScan(const IndexScanParams& params, WorkingSet* workingSet,
-                  const MatchExpression* filter);
-
-        virtual ~IndexScan() { }
-
-        virtual StageState work(WorkingSetID* out);
-        virtual bool isEOF();
-        virtual void prepareToYield();
-        virtual void recoverFromYield();
-        virtual void invalidate(const DiskLoc& dl, InvalidationType type);
-
-        virtual PlanStageStats* getStats();
-
-        /**
-         * Get an unowned pointer to this stage's common stats.
-         */
-        CommonStats* getCommonStats();
-
-        /**
-         * Get an unowned pointer to this stage's specific stats.
-         */
-        IndexScanStats* getSpecificStats();
-
-    private:
-        /**
-         * Initialize the underlying IndexCursor, grab information from the catalog for stats.
-         */
-        void initIndexScan();
-
-        /** See if the cursor is pointing at or past _endKey, if _endKey is non-empty. */
-        void checkEnd();
-
-        // The WorkingSet we annotate with results.  Not owned by us.
-        WorkingSet* _workingSet;
-
-        // Index access.
-        const IndexAccessMethod* _iam; // owned by Collection -> IndexCatalog
-        scoped_ptr<IndexCursor> _indexCursor;
-        BSONObj _keyPattern;
-
-        // Keeps track of what work we need to do next.
-        ScanState _scanState;
-
-        // Contains expressions only over fields in the index key.  We assume this is built
-        // correctly by whomever creates this class.
-        // The filter is not owned by us.
-        const MatchExpression* _filter;
-
-        // Could our index have duplicates?  If so, we use _returned to dedup.
-        bool _shouldDedup;
-        unordered_set<DiskLoc, DiskLoc::Hasher> _returned;
-
-        // For yielding.
-        BSONObj _savedKey;
-        DiskLoc _savedLoc;
-
-        IndexScanParams _params;
-
-        // For our "fast" Btree-only navigation AKA the index bounds optimization.
-        scoped_ptr<IndexBoundsChecker> _checker;
-        BtreeIndexCursor* _btreeCursor;
-        int _keyEltsToUse;
-        bool _movePastKeyElts;
-        vector<const BSONElement*> _keyElts;
-        vector<bool> _keyEltsInc;
-
-        // Stats
-        CommonStats _commonStats;
-        IndexScanStats _specificStats;
+        // The index scan is finished.
+        HIT_END
     };
+
+    IndexScan(OperationContext* txn,
+              const IndexScanParams& params,
+              WorkingSet* workingSet,
+              const MatchExpression* filter);
+
+    StageState work(WorkingSetID* out) final;
+    bool isEOF() final;
+    void doSaveState() final;
+    void doRestoreState() final;
+    void doDetachFromOperationContext() final;
+    void doReattachToOperationContext() final;
+    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
+
+    StageType stageType() const final {
+        return STAGE_IXSCAN;
+    }
+
+    std::unique_ptr<PlanStageStats> getStats() final;
+
+    const SpecificStats* getSpecificStats() const final;
+
+    static const char* kStageType;
+
+private:
+    /**
+     * Initialize the underlying index Cursor, returning first result if any.
+     */
+    boost::optional<IndexKeyEntry> initIndexScan();
+
+    // The WorkingSet we fill with results.  Not owned by us.
+    WorkingSet* const _workingSet;
+
+    // Index access.
+    const IndexAccessMethod* const _iam;  // owned by Collection -> IndexCatalog
+    std::unique_ptr<SortedDataInterface::Cursor> _indexCursor;
+    const BSONObj _keyPattern;
+
+    // Keeps track of what work we need to do next.
+    ScanState _scanState;
+
+    // Contains expressions only over fields in the index key.  We assume this is built
+    // correctly by whomever creates this class.
+    // The filter is not owned by us.
+    const MatchExpression* const _filter;
+
+    // Could our index have duplicates?  If so, we use _returned to dedup.
+    bool _shouldDedup;
+    unordered_set<RecordId, RecordId::Hasher> _returned;
+
+    const bool _forward;
+    const IndexScanParams _params;
+
+    // Stats
+    IndexScanStats _specificStats;
+
+    //
+    // This class employs one of two different algorithms for determining when the index scan
+    // has reached the end:
+    //
+
+    //
+    // 1) If the index scan is not a single contiguous interval, then we use an
+    //    IndexBoundsChecker to determine which keys to return and when to stop scanning.
+    //    In this case, _checker will be non-NULL.
+    //
+
+    std::unique_ptr<IndexBoundsChecker> _checker;
+    IndexSeekPoint _seekPoint;
+
+    //
+    // 2) If the index scan is a single contiguous interval, then the scan can execute faster by
+    //    letting the index cursor tell us when it hits the end, rather than repeatedly doing
+    //    BSON compares against scanned keys. In this case _checker will be NULL.
+    //
+
+    // The key that the index cursor should stop on/after.
+    BSONObj _endKey;
+
+    // Is the end key included in the range?
+    bool _endKeyInclusive;
+};
 
 }  // namespace mongo

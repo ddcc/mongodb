@@ -32,51 +32,70 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/jsobj.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/op_observer.h"
 #include "mongo/db/repl/oplog.h"
-#include "mongo/db/repl/replication_server_status.h"
+#include "mongo/db/repl/replication_coordinator_global.h"
 
 namespace mongo {
-    class AppendOplogNoteCmd : public Command {
-    public:
-        AppendOplogNoteCmd() : Command( "appendOplogNote" ) {}
-        virtual bool slaveOk() const { return false; }
-        virtual bool adminOnly() const { return true; }
-        virtual LockType locktype() const { return NONE; }
-        virtual void help( stringstream &help ) const {
-            help << "Adds a no-op entry to the oplog";
-        }
-        virtual Status checkAuthForCommand(ClientBasic* client,
-                                           const std::string& dbname,
-                                           const BSONObj& cmdObj) {
-            if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
-                    ResourcePattern::forClusterResource(), ActionType::appendOplogNote)) {
-                return Status(ErrorCodes::Unauthorized, "Unauthorized");
-            }
-            return Status::OK();
-        }
-        virtual bool run(const string& dbname,
-                         BSONObj& cmdObj,
-                         int,
-                         string& errmsg,
-                         BSONObjBuilder& result,
-                         bool fromRepl) {
-            if (!replSettings.master) {
-                return appendCommandStatus(result, Status(
-                        ErrorCodes::NoReplicationEnabled,
-                        "Must have replication set up to run \"appendOplogNote\""));
-            }
-            BSONElement dataElement;
-            Status status = bsonExtractTypedField(cmdObj, "data", Object, &dataElement);
-            if (!status.isOK()) {
-                return appendCommandStatus(result, status);
-            }
 
-            logOpComment(dataElement.Obj());
-            return true;
+using std::string;
+using std::stringstream;
+
+class AppendOplogNoteCmd : public Command {
+public:
+    AppendOplogNoteCmd() : Command("appendOplogNote") {}
+    virtual bool slaveOk() const {
+        return false;
+    }
+    virtual bool adminOnly() const {
+        return true;
+    }
+    virtual bool isWriteCommandForConfigServer() const {
+        return false;
+    }
+    virtual void help(stringstream& help) const {
+        help << "Adds a no-op entry to the oplog";
+    }
+    virtual Status checkAuthForCommand(ClientBasic* client,
+                                       const std::string& dbname,
+                                       const BSONObj& cmdObj) {
+        if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
+                ResourcePattern::forClusterResource(), ActionType::appendOplogNote)) {
+            return Status(ErrorCodes::Unauthorized, "Unauthorized");
+        }
+        return Status::OK();
+    }
+    virtual bool run(OperationContext* txn,
+                     const string& dbname,
+                     BSONObj& cmdObj,
+                     int,
+                     string& errmsg,
+                     BSONObjBuilder& result) {
+        if (!repl::getGlobalReplicationCoordinator()->isReplEnabled()) {
+            return appendCommandStatus(
+                result,
+                Status(ErrorCodes::NoReplicationEnabled,
+                       "Must have replication set up to run \"appendOplogNote\""));
+        }
+        BSONElement dataElement;
+        Status status = bsonExtractTypedField(cmdObj, "data", Object, &dataElement);
+        if (!status.isOK()) {
+            return appendCommandStatus(result, status);
         }
 
-    } appendOplogNoteCmd;
+        ScopedTransaction scopedXact(txn, MODE_X);
+        Lock::GlobalWrite globalWrite(txn->lockState());
 
-} // namespace mongo
+        WriteUnitOfWork wuow(txn);
+        getGlobalServiceContext()->getOpObserver()->onOpMessage(txn, dataElement.Obj());
+        wuow.commit();
+        return true;
+    }
+
+} appendOplogNoteCmd;
+
+}  // namespace mongo

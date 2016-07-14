@@ -30,65 +30,58 @@
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/init.h"
-#include "mongo/client/auth_helpers.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/server_parameters.h"
+#include "mongo/db/service_context.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
 namespace {
-    AuthorizationManager* globalAuthManager = NULL;
+class AuthzVersionParameter : public ServerParameter {
+    MONGO_DISALLOW_COPYING(AuthzVersionParameter);
 
-    class AuthzVersionParameter : public ServerParameter {
-        MONGO_DISALLOW_COPYING(AuthzVersionParameter);
-    public:
-        AuthzVersionParameter(ServerParameterSet* sps, const std::string& name);
-        virtual void append(BSONObjBuilder& b, const std::string& name);
-        virtual Status set(const BSONElement& newValueElement);
-        virtual Status setFromString(const std::string& str);
-    };
+public:
+    AuthzVersionParameter(ServerParameterSet* sps, const std::string& name);
+    virtual void append(OperationContext* txn, BSONObjBuilder& b, const std::string& name);
+    virtual Status set(const BSONElement& newValueElement);
+    virtual Status setFromString(const std::string& str);
+};
 
-    MONGO_INITIALIZER_GENERAL(AuthzSchemaParameter,
-                              MONGO_NO_PREREQUISITES,
-                              ("BeginStartupOptionParsing"))(InitializerContext*) {
-        new AuthzVersionParameter(ServerParameterSet::getGlobal(),
-                                  auth::schemaVersionServerParameter);
-        return Status::OK();
-    }
+MONGO_INITIALIZER_GENERAL(AuthzSchemaParameter,
+                          MONGO_NO_PREREQUISITES,
+                          ("BeginStartupOptionParsing"))(InitializerContext*) {
+    new AuthzVersionParameter(ServerParameterSet::getGlobal(), authSchemaVersionServerParameter);
+    return Status::OK();
+}
 
-    AuthzVersionParameter::AuthzVersionParameter(ServerParameterSet* sps, const std::string& name) :
-        ServerParameter(sps, name, false, false) {}
+AuthzVersionParameter::AuthzVersionParameter(ServerParameterSet* sps, const std::string& name)
+    : ServerParameter(sps, name, false, false) {}
 
-    void AuthzVersionParameter::append(BSONObjBuilder& b, const std::string& name) {
-        int authzVersion;
-        uassertStatusOK(getGlobalAuthorizationManager()->getAuthorizationVersion(&authzVersion));
-        b.append(name, authzVersion);
-    }
+void AuthzVersionParameter::append(OperationContext* txn,
+                                   BSONObjBuilder& b,
+                                   const std::string& name) {
+    int authzVersion;
+    uassertStatusOK(getGlobalAuthorizationManager()->getAuthorizationVersion(txn, &authzVersion));
+    b.append(name, authzVersion);
+}
 
-    Status AuthzVersionParameter::set(const BSONElement& newValueElement) {
-        return Status(ErrorCodes::InternalError, "set called on unsettable server parameter");
-    }
+Status AuthzVersionParameter::set(const BSONElement& newValueElement) {
+    return Status(ErrorCodes::InternalError, "set called on unsettable server parameter");
+}
 
-    Status AuthzVersionParameter::setFromString(const std::string& newValueString) {
-        return Status(ErrorCodes::InternalError, "set called on unsettable server parameter");
-    }
+Status AuthzVersionParameter::setFromString(const std::string& newValueString) {
+    return Status(ErrorCodes::InternalError, "set called on unsettable server parameter");
+}
+
 }  // namespace
 
-    void setGlobalAuthorizationManager(AuthorizationManager* authManager) {
-        fassert(16841, globalAuthManager == NULL);
-        globalAuthManager = authManager;
-    }
+const std::string authSchemaVersionServerParameter = "authSchemaVersion";
 
-    void clearGlobalAuthorizationManager() {
-        fassert(16843, globalAuthManager != NULL);
-        delete globalAuthManager;
-        globalAuthManager = NULL;
-    }
+AuthorizationManager* getGlobalAuthorizationManager() {
+    AuthorizationManager* globalAuthManager = AuthorizationManager::get(getGlobalServiceContext());
+    fassert(16842, globalAuthManager != nullptr);
+    return globalAuthManager;
+}
 
-    AuthorizationManager* getGlobalAuthorizationManager() {
-        fassert(16842, globalAuthManager != NULL);
-        return globalAuthManager;
-    }
-
-} // namespace mongo
+}  // namespace mongo

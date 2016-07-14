@@ -31,43 +31,38 @@
 #include <vector>
 
 #include "mongo/base/status.h"
-#include "mongo/db/index/btree_index_cursor.h"
-#include "mongo/db/index/btree_interface.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/pdfile.h"
-#include "mongo/db/pdfile_private.h"
 
 namespace mongo {
 
-    // Standard Btree implementation below.
-    BtreeAccessMethod::BtreeAccessMethod(IndexCatalogEntry* btreeState)
-        : BtreeBasedAccessMethod(btreeState) {
+using std::vector;
 
-        // The key generation wants these values.
-        vector<const char*> fieldNames;
-        vector<BSONElement> fixed;
+// Standard Btree implementation below.
+BtreeAccessMethod::BtreeAccessMethod(IndexCatalogEntry* btreeState, SortedDataInterface* btree)
+    : IndexAccessMethod(btreeState, btree) {
+    // The key generation wants these values.
+    vector<const char*> fieldNames;
+    vector<BSONElement> fixed;
 
-        BSONObjIterator it(_descriptor->keyPattern());
-        while (it.more()) {
-            BSONElement elt = it.next();
-            fieldNames.push_back(elt.fieldName());
-            fixed.push_back(BSONElement());
-        }
-
-        if (0 == _descriptor->version()) {
-            _keyGenerator.reset(new BtreeKeyGeneratorV0(fieldNames, fixed,
-                _descriptor->isSparse()));
-        } else if (1 == _descriptor->version()) {
-            _keyGenerator.reset(new BtreeKeyGeneratorV1(fieldNames, fixed,
-                _descriptor->isSparse()));
-        } else {
-            massert(16745, "Invalid index version for key generation.", false );
-        }
+    BSONObjIterator it(_descriptor->keyPattern());
+    while (it.more()) {
+        BSONElement elt = it.next();
+        fieldNames.push_back(elt.fieldName());
+        fixed.push_back(BSONElement());
     }
 
-    void BtreeAccessMethod::getKeys(const BSONObj& obj, BSONObjSet* keys) {
-        _keyGenerator->getKeys(obj, keys);
+    if (0 == _descriptor->version()) {
+        _keyGenerator.reset(new BtreeKeyGeneratorV0(fieldNames, fixed, _descriptor->isSparse()));
+    } else if (1 == _descriptor->version()) {
+        _keyGenerator.reset(new BtreeKeyGeneratorV1(fieldNames, fixed, _descriptor->isSparse()));
+    } else {
+        massert(16745, "Invalid index version for key generation.", false);
     }
+}
+
+void BtreeAccessMethod::getKeys(const BSONObj& obj, BSONObjSet* keys) const {
+    _keyGenerator->getKeys(obj, keys);
+}
 
 }  // namespace mongo

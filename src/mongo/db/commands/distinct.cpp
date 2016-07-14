@@ -1,7 +1,7 @@
 // distinct.cpp
 
 /**
-*    Copyright (C) 2012 10gen Inc.
+*    Copyright (C) 2012-2014 MongoDB Inc.
 *
 *    This program is free software: you can redistribute it and/or  modify
 *    it under the terms of the GNU Affero General Public License, version 3,
@@ -28,142 +28,229 @@
 *    it in the license file.
 */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kQuery
+
 #include <string>
 #include <vector>
 
+#include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/database.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/db_raii.h"
+#include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/kill_current_op.h"
-#include "mongo/db/pdfile.h"
-#include "mongo/db/query/get_runner.h"
+#include "mongo/db/query/explain.h"
+#include "mongo/db/query/find_common.h"
+#include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/query_planner_common.h"
-#include "mongo/db/query/type_explain.h"
+#include "mongo/util/log.h"
 #include "mongo/util/timer.h"
 
 namespace mongo {
 
-    class DistinctCommand : public Command {
-    public:
-        DistinctCommand() : Command("distinct") {}
+using std::unique_ptr;
+using std::string;
+using std::stringstream;
 
-        virtual bool slaveOk() const { return false; }
-        virtual bool slaveOverrideOk() const { return true; }
-        virtual LockType locktype() const { return READ; }
+namespace {
 
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {
-            ActionSet actions;
-            actions.addAction(ActionType::find);
-            out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
+const char kKeyField[] = "key";
+const char kQueryField[] = "query";
+
+}  // namespace
+
+class DistinctCommand : public Command {
+public:
+    DistinctCommand() : Command("distinct") {}
+
+    virtual bool slaveOk() const {
+        return false;
+    }
+    virtual bool slaveOverrideOk() const {
+        return true;
+    }
+    virtual bool isWriteCommandForConfigServer() const {
+        return false;
+    }
+    bool supportsReadConcern() const final {
+        return true;
+    }
+
+    std::size_t reserveBytesForReply() const override {
+        return FindCommon::kInitReplyBufferSize;
+    }
+
+    virtual void addRequiredPrivileges(const std::string& dbname,
+                                       const BSONObj& cmdObj,
+                                       std::vector<Privilege>* out) {
+        ActionSet actions;
+        actions.addAction(ActionType::find);
+        out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
+    }
+
+    virtual void help(stringstream& help) const {
+        help << "{ distinct : 'collection name' , key : 'a.b' , query : {} }";
+    }
+
+    /**
+     * Used by explain() and run() to get the PlanExecutor for the query.
+     */
+    StatusWith<unique_ptr<PlanExecutor>> getPlanExecutor(OperationContext* txn,
+                                                         Collection* collection,
+                                                         const string& ns,
+                                                         const BSONObj& cmdObj,
+                                                         bool isExplain) const {
+        // Extract the key field.
+        BSONElement keyElt;
+        auto statusKey = bsonExtractTypedField(cmdObj, kKeyField, BSONType::String, &keyElt);
+        if (!statusKey.isOK()) {
+            return {statusKey};
+        }
+        string key = keyElt.valuestrsafe();
+
+        // Extract the query field. If the query field is nonexistent, an empty query is used.
+        BSONObj query;
+        if (BSONElement queryElt = cmdObj[kQueryField]) {
+            if (queryElt.type() == BSONType::Object) {
+                query = queryElt.embeddedObject();
+            } else if (queryElt.type() != BSONType::jstNULL) {
+                return Status(ErrorCodes::TypeMismatch,
+                              str::stream() << "\"" << kQueryField
+                                            << "\" had the wrong type. Expected "
+                                            << typeName(BSONType::Object) << " or "
+                                            << typeName(BSONType::jstNULL) << ", found "
+                                            << typeName(queryElt.type()));
+            }
         }
 
-        virtual void help( stringstream &help ) const {
-            help << "{ distinct : 'collection name' , key : 'a.b' , query : {} }";
+        auto executor = getExecutorDistinct(
+            txn, collection, ns, query, key, isExplain, PlanExecutor::YIELD_AUTO);
+        if (!executor.isOK()) {
+            return executor.getStatus();
         }
 
-        bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result,
-                 bool fromRepl ) {
+        return std::move(executor.getValue());
+    }
 
-            Timer t;
-            string ns = dbname + '.' + cmdObj.firstElement().valuestr();
+    virtual Status explain(OperationContext* txn,
+                           const std::string& dbname,
+                           const BSONObj& cmdObj,
+                           ExplainCommon::Verbosity verbosity,
+                           const rpc::ServerSelectionMetadata&,
+                           BSONObjBuilder* out) const {
+        const string ns = parseNs(dbname, cmdObj);
+        AutoGetCollectionForRead ctx(txn, ns);
 
-            string key = cmdObj["key"].valuestrsafe();
-            BSONObj keyPattern = BSON( key << 1 );
+        Collection* collection = ctx.getCollection();
 
-            BSONObj query = getQuery( cmdObj );
+        StatusWith<unique_ptr<PlanExecutor>> executor =
+            getPlanExecutor(txn, collection, ns, cmdObj, true);
+        if (!executor.isOK()) {
+            return executor.getStatus();
+        }
 
-            int bufSize = BSONObjMaxUserSize - 4096;
-            BufBuilder bb( bufSize );
-            char * start = bb.buf();
+        Explain::explainStages(executor.getValue().get(), verbosity, out);
+        return Status::OK();
+    }
 
-            BSONArrayBuilder arr( bb );
-            BSONElementSet values;
+    bool run(OperationContext* txn,
+             const string& dbname,
+             BSONObj& cmdObj,
+             int,
+             string& errmsg,
+             BSONObjBuilder& result) {
+        Timer t;
 
-            long long nscanned = 0; // locations looked at
-            long long nscannedObjects = 0; // full objects looked at
-            long long n = 0; // matches
+        const string ns = parseNs(dbname, cmdObj);
+        AutoGetCollectionForRead ctx(txn, ns);
 
-            Collection* collection = cc().database()->getCollection( ns );
+        Collection* collection = ctx.getCollection();
 
-            if (!collection) {
-                result.appendArray( "values" , BSONObj() );
-                result.append("stats", BSON("n" << 0 <<
-                                            "nscanned" << 0 <<
-                                            "nscannedObjects" << 0));
-                return true;
-            }
+        auto executor = getPlanExecutor(txn, collection, ns, cmdObj, false);
+        if (!executor.isOK()) {
+            return appendCommandStatus(result, executor.getStatus());
+        }
 
-            Runner* rawRunner;
-            Status status = getRunnerDistinct(collection, query, key, &rawRunner);
-            if (!status.isOK()) {
-                uasserted(17216, mongoutils::str::stream() << "Can't get runner for query "
-                              << query << ": " << status.toString());
-                return 0;
-            }
+        string key = cmdObj[kKeyField].valuestrsafe();
 
-            auto_ptr<Runner> runner(rawRunner);
-            const ScopedRunnerRegistration safety(runner.get());
-            runner->setYieldPolicy(Runner::YIELD_AUTO);
+        int bufSize = BSONObjMaxUserSize - 4096;
+        BufBuilder bb(bufSize);
+        char* start = bb.buf();
 
-            string cursorName;
-            BSONObj obj;
-            Runner::RunnerState state;
-            while (Runner::RUNNER_ADVANCED == (state = runner->getNext(&obj, NULL))) {
-                // Distinct expands arrays.
-                //
-                // If our query is covered, each value of the key should be in the index key and
-                // available to us without this.  If a collection scan is providing the data, we may
-                // have to expand an array.
-                BSONElementSet elts;
-                obj.getFieldsDotted(key, elts);
+        BSONArrayBuilder arr(bb);
+        BSONElementSet values;
 
-                for (BSONElementSet::iterator it = elts.begin(); it != elts.end(); ++it) {
-                    BSONElement elt = *it;
-                    if (values.count(elt)) { continue; }
-                    int currentBufPos = bb.len();
+        BSONObj obj;
+        PlanExecutor::ExecState state;
+        while (PlanExecutor::ADVANCED == (state = executor.getValue()->getNext(&obj, NULL))) {
+            // Distinct expands arrays.
+            //
+            // If our query is covered, each value of the key should be in the index key and
+            // available to us without this.  If a collection scan is providing the data, we may
+            // have to expand an array.
+            BSONElementSet elts;
+            obj.getFieldsDotted(key, elts);
 
-                    uassert(17217, "distinct too big, 16mb cap",
-                            (currentBufPos + elt.size() + 1024) < bufSize);
-
-                    arr.append(elt);
-                    BSONElement x(start + currentBufPos);
-                    values.insert(x);
+            for (BSONElementSet::iterator it = elts.begin(); it != elts.end(); ++it) {
+                BSONElement elt = *it;
+                if (values.count(elt)) {
+                    continue;
                 }
+                int currentBufPos = bb.len();
+
+                uassert(17217,
+                        "distinct too big, 16mb cap",
+                        (currentBufPos + elt.size() + 1024) < bufSize);
+
+                arr.append(elt);
+                BSONElement x(start + currentBufPos);
+                values.insert(x);
             }
-            TypeExplain* bareExplain;
-            Status res = runner->getInfo(&bareExplain, NULL);
-            if (res.isOK()) {
-                auto_ptr<TypeExplain> explain(bareExplain);
-                if (explain->isCursorSet()) {
-                    cursorName = explain->getCursor();
-                }
-                n = explain->getN();
-                nscanned = explain->getNScanned();
-                nscannedObjects = explain->getNScannedObjects();
-            }
-
-            verify( start == bb.buf() );
-
-            result.appendArray( "values" , arr.done() );
-
-            {
-                BSONObjBuilder b;
-                b.appendNumber( "n" , n );
-                b.appendNumber( "nscanned" , nscanned );
-                b.appendNumber( "nscannedObjects" , nscannedObjects );
-                b.appendNumber( "timems" , t.millis() );
-                b.append( "cursor" , cursorName );
-                result.append( "stats" , b.obj() );
-            }
-
-            return true;
         }
-    } distinctCmd;
+
+        // Return an error if execution fails for any reason.
+        if (PlanExecutor::FAILURE == state || PlanExecutor::DEAD == state) {
+            log() << "Plan executor error during distinct command: "
+                  << PlanExecutor::statestr(state)
+                  << ", stats: " << Explain::getWinningPlanStats(executor.getValue().get());
+
+            return appendCommandStatus(result,
+                                       Status(ErrorCodes::OperationFailed,
+                                              str::stream()
+                                                  << "Executor error during distinct command: "
+                                                  << WorkingSetCommon::toStatusString(obj)));
+        }
+
+
+        // Get summary information about the plan.
+        PlanSummaryStats stats;
+        Explain::getSummaryStats(*executor.getValue(), &stats);
+        collection->infoCache()->notifyOfQuery(txn, stats.indexesUsed);
+        CurOp::get(txn)->debug().fromMultiPlanner = stats.fromMultiPlanner;
+        CurOp::get(txn)->debug().replanned = stats.replanned;
+
+        verify(start == bb.buf());
+
+        result.appendArray("values", arr.done());
+
+        {
+            BSONObjBuilder b;
+            b.appendNumber("n", stats.nReturned);
+            b.appendNumber("nscanned", stats.totalKeysExamined);
+            b.appendNumber("nscannedObjects", stats.totalDocsExamined);
+            b.appendNumber("timems", t.millis());
+            b.append("planSummary", Explain::getPlanSummary(executor.getValue().get()));
+            result.append("stats", b.obj());
+        }
+
+        return true;
+    }
+} distinctCmd;
 
 }  // namespace mongo

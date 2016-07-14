@@ -1,5 +1,5 @@
 /**
-*    Copyright (C) 2008 10gen Inc.
+*    Copyright (C) 2015 10gen Inc.
 *
 *    This program is free software: you can redistribute it and/or  modify
 *    it under the terms of the GNU Affero General Public License, version 3,
@@ -28,105 +28,68 @@
 
 #include "mongo/platform/basic.h"
 
+#include <sstream>
+
 #include "mongo/db/dbwebserver.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/repl/replication_server_status.h"  // replSettings
-#include "mongo/db/repl/rs.h"
+#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/repl_set_html_summary.h"
+#include "mongo/db/repl/rslog.h"
 #include "mongo/util/mongoutils/html.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
+namespace repl {
 
-    extern void fillRsLog(std::stringstream&);
+using namespace html;
 
-namespace {
+class ReplSetHandler : public DbWebHandler {
+public:
+    ReplSetHandler() : DbWebHandler("_replSet", 1, false) {}
 
-    using namespace bson;
-    using namespace mongoutils;
-    using namespace mongoutils::html;
+    virtual bool handles(const std::string& url) const {
+        return str::startsWith(url, "/_replSet");
+    }
 
-    class ReplSetHandler : public DbWebHandler {
-    public:
-        ReplSetHandler() : DbWebHandler( "_replSet" , 1 , true ) {}
+    virtual void handle(OperationContext* txn,
+                        const char* rq,
+                        const std::string& url,
+                        BSONObj params,
+                        std::string& responseMsg,
+                        int& responseCode,
+                        std::vector<std::string>& headers,
+                        const SockAddr& from) {
+        responseMsg = _replSet(txn);
+        responseCode = 200;
+    }
 
-        virtual bool handles( const string& url ) const {
-            return startsWith( url , "/_replSet" );
-        }
+    /* /_replSet show replica set status in html format */
+    std::string _replSet(OperationContext* txn) {
+        std::stringstream s;
+        s << start("Replica Set Status " + prettyHostName());
+        s << p(a("/", "back", "Home") + " | " +
+               a("/local/system.replset/?html=1", "", "View Replset Config") + " | " +
+               a("/replSetGetStatus?text=1", "", "replSetGetStatus") + " | " +
+               a("http://dochub.mongodb.org/core/replicasets", "", "Docs"));
 
-        virtual void handle( const char *rq, const std::string& url, BSONObj params,
-                             string& responseMsg, int& responseCode,
-                             vector<string>& headers,  const SockAddr &from ) {
-
-            if( url == "/_replSetOplog" ) {
-                responseMsg = _replSetOplog(params);
-            }
-            else
-                responseMsg = _replSet();
-            responseCode = 200;
-        }
-
-        string _replSetOplog(bo parms) {
-            int _id = (int) str::toUnsigned( parms["_id"].String() );
-
-            stringstream s;
-            string t = "Replication oplog";
-            s << start(t);
-            s << p(t);
-
-            if( theReplSet == 0 ) {
-                if (replSettings.replSet.empty())
-                    s << p("Not using --replSet");
-                else  {
-                    s << p("Still starting up, or else set is not yet " + a("http://dochub.mongodb.org/core/replicasetconfiguration#ReplicaSetConfiguration-InitialSetup", "", "initiated")
-                           + ".<br>" + ReplSet::startupStatusMsg.get());
-                }
-            }
-            else {
-                try {
-                    theReplSet->getOplogDiagsAsHtml(_id, s);
-                }
-                catch(std::exception& e) {
-                    s << "error querying oplog: " << e.what() << '\n';
-                }
-            }
-
+        ReplicationCoordinator* replCoord = getGlobalReplicationCoordinator();
+        if (replCoord->getReplicationMode() != ReplicationCoordinator::modeReplSet) {
+            s << p("Not using --replSet");
             s << _end();
             return s.str();
         }
 
-        /* /_replSet show replica set status in html format */
-        string _replSet() {
-            stringstream s;
-            s << start("Replica Set Status " + prettyHostName());
-            s << p( a("/", "back", "Home") + " | " +
-                    a("/local/system.replset/?html=1", "", "View Replset Config") + " | " +
-                    a("/replSetGetStatus?text=1", "", "replSetGetStatus") + " | " +
-                    a("http://dochub.mongodb.org/core/replicasets", "", "Docs")
-                  );
+        ReplSetHtmlSummary summary;
+        replCoord->summarizeAsHtml(&summary);
+        s << summary.toHtmlString();
 
-            if( theReplSet == 0 ) {
-                if (replSettings.replSet.empty())
-                    s << p("Not using --replSet");
-                else  {
-                    s << p("Still starting up, or else set is not yet " + a("http://dochub.mongodb.org/core/replicasetconfiguration#ReplicaSetConfiguration-InitialSetup", "", "initiated")
-                           + ".<br>" + ReplSet::startupStatusMsg.get());
-                }
-            }
-            else {
-                try {
-                    theReplSet->summarizeAsHtml(s);
-                }
-                catch(...) { s << "error summarizing replset status\n"; }
-            }
-            s << p("Recent replset log activity:");
-            fillRsLog(s);
-            s << _end();
-            return s.str();
-        }
+        s << p("Recent replset log activity:");
+        fillRsLog(&s);
+        s << _end();
+        return s.str();
+    }
 
+} replSetHandler;
 
-
-    } replSetHandler;
-
-}  // namespace
+}  // namespace repl
 }  // namespace mongo

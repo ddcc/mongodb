@@ -78,7 +78,7 @@ class DependencyCycleError(SCons.Errors.UserError):
         self.cycle_nodes = [first_node]
 
     def __str__(self):
-        return " => ".join(str(n) for n in self.cycle_nodes)
+        return "Library dependency cycle detected: " + " => ".join(str(n) for n in self.cycle_nodes)
 
 def __get_libdeps(node):
     """Given a SCons Node, return its library dependencies.
@@ -111,8 +111,8 @@ def __compute_libdeps(node):
 
         except DependencyCycleError, e:
             if len(e.cycle_nodes) == 1 or e.cycle_nodes[0] != e.cycle_nodes[-1]:
-                e.cycle_nodes.append(node)
-                raise
+                e.cycle_nodes.insert(0, node)
+            raise
     finally:
         node.attributes.libdeps_exploring = False
 
@@ -125,7 +125,7 @@ def __get_syslibdeps(node):
     """
     cached_var_name = syslibdeps_env_var + '_cached'
     if not hasattr(node.attributes, cached_var_name):
-        syslibdeps = []
+        syslibdeps = node.get_env().Flatten(node.get_env().get(syslibdeps_env_var, []))
         for lib in __get_libdeps(node):
             for syslib in node.get_env().Flatten(lib.get_env().get(syslibdeps_env_var, [])):
                 if syslib:
@@ -224,18 +224,17 @@ def libdeps_emitter(target, source, env):
     of the "target" list is made a prerequisite of the elements of LIBDEPS_DEPENDENTS.
     """
 
+    lib_builder = env['BUILDERS']['StaticLibrary']
+    lib_node_factory = lib_builder.target_factory or env.File
+
+    prog_builder = env['BUILDERS']['Program']
+    prog_node_factory = prog_builder.target_factory or env.File
+
     libdep_files = []
-    lib_suffix = env.subst('$LIBSUFFIX', target=target, source=source)
-    lib_prefix = env.subst('$LIBPREFIX', target=target, source=source)
     for prereq in env.Flatten([env.get(libdeps_env_var, [])]):
-        full_path = env.subst(str(prereq), target=target, source=source)
-        dir_name = os.path.dirname(full_path)
-        file_name = os.path.basename(full_path)
-        if not file_name.startswith(lib_prefix):
-            file_name = '${LIBPREFIX}' + file_name
-        if not file_name.endswith(lib_suffix):
-            file_name += '${LIBSUFFIX}'
-        libdep_files.append(env.File(os.path.join(dir_name, file_name)))
+        prereqWithIxes = SCons.Util.adjustixes(
+            prereq, lib_builder.get_prefix(env), lib_builder.get_suffix(env))
+        libdep_files.append(lib_node_factory(prereqWithIxes))
 
     for t in target:
         # target[0] must be a Node and not a string, or else libdeps will fail to
@@ -243,17 +242,83 @@ def libdeps_emitter(target, source, env):
         __append_direct_libdeps(t, libdep_files)
 
     for dependent in env.Flatten([env.get('LIBDEPS_DEPENDENTS', [])]):
-        __append_direct_libdeps(env.File(dependent), [target[0]])
+        dependentWithIxes = SCons.Util.adjustixes(
+            dependent, lib_builder.get_prefix(env), lib_builder.get_suffix(env))
+        dependentNode = lib_node_factory(dependentWithIxes)
+        __append_direct_libdeps(dependentNode, [target[0]])
+
+    for dependent in env.Flatten([env.get('PROGDEPS_DEPENDENTS', [])]):
+        dependentWithIxes = SCons.Util.adjustixes(
+            dependent, prog_builder.get_prefix(env), prog_builder.get_suffix(env))
+        dependentNode = prog_node_factory(dependentWithIxes)
+        __append_direct_libdeps(dependentNode, [target[0]])
 
     return target, source
 
-def setup_environment(env):
+def shlibdeps_emitter(target, source, env):
+    """SCons emitter that takes values from the LIBDEPS environment variable and
+    converts them to File node objects, binding correct path information into
+    those File objects.
+
+    Emitters run on a particular "target" node during the initial execution of
+    the SConscript file, rather than during the later build phase.  When they
+    run, the "env" environment's working directory information is what you
+    expect it to be -- that is, the working directory is considered to be the
+    one that contains the SConscript file.  This allows specification of
+    relative paths to LIBDEPS elements.
+
+    This emitter also adds LIBSUFFIX and LIBPREFIX appropriately.
+
+    NOTE: For purposes of LIBDEPS_DEPENDENTS propagation, only the first member
+    of the "target" list is made a prerequisite of the elements of LIBDEPS_DEPENDENTS.
+    """
+
+    lib_builder = env['BUILDERS']['SharedLibrary']
+    lib_node_factory = lib_builder.target_factory or env.File
+
+    prog_builder = env['BUILDERS']['Program']
+    prog_node_factory = prog_builder.target_factory or env.File
+
+    libdep_files = []
+    for prereq in env.Flatten([env.get(libdeps_env_var, [])]):
+        prereqWithIxes = SCons.Util.adjustixes(
+            prereq, lib_builder.get_prefix(env), lib_builder.get_suffix(env))
+        libdep_files.append(lib_node_factory(prereqWithIxes))
+
+    for t in target:
+        # target[0] must be a Node and not a string, or else libdeps will fail to
+        # work properly.
+        __append_direct_libdeps(t, libdep_files)
+
+    for dependent in env.Flatten([env.get('LIBDEPS_DEPENDENTS', [])]):
+        dependentWithIxes = SCons.Util.adjustixes(
+            dependent, lib_builder.get_prefix(env), lib_builder.get_suffix(env))
+        dependentNode = lib_node_factory(dependentWithIxes)
+        __append_direct_libdeps(dependentNode, [target[0]])
+
+    for dependent in env.Flatten([env.get('PROGDEPS_DEPENDENTS', [])]):
+        dependentWithIxes = SCons.Util.adjustixes(
+            dependent, prog_builder.get_prefix(env), prog_builder.get_suffix(env))
+        dependentNode = prog_node_factory(dependentWithIxes)
+        __append_direct_libdeps(dependentNode, [target[0]])
+
+    return target, source
+
+def expand_libdeps_tags(source, target, env, for_signature):
+    results = []
+    for expansion in env.get('LIBDEPS_TAG_EXPANSIONS', []):
+        results.append(expansion(source, target, env, for_signature))
+    return results
+
+def setup_environment(env, emitting_shared=False):
     """Set up the given build environment to do LIBDEPS tracking."""
 
     try:
         env['_LIBDEPS']
     except KeyError:
         env['_LIBDEPS'] = '$_LIBDEPS_LIBS'
+
+    env['_LIBDEPS_TAGS'] = expand_libdeps_tags
 
     # TODO: remove this
     # this is a horrible horrible hack for 
@@ -269,10 +334,16 @@ def setup_environment(env):
 
     env[libdeps_env_var] = SCons.Util.CLVar()
     env[syslibdeps_env_var] = SCons.Util.CLVar()
-    env.Append(LIBEMITTER=libdeps_emitter,
-               PROGEMITTER=libdeps_emitter,
-               SHLIBEMITTER=libdeps_emitter)
-    env.Prepend(_LIBFLAGS=' $LINK_LIBGROUP_START $_LIBDEPS $LINK_LIBGROUP_END $_SYSLIBDEPS ')
+    env.Append(LIBEMITTER=libdeps_emitter)
+    if emitting_shared:
+        env.Append(
+            PROGEMITTER=shlibdeps_emitter,
+            SHLIBEMITTER=shlibdeps_emitter)
+    else:
+        env.Append(
+            PROGEMITTER=libdeps_emitter,
+            SHLIBEMITTER=libdeps_emitter)
+    env.Prepend(_LIBFLAGS=' $_LIBDEPS_TAGS $LINK_WHOLE_ARCHIVE_START $LINK_LIBGROUP_START $_LIBDEPS $LINK_LIBGROUP_END $LINK_WHOLE_ARCHIVE_END $_SYSLIBDEPS ')
     for builder_name in ('Program', 'SharedLibrary', 'LoadableModule'):
         try:
             update_scanner(env['BUILDERS'][builder_name])

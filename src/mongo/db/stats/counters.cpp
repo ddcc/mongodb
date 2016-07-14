@@ -27,138 +27,139 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/stats/counters.h"
 
 #include "mongo/db/jsobj.h"
+#include "mongo/util/debug_util.h"
+#include "mongo/util/log.h"
 
 namespace mongo {
-    OpCounters::OpCounters() {}
 
-    void OpCounters::incInsertInWriteLock(int n) {
-        RARELY _checkWrap();
-        _insert.x += n;
-    }
+using std::endl;
 
-    void OpCounters::gotInsert() {
-        RARELY _checkWrap();
-        _insert++;
-    }
+OpCounters::OpCounters() {}
 
-    void OpCounters::gotQuery() {
-        RARELY _checkWrap();
-        _query++;
-    }
+void OpCounters::incInsertInWriteLock(int n) {
+    RARELY _checkWrap();
+    _insert.fetchAndAdd(n);
+}
 
-    void OpCounters::gotUpdate() {
-        RARELY _checkWrap();
-        _update++;
-    }
+void OpCounters::gotInsert() {
+    RARELY _checkWrap();
+    _insert.fetchAndAdd(1);
+}
 
-    void OpCounters::gotDelete() {
-        RARELY _checkWrap();
-        _delete++;
-    }
+void OpCounters::gotQuery() {
+    RARELY _checkWrap();
+    _query.fetchAndAdd(1);
+}
 
-    void OpCounters::gotGetMore() {
-        RARELY _checkWrap();
-        _getmore++;
-    }
+void OpCounters::gotUpdate() {
+    RARELY _checkWrap();
+    _update.fetchAndAdd(1);
+}
 
-    void OpCounters::gotCommand() {
-        RARELY _checkWrap();
-        _command++;
-    }
+void OpCounters::gotDelete() {
+    RARELY _checkWrap();
+    _delete.fetchAndAdd(1);
+}
 
-    void OpCounters::gotOp( int op , bool isCommand ) {
-        switch ( op ) {
-        case dbInsert: /*gotInsert();*/ break; // need to handle multi-insert
+void OpCounters::gotGetMore() {
+    RARELY _checkWrap();
+    _getmore.fetchAndAdd(1);
+}
+
+void OpCounters::gotCommand() {
+    RARELY _checkWrap();
+    _command.fetchAndAdd(1);
+}
+
+void OpCounters::gotOp(int op, bool isCommand) {
+    switch (op) {
+        case dbInsert: /*gotInsert();*/
+            break;     // need to handle multi-insert
         case dbQuery:
-            if ( isCommand )
+            if (isCommand)
                 gotCommand();
             else
                 gotQuery();
             break;
 
-        case dbUpdate: gotUpdate(); break;
-        case dbDelete: gotDelete(); break;
-        case dbGetMore: gotGetMore(); break;
+        case dbUpdate:
+            gotUpdate();
+            break;
+        case dbDelete:
+            gotDelete();
+            break;
+        case dbGetMore:
+            gotGetMore();
+            break;
         case dbKillCursors:
         case opReply:
         case dbMsg:
             break;
-        default: log() << "OpCounters::gotOp unknown op: " << op << endl;
-        }
+        default:
+            log() << "OpCounters::gotOp unknown op: " << op << endl;
     }
+}
 
-    void OpCounters::_checkWrap() {
-        const unsigned MAX = 1 << 30;
-        
-        bool wrap =
-            _insert.get() > MAX ||
-            _query.get() > MAX ||
-            _update.get() > MAX ||
-            _delete.get() > MAX ||
-            _getmore.get() > MAX ||
-            _command.get() > MAX;
-        
-        if ( wrap ) {
-            _insert.zero();
-            _query.zero();
-            _update.zero();
-            _delete.zero();
-            _getmore.zero();
-            _command.zero();
-        }
+void OpCounters::_checkWrap() {
+    const unsigned MAX = 1 << 30;
+
+    bool wrap = _insert.loadRelaxed() > MAX || _query.loadRelaxed() > MAX ||
+        _update.loadRelaxed() > MAX || _delete.loadRelaxed() > MAX ||
+        _getmore.loadRelaxed() > MAX || _command.loadRelaxed() > MAX;
+
+    if (wrap) {
+        _insert.store(0);
+        _query.store(0);
+        _update.store(0);
+        _delete.store(0);
+        _getmore.store(0);
+        _command.store(0);
     }
+}
 
-    BSONObj OpCounters::getObj() const {
-        BSONObjBuilder b;
-        b.append( "insert" , _insert.get() );
-        b.append( "query" , _query.get() );
-        b.append( "update" , _update.get() );
-        b.append( "delete" , _delete.get() );
-        b.append( "getmore" , _getmore.get() );
-        b.append( "command" , _command.get() );
-        return b.obj();
+BSONObj OpCounters::getObj() const {
+    BSONObjBuilder b;
+    b.append("insert", _insert.loadRelaxed());
+    b.append("query", _query.loadRelaxed());
+    b.append("update", _update.loadRelaxed());
+    b.append("delete", _delete.loadRelaxed());
+    b.append("getmore", _getmore.loadRelaxed());
+    b.append("command", _command.loadRelaxed());
+    return b.obj();
+}
+
+void NetworkCounter::hit(long long bytesIn, long long bytesOut) {
+    const int64_t MAX = 1ULL << 60;
+
+    // don't care about the race as its just a counter
+    bool overflow = _bytesIn.loadRelaxed() > MAX || _bytesOut.loadRelaxed() > MAX;
+
+    if (overflow) {
+        _bytesIn.store(bytesIn);
+        _bytesOut.store(bytesOut);
+        _requests.store(1);
+    } else {
+        _bytesIn.fetchAndAdd(bytesIn);
+        _bytesOut.fetchAndAdd(bytesOut);
+        _requests.fetchAndAdd(1);
     }
+}
 
-    void NetworkCounter::hit( long long bytesIn , long long bytesOut ) {
-        const long long MAX = 1ULL << 60;
-
-        // don't care about the race as its just a counter
-        bool overflow = _bytesIn > MAX || _bytesOut > MAX;
-
-        if ( overflow ) {
-            _lock.lock();
-            _overflows++;
-            _bytesIn = bytesIn;
-            _bytesOut = bytesOut;
-            _requests = 1;
-            _lock.unlock();
-        }
-        else {
-            _lock.lock();
-            _bytesIn += bytesIn;
-            _bytesOut += bytesOut;
-            _requests++;
-            _lock.unlock();
-        }
-    }
-
-    void NetworkCounter::append( BSONObjBuilder& b ) {
-        _lock.lock();
-        b.appendNumber( "bytesIn" , _bytesIn );
-        b.appendNumber( "bytesOut" , _bytesOut );
-        b.appendNumber( "numRequests" , _requests );
-        _lock.unlock();
-    }
+void NetworkCounter::append(BSONObjBuilder& b) {
+    b.append("bytesIn", static_cast<long long>(_bytesIn.loadRelaxed()));
+    b.append("bytesOut", static_cast<long long>(_bytesOut.loadRelaxed()));
+    b.append("numRequests", static_cast<long long>(_requests.loadRelaxed()));
+}
 
 
-    OpCounters globalOpCounters;
-    OpCounters replOpCounters;
-    NetworkCounter networkCounter;
-
+OpCounters globalOpCounters;
+OpCounters replOpCounters;
+NetworkCounter networkCounter;
 }

@@ -30,42 +30,45 @@
 
 #pragma once
 
-#include "mongo/db/fts/fts_spec.h"
+#include <string>
+
+#include "mongo/base/string_data.h"
+#include "mongo/db/fts/fts_util.h"
 
 namespace mongo {
 
-    namespace fts {
+namespace fts {
 
-        class FTSIndexFormat {
-        public:
+class FTSSpec;
 
-            static void getKeys( const FTSSpec& spec,
-                                 const BSONObj& document,
-                                 BSONObjSet* keys );
+class FTSIndexFormat {
+public:
+    static void getKeys(const FTSSpec& spec, const BSONObj& document, BSONObjSet* keys);
 
-            /*
-             * Helper method to get return entry from the FTSIndex as a BSONObj
-             * @param weight, the weight of the term in the entry
-             * @param term, the string term in the entry
-             * @param indexPrefix, the fields that go in the index first
-             * @param textIndexVersion, index version. affects key format.
-             */
-            static BSONObj getIndexKey( double weight,
-                                        const string& term,
-                                        const BSONObj& indexPrefix,
-                                        TextIndexVersion textIndexVersion );
+    /**
+     * Helper method to get return entry from the FTSIndex as a BSONObj
+     * @param weight, the weight of the term in the entry
+     * @param term, the std::string term in the entry
+     * @param indexPrefix, the fields that go in the index first
+     * @param textIndexVersion, index version. affects key format.
+     */
+    static BSONObj getIndexKey(double weight,
+                               const std::string& term,
+                               const BSONObj& indexPrefix,
+                               TextIndexVersion textIndexVersion);
 
-        private:
-            /*
-             * Helper method to get return entry from the FTSIndex as a BSONObj
-             * @param b, reference to the BSONOBjBuilder
-             * @param weight, the weight of the term in the entry
-             * @param term, the string term in the entry
-             * @param textIndexVersion, index version. affects key format.
-             */
-            static void _appendIndexKey( BSONObjBuilder& b, double weight, const string& term,
-                                         TextIndexVersion textIndexVersion );
-        };
-
-    }
+private:
+    /**
+     * Helper method to get return entry from the FTSIndex as a BSONObj
+     * @param b, reference to the BSONOBjBuilder
+     * @param weight, the weight of the term in the entry
+     * @param term, the std::string term in the entry
+     * @param textIndexVersion, index version. affects key format.
+     */
+    static void _appendIndexKey(BSONObjBuilder& b,
+                                double weight,
+                                const std::string& term,
+                                TextIndexVersion textIndexVersion);
+};
+}
 }

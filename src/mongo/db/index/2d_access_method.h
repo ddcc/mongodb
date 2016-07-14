@@ -30,84 +30,33 @@
 
 #include "mongo/base/status.h"
 #include "mongo/db/index/2d_common.h"
-#include "mongo/db/index/2d_key_generator.h"
-#include "mongo/db/index/btree_based_access_method.h"
+#include "mongo/db/index/index_access_method.h"
 #include "mongo/db/jsobj.h"
 
 namespace mongo {
 
-    class IndexCatalogEntry;
-    class IndexCursor;
-    class IndexDescriptor;
-    struct TwoDIndexingParams;
+class IndexCatalogEntry;
+class IndexDescriptor;
+struct TwoDIndexingParams;
 
-    namespace twod_exec {
-        class GeoPoint;
-        class GeoAccumulator;
-        class GeoBrowse;
-        class GeoHopper;
-        class GeoSearch;
-        class GeoCircleBrowse;
-        class GeoBoxBrowse;
-        class GeoPolygonBrowse;
-        class TwoDGeoNearRunner;
+class TwoDAccessMethod : public IndexAccessMethod {
+public:
+    TwoDAccessMethod(IndexCatalogEntry* btreeState, SortedDataInterface* btree);
+
+private:
+    const IndexDescriptor* getDescriptor() {
+        return _descriptor;
+    }
+    TwoDIndexingParams& getParams() {
+        return _params;
     }
 
-    namespace twod_internal {
-        class GeoPoint;
-        class GeoAccumulator;
-        class GeoBrowse;
-        class GeoHopper;
-        class GeoSearch;
-        class GeoCircleBrowse;
-        class GeoBoxBrowse;
-        class GeoPolygonBrowse;
-        class TwoDGeoNearRunner;
-    }
+    // This really gets the 'locs' from the provided obj.
+    void getKeys(const BSONObj& obj, std::vector<BSONObj>& locs) const;
 
-    class TwoDAccessMethod : public BtreeBasedAccessMethod {
-    public:
-        using BtreeBasedAccessMethod::_descriptor;
-        using BtreeBasedAccessMethod::_interface;
+    virtual void getKeys(const BSONObj& obj, BSONObjSet* keys) const;
 
-        TwoDAccessMethod(IndexCatalogEntry* btreeState);
-        virtual ~TwoDAccessMethod() { }
-
-        virtual shared_ptr<KeyGenerator> getKeyGenerator() const { return _keyGenerator; }
-    private:
-        friend class TwoDIndexCursor;
-        friend class twod_internal::GeoPoint;
-        friend class twod_internal::GeoAccumulator;
-        friend class twod_internal::GeoBrowse;
-        friend class twod_internal::GeoHopper;
-        friend class twod_internal::GeoSearch;
-        friend class twod_internal::GeoCircleBrowse;
-        friend class twod_internal::GeoBoxBrowse;
-        friend class twod_internal::GeoPolygonBrowse;
-
-        friend class twod_exec::GeoPoint;
-        friend class twod_exec::GeoAccumulator;
-        friend class twod_exec::GeoBrowse;
-        friend class twod_exec::GeoHopper;
-        friend class twod_exec::GeoSearch;
-        friend class twod_exec::GeoCircleBrowse;
-        friend class twod_exec::GeoBoxBrowse;
-        friend class twod_exec::GeoPolygonBrowse;
-
-        friend class twod_internal::TwoDGeoNearRunner;
-
-        BtreeInterface* getInterface() { return _interface; }
-        const IndexDescriptor* getDescriptor() { return _descriptor; }
-        TwoDIndexingParams& getParams() { return _params; }
-
-        // This really gets the 'locs' from the provided obj.
-        void getKeys(const BSONObj& obj, vector<BSONObj>& locs) const;
-
-        virtual void getKeys(const BSONObj& obj, BSONObjSet* keys);
-
-        TwoDIndexingParams _params;
-
-        shared_ptr<TwoDKeyGenerator> _keyGenerator;
-    };
+    TwoDIndexingParams _params;
+};
 
 }  // namespace mongo

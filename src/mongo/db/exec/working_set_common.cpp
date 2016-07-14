@@ -26,98 +26,178 @@
  *    it in the license file.
  */
 
-#include "mongo/db/exec/working_set.h"
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/exec/working_set_common.h"
-#include "mongo/db/pdfile.h"
+
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/exec/working_set.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/index/index_access_method.h"
+#include "mongo/db/query/canonical_query.h"
 
 namespace mongo {
 
-    // static
-    bool WorkingSetCommon::fetchAndInvalidateLoc(WorkingSetMember* member) {
-        // Already in our desired state.
-        if (member->state == WorkingSetMember::OWNED_OBJ) { return true; }
-
-        // We can't do anything without a DiskLoc.
-        if (!member->hasLoc()) { return false; }
-
-        // Do the fetch, invalidate the DL.
-        member->obj = member->loc.obj().getOwned();
-
-        member->state = WorkingSetMember::OWNED_OBJ;
-        member->loc = DiskLoc();
+// static
+bool WorkingSetCommon::fetchAndInvalidateLoc(OperationContext* txn,
+                                             WorkingSetMember* member,
+                                             const Collection* collection) {
+    // Already in our desired state.
+    if (member->getState() == WorkingSetMember::OWNED_OBJ) {
         return true;
     }
 
-    // static
-    void WorkingSetCommon::initFrom(WorkingSetMember* dest, const WorkingSetMember& src) {
-        dest->loc = src.loc;
-        dest->obj = src.obj;
-        dest->keyData = src.keyData;
-        dest->state = src.state;
+    // We can't do anything without a RecordId.
+    if (!member->hasLoc()) {
+        return false;
+    }
 
-        // Merge computed data.
-        typedef WorkingSetComputedDataType WSCD;
-        for (WSCD i = WSCD(0); i < WSM_COMPUTED_NUM_TYPES; i = WSCD(i + 1)) {
-            if (src.hasComputed(i)) {
-                dest->addComputed(src.getComputed(i)->clone());
+    // Do the fetch, invalidate the DL.
+    member->obj = collection->docFor(txn, member->loc);
+    member->obj.setValue(member->obj.value().getOwned());
+    member->loc = RecordId();
+    member->transitionToOwnedObj();
+
+    return true;
+}
+
+void WorkingSetCommon::prepareForSnapshotChange(WorkingSet* workingSet) {
+    if (!supportsDocLocking()) {
+        // Non doc-locking storage engines use invalidations, so we don't need to examine the
+        // buffered working set ids. But we do need to clear the set of ids in order to keep our
+        // memory utilization in check.
+        workingSet->getAndClearYieldSensitiveIds();
+        return;
+    }
+
+    for (auto id : workingSet->getAndClearYieldSensitiveIds()) {
+        if (workingSet->isFree(id)) {
+            continue;
+        }
+
+        // We may see the same member twice, so anything we do here should be idempotent.
+        WorkingSetMember* member = workingSet->get(id);
+        if (member->getState() == WorkingSetMember::LOC_AND_IDX) {
+            member->isSuspicious = true;
+        }
+    }
+}
+
+// static
+bool WorkingSetCommon::fetch(OperationContext* txn,
+                             WorkingSet* workingSet,
+                             WorkingSetID id,
+                             unowned_ptr<SeekableRecordCursor> cursor) {
+    WorkingSetMember* member = workingSet->get(id);
+
+    // The RecordFetcher should already have been transferred out of the WSM and used.
+    invariant(!member->hasFetcher());
+
+    // We should have a RecordId but need to retrieve the obj. Get the obj now and reset all WSM
+    // state appropriately.
+    invariant(member->hasLoc());
+
+    member->obj.reset();
+    auto record = cursor->seekExact(member->loc);
+    if (!record) {
+        return false;
+    }
+
+    member->obj = {txn->recoveryUnit()->getSnapshotId(), record->data.releaseToBson()};
+
+    if (member->isSuspicious) {
+        // Make sure that all of the keyData is still valid for this copy of the document.
+        // This ensures both that index-provided filters and sort orders still hold.
+        // TODO provide a way for the query planner to opt out of this checking if it is
+        // unneeded due to the structure of the plan.
+        invariant(!member->keyData.empty());
+        for (size_t i = 0; i < member->keyData.size(); i++) {
+            BSONObjSet keys;
+            member->keyData[i].index->getKeys(member->obj.value(), &keys);
+            if (!keys.count(member->keyData[i].keyData)) {
+                // document would no longer be at this position in the index.
+                return false;
             }
         }
+
+        member->isSuspicious = false;
     }
 
-    // static
-    WorkingSetID WorkingSetCommon::allocateStatusMember(WorkingSet* ws, const Status& status) {
-        invariant(ws);
+    member->keyData.clear();
+    workingSet->transitionToLocAndObj(id);
+    return true;
+}
 
-        BSONObjBuilder bob;
-        bob.append("ok", status.isOK() ? 1.0 : 0.0);
-        bob.append("code", status.code());
-        bob.append("errmsg", status.reason());
+// static
+BSONObj WorkingSetCommon::buildMemberStatusObject(const Status& status) {
+    BSONObjBuilder bob;
+    bob.append("ok", status.isOK() ? 1.0 : 0.0);
+    bob.append("code", status.code());
+    bob.append("errmsg", status.reason());
 
-        WorkingSetID wsid = ws->allocate();
-        WorkingSetMember* member = ws->get(wsid);
-        member->state = WorkingSetMember::OWNED_OBJ;
-        member->obj = bob.obj();
+    return bob.obj();
+}
 
-        return wsid;
+// static
+WorkingSetID WorkingSetCommon::allocateStatusMember(WorkingSet* ws, const Status& status) {
+    invariant(ws);
+
+    WorkingSetID wsid = ws->allocate();
+    WorkingSetMember* member = ws->get(wsid);
+    member->obj = Snapshotted<BSONObj>(SnapshotId(), buildMemberStatusObject(status));
+    member->transitionToOwnedObj();
+
+    return wsid;
+}
+
+// static
+bool WorkingSetCommon::isValidStatusMemberObject(const BSONObj& obj) {
+    return obj.nFields() == 3 && obj.hasField("ok") && obj.hasField("code") &&
+        obj.hasField("errmsg");
+}
+
+// static
+void WorkingSetCommon::getStatusMemberObject(const WorkingSet& ws,
+                                             WorkingSetID wsid,
+                                             BSONObj* objOut) {
+    invariant(objOut);
+
+    // Validate ID and working set member.
+    if (WorkingSet::INVALID_ID == wsid) {
+        return;
     }
-
-    // static
-    bool WorkingSetCommon::isValidStatusMemberObject(const BSONObj& obj) {
-        return obj.nFields() == 3 &&
-               obj.hasField("ok") &&
-               obj.hasField("code") &&
-               obj.hasField("errmsg");
+    WorkingSetMember* member = ws.get(wsid);
+    if (!member->hasOwnedObj()) {
+        return;
     }
-
-    // static
-    void WorkingSetCommon::getStatusMemberObject(const WorkingSet& ws, WorkingSetID wsid,
-                                                 BSONObj* objOut) {
-        invariant(objOut);
-
-        // Validate ID and working set member.
-        if (WorkingSet::INVALID_ID == wsid) {
-            return;
-        }
-        WorkingSetMember* member = ws.get(wsid);
-        if (!member->hasOwnedObj()) {
-            return;
-        }
-        BSONObj obj = member->obj;
-        if (!isValidStatusMemberObject(obj)) {
-            return;
-        }
-        *objOut = member->obj;
+    BSONObj obj = member->obj.value();
+    if (!isValidStatusMemberObject(obj)) {
+        return;
     }
+    *objOut = obj;
+}
 
-    // static
-    std::string WorkingSetCommon::toStatusString(const BSONObj& obj) {
-        if (!isValidStatusMemberObject(obj)) {
-            Status unknownStatus(ErrorCodes::UnknownError, "no details available");
-            return unknownStatus.toString();
-        }
-        Status status(ErrorCodes::fromInt(obj.getIntField("code")),
-                      obj.getStringField("errmsg"));
-        return status.toString();
+// static
+Status WorkingSetCommon::getMemberObjectStatus(const BSONObj& memberObj) {
+    invariant(WorkingSetCommon::isValidStatusMemberObject(memberObj));
+    return Status(ErrorCodes::fromInt(memberObj["code"].numberInt()), memberObj["errmsg"]);
+}
+
+// static
+Status WorkingSetCommon::getMemberStatus(const WorkingSetMember& member) {
+    invariant(member.hasObj());
+    return getMemberObjectStatus(member.obj.value());
+}
+
+// static
+std::string WorkingSetCommon::toStatusString(const BSONObj& obj) {
+    if (!isValidStatusMemberObject(obj)) {
+        Status unknownStatus(ErrorCodes::UnknownError, "no details available");
+        return unknownStatus.toString();
     }
+    Status status(ErrorCodes::fromInt(obj.getIntField("code")), obj.getStringField("errmsg"));
+    return status.toString();
+}
 
 }  // namespace mongo

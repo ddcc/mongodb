@@ -11,15 +11,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kGeo
+
 #include "logging.h"
 
+#include <utility>
+
 #include "mongo/util/assert_util.h"
+#include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 
-LogMessageFatal::LogMessageFatal(const char* file, int line) :
-    _lsb(mongo::severe()) {
+using ::mongo::logger::LogstreamBuilder;
+
+LogMessageBase::LogMessageBase(LogstreamBuilder builder, const char* file, int line) :
+    _lsb(std::move(builder)) {
     _lsb.setBaseMessage(mongoutils::str::stream() << file << ':' << line << ": ");
 }
+
+LogMessageBase::LogMessageBase(LogstreamBuilder builder) : _lsb(std::move(builder)) { }
+
+LogMessageInfo::LogMessageInfo() : LogMessageBase(mongo::log()) { }
+
+LogMessageWarning::LogMessageWarning(const char* file, int line) :
+        LogMessageBase(mongo::warning(), file, line) { }
+
+LogMessageFatal::LogMessageFatal(const char* file, int line) :
+        LogMessageBase(mongo::severe(), file, line) { }
 
 LogMessageFatal::~LogMessageFatal() {
     _lsb.~LogstreamBuilder();

@@ -1,5 +1,3 @@
-// repair_database.h
-
 /**
 *    Copyright (C) 2014 MongoDB Inc.
 *
@@ -32,21 +30,20 @@
 
 #include <string>
 
-#include "mongo/base/status.h"
-#include "mongo/platform/cstdint.h"
-
 namespace mongo {
+class OperationContext;
+class Status;
+class StorageEngine;
+class StringData;
 
-    // TODO: move
-    intmax_t dbSize( const std::string& database );
-
-    // TODO: move
-    void _deleteDataFiles(const std::string& database);
-
-    // must have a global lock
-    Status repairDatabase( std::string db,
-                           bool preserveClonedFilesOnFailure = false,
-                           bool backupOriginalFiles = false );
-
-
-} // namespace mongo
+/**
+ * Repairs a database using a storage engine-specific, best-effort process.
+ * Some data may be lost or modified in the process but the output will
+ * be structurally valid on successful return.
+ */
+Status repairDatabase(OperationContext* txn,
+                      StorageEngine* engine,
+                      const std::string& dbName,
+                      bool preserveClonedFilesOnFailure = false,
+                      bool backupOriginalFiles = false);
+}

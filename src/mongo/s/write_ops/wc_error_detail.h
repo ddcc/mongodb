@@ -29,83 +29,65 @@
 #pragma once
 
 #include <string>
-#include <vector>
 
+#include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/s/bson_serializable.h"
 
 namespace mongo {
 
-    /**
-     * This class represents the layout and content of the error that occurs while trying
-     * to satisfy the write concern after executing the insert/update/delete runCommand.
-     */
-    class WCErrorDetail : public BSONSerializable {
-        MONGO_DISALLOW_COPYING(WCErrorDetail);
-    public:
+/**
+ * This class represents the layout and content of the error that occurs while trying
+ * to satisfy the write concern after executing the insert/update/delete runCommand.
+ */
+class WCErrorDetail {
+    MONGO_DISALLOW_COPYING(WCErrorDetail);
 
-        //
-        // schema declarations
-        //
+public:
+    WCErrorDetail();
 
-        static const BSONField<int> errCode;
-        static const BSONField<BSONObj> errInfo;
-        static const BSONField<std::string> errMessage;
+    /** Copies all the fields present in 'this' to 'other'. */
+    void cloneTo(WCErrorDetail* other) const;
 
-        //
-        // construction / destruction
-        //
+    //
+    // bson serializable interface implementation
+    //
 
-        WCErrorDetail();
-        virtual ~WCErrorDetail();
+    bool isValid(std::string* errMsg) const;
+    BSONObj toBSON() const;
+    bool parseBSON(const BSONObj& source, std::string* errMsg);
+    void clear();
+    std::string toString() const;
 
-        /** Copies all the fields present in 'this' to 'other'. */
-        void cloneTo(WCErrorDetail* other) const;
+    //
+    // individual field accessors
+    //
 
-        //
-        // bson serializable interface implementation
-        //
+    void setErrCode(ErrorCodes::Error code);
+    ErrorCodes::Error getErrCode() const;
 
-        virtual bool isValid(std::string* errMsg) const;
-        virtual BSONObj toBSON() const;
-        virtual bool parseBSON(const BSONObj& source, std::string* errMsg);
-        virtual void clear();
-        virtual std::string toString() const;
+    void setErrInfo(const BSONObj& errInfo);
+    bool isErrInfoSet() const;
+    const BSONObj& getErrInfo() const;
 
-        //
-        // individual field accessors
-        //
+    void setErrMessage(StringData errMessage);
+    bool isErrMessageSet() const;
+    const std::string& getErrMessage() const;
 
-        void setErrCode(int errCode);
-        void unsetErrCode();
-        bool isErrCodeSet() const;
-        int getErrCode() const;
+private:
+    // Convention: (M)andatory, (O)ptional
 
-        void setErrInfo(const BSONObj& errInfo);
-        void unsetErrInfo();
-        bool isErrInfoSet() const;
-        const BSONObj& getErrInfo() const;
+    // (M)  error code for the write concern error.
+    ErrorCodes::Error _errCode;
+    bool _isErrCodeSet;
 
-        void setErrMessage(const StringData& errMessage);
-        void unsetErrMessage();
-        bool isErrMessageSet() const;
-        const std::string& getErrMessage() const;
+    // (O)  further details about the write concern error.
+    BSONObj _errInfo;
+    bool _isErrInfoSet;
 
-    private:
-        // Convention: (M)andatory, (O)ptional
+    // (O)  user readable explanation about the write concern error.
+    std::string _errMessage;
+    bool _isErrMessageSet;
+};
 
-        // (M)  error code for the write concern error.
-        int _errCode;
-        bool _isErrCodeSet;
-
-        // (O)  further details about the write concern error.
-        BSONObj _errInfo;
-        bool _isErrInfoSet;
-
-        // (O)  user readable explanation about the write concern error.
-        std::string _errMessage;
-        bool _isErrMessageSet;
-    };
-
-} // namespace mongo
+}  // namespace mongo

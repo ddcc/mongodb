@@ -30,128 +30,128 @@
 
 #pragma once
 
-#include <boost/function.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_tree.h"
+#include "mongo/db/matcher/extensions_callback.h"
+#include "mongo/stdx/functional.h"
 
 namespace mongo {
 
-    typedef StatusWith<MatchExpression*> StatusWithMatchExpression;
+class OperationContext;
 
-    class MatchExpressionParser {
-    public:
+class MatchExpressionParser {
+public:
+    /**
+     * caller has to maintain ownership obj
+     * the tree has views (BSONElement) into obj
+     */
+    static StatusWithMatchExpression parse(
+        const BSONObj& obj, const ExtensionsCallback& extensionsCallback = ExtensionsCallback()) {
+        // The 0 initializes the match expression tree depth.
+        return MatchExpressionParser(&extensionsCallback)._parse(obj, 0);
+    }
 
-        /**
-         * caller has to maintain ownership obj
-         * the tree has views (BSONElement) into obj
-         */
-        static StatusWithMatchExpression parse( const BSONObj& obj ) {
-            // The 0 initializes the match expression tree depth.
-            return _parse( obj, 0 );
-        }
+private:
+    explicit MatchExpressionParser(const ExtensionsCallback* extensionsCallback)
+        : _extensionsCallback(extensionsCallback) {}
 
-    private:
+    /**
+     * 5 = false
+     * { a : 5 } = false
+     * { $lt : 5 } = true
+     * { $ref: "s", $id: "x" } = false
+     * { $ref: "s", $id: "x", $db: "mydb" } = false
+     * { $ref : "s" } = false (if incomplete DBRef is allowed)
+     * { $id : "x" } = false (if incomplete DBRef is allowed)
+     * { $db : "mydb" } = false (if incomplete DBRef is allowed)
+     */
+    bool _isExpressionDocument(const BSONElement& e, bool allowIncompleteDBRef);
 
-        /**
-         * 5 = false
-         * { a : 5 } = false
-         * { $lt : 5 } = true
-         * { $ref: "s", $id: "x" } = false
-         * { $ref: "s", $id: "x", $db: "mydb" } = false
-         * { $ref : "s" } = false (if incomplete DBRef is allowed)
-         * { $id : "x" } = false (if incomplete DBRef is allowed)
-         * { $db : "mydb" } = false (if incomplete DBRef is allowed)
-         */
-        static bool _isExpressionDocument( const BSONElement& e, bool allowIncompleteDBRef );
+    /**
+     * { $ref: "s", $id: "x" } = true
+     * { $ref : "s" } = true (if incomplete DBRef is allowed)
+     * { $id : "x" } = true (if incomplete DBRef is allowed)
+     * { $db : "x" } = true (if incomplete DBRef is allowed)
+     */
+    bool _isDBRefDocument(const BSONObj& obj, bool allowIncompleteDBRef);
 
-        /**
-         * { $ref: "s", $id: "x" } = true
-         * { $ref : "s" } = true (if incomplete DBRef is allowed)
-         * { $id : "x" } = true (if incomplete DBRef is allowed)
-         * { $db : "x" } = true (if incomplete DBRef is allowed)
-         */
-        static bool _isDBRefDocument( const BSONObj& obj, bool allowIncompleteDBRef );
+    /**
+     * Parse 'obj' and return either a MatchExpression or an error.
+     *
+     * 'level' tracks the current depth of the tree across recursive calls to this
+     * function. Used in order to apply special logic at the top-level and to return an
+     * error if the tree exceeds the maximum allowed depth.
+     */
+    StatusWithMatchExpression _parse(const BSONObj& obj, int level);
 
-        /**
-         * Parse 'obj' and return either a MatchExpression or an error.
-         *
-         * 'level' tracks the current depth of the tree across recursive calls to this
-         * function. Used in order to apply special logic at the top-level and to return an
-         * error if the tree exceeds the maximum allowed depth.
-         */
-        static StatusWithMatchExpression _parse( const BSONObj& obj, int level );
+    /**
+     * parses a field in a sub expression
+     * if the query is { x : { $gt : 5, $lt : 8 } }
+     * e is { $gt : 5, $lt : 8 }
+     */
+    Status _parseSub(const char* name, const BSONObj& obj, AndMatchExpression* root, int level);
 
-        /**
-         * parses a field in a sub expression
-         * if the query is { x : { $gt : 5, $lt : 8 } }
-         * e is { $gt : 5, $lt : 8 }
-         */
-        static Status _parseSub( const char* name,
-                                 const BSONObj& obj,
-                                 AndMatchExpression* root,
-                                 int level );
+    /**
+     * parses a single field in a sub expression
+     * if the query is { x : { $gt : 5, $lt : 8 } }
+     * e is $gt : 5
+     */
+    StatusWithMatchExpression _parseSubField(const BSONObj& context,
+                                             const AndMatchExpression* andSoFar,
+                                             const char* name,
+                                             const BSONElement& e,
+                                             int level);
 
-        /**
-         * parses a single field in a sub expression
-         * if the query is { x : { $gt : 5, $lt : 8 } }
-         * e is $gt : 5
-         */
-        static StatusWithMatchExpression _parseSubField( const BSONObj& context,
-                                                         const AndMatchExpression* andSoFar,
-                                                         const char* name,
-                                                         const BSONElement& e,
-                                                         int level );
+    StatusWithMatchExpression _parseComparison(const char* name,
+                                               ComparisonMatchExpression* cmp,
+                                               const BSONElement& e);
 
-        static StatusWithMatchExpression _parseComparison( const char* name,
-                                                           ComparisonMatchExpression* cmp,
-                                                           const BSONElement& e );
+    StatusWithMatchExpression _parseMOD(const char* name, const BSONElement& e);
 
-        static StatusWithMatchExpression _parseMOD( const char* name,
-                                               const BSONElement& e );
+    StatusWithMatchExpression _parseRegexElement(const char* name, const BSONElement& e);
 
-        static StatusWithMatchExpression _parseRegexElement( const char* name,
-                                                        const BSONElement& e );
-
-        static StatusWithMatchExpression _parseRegexDocument( const char* name,
-                                                         const BSONObj& doc );
+    StatusWithMatchExpression _parseRegexDocument(const char* name, const BSONObj& doc);
 
 
-        static Status _parseArrayFilterEntries( ArrayFilterEntries* entries,
-                                                const BSONObj& theArray );
+    Status _parseArrayFilterEntries(ArrayFilterEntries* entries, const BSONObj& theArray);
 
-        // arrays
+    StatusWithMatchExpression _parseType(const char* name, const BSONElement& elt);
 
-        static StatusWithMatchExpression _parseElemMatch( const char* name,
-                                                          const BSONElement& e,
-                                                          int level );
+    // arrays
 
-        static StatusWithMatchExpression _parseAll( const char* name,
-                                                    const BSONElement& e,
-                                                    int level );
+    StatusWithMatchExpression _parseElemMatch(const char* name, const BSONElement& e, int level);
 
-        // tree
+    StatusWithMatchExpression _parseAll(const char* name, const BSONElement& e, int level);
 
-        static Status _parseTreeList( const BSONObj& arr, ListOfMatchExpression* out, int level );
+    // tree
 
-        static StatusWithMatchExpression _parseNot( const char* name,
-                                                    const BSONElement& e,
-                                                    int level );
+    Status _parseTreeList(const BSONObj& arr, ListOfMatchExpression* out, int level);
 
-        // The maximum allowed depth of a query tree. Just to guard against stack overflow.
-        static const int kMaximumTreeDepth;
-    };
+    StatusWithMatchExpression _parseNot(const char* name, const BSONElement& e, int level);
 
-    typedef boost::function<StatusWithMatchExpression(const char* name, int type, const BSONObj& section)> MatchExpressionParserGeoCallback;
-    extern MatchExpressionParserGeoCallback expressionParserGeoCallback;
+    /**
+     * Parses 'e' into a BitTestMatchExpression.
+     */
+    template <class T>
+    StatusWithMatchExpression _parseBitTest(const char* name, const BSONElement& e);
 
-    typedef boost::function<StatusWithMatchExpression(const BSONElement& where)> MatchExpressionParserWhereCallback;
-    extern MatchExpressionParserWhereCallback expressionParserWhereCallback;
+    /**
+     * Converts 'theArray', a BSONArray of integers, into a std::vector of integers.
+     */
+    StatusWith<std::vector<uint32_t>> _parseBitPositionsArray(const BSONObj& theArray);
 
-    typedef boost::function<StatusWithMatchExpression(const BSONObj& queryObj)> MatchExpressionParserTextCallback;
-    extern MatchExpressionParserTextCallback expressionParserTextCallback;
+    // The maximum allowed depth of a query tree. Just to guard against stack overflow.
+    static const int kMaximumTreeDepth;
 
+    // Performs parsing for the match extensions. We do not own this pointer - it has to live
+    // as long as the parser is active.
+    const ExtensionsCallback* _extensionsCallback;
+};
+
+typedef stdx::function<StatusWithMatchExpression(
+    const char* name, int type, const BSONObj& section)> MatchExpressionParserGeoCallback;
+extern MatchExpressionParserGeoCallback expressionParserGeoCallback;
 }

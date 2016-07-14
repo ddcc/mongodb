@@ -30,42 +30,37 @@
 
 #include <string>
 
-#include "mongo/db/interrupt_status.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/util/intrusive_counter.h"
 
 namespace mongo {
 
-    struct ExpressionContext : public IntrusiveCounterUnsigned {
-    public:
-        ExpressionContext(const InterruptStatus& status, const NamespaceString& ns)
-            : inShard(false)
-            , inRouter(false)
-            , extSortAllowed(false)
-            , ns(ns)
-            , interruptStatus(status)
-            , interruptCounter(interruptCheckPeriod)
-        {}
+struct ExpressionContext : public IntrusiveCounterUnsigned {
+public:
+    ExpressionContext(OperationContext* opCtx, const NamespaceString& ns) : ns(ns), opCtx(opCtx) {}
 
-        /** Used by a pipeline to check for interrupts so that killOp() works.
-         *  @throws if the operation has been interrupted
-         */
-        void checkForInterrupt() {
-            if (--interruptCounter == 0) {
-                // The checkForInterrupt could be expensive, at least in relative terms.
-                interruptStatus.checkForInterrupt();
-                interruptCounter = interruptCheckPeriod;
-            }
+    /** Used by a pipeline to check for interrupts so that killOp() works.
+     *  @throws if the operation has been interrupted
+     */
+    void checkForInterrupt() {
+        if (opCtx && --interruptCounter == 0) {  // XXX SERVER-13931 for opCtx check
+            // The checkForInterrupt could be expensive, at least in relative terms.
+            opCtx->checkForInterrupt();
+            interruptCounter = kInterruptCheckPeriod;
         }
-        
-        bool inShard;
-        bool inRouter;
-        bool extSortAllowed;
-        NamespaceString ns;
-        std::string tempDir; // Defaults to empty to prevent external sorting in mongos.
+    }
 
-        const InterruptStatus& interruptStatus;
-        static const int interruptCheckPeriod = 128;
-        int interruptCounter; // when 0, check interruptStatus
-    };
+    bool inShard = false;
+    bool inRouter = false;
+    bool extSortAllowed = false;
+    bool bypassDocumentValidation = false;
+
+    NamespaceString ns;
+    std::string tempDir;  // Defaults to empty to prevent external sorting in mongos.
+
+    OperationContext* opCtx;
+    static const int kInterruptCheckPeriod = 128;
+    int interruptCounter = kInterruptCheckPeriod;  // when 0, check interruptStatus
+};
 }

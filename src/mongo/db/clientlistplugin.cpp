@@ -28,69 +28,215 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
+#include "mongo/db/commands.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/dbwebserver.h"
+#include "mongo/db/matcher/expression_parser.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/stats/fill_locker_info.h"
 #include "mongo/util/mongoutils/html.h"
+#include "mongo/util/stringutils.h"
 
 namespace mongo {
+
+using std::unique_ptr;
+using std::string;
+
 namespace {
-    class ClientListPlugin : public WebStatusPlugin {
-    public:
-        ClientListPlugin() : WebStatusPlugin( "clients" , 20 ) {}
-        virtual void init() {}
 
-        virtual void run( std::stringstream& ss ) {
-            using namespace mongoutils::html;
+class ClientListPlugin : public WebStatusPlugin {
+public:
+    ClientListPlugin() : WebStatusPlugin("clients", 20) {}
+    virtual void init() {}
 
-            ss << "\n<table border=1 cellpadding=2 cellspacing=0>";
-            ss << "<tr align='left'>"
-               << th( a("", "Connections to the database, both internal and external.", "Client") )
-               << th( a("http://dochub.mongodb.org/core/viewingandterminatingcurrentoperation", "", "OpId") )
-               << "<th>Locking</th>"
-               << "<th>Waiting</th>"
-               << "<th>SecsRunning</th>"
-               << "<th>Op</th>"
-               << th( a("http://dochub.mongodb.org/core/whatisanamespace", "", "Namespace") )
-               << "<th>Query</th>"
-               << "<th>client</th>"
-               << "<th>msg</th>"
-               << "<th>progress</th>"
+    virtual void run(OperationContext* txn, std::stringstream& ss) {
+        using namespace html;
 
-               << "</tr>\n";
+        ss << "\n<table border=1 cellpadding=2 cellspacing=0>";
+        ss << "<tr align='left'>"
+           << th(a("", "Connections to the database, both internal and external.", "Client"))
+           << th(a("http://dochub.mongodb.org/core/viewingandterminatingcurrentoperation",
+                   "",
+                   "OpId")) << "<th>Locking</th>"
+           << "<th>Waiting</th>"
+           << "<th>SecsRunning</th>"
+           << "<th>Op</th>"
+           << th(a("http://dochub.mongodb.org/core/whatisanamespace", "", "Namespace"))
+           << "<th>Query</th>"
+           << "<th>client</th>"
+           << "<th>msg</th>"
+           << "<th>progress</th>"
+
+           << "</tr>\n";
+
+        _processAllClients(txn->getClient()->getServiceContext(), ss);
+
+        ss << "</table>\n";
+    }
+
+private:
+    static void _processAllClients(ServiceContext* service, std::stringstream& ss) {
+        using namespace html;
+
+        for (ServiceContext::LockedClientsCursor cursor(service); Client* client = cursor.next();) {
+            invariant(client);
+
+            // Make the client stable
+            stdx::lock_guard<Client> lk(*client);
+            const OperationContext* txn = client->getOperationContext();
+            if (!txn)
+                continue;
+
+            CurOp* curOp = CurOp::get(txn);
+            if (!curOp)
+                continue;
+
+            ss << "<tr><td>" << client->desc() << "</td>";
+
+            tablecell(ss, txn->getOpID());
+            tablecell(ss, true);
+
+            // LockState
             {
-                scoped_lock bl(Client::clientsMutex);
-                for( set<Client*>::iterator i = Client::clients.begin(); i != Client::clients.end(); i++ ) {
-                    Client *c = *i;
-                    CurOp& co = *(c->curop());
-                    ss << "<tr><td>" << c->desc() << "</td>";
+                Locker::LockerInfo lockerInfo;
+                txn->lockState()->getLockerInfo(&lockerInfo);
 
-                    tablecell( ss , co.opNum() );
-                    tablecell( ss , co.active() );
-                    tablecell( ss , c->lockState().reportState() );
-                    if ( co.active() )
-                        tablecell( ss , co.elapsedSeconds() );
-                    else
-                        tablecell( ss , "" );
-                    tablecell( ss , co.getOp() );
-                    tablecell( ss , html::escape( co.getNS() ) );
-                    if ( co.haveQuery() )
-                        tablecell( ss , html::escape( co.query().toString() ) );
-                    else
-                        tablecell( ss , "" );
-                    tablecell( ss , co.getRemoteString() );
+                BSONObjBuilder lockerInfoBuilder;
+                fillLockerInfo(lockerInfo, lockerInfoBuilder);
 
-                    tablecell( ss , co.getMessage() );
-                    tablecell( ss , co.getProgressMeter().toString() );
-
-
-                    ss << "</tr>\n";
-                }
+                tablecell(ss, lockerInfoBuilder.obj());
             }
-            ss << "</table>\n";
 
+            tablecell(ss, curOp->elapsedSeconds());
+
+            tablecell(ss, curOp->getNetworkOp());
+            tablecell(ss, html::escape(curOp->getNS()));
+
+            if (curOp->haveQuery()) {
+                tablecell(ss, html::escape(curOp->query().toString()));
+            } else {
+                tablecell(ss, "");
+            }
+
+            tablecell(ss, client->clientAddress(true /*includePort*/));
+
+            tablecell(ss, curOp->getMessage());
+            tablecell(ss, curOp->getProgressMeter().toString());
+
+            ss << "</tr>\n";
+        }
+    }
+
+} clientListPlugin;
+
+
+class CurrentOpContexts : public Command {
+public:
+    CurrentOpContexts() : Command("currentOpCtx") {}
+
+    virtual bool isWriteCommandForConfigServer() const {
+        return false;
+    }
+
+    virtual bool slaveOk() const {
+        return true;
+    }
+
+    virtual Status checkAuthForCommand(ClientBasic* client,
+                                       const std::string& dbname,
+                                       const BSONObj& cmdObj) {
+        if (AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
+                ResourcePattern::forClusterResource(), ActionType::inprog)) {
+            return Status::OK();
         }
 
-    } clientListPlugin;
+        return Status(ErrorCodes::Unauthorized, "unauthorized");
+    }
+
+    bool run(OperationContext* txn,
+             const string& dbname,
+             BSONObj& cmdObj,
+             int,
+             string& errmsg,
+             BSONObjBuilder& result) {
+        unique_ptr<MatchExpression> filter;
+        if (cmdObj["filter"].isABSONObj()) {
+            StatusWithMatchExpression statusWithMatcher =
+                MatchExpressionParser::parse(cmdObj["filter"].Obj());
+            if (!statusWithMatcher.isOK()) {
+                return appendCommandStatus(result, statusWithMatcher.getStatus());
+            }
+            filter = std::move(statusWithMatcher.getValue());
+        }
+
+        result.appendArray("operations",
+                           _processAllClients(txn->getClient()->getServiceContext(), filter.get()));
+
+        return true;
+    }
+
+
+private:
+    static BSONArray _processAllClients(ServiceContext* service, MatchExpression* matcher) {
+        BSONArrayBuilder array;
+
+        for (ServiceContext::LockedClientsCursor cursor(service); Client* client = cursor.next();) {
+            invariant(client);
+
+            BSONObjBuilder b;
+
+            // Make the client stable
+            stdx::lock_guard<Client> lk(*client);
+
+            client->reportState(b);
+
+            const OperationContext* txn = client->getOperationContext();
+            b.appendBool("active", static_cast<bool>(txn));
+            if (txn) {
+                b.append("opid", txn->getOpID());
+                if (txn->isKillPending()) {
+                    b.append("killPending", true);
+                }
+
+                CurOp::get(txn)->reportState(&b);
+
+                // LockState
+                if (txn->lockState()) {
+                    StringBuilder ss;
+                    ss << txn->lockState();
+                    b.append("lockStatePointer", ss.str());
+
+                    Locker::LockerInfo lockerInfo;
+                    txn->lockState()->getLockerInfo(&lockerInfo);
+
+                    BSONObjBuilder lockerInfoBuilder;
+                    fillLockerInfo(lockerInfo, lockerInfoBuilder);
+
+                    b.append("lockState", lockerInfoBuilder.obj());
+                }
+
+                // RecoveryUnit
+                if (txn->recoveryUnit()) {
+                    txn->recoveryUnit()->reportState(&b);
+                }
+            }
+
+            const BSONObj obj = b.obj();
+
+            if (!matcher || matcher->matchesBSON(obj)) {
+                array.append(obj);
+            }
+        }
+
+        return array.arr();
+    }
+
+} currentOpContexts;
+
 }  // namespace
 }  // namespace mongo

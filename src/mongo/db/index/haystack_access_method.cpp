@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2013-2014 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -26,106 +26,120 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kQuery
+
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/index/haystack_access_method.h"
+
 
 #include "mongo/base/status.h"
 #include "mongo/db/geo/hash.h"
+#include "mongo/db/index/expression_keys_private.h"
 #include "mongo/db/index/expression_params.h"
 #include "mongo/db/index/haystack_access_method_internal.h"
-#include "mongo/db/index/haystack_key_generator.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/pdfile.h"
 #include "mongo/db/query/internal_plans.h"
+#include "mongo/util/log.h"
 
 namespace mongo {
 
-    HaystackAccessMethod::HaystackAccessMethod(IndexCatalogEntry* btreeState)
-        : BtreeBasedAccessMethod(btreeState) {
+using std::unique_ptr;
 
-        const IndexDescriptor* descriptor = btreeState->descriptor();
+HaystackAccessMethod::HaystackAccessMethod(IndexCatalogEntry* btreeState,
+                                           SortedDataInterface* btree)
+    : IndexAccessMethod(btreeState, btree) {
+    const IndexDescriptor* descriptor = btreeState->descriptor();
 
-        ExpressionParams::parseHaystackParams(descriptor->infoObj(),
-                                              &_geoField,
-                                              &_otherFields,
-                                              &_bucketSize);
+    ExpressionParams::parseHaystackParams(
+        descriptor->infoObj(), &_geoField, &_otherFields, &_bucketSize);
 
-        uassert(16773, "no geo field specified", _geoField.size());
-        uassert(16774, "no non-geo fields specified", _otherFields.size());
+    uassert(16773, "no geo field specified", _geoField.size());
+    uassert(16774, "no non-geo fields specified", _otherFields.size());
+}
 
-        _keyGenerator.reset( new HaystackKeyGenerator( _geoField, _otherFields, _bucketSize ) );
+void HaystackAccessMethod::getKeys(const BSONObj& obj, BSONObjSet* keys) const {
+    ExpressionKeysPrivate::getHaystackKeys(obj, _geoField, _otherFields, _bucketSize, keys);
+}
+
+void HaystackAccessMethod::searchCommand(OperationContext* txn,
+                                         Collection* collection,
+                                         const BSONObj& nearObj,
+                                         double maxDistance,
+                                         const BSONObj& search,
+                                         BSONObjBuilder* result,
+                                         unsigned limit) {
+    Timer t;
+
+    LOG(1) << "SEARCH near:" << nearObj << " maxDistance:" << maxDistance << " search: " << search
+           << endl;
+    int x, y;
+    {
+        BSONObjIterator i(nearObj);
+        x = ExpressionKeysPrivate::hashHaystackElement(i.next(), _bucketSize);
+        y = ExpressionKeysPrivate::hashHaystackElement(i.next(), _bucketSize);
     }
+    int scale = static_cast<int>(ceil(maxDistance / _bucketSize));
 
-    void HaystackAccessMethod::getKeys(const BSONObj& obj, BSONObjSet* keys) {
-        _keyGenerator->getKeys( obj, keys );
-    }
+    GeoHaystackSearchHopper hopper(txn, nearObj, maxDistance, limit, _geoField, collection);
 
-    void HaystackAccessMethod::searchCommand(const BSONObj& nearObj, double maxDistance,
-                                             const BSONObj& search, BSONObjBuilder* result,
-                                             unsigned limit) {
-        Timer t;
+    long long btreeMatches = 0;
 
-        LOG(1) << "SEARCH near:" << nearObj << " maxDistance:" << maxDistance
-               << " search: " << search << endl;
-        int x, y;
-        {
-            BSONObjIterator i(nearObj);
-            x = HaystackKeyGenerator::hashHaystackElement(i.next(), _bucketSize);
-            y = HaystackKeyGenerator::hashHaystackElement(i.next(), _bucketSize);
-        }
-        int scale = static_cast<int>(ceil(maxDistance / _bucketSize));
+    for (int a = -scale; a <= scale && !hopper.limitReached(); ++a) {
+        for (int b = -scale; b <= scale && !hopper.limitReached(); ++b) {
+            BSONObjBuilder bb;
+            bb.append("", ExpressionKeysPrivate::makeHaystackString(x + a, y + b));
 
-        GeoHaystackSearchHopper hopper(nearObj, maxDistance, limit, _geoField);
+            for (unsigned i = 0; i < _otherFields.size(); i++) {
+                // See if the non-geo field we're indexing on is in the provided search term.
+                BSONElement e = search.getFieldDotted(_otherFields[i]);
+                if (e.eoo())
+                    bb.appendNull("");
+                else
+                    bb.appendAs(e, "");
+            }
 
-        long long btreeMatches = 0;
+            BSONObj key = bb.obj();
 
-        for (int a = -scale; a <= scale && !hopper.limitReached(); ++a) {
-            for (int b = -scale; b <= scale && !hopper.limitReached(); ++b) {
-                BSONObjBuilder bb;
-                bb.append("", HaystackKeyGenerator::makeHaystackString(x + a, y + b));
+            unordered_set<RecordId, RecordId::Hasher> thisPass;
 
-                for (unsigned i = 0; i < _otherFields.size(); i++) {
-                    // See if the non-geo field we're indexing on is in the provided search term.
-                    BSONElement e = search.getFieldDotted(_otherFields[i]);
-                    if (e.eoo())
-                        bb.appendNull("");
-                    else
-                        bb.appendAs(e, "");
+
+            unique_ptr<PlanExecutor> exec(InternalPlanner::indexScan(txn,
+                                                                     collection,
+                                                                     _descriptor,
+                                                                     key,
+                                                                     key,
+                                                                     true,  // endKeyInclusive
+                                                                     PlanExecutor::YIELD_MANUAL));
+            PlanExecutor::ExecState state;
+            RecordId loc;
+            while (PlanExecutor::ADVANCED == (state = exec->getNext(NULL, &loc))) {
+                if (hopper.limitReached()) {
+                    break;
                 }
-
-                BSONObj key = bb.obj();
-
-                unordered_set<DiskLoc, DiskLoc::Hasher> thisPass;
-
-
-                scoped_ptr<Runner> runner(InternalPlanner::indexScan(_btreeState->collection(),
-                                                                     _descriptor, key, key, true));
-                Runner::RunnerState state;
-                DiskLoc loc;
-                while (Runner::RUNNER_ADVANCED == (state = runner->getNext(NULL, &loc))) {
-                    if (hopper.limitReached()) { break; }
-                    pair<unordered_set<DiskLoc, DiskLoc::Hasher>::iterator, bool> p
-                        = thisPass.insert(loc);
-                    // If a new element was inserted (haven't seen the DiskLoc before), p.second
-                    // is true.
-                    if (p.second) {
-                        hopper.consider(loc);
-                        btreeMatches++;
-                    }
+                pair<unordered_set<RecordId, RecordId::Hasher>::iterator, bool> p =
+                    thisPass.insert(loc);
+                // If a new element was inserted (haven't seen the RecordId before), p.second
+                // is true.
+                if (p.second) {
+                    hopper.consider(loc);
+                    btreeMatches++;
                 }
             }
         }
-
-        BSONArrayBuilder arr(result->subarrayStart("results"));
-        int num = hopper.appendResultsTo(&arr);
-        arr.done();
-
-        {
-            BSONObjBuilder b(result->subobjStart("stats"));
-            b.append("time", t.millis());
-            b.appendNumber("btreeMatches", btreeMatches);
-            b.append("n", num);
-            b.done();
-        }
     }
+
+    BSONArrayBuilder arr(result->subarrayStart("results"));
+    int num = hopper.appendResultsTo(&arr);
+    arr.done();
+
+    {
+        BSONObjBuilder b(result->subobjStart("stats"));
+        b.append("time", t.millis());
+        b.appendNumber("btreeMatches", btreeMatches);
+        b.append("n", num);
+        b.done();
+    }
+}
 
 }  // namespace mongo

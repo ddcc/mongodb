@@ -26,238 +26,68 @@
 *    it in the license file.
 */
 
-#include "mongo/db/auth/authz_manager_external_state_d.h"
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kAccessControl
 
-#include <boost/thread/mutex.hpp>
-#include <boost/date_time/time_duration.hpp>
-#include <string>
+#include "mongo/platform/basic.h"
+
+#include "mongo/db/auth/authz_manager_external_state_d.h"
 
 #include "mongo/base/status.h"
 #include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authz_session_external_state_d.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/client.h"
+#include "mongo/db/db_raii.h"
+#include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/instance.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/storage_engine.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-    AuthzManagerExternalStateMongod::AuthzManagerExternalStateMongod() {}
-    AuthzManagerExternalStateMongod::~AuthzManagerExternalStateMongod() {}
+AuthzManagerExternalStateMongod::AuthzManagerExternalStateMongod() = default;
+AuthzManagerExternalStateMongod::~AuthzManagerExternalStateMongod() = default;
 
-    Status AuthzManagerExternalStateMongod::_getUserDocument(const UserName& userName,
-                                                             BSONObj* userDoc) {
+std::unique_ptr<AuthzSessionExternalState>
+AuthzManagerExternalStateMongod::makeAuthzSessionExternalState(AuthorizationManager* authzManager) {
+    return stdx::make_unique<AuthzSessionExternalStateMongod>(authzManager);
+}
 
-        Client::ReadContext ctx("admin");
-        int authzVersion;
-        Status status = getStoredAuthorizationVersion(&authzVersion);
-        if (!status.isOK())
-            return status;
-
-        switch (authzVersion) {
-        case AuthorizationManager::schemaVersion26Upgrade:
-        case AuthorizationManager::schemaVersion26Final:
-            break;
-        default:
-            return Status(ErrorCodes::AuthSchemaIncompatible, mongoutils::str::stream() <<
-                          "Unsupported schema version for getUserDescription(): " <<
-                          authzVersion);
-        }
-
-        status = findOne(
-                (authzVersion == AuthorizationManager::schemaVersion26Final ?
-                 AuthorizationManager::usersCollectionNamespace :
-                 AuthorizationManager::usersAltCollectionNamespace),
-                BSON(AuthorizationManager::USER_NAME_FIELD_NAME << userName.getUser() <<
-                     AuthorizationManager::USER_DB_FIELD_NAME << userName.getDB()),
-                userDoc);
-        if (status == ErrorCodes::NoMatchingDocument) {
-            status = Status(ErrorCodes::UserNotFound, mongoutils::str::stream() <<
-                            "Could not find user " << userName.getFullName());
-        }
-        return status;
+Status AuthzManagerExternalStateMongod::query(
+    OperationContext* txn,
+    const NamespaceString& collectionName,
+    const BSONObj& query,
+    const BSONObj& projection,
+    const stdx::function<void(const BSONObj&)>& resultProcessor) {
+    try {
+        DBDirectClient client(txn);
+        client.query(resultProcessor, collectionName.ns(), query, &projection);
+        return Status::OK();
+    } catch (const DBException& e) {
+        return e.toStatus();
     }
+}
 
-    Status AuthzManagerExternalStateMongod::query(
-            const NamespaceString& collectionName,
-            const BSONObj& query,
-            const BSONObj& projection,
-            const boost::function<void(const BSONObj&)>& resultProcessor) {
-        try {
-            DBDirectClient client;
-            client.query(resultProcessor, collectionName.ns(), query, &projection);
-            return Status::OK();
-        } catch (const DBException& e) {
-            return e.toStatus();
-        }
-    }
+Status AuthzManagerExternalStateMongod::findOne(OperationContext* txn,
+                                                const NamespaceString& collectionName,
+                                                const BSONObj& query,
+                                                BSONObj* result) {
+    AutoGetCollectionForRead ctx(txn, collectionName);
 
-    Status AuthzManagerExternalStateMongod::getAllDatabaseNames(
-            std::vector<std::string>* dbnames) {
-        Lock::GlobalRead lk;
-        getDatabaseNames(*dbnames);
+    BSONObj found;
+    if (Helpers::findOne(txn, ctx.getCollection(), query, found)) {
+        *result = found.getOwned();
         return Status::OK();
     }
+    return Status(ErrorCodes::NoMatchingDocument,
+                  mongoutils::str::stream() << "No document in " << collectionName.ns()
+                                            << " matches " << query);
+}
 
-    Status AuthzManagerExternalStateMongod::findOne(
-            const NamespaceString& collectionName,
-            const BSONObj& query,
-            BSONObj* result) {
-
-        Client::ReadContext ctx(collectionName.ns());
-        BSONObj found;
-        if (Helpers::findOne(collectionName.ns(),
-                             query,
-                             found)) {
-            *result = found.getOwned();
-            return Status::OK();
-        }
-        return Status(ErrorCodes::NoMatchingDocument, mongoutils::str::stream() <<
-                      "No document in " << collectionName.ns() << " matches " << query);
-    }
-
-    Status AuthzManagerExternalStateMongod::insert(
-            const NamespaceString& collectionName,
-            const BSONObj& document,
-            const BSONObj& writeConcern) {
-        try {
-            DBDirectClient client;
-            client.insert(collectionName, document);
-
-            // Handle write concern
-            BSONObjBuilder gleBuilder;
-            gleBuilder.append("getLastError", 1);
-            gleBuilder.appendElements(writeConcern);
-            BSONObj res;
-            client.runCommand("admin", gleBuilder.done(), res);
-            string errstr = client.getLastErrorString(res);
-            if (errstr.empty()) {
-                return Status::OK();
-            }
-            if (res.hasField("code") && res["code"].Int() == ASSERT_ID_DUPKEY) {
-                return Status(ErrorCodes::DuplicateKey, errstr);
-            }
-            return Status(ErrorCodes::UnknownError, errstr);
-        } catch (const DBException& e) {
-            return e.toStatus();
-        }
-    }
-
-    Status AuthzManagerExternalStateMongod::update(const NamespaceString& collectionName,
-                                                   const BSONObj& query,
-                                                   const BSONObj& updatePattern,
-                                                   bool upsert,
-                                                   bool multi,
-                                                   const BSONObj& writeConcern,
-                                                   int* nMatched) {
-        try {
-            DBDirectClient client;
-            client.update(collectionName, query, updatePattern, upsert, multi);
-
-            // Handle write concern
-            BSONObjBuilder gleBuilder;
-            gleBuilder.append("getLastError", 1);
-            gleBuilder.appendElements(writeConcern);
-            BSONObj res;
-            client.runCommand("admin", gleBuilder.done(), res);
-            string err = client.getLastErrorString(res);
-            if (!err.empty()) {
-                return Status(ErrorCodes::UnknownError, err);
-            }
-
-            *nMatched = res["n"].numberInt();
-            return Status::OK();
-        } catch (const DBException& e) {
-            return e.toStatus();
-        }
-    }
-
-    Status AuthzManagerExternalStateMongod::remove(
-            const NamespaceString& collectionName,
-            const BSONObj& query,
-            const BSONObj& writeConcern,
-            int* numRemoved) {
-        try {
-            DBDirectClient client;
-            client.remove(collectionName, query);
-
-            // Handle write concern
-            BSONObjBuilder gleBuilder;
-            gleBuilder.append("getLastError", 1);
-            gleBuilder.appendElements(writeConcern);
-            BSONObj res;
-            client.runCommand("admin", gleBuilder.done(), res);
-            string errstr = client.getLastErrorString(res);
-            if (!errstr.empty()) {
-                return Status(ErrorCodes::UnknownError, errstr);
-            }
-
-            *numRemoved = res["n"].numberInt();
-            return Status::OK();
-        } catch (const DBException& e) {
-            return e.toStatus();
-        }
-    }
-
-    Status AuthzManagerExternalStateMongod::createIndex(
-            const NamespaceString& collectionName,
-            const BSONObj& pattern,
-            bool unique,
-            const BSONObj& writeConcern) {
-        DBDirectClient client;
-        try {
-            if (client.ensureIndex(collectionName.ns(),
-                                   pattern,
-                                   unique)) {
-                BSONObjBuilder gleBuilder;
-                gleBuilder.append("getLastError", 1);
-                gleBuilder.appendElements(writeConcern);
-                BSONObj res;
-                client.runCommand("admin", gleBuilder.done(), res);
-                string errstr = client.getLastErrorString(res);
-                if (!errstr.empty()) {
-                    return Status(ErrorCodes::UnknownError, errstr);
-                }
-            }
-            return Status::OK();
-        }
-        catch (const DBException& ex) {
-            return ex.toStatus();
-        }
-    }
-
-    Status AuthzManagerExternalStateMongod::dropIndexes(
-            const NamespaceString& collectionName,
-            const BSONObj& writeConcern) {
-        DBDirectClient client;
-        try {
-            client.dropIndexes(collectionName.ns());
-            BSONObjBuilder gleBuilder;
-            gleBuilder.append("getLastError", 1);
-            gleBuilder.appendElements(writeConcern);
-            BSONObj res;
-            client.runCommand("admin", gleBuilder.done(), res);
-            string errstr = client.getLastErrorString(res);
-            if (!errstr.empty()) {
-                return Status(ErrorCodes::UnknownError, errstr);
-            }
-            return Status::OK();
-        }
-        catch (const DBException& ex) {
-            return ex.toStatus();
-        }
-    }
-
-    bool AuthzManagerExternalStateMongod::tryAcquireAuthzUpdateLock(const StringData& why) {
-        LOG(2) << "Attempting to lock user data for: " << why << endl;
-        return _authzDataUpdateLock.timed_lock(
-                boost::posix_time::milliseconds(_authzUpdateLockAcquisitionTimeoutMillis));
-    }
-
-    void AuthzManagerExternalStateMongod::releaseAuthzUpdateLock() {
-        return _authzDataUpdateLock.unlock();
-    }
-
-} // namespace mongo
+}  // namespace mongo

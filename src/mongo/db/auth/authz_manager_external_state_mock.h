@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/function.hpp>
 #include <string>
 #include <map>
 #include <vector>
@@ -39,90 +38,91 @@
 #include "mongo/db/auth/role_graph.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/stdx/functional.h"
 
 namespace mongo {
 
-    class AuthorizationManager;
+class AuthorizationManager;
+
+/**
+ * Mock of the AuthzManagerExternalState class used only for testing.
+ */
+class AuthzManagerExternalStateMock : public AuthzManagerExternalStateLocal {
+    MONGO_DISALLOW_COPYING(AuthzManagerExternalStateMock);
+
+public:
+    AuthzManagerExternalStateMock();
+    virtual ~AuthzManagerExternalStateMock();
+
+    void setAuthorizationManager(AuthorizationManager* authzManager);
+    void setAuthzVersion(int version);
+
+    std::unique_ptr<AuthzSessionExternalState> makeAuthzSessionExternalState(
+        AuthorizationManager* authzManager) override;
+
+    virtual Status findOne(OperationContext* txn,
+                           const NamespaceString& collectionName,
+                           const BSONObj& query,
+                           BSONObj* result);
+
+    virtual Status query(OperationContext* txn,
+                         const NamespaceString& collectionName,
+                         const BSONObj& query,
+                         const BSONObj& projection,  // Currently unused in mock
+                         const stdx::function<void(const BSONObj&)>& resultProcessor);
 
     /**
-     * Mock of the AuthzManagerExternalState class used only for testing.
+     * Inserts the given user object into the "admin" database.
      */
-    class AuthzManagerExternalStateMock : public AuthzManagerExternalStateLocal {
-        MONGO_DISALLOW_COPYING(AuthzManagerExternalStateMock);
+    Status insertPrivilegeDocument(OperationContext* txn,
+                                   const BSONObj& userObj,
+                                   const BSONObj& writeConcern);
 
-    public:
+    // This implementation does not understand uniqueness constraints.
+    virtual Status insert(OperationContext* txn,
+                          const NamespaceString& collectionName,
+                          const BSONObj& document,
+                          const BSONObj& writeConcern);
 
-        AuthzManagerExternalStateMock();
-        virtual ~AuthzManagerExternalStateMock();
-
-        void setAuthorizationManager(AuthorizationManager* authzManager);
-        void setAuthzVersion(int version);
-
-        virtual Status getAllDatabaseNames(std::vector<std::string>* dbnames);
-
-        virtual Status findOne(const NamespaceString& collectionName,
-                               const BSONObj& query,
-                               BSONObj* result);
-
-        virtual Status query(const NamespaceString& collectionName,
+    // This implementation does not understand uniqueness constraints, ignores writeConcern,
+    // and only correctly handles some upsert behaviors.
+    virtual Status updateOne(OperationContext* txn,
+                             const NamespaceString& collectionName,
                              const BSONObj& query,
-                             const BSONObj& projection, // Currently unused in mock
-                             const boost::function<void(const BSONObj&)>& resultProcessor);
+                             const BSONObj& updatePattern,
+                             bool upsert,
+                             const BSONObj& writeConcern);
+    virtual Status update(OperationContext* txn,
+                          const NamespaceString& collectionName,
+                          const BSONObj& query,
+                          const BSONObj& updatePattern,
+                          bool upsert,
+                          bool multi,
+                          const BSONObj& writeConcern,
+                          int* nMatched);
+    virtual Status remove(OperationContext* txn,
+                          const NamespaceString& collectionName,
+                          const BSONObj& query,
+                          const BSONObj& writeConcern,
+                          int* numRemoved);
 
-        // This implementation does not understand uniqueness constraints.
-        virtual Status insert(const NamespaceString& collectionName,
-                              const BSONObj& document,
-                              const BSONObj& writeConcern);
+    std::vector<BSONObj> getCollectionContents(const NamespaceString& collectionName);
 
-        // This implementation does not understand uniqueness constraints, ignores writeConcern,
-        // and only correctly handles some upsert behaviors.
-        virtual Status updateOne(const NamespaceString& collectionName,
-                                 const BSONObj& query,
-                                 const BSONObj& updatePattern,
-                                 bool upsert,
-                                 const BSONObj& writeConcern);
-        virtual Status update(const NamespaceString& collectionName,
-                              const BSONObj& query,
-                              const BSONObj& updatePattern,
-                              bool upsert,
-                              bool multi,
-                              const BSONObj& writeConcern,
-                              int* nMatched);
-        virtual Status remove(const NamespaceString& collectionName,
-                              const BSONObj& query,
-                              const BSONObj& writeConcern,
-                              int* numRemoved);
-        virtual Status createIndex(const NamespaceString& collectionName,
-                                   const BSONObj& pattern,
-                                   bool unique,
-                                   const BSONObj& writeConcern);
-        virtual Status dropIndexes(const NamespaceString& collectionName,
-                                   const BSONObj& writeConcern);
-        virtual bool tryAcquireAuthzUpdateLock(const StringData& why);
-        virtual void releaseAuthzUpdateLock();
+private:
+    typedef std::vector<BSONObj> BSONObjCollection;
+    typedef std::map<NamespaceString, BSONObjCollection> NamespaceDocumentMap;
 
-        Status _findUser(const std::string& usersNamespace,
-                                 const BSONObj& query,
-                                 BSONObj* result);
-        std::vector<BSONObj> getCollectionContents(const NamespaceString& collectionName);
+    Status _findOneIter(const NamespaceString& collectionName,
+                        const BSONObj& query,
+                        BSONObjCollection::iterator* result);
 
-    private:
-        typedef std::vector<BSONObj> BSONObjCollection;
-        typedef std::map<NamespaceString, BSONObjCollection> NamespaceDocumentMap;
-
-        virtual Status _getUserDocument(const UserName& userName, BSONObj* userDoc);
-
-        Status _findOneIter(const NamespaceString& collectionName,
-                            const BSONObj& query,
-                            BSONObjCollection::iterator* result);
-
-        Status _queryVector(const NamespaceString& collectionName,
-                            const BSONObj& query,
-                            std::vector<BSONObjCollection::iterator>* result);
+    Status _queryVector(const NamespaceString& collectionName,
+                        const BSONObj& query,
+                        std::vector<BSONObjCollection::iterator>* result);
 
 
-        AuthorizationManager* _authzManager;  // For reporting logOps.
-        NamespaceDocumentMap _documents; // Mock database.
-    };
+    AuthorizationManager* _authzManager;  // For reporting logOps.
+    NamespaceDocumentMap _documents;      // Mock database.
+};
 
-} // namespace mongo
+}  // namespace mongo
