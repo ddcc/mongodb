@@ -1,3 +1,38 @@
+mongodb (1:3.2.8-1) experimental; urgency=medium
+
+  * New upstream release
+    + Enable wiredtiger (using the bundled copy for the time being)
+  * Upload to experimental
+  * Drop irrelevant or merged/fixed upstream patches:
+    + ppc64el patch
+    + Fix-GCC-5-FTBFS.patch
+    + fix-yaml-detection
+    + add-option-to-disable-javascript.patch
+    + disable-warnings.patch
+    + no-unused-function.patch
+    + 0006-Fix-ARM-alignment-problems.patch
+    + 0099-Pagesize-hacks.patch
+    + 0004-kfreebsd-does-not-have-sys-prctl.h.patch
+  * Refresh remaining patches
+  * scons:
+    + 'scons smoke' is gone, run smoke directly
+    + Use the new test suite arguments for scons
+  * mongodb-clients: drop binaries removed upstream
+    + Also drop manpages of missing binaries
+  * Remove v8 B-D, mongodb now uses a bundled greasemonkey copy
+  * B-D on zlib1g-dev and libboost-regex-dev
+  * Use system valgrind
+  * d/copyright:
+    + update for 3.2
+    + fix zlib file matching
+  * d/watch: search for stable 3.2 releases
+  * lintian:
+    + relax source override for utils.js to allow long lines of any
+      length (and not just 565 characters)
+    + remove unused overrides for PCRE
+
+ -- Apollon Oikonomopoulos <apoikos@debian.org>  Thu, 14 Jul 2016 16:42:32 +0300
+
 mongodb (1:2.6.12-2) unstable; urgency=medium
 
   * Do not use tcmalloc on ppc64el (fixes FTBFS on ppc64el).
