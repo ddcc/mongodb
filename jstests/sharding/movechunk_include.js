@@ -1,40 +1,43 @@
 function setupMoveChunkTest(st) {
-    //Stop Balancer
+    // Stop Balancer
     st.stopBalancer();
 
-    var testdb = st.getDB( "test" );
+    var testdb = st.getDB("test");
     var testcoll = testdb.foo;
 
-    st.adminCommand( { enablesharding : "test" } );
-    st.adminCommand( { shardcollection : "test.foo" , key : { _id : 1 } } );
+    st.adminCommand({enablesharding: "test"});
+    st.ensurePrimaryShard('test', 'shard0001');
+    st.adminCommand({shardcollection: "test.foo", key: {_id: 1}});
 
     var str = "";
-    while ( str.length < 10000 ) {
+    while (str.length < 10000) {
         str += "asdasdsdasdasdasdas";
     }
 
-    var data = num = 0;
+    var data = 0;
+    var num = 0;
 
-    //Insert till you get to 10MB of data
-    while ( data < ( 1024 * 1024 * 10 ) ) {
-        testcoll.insert( { _id : num++ , s : str } )
-        data += str.length
+    // Insert till you get to 10MB of data
+    var bulk = testcoll.initializeUnorderedBulkOp();
+    while (data < (1024 * 1024 * 10)) {
+        bulk.insert({_id: num++, s: str});
+        data += str.length;
     }
+    assert.writeOK(bulk.execute());
 
-    //Flush and wait
-    testdb.getLastError()
-
-    var stats = st.chunkCounts( "foo" )
-    var to = ""
-    for ( shard in stats ){
-        if ( stats[shard] == 0 ) {
-            to = shard
+    var stats = st.chunkCounts("foo");
+    var to = "";
+    for (shard in stats) {
+        if (stats[shard] == 0) {
+            to = shard;
             break;
         }
     }
-    var result = st.adminCommand( { movechunk : "test.foo" ,
-                                    find : { _id : 1 } ,
-                                    to : to ,
-                                    _waitForDelete : true} ); //some tests need this...
-    assert(result, "movechunk failed: " + tojson( result ) )
+    var result = st.adminCommand({
+        movechunk: "test.foo",
+        find: {_id: 1},
+        to: to,
+        _waitForDelete: true
+    });  // some tests need this...
+    assert(result, "movechunk failed: " + tojson(result));
 }

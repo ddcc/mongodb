@@ -28,860 +28,679 @@
 *    it in the license file.
 */
 
-#include "mongo/pch.h"
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
 
-#include "mongo/base/init.h"
+#include "mongo/platform/basic.h"
+
+#include "mongo/db/cloner.h"
+
 #include "mongo/base/status.h"
+#include "mongo/bson/util/bson_extract.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/dbclientinterface.h"
-#include "mongo/db/auth/action_set.h"
-#include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/cloner.h"
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_manager_global.h"
+#include "mongo/db/auth/internal_user_auth.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/database.h"
+#include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/catalog/index_create.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/copydb.h"
 #include "mongo/db/commands/rename_collection.h"
-#include "mongo/db/db.h"
+#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/index_builder.h"
-#include "mongo/db/instance.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/kill_current_op.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/ops/insert.h"
-#include "mongo/db/repl/is_master.h"
-#include "mongo/db/repl/oplog.h"
-#include "mongo/db/repl/oplogreader.h"
-#include "mongo/db/pdfile.h"
+#include "mongo/db/op_observer.h"
+#include "mongo/db/repl/isself.h"
+#include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/server_parameters.h"
-#include "mongo/db/storage_options.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/storage_options.h"
+#include "mongo/s/grid.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/log.h"
+#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-    MONGO_EXPORT_SERVER_PARAMETER(skipCorruptDocumentsWhenCloning, bool, false);
+using std::endl;
+using std::list;
+using std::set;
+using std::string;
+using std::unique_ptr;
+using std::vector;
 
-    BSONElement getErrField(const BSONObj& o);
+MONGO_EXPORT_SERVER_PARAMETER(skipCorruptDocumentsWhenCloning, bool, false);
 
-    /** Selectively release the mutex based on a parameter. */
-    class dbtempreleaseif {
-        MONGO_DISALLOW_COPYING(dbtempreleaseif);
-    public:
-        dbtempreleaseif( bool release ) : _impl( release ? new dbtemprelease() : 0 ) {}
-        ~dbtempreleaseif() throw(DBException) {
-            if (_impl)
-                delete _impl;
+BSONElement getErrField(const BSONObj& o);
+
+/* for index info object:
+     { "name" : "name_1" , "ns" : "foo.index3" , "key" :  { "name" : 1.0 } }
+   we need to fix up the value in the "ns" parameter so that the name prefix is correct on a
+   copy to a new name.
+*/
+BSONObj fixindex(const string& newDbName, BSONObj o) {
+    BSONObjBuilder b;
+    BSONObjIterator i(o);
+    while (i.moreWithEOO()) {
+        BSONElement e = i.next();
+        if (e.eoo())
+            break;
+
+        // for now, skip the "v" field so that v:0 indexes will be upgraded to v:1
+        if (string("v") == e.fieldName()) {
+            continue;
         }
-    private:
-        // can't use a smart pointer because we need throw annotation on destructor
-        dbtemprelease* _impl;
-    };
 
-    void mayInterrupt( bool mayBeInterrupted ) {
-        if ( mayBeInterrupted ) {
-            killCurrentOp.checkForInterrupt( false );
+        if (string("ns") == e.fieldName()) {
+            uassert(10024, "bad ns field for index during dbcopy", e.type() == String);
+            const char* p = strchr(e.valuestr(), '.');
+            uassert(10025, "bad ns field for index during dbcopy [2]", p);
+            string newname = newDbName + p;
+            b.append("ns", newname);
+        } else {
+            b.append(e);
         }
     }
 
-    /* for index info object:
-         { "name" : "name_1" , "ns" : "foo.index3" , "key" :  { "name" : 1.0 } }
-       we need to fix up the value in the "ns" parameter so that the name prefix is correct on a
-       copy to a new name.
-    */
-    BSONObj fixindex(BSONObj o) {
-        BSONObjBuilder b;
-        BSONObjIterator i(o);
-        while ( i.moreWithEOO() ) {
-            BSONElement e = i.next();
-            if ( e.eoo() )
-                break;
+    BSONObj res = b.obj();
 
-            // for now, skip the "v" field so that v:0 indexes will be upgraded to v:1
-            if ( string("v") == e.fieldName() ) {
+    return res;
+}
+
+namespace {
+Status _checkForCatalogManagerChangeIfNeeded(const CloneOptions& opts) {
+    if (!opts.checkForCatalogChange) {
+        return Status::OK();
+    }
+    auto catalogManager = grid.forwardingCatalogManager();
+    invariant(catalogManager);
+
+    Status status = catalogManager->checkForPendingCatalogChange();
+    if (!status.isOK()) {
+        return status;
+    }
+
+    auto currentConfigServerMode = catalogManager->getMode();
+    if (currentConfigServerMode != opts.initialCatalogMode) {
+        invariant(opts.initialCatalogMode == CatalogManager::ConfigServerMode::SCCC &&
+                  currentConfigServerMode == CatalogManager::ConfigServerMode::CSRS);
+        return Status(ErrorCodes::IncompatibleCatalogManager,
+                      "CatalogManager was swapped from SCCC to CSRS mode during movePrimary."
+                      "Aborting movePrimary to unblock mongos.");
+    }
+    return Status::OK();
+}
+}  // namespace
+
+Cloner::Cloner() {}
+
+struct Cloner::Fun {
+    Fun(OperationContext* txn, const string& dbName) : lastLog(0), txn(txn), _dbName(dbName) {}
+
+    void operator()(DBClientCursorBatchIterator& i) {
+        invariant(from_collection.coll() != "system.indexes");
+        uassertStatusOK(_checkForCatalogManagerChangeIfNeeded(_opts));
+
+        // XXX: can probably take dblock instead
+        unique_ptr<ScopedTransaction> scopedXact(new ScopedTransaction(txn, MODE_X));
+        unique_ptr<Lock::GlobalWrite> globalWriteLock(new Lock::GlobalWrite(txn->lockState()));
+        uassert(ErrorCodes::NotMaster,
+                str::stream() << "Not primary while cloning collection " << from_collection.ns()
+                              << " to " << to_collection.ns(),
+                !txn->writesAreReplicated() ||
+                    repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(to_collection));
+
+        // Make sure database still exists after we resume from the temp release
+        Database* db = dbHolder().openDb(txn, _dbName);
+
+        bool createdCollection = false;
+        Collection* collection = NULL;
+
+        collection = db->getCollection(to_collection);
+        if (!collection) {
+            massert(17321,
+                    str::stream() << "collection dropped during clone [" << to_collection.ns()
+                                  << "]",
+                    !createdCollection);
+            MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
+                txn->checkForInterrupt();
+
+                WriteUnitOfWork wunit(txn);
+                Status s = userCreateNS(txn, db, to_collection.toString(), from_options, false);
+                verify(s.isOK());
+                wunit.commit();
+                collection = db->getCollection(to_collection);
+            }
+            MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "createCollection", to_collection.ns());
+        }
+
+        while (i.moreInCurrentBatch()) {
+            if (numSeen % 128 == 127) {
+                time_t now = time(0);
+                if (now - lastLog >= 60) {
+                    // report progress
+                    if (lastLog)
+                        log() << "clone " << to_collection << ' ' << numSeen << endl;
+                    lastLog = now;
+                }
+                txn->checkForInterrupt();
+
+                scopedXact.reset();
+                globalWriteLock.reset();
+
+                CurOp::get(txn)->yielded();
+
+                scopedXact.reset(new ScopedTransaction(txn, MODE_X));
+                globalWriteLock.reset(new Lock::GlobalWrite(txn->lockState()));
+
+                // Check if everything is still all right.
+                if (txn->writesAreReplicated()) {
+                    uassert(
+                        28592,
+                        str::stream() << "Cannot write to ns: " << to_collection.ns()
+                                      << " after yielding",
+                        repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(to_collection));
+                }
+
+                // TODO: SERVER-16598 abort if original db or collection is gone.
+                db = dbHolder().get(txn, _dbName);
+                uassert(28593,
+                        str::stream() << "Database " << _dbName << " dropped while cloning",
+                        db != NULL);
+
+                collection = db->getCollection(to_collection);
+                uassert(28594,
+                        str::stream() << "Collection " << to_collection.ns()
+                                      << " dropped while cloning",
+                        collection != NULL);
+            }
+
+            BSONObj tmp = i.nextSafe();
+
+            /* assure object is valid.  note this will slow us down a little. */
+            const Status status = validateBSON(tmp.objdata(), tmp.objsize());
+            if (!status.isOK()) {
+                str::stream ss;
+                ss << "Cloner: found corrupt document in " << from_collection.toString() << ": "
+                   << status.reason();
+                if (skipCorruptDocumentsWhenCloning) {
+                    warning() << ss.ss.str() << "; skipping";
+                    continue;
+                }
+                msgasserted(28531, ss);
+            }
+
+            verify(collection);
+            ++numSeen;
+            MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
+                txn->checkForInterrupt();
+
+                WriteUnitOfWork wunit(txn);
+
+                BSONObj doc = tmp;
+                Status status = collection->insertDocument(txn, doc, true);
+                if (!status.isOK()) {
+                    error() << "error: exception cloning object in " << from_collection << ' '
+                            << status << " obj:" << doc;
+                }
+                uassertStatusOK(status);
+                wunit.commit();
+            }
+            MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "cloner insert", to_collection.ns());
+            RARELY if (time(0) - saveLast > 60) {
+                log() << numSeen << " objects cloned so far from collection " << from_collection;
+                saveLast = time(0);
+            }
+        }
+    }
+
+    time_t lastLog;
+    OperationContext* txn;
+    const string _dbName;
+
+    int64_t numSeen;
+    NamespaceString from_collection;
+    BSONObj from_options;
+    NamespaceString to_collection;
+    time_t saveLast;
+    CloneOptions _opts;
+};
+
+/* copy the specified collection
+*/
+void Cloner::copy(OperationContext* txn,
+                  const string& toDBName,
+                  const NamespaceString& from_collection,
+                  const BSONObj& from_opts,
+                  const NamespaceString& to_collection,
+                  bool masterSameProcess,
+                  const CloneOptions& opts,
+                  Query query) {
+    LOG(2) << "\t\tcloning collection " << from_collection << " to " << to_collection << " on "
+           << _conn->getServerAddress() << " with filter " << query.toString() << endl;
+
+    Fun f(txn, toDBName);
+    f.numSeen = 0;
+    f.from_collection = from_collection;
+    f.from_options = from_opts;
+    f.to_collection = to_collection;
+    f.saveLast = time(0);
+    f._opts = opts;
+
+    int options = QueryOption_NoCursorTimeout | (opts.slaveOk ? QueryOption_SlaveOk : 0);
+    {
+        Lock::TempRelease tempRelease(txn->lockState());
+        _conn->query(stdx::function<void(DBClientCursorBatchIterator&)>(f),
+                     from_collection.ns(),
+                     query,
+                     0,
+                     options);
+    }
+
+    uassert(ErrorCodes::NotMaster,
+            str::stream() << "Not primary while cloning collection " << from_collection.ns()
+                          << " to " << to_collection.ns() << " with filter " << query.toString(),
+            !txn->writesAreReplicated() ||
+                repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(to_collection));
+}
+
+void Cloner::copyIndexes(OperationContext* txn,
+                         const string& toDBName,
+                         const NamespaceString& from_collection,
+                         const BSONObj& from_opts,
+                         const NamespaceString& to_collection,
+                         bool masterSameProcess,
+                         bool slaveOk) {
+    LOG(2) << "\t\t copyIndexes " << from_collection << " to " << to_collection << " on "
+           << _conn->getServerAddress();
+
+    vector<BSONObj> indexesToBuild;
+
+    {
+        Lock::TempRelease tempRelease(txn->lockState());
+        list<BSONObj> sourceIndexes =
+            _conn->getIndexSpecs(from_collection.ns(), slaveOk ? QueryOption_SlaveOk : 0);
+        for (list<BSONObj>::const_iterator it = sourceIndexes.begin(); it != sourceIndexes.end();
+             ++it) {
+            indexesToBuild.push_back(fixindex(to_collection.db().toString(), *it));
+        }
+    }
+
+    uassert(ErrorCodes::NotMaster,
+            str::stream() << "Not primary while copying indexes from " << from_collection.ns()
+                          << " to " << to_collection.ns() << " (Cloner)",
+            !txn->writesAreReplicated() ||
+                repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(to_collection));
+
+
+    if (indexesToBuild.empty())
+        return;
+
+    // We are under lock here again, so reload the database in case it may have disappeared
+    // during the temp release
+    Database* db = dbHolder().openDb(txn, toDBName);
+
+    Collection* collection = db->getCollection(to_collection);
+    if (!collection) {
+        MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
+            txn->checkForInterrupt();
+
+            WriteUnitOfWork wunit(txn);
+            Status s = userCreateNS(txn, db, to_collection.toString(), from_opts, false);
+            invariant(s.isOK());
+            collection = db->getCollection(to_collection);
+            invariant(collection);
+            wunit.commit();
+        }
+        MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "createCollection", to_collection.ns());
+    }
+
+    // TODO pass the MultiIndexBlock when inserting into the collection rather than building the
+    // indexes after the fact. This depends on holding a lock on the collection the whole time
+    // from creation to completion without yielding to ensure the index and the collection
+    // matches. It also wouldn't work on non-empty collections so we would need both
+    // implementations anyway as long as that is supported.
+    MultiIndexBlock indexer(txn, collection);
+    indexer.allowInterruption();
+
+    indexer.removeExistingIndexes(&indexesToBuild);
+    if (indexesToBuild.empty())
+        return;
+
+    uassertStatusOK(indexer.init(indexesToBuild));
+    uassertStatusOK(indexer.insertAllDocumentsInCollection());
+
+    WriteUnitOfWork wunit(txn);
+    indexer.commit();
+    if (txn->writesAreReplicated()) {
+        const string targetSystemIndexesCollectionName = to_collection.getSystemIndexesCollection();
+        const char* createIndexNs = targetSystemIndexesCollectionName.c_str();
+        for (vector<BSONObj>::const_iterator it = indexesToBuild.begin();
+             it != indexesToBuild.end();
+             ++it) {
+            getGlobalServiceContext()->getOpObserver()->onCreateIndex(txn, createIndexNs, *it);
+        }
+    }
+    wunit.commit();
+}
+
+bool Cloner::copyCollection(OperationContext* txn,
+                            const string& ns,
+                            const BSONObj& query,
+                            string& errmsg,
+                            bool shouldCopyIndexes) {
+    const NamespaceString nss(ns);
+    const string dbname = nss.db().toString();
+
+    ScopedTransaction transaction(txn, MODE_IX);
+    Lock::DBLock dbWrite(txn->lockState(), dbname, MODE_X);
+
+    uassert(ErrorCodes::NotMaster,
+            str::stream() << "Not primary while copying collection " << ns << " (Cloner)",
+            !txn->writesAreReplicated() ||
+                repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(nss));
+
+    Database* db = dbHolder().openDb(txn, dbname);
+
+    // config
+    BSONObj filter = BSON("name" << nss.coll().toString());
+    list<BSONObj> collList = _conn->getCollectionInfos(dbname, filter);
+    BSONObj options;
+    if (!collList.empty()) {
+        invariant(collList.size() <= 1);
+        BSONObj col = collList.front();
+        if (col["options"].isABSONObj()) {
+            options = col["options"].Obj();
+        }
+        MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
+            txn->checkForInterrupt();
+
+            WriteUnitOfWork wunit(txn);
+            Status status = userCreateNS(txn, db, ns, options, false);
+            if (!status.isOK()) {
+                errmsg = status.toString();
+                // abort write unit of work
+                return false;
+            }
+            wunit.commit();
+        }
+        MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "createCollection", ns);
+    } else {
+        LOG(1) << "No collection info found for ns:" << nss.toString()
+               << ", host:" << _conn->getServerAddress();
+    }
+
+    // main data
+    CloneOptions opts;
+    opts.slaveOk = true;
+    copy(txn, dbname, nss, options, nss, false, opts, Query(query).snapshot());
+
+    /* TODO : copyIndexes bool does not seem to be implemented! */
+    if (!shouldCopyIndexes) {
+        log() << "ERROR copy collection shouldCopyIndexes not implemented? " << ns << endl;
+    }
+
+    // indexes
+    copyIndexes(txn, dbname, NamespaceString(ns), options, NamespaceString(ns), false, true);
+
+    return true;
+}
+
+StatusWith<std::vector<BSONObj>> Cloner::filterCollectionsForClone(
+    const CloneOptions& opts, const std::list<BSONObj>& initialCollections) {
+    std::vector<BSONObj> finalCollections;
+    for (auto&& collection : initialCollections) {
+        LOG(2) << "\t cloner got " << collection;
+
+        BSONElement collectionOptions = collection["options"];
+        if (collectionOptions.isABSONObj()) {
+            auto parseOptionsStatus = CollectionOptions().parse(collectionOptions.Obj());
+            if (!parseOptionsStatus.isOK()) {
+                return parseOptionsStatus;
+            }
+        }
+
+        std::string collectionName;
+        auto status = bsonExtractStringField(collection, "name", &collectionName);
+        if (!status.isOK()) {
+            return status;
+        }
+
+        const NamespaceString ns(opts.fromDB, collectionName.c_str());
+
+        if (ns.isSystem()) {
+            if (legalClientSystemNS(ns.ns(), true) == 0) {
+                LOG(2) << "\t\t not cloning because system collection" << endl;
                 continue;
             }
-
-            if ( string("ns") == e.fieldName() ) {
-                uassert( 10024 , "bad ns field for index during dbcopy", e.type() == String);
-                const char *p = strchr(e.valuestr(), '.');
-                uassert( 10025 , "bad ns field for index during dbcopy [2]", p);
-                string newname = cc().database()->name() + p;
-                b.append("ns", newname);
-            }
-            else
-                b.append(e);
         }
-        BSONObj res= b.obj();
+        if (!ns.isNormal()) {
+            LOG(2) << "\t\t not cloning because has $ ";
+            continue;
+        }
+        if (opts.collsToIgnore.find(ns.ns()) != opts.collsToIgnore.end()) {
+            LOG(2) << "\t\t ignoring collection " << ns;
+            continue;
+        } else {
+            LOG(2) << "\t\t not ignoring collection " << ns;
+        }
 
-        /*    if( mod ) {
-            out() << "before: " << o.toString() << endl;
-            o.dump();
-            out() << "after:  " << res.toString() << endl;
-            res.dump();
-            }*/
+        finalCollections.push_back(collection.getOwned());
+    }
+    return finalCollections;
+}
 
-        return res;
+Status Cloner::createCollectionsForDb(OperationContext* txn,
+                                      const std::vector<BSONObj>& collections,
+                                      const std::string& dbName) {
+    Database* db = dbHolder().openDb(txn, dbName);
+    for (auto&& collection : collections) {
+        BSONObj options = collection.getObjectField("options");
+        const NamespaceString nss(dbName, collection["name"].valuestr());
+
+        MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
+            txn->checkForInterrupt();
+            WriteUnitOfWork wunit(txn);
+
+            // we defer building id index for performance - building it in batch is much faster
+            Status createStatus = userCreateNS(txn, db, nss.ns(), options, false);
+            if (!createStatus.isOK()) {
+                return createStatus;
+            }
+
+            wunit.commit();
+        }
+        MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "createCollection", nss.ns());
+    }
+    return Status::OK();
+}
+
+Status Cloner::copyDb(OperationContext* txn,
+                      const std::string& toDBName,
+                      const string& masterHost,
+                      const CloneOptions& opts,
+                      set<string>* clonedColls,
+                      std::vector<BSONObj> collectionsToClone) {
+    massert(10289,
+            "useReplAuth is not written to replication log",
+            !opts.useReplAuth || !txn->writesAreReplicated());
+
+    auto statusWithMasterHost = ConnectionString::parse(masterHost);
+    if (!statusWithMasterHost.isOK()) {
+        return statusWithMasterHost.getStatus();
     }
 
-    Cloner::Cloner() { }
+    const ConnectionString cs(statusWithMasterHost.getValue());
 
-    struct Cloner::Fun {
-        Fun( Client::Context& ctx ) : lastLog(0), context( ctx ) { }
+    bool masterSameProcess = false;
+    std::vector<HostAndPort> csServers = cs.getServers();
+    for (std::vector<HostAndPort>::const_iterator iter = csServers.begin(); iter != csServers.end();
+         ++iter) {
+        if (!repl::isSelf(*iter))
+            continue;
 
-        void operator()( DBClientCursorBatchIterator &i ) {
-            Lock::GlobalWrite lk;
-            context.relocked();
+        masterSameProcess = true;
+        break;
+    }
 
-            bool createdCollection = false;
-            Collection* collection = NULL;
-
-            while( i.moreInCurrentBatch() ) {
-                if ( numSeen % 128 == 127 /*yield some*/ ) {
-                    collection = NULL;
-                    time_t now = time(0);
-                    if( now - lastLog >= 60 ) {
-                        // report progress
-                        if( lastLog )
-                            log() << "clone " << to_collection << ' ' << numSeen << endl;
-                        lastLog = now;
-                    }
-                    mayInterrupt( _mayBeInterrupted );
-                    dbtempreleaseif t( _mayYield );
-                }
-
-                uassert(ErrorCodes::NotMaster,
-                        str::stream() << "Not primary while cloning collection " << from_collection
-                                      << " to " << to_collection,
-                        !logForRepl ||
-                        isMasterNs(to_collection));
-
-                if ( isindex == false && collection == NULL ) {
-                    collection = context.db()->getCollection( to_collection );
-                    if ( !collection ) {
-                        massert( 17321,
-                                 str::stream()
-                                 << "collection dropped during clone ["
-                                 << to_collection << "]",
-                                 !createdCollection );
-                        createdCollection = true;
-                        collection = context.db()->createCollection( to_collection );
-                        verify( collection );
-                    }
-                }
-
-                BSONObj tmp = i.nextSafe();
-
-                /* assure object is valid.  note this will slow us down a little. */
-                const Status status = validateBSON(tmp.objdata(), tmp.objsize());
-                if (!status.isOK()) {
-                    str::stream ss;
-                    ss << "Cloner: found corrupt document in " << from_collection
-                          << ": " << status.reason();
-                    if (skipCorruptDocumentsWhenCloning) {
-                        warning() << ss.ss.str() << "; skipping";
-                        continue;
-                    }
-                    msgasserted(28531, ss);
-                }
-
-                ++numSeen;
-
-                BSONObj js = tmp;
-                if ( isindex ) {
-                    verify(nsToCollectionSubstring(from_collection) == "system.indexes");
-                    js = fixindex(tmp);
-                    indexesToBuild->push_back( js.getOwned() );
-                    continue;
-                }
-
-                verify(nsToCollectionSubstring(from_collection) != "system.indexes");
-
-                StatusWith<DiskLoc> loc = collection->insertDocument( js, true );
-                if ( !loc.isOK() ) {
-                    error() << "error: exception cloning object in " << from_collection
-                            << ' ' << loc.toString() << " obj:" << js;
-                }
-                uassertStatusOK( loc.getStatus() );
-                if ( logForRepl )
-                    logOp("i", to_collection, js);
-
-                getDur().commitIfNeeded();
-
-                RARELY if ( time( 0 ) - saveLast > 60 ) {
-                    log() << numSeen << " objects cloned so far from collection " << from_collection;
-                    saveLast = time( 0 );
-                }
-            }
-        }
-
-        time_t lastLog;
-        Client::Context& context;
-
-        int64_t numSeen;
-        bool isindex;
-        const char *from_collection;
-        const char *to_collection;
-        time_t saveLast;
-        list<BSONObj> *indexesToBuild;  // deferred query results (e.g. index insert/build)
-        bool logForRepl;
-        bool _mayYield;
-        bool _mayBeInterrupted;
-    };
-
-    /* copy the specified collection
-       isindex - if true, this is system.indexes collection, in which we do some transformation when copying.
-    */
-    void Cloner::copy(Client::Context& ctx,
-                      const char *from_collection, const char *to_collection, bool isindex,
-                      bool logForRepl, bool masterSameProcess, bool slaveOk, bool mayYield,
-                      bool mayBeInterrupted, Query query) {
-
-        list<BSONObj> indexesToBuild;
-        LOG(2) << "\t\tcloning collection " << from_collection << " to " << to_collection << " on " << _conn->getServerAddress() << " with filter " << query.toString() << endl;
-
-        Fun f( ctx );
-        f.numSeen = 0;
-        f.isindex = isindex;
-        f.from_collection = from_collection;
-        f.to_collection = to_collection;
-        f.saveLast = time( 0 );
-        f.indexesToBuild = &indexesToBuild;
-        f.logForRepl = logForRepl;
-        f._mayYield = mayYield;
-        f._mayBeInterrupted = mayBeInterrupted;
-
-        int options = QueryOption_NoCursorTimeout | ( slaveOk ? QueryOption_SlaveOk : 0 );
-        {
-            mayInterrupt( mayBeInterrupted );
-            dbtempreleaseif r( mayYield );
-            _conn->query(boost::function<void(DBClientCursorBatchIterator &)>(f), from_collection,
-                         query, 0, options);
-        }
-
-        uassert(ErrorCodes::NotMaster,
-                str::stream() << "Not primary while cloning collection " << from_collection
-                              << " to " << to_collection << " with filter "
-                              << query.toString(),
-                !logForRepl ||
-                isMasterNs(from_collection));
-
-        if ( indexesToBuild.size() ) {
-            for (list<BSONObj>::const_iterator i = indexesToBuild.begin();
-                 i != indexesToBuild.end();
-                 ++i) {
-
-                BSONObj spec = *i;
-                string ns = spec["ns"].String(); // this was fixed when pulled off network
-                Collection* collection = f.context.db()->getCollection( ns );
-                if ( !collection ) {
-                    collection = f.context.db()->createCollection( ns );
-                    verify( collection );
-                }
-
-                Status status = collection->getIndexCatalog()->createIndex( spec, mayBeInterrupted );
-                if ( status.code() == ErrorCodes::IndexAlreadyExists ) {
-                    // no-op
-                }
-                else if ( !status.isOK() ) {
-                    error() << "error creating index when cloning spec: " << spec
-                            << " error: " << status.toString();
-                    uassertStatusOK( status );
-                }
-
-                if ( logForRepl )
-                    logOp("i", to_collection, spec);
-
-                getDur().commitIfNeeded();
-
-            }
+    if (masterSameProcess) {
+        if (opts.fromDB == toDBName) {
+            // Guard against re-entrance
+            return Status(ErrorCodes::IllegalOperation, "can't clone from self (localhost)");
         }
     }
 
-    bool Cloner::validateQueryResults(const auto_ptr<DBClientCursor>& cur,
-                                      int32_t* errCode,
-                                      string& errmsg) {
-        if ( cur.get() == 0 )
-            return false;
-        if ( cur->more() ) {
-            BSONObj first = cur->next();
-            BSONElement errField = getErrField(first);
-            if(!errField.eoo()) {
-                errmsg = errField.str();
-                if (errCode)
-                    *errCode = first.getIntField("code");
-                return false;
+    {
+        // setup connection
+        if (_conn.get()) {
+            // nothing to do
+        } else if (!masterSameProcess) {
+            std::string errmsg;
+            unique_ptr<DBClientBase> con(cs.connect(errmsg));
+            if (!con.get()) {
+                return Status(ErrorCodes::HostUnreachable, errmsg);
             }
-            cur->putBack(first);
+
+            if (getGlobalAuthorizationManager()->isAuthEnabled() &&
+                !con->authenticateInternalUser()) {
+                return Status(ErrorCodes::AuthenticationFailed,
+                              "Unable to authenticate as internal user");
+            }
+
+            _conn = std::move(con);
+        } else {
+            _conn.reset(new DBDirectClient(txn));
         }
-        return true;
     }
 
-    bool Cloner::copyCollectionFromRemote(const string& host, const string& ns, string& errmsg) {
-        Cloner cloner;
-
-        DBClientConnection *tmpConn = new DBClientConnection();
-        // cloner owns _conn in auto_ptr
-        cloner.setConnection(tmpConn);
-        uassert(15908, errmsg, tmpConn->connect(host, errmsg) && replAuthenticate(tmpConn));
-
-        return cloner.copyCollection(ns, BSONObj(), errmsg, true, false, true, false);
+    // Gather the list of collections to clone
+    std::vector<BSONObj> toClone;
+    if (clonedColls) {
+        clonedColls->clear();
     }
 
-    bool Cloner::copyCollection(const string& ns, const BSONObj& query, string& errmsg,
-                                bool mayYield, bool mayBeInterrupted, bool copyIndexes,
-                                bool logForRepl) {
+    uassertStatusOK(_checkForCatalogManagerChangeIfNeeded(opts));
 
-        const NamespaceString nss(ns);
-        const string dbname = nss.db().toString();
-
-        Client::WriteContext ctx(ns);
-
-        uassert(ErrorCodes::NotMaster,
-                str::stream() << "Not primary while copying collection " << ns << " (Cloner)",
-                !logForRepl ||
-                isMasterNs(ns.c_str()));
-
-        // config
-        BSONObj filter = BSON("name" << nss.coll().toString());
-        list<BSONObj> collList = _conn->getCollectionInfos( dbname, filter);
-        if (!collList.empty()) {
-            invariant(collList.size() <= 1);
-            BSONObj col = collList.front();
-            if (col["options"].isABSONObj()) {
-                if (!userCreateNS(ns.c_str(), col["options"].Obj(), errmsg, logForRepl, 0))
-                    return false;
-            }
+    if (opts.createCollections) {
+        // getCollectionInfos may make a remote call, which may block indefinitely, so release
+        // the global lock that we are entering with.
+        Lock::TempRelease tempRelease(txn->lockState());
+        std::list<BSONObj> initialCollections = _conn->getCollectionInfos(opts.fromDB);
+        auto status = filterCollectionsForClone(opts, initialCollections);
+        if (!status.isOK()) {
+            return status.getStatus();
         }
-
-        // main data
-        copy(ctx.ctx(),
-             ns.c_str(), ns.c_str(), false, logForRepl, false, true, mayYield, mayBeInterrupted,
-             Query(query).snapshot());
-
-        /* TODO : copyIndexes bool does not seem to be implemented! */
-        if(!copyIndexes) {
-            log() << "ERROR copy collection copyIndexes not implemented? " << ns << endl;
-        }
-
-        // indexes
-        std::string temp = ctx.ctx().db()->name() + ".system.indexes";
-        copy(ctx.ctx(), temp.c_str(), temp.c_str(), true, logForRepl, false, true, mayYield,
-             mayBeInterrupted, BSON( "ns" << ns ));
-
-        getDur().commitIfNeeded();
-        return true;
+        toClone = status.getValue();
+    } else {
+        toClone = collectionsToClone;
     }
 
-    extern bool inDBRepair;
+    uassert(ErrorCodes::NotMaster,
+            str::stream() << "Not primary while cloning database " << opts.fromDB
+                          << " (after getting list of collections to clone)",
+            !txn->writesAreReplicated() ||
+                repl::getGlobalReplicationCoordinator()->canAcceptWritesForDatabase(toDBName));
 
-    bool Cloner::go(Client::Context& context,
-                    const string& masterHost, const CloneOptions& opts, set<string>* clonedColls,
-                    string& errmsg, int* errCode) {
-        if ( errCode ) {
-            *errCode = 0;
-        }
-        massert( 10289 ,  "useReplAuth is not written to replication log", !opts.useReplAuth || !opts.logForRepl );
-
-        string todb = cc().database()->name();
-        stringstream a,b;
-        a << "localhost:" << serverGlobalParams.port;
-        b << "127.0.0.1:" << serverGlobalParams.port;
-        bool masterSameProcess = ( a.str() == masterHost || b.str() == masterHost );
-        if ( masterSameProcess ) {
-            if (opts.fromDB == todb && cc().database()->path() == storageGlobalParams.dbpath) {
-                // guard against an "infinite" loop
-                /* if you are replicating, the local.sources config may be wrong if you get this */
-                errmsg = "can't clone from self (localhost).";
-                return false;
+    if (opts.syncData) {
+        if (opts.createCollections) {
+            Status status = createCollectionsForDb(txn, toClone, toDBName);
+            if (!status.isOK()) {
+                return status;
             }
         }
-
-        {
-            // setup connection
-            if (_conn.get()) {
-                // nothing to do
-            }
-            else if ( !masterSameProcess ) {
-                ConnectionString cs = ConnectionString::parse( masterHost, errmsg );
-                auto_ptr<DBClientBase> con( cs.connect( errmsg ));
-                if ( !con.get() )
-                    return false;
-                if( !replAuthenticate(con.get()))
-                    return false;
-                
-                _conn = con;
-            }
-            else {
-                _conn.reset(new DBDirectClient());
-            }
-        }
-
-        list<BSONObj> toClone;
-        if ( clonedColls ) clonedColls->clear();
-        if ( opts.syncData ) {
-            /* todo: we can put these releases inside dbclient or a dbclient specialization.
-               or just wait until we get rid of global lock anyway.
-               */
-            mayInterrupt( opts.mayBeInterrupted );
-            dbtempreleaseif r( opts.mayYield );
-
-            list<BSONObj> raw = _conn->getCollectionInfos( opts.fromDB );
-            for ( list<BSONObj>::iterator it = raw.begin(); it != raw.end(); ++it ) {
-                BSONObj collection = *it;
-
-
-                LOG(2) << "\t cloner got " << collection << endl;
-
-                BSONElement collectionOptions = collection["options"];
-                if ( collectionOptions.isABSONObj() ) {
-                    Status parseOptionsStatus = CollectionOptions().parse(collectionOptions.Obj());
-                    if ( !parseOptionsStatus.isOK() ) {
-                        errmsg = str::stream() << "invalid collection options: " << collection
-                                               << ", reason: " << parseOptionsStatus.reason();
-                        return false;
-                    }
-                }
-
-                BSONElement e = collection.getField("name");
-                if ( e.eoo() ) {
-                    string s = "bad system.namespaces object " + collection.toString();
-                    massert( 10290 , s.c_str(), false);
-                }
-                verify( !e.eoo() );
-                verify( e.type() == String );
-
-                const NamespaceString ns(opts.fromDB, e.valuestr());
-
-                if( ns.isSystem() ) {
-                    /* system.users and s.js is cloned -- but nothing else from system.
-                     * system.indexes is handled specially at the end*/
-                    if( legalClientSystemNS( ns.ns() , true ) == 0 ) {
-                        LOG(2) << "\t\t not cloning because system collection" << endl;
-                        continue;
-                    }
-                }
-                if( !ns.isNormal() ) {
-                    LOG(2) << "\t\t not cloning because has $ " << endl;
-                    continue;
-                }
-
-                if( opts.collsToIgnore.find( ns.ns() ) != opts.collsToIgnore.end() ){
-                    LOG(2) << "\t\t ignoring collection " << ns << endl;
-                    continue;
-                }
-                else {
-                    LOG(2) << "\t\t not ignoring collection " << ns << endl;
-                }
-
-                if (clonedColls) {
-                    clonedColls->insert(ns.ns());
-                }
-
-                toClone.push_back( collection.getOwned() );
-            }
-        }
-
-        for ( list<BSONObj>::iterator i=toClone.begin(); i != toClone.end(); i++ ) {
-            {
-                mayInterrupt( opts.mayBeInterrupted );
-                dbtempreleaseif r( opts.mayYield );
-            }
-
-            uassert(ErrorCodes::NotMaster,
-                    str::stream() << "Not primary while cloning database " << opts.fromDB
-                                  << " (after getting list of collections to clone)",
-                    !opts.logForRepl ||
-                    isMaster(todb.c_str()));
-
-            BSONObj collection = *i;
+        for (auto&& collection : toClone) {
             LOG(2) << "  really will clone: " << collection << endl;
+
+            const char* collectionName = collection["name"].valuestr();
             BSONObj options = collection.getObjectField("options");
 
-            string to_name = todb + "." + collection["name"].valuestr();
-            string from_name = opts.fromDB + "." + collection["name"].valuestr();
-            {
-                string err;
-                const char *toname = to_name.c_str();
-                /* we defer building id index for performance - building it in batch is much faster */
-                bool createStatus = userCreateNS(toname, options, err, opts.logForRepl, false);
-                if ( !createStatus ) {
-                    errmsg = str::stream() << "failed to create collection \"" << to_name << "\": "
-                                           << err;
-                    return false;
-                }
+            const NamespaceString from_name(opts.fromDB, collectionName);
+            const NamespaceString to_name(toDBName, collectionName);
+
+            if (clonedColls) {
+                clonedColls->insert(from_name.ns());
             }
 
             LOG(1) << "\t\t cloning " << from_name << " -> " << to_name << endl;
             Query q;
-            if( opts.snapshot )
+            if (opts.snapshot)
                 q.snapshot();
-            copy(context, from_name.c_str(), to_name.c_str(), false, opts.logForRepl, 
-                 masterSameProcess, opts.slaveOk, opts.mayYield, opts.mayBeInterrupted, q);
 
-            {
-                /* we need dropDups to be true as we didn't do a true snapshot and this is before applying oplog operations
-                   that occur during the initial sync.  inDBRepair makes dropDups be true.
-                   */
-                bool old = inDBRepair;
-                try {
-                    inDBRepair = true;
-                    Collection* c = cc().database()->getCollection( to_name );
-                    if ( c )
-                        c->getIndexCatalog()->ensureHaveIdIndex();
-                    inDBRepair = old;
+            uassertStatusOK(_checkForCatalogManagerChangeIfNeeded(opts));
+            copy(txn, toDBName, from_name, options, to_name, masterSameProcess, opts, q);
+
+            // Copy releases the lock, so we need to re-load the database. This should
+            // probably throw if the database has changed in between, but for now preserve
+            // the existing behaviour.
+            Database* db = dbHolder().get(txn, toDBName);
+            uassert(18645, str::stream() << "database " << toDBName << " dropped during clone", db);
+
+            Collection* c = db->getCollection(to_name);
+            if (c && !c->getIndexCatalog()->haveIdIndex(txn)) {
+                // We need to drop objects with duplicate _ids because we didn't do a true
+                // snapshot and this is before applying oplog operations that occur during the
+                // initial sync.
+                set<RecordId> dups;
+
+                MultiIndexBlock indexer(txn, c);
+                indexer.allowInterruption();
+
+                uassertStatusOK(indexer.init(c->getIndexCatalog()->getDefaultIdIndexSpec()));
+                uassertStatusOK(indexer.insertAllDocumentsInCollection(&dups));
+
+                // This must be done before we commit the indexer. See the comment about
+                // dupsAllowed in IndexCatalog::_unindexRecord and SERVER-17487.
+                for (set<RecordId>::const_iterator it = dups.begin(); it != dups.end(); ++it) {
+                    WriteUnitOfWork wunit(txn);
+                    c->deleteDocument(txn, *it, false, true);
+                    wunit.commit();
                 }
-                catch(...) {
-                    inDBRepair = old;
-                    throw;
+
+                if (!dups.empty()) {
+                    log() << "index build dropped: " << dups.size() << " dups";
                 }
+
+                WriteUnitOfWork wunit(txn);
+                indexer.commit();
+                if (txn->writesAreReplicated()) {
+                    getGlobalServiceContext()->getOpObserver()->onCreateIndex(
+                        txn,
+                        c->ns().getSystemIndexesCollection().c_str(),
+                        c->getIndexCatalog()->getDefaultIdIndexSpec());
+                }
+                wunit.commit();
             }
         }
-
-        // now build the indexes
-        
-        if ( opts.syncIndexes ) {
-            string system_indexes_from = opts.fromDB + ".system.indexes";
-            string system_indexes_to = todb + ".system.indexes";
-            
-            /* [dm]: is the ID index sometimes not called "_id_"?  There is other code in the system that looks for a "_id" prefix
-               rather than this exact value.  we should standardize.  OR, remove names - which is in the bugdb.  Anyway, this
-               is dubious here at the moment.
-            */
-            
-            // build a $nin query filter for the collections we *don't* want
-            BSONArrayBuilder barr;
-            barr.append( opts.collsToIgnore );
-            BSONArray arr = barr.arr();
-            
-            // Also don't copy the _id_ index
-            BSONObj query = BSON( "name" << NE << "_id_" << "ns" << NIN << arr );
-            
-            // won't need a snapshot of the query of system.indexes as there can never be very many.
-            copy(context,system_indexes_from.c_str(), system_indexes_to.c_str(), true,
-                 opts.logForRepl, masterSameProcess, opts.slaveOk, opts.mayYield, opts.mayBeInterrupted, query );
-        }
-        return true;
     }
 
-    bool Cloner::cloneFrom(Client::Context& context, const string& masterHost, const CloneOptions& options,
-                           string& errmsg, int* errCode, set<string>* clonedCollections) {
-        Cloner cloner;
-        return cloner.go(context, masterHost.c_str(), options, clonedCollections, errmsg, errCode);
+    // now build the secondary indexes
+    if (opts.syncIndexes) {
+        for (auto&& collection : toClone) {
+            log() << "copying indexes for: " << collection;
+
+            const char* collectionName = collection["name"].valuestr();
+
+            NamespaceString from_name(opts.fromDB, collectionName);
+            NamespaceString to_name(toDBName, collectionName);
+
+            uassertStatusOK(_checkForCatalogManagerChangeIfNeeded(opts));
+
+            copyIndexes(txn,
+                        toDBName,
+                        from_name,
+                        collection.getObjectField("options"),
+                        to_name,
+                        masterSameProcess,
+                        opts.slaveOk);
+        }
     }
 
-    /* Usage:
-       mydb.$cmd.findOne( { clone: "fromhost" } );
-       Note: doesn't work with authentication enabled, except as internal operation or for
-       old-style users for backwards compatibility.
-    */
-    class CmdClone : public Command {
-    public:
-        virtual bool slaveOk() const {
-            return false;
-        }
-        virtual LockType locktype() const { return WRITE; }
-        virtual void help( stringstream &help ) const {
-            help << "clone this database from an instance of the db on another host\n";
-            help << "{ clone : \"host13\" }";
-        }
-        virtual Status checkAuthForCommand(ClientBasic* client,
-                                           const std::string& dbname,
-                                           const BSONObj& cmdObj) {
-            ActionSet actions;
-            actions.addAction(ActionType::insert);
-            actions.addAction(ActionType::createIndex);
-            if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
-                    ResourcePattern::forDatabaseName(dbname), actions)) {
-                return Status(ErrorCodes::Unauthorized, "Unauthorized");
-            }
-            return Status::OK();
-        }
-        CmdClone() : Command("clone") { }
-        virtual bool run(const string& dbname , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            string from = cmdObj.getStringField("clone");
-            if ( from.empty() )
-                return false;
+    return Status::OK();
+}
 
-            CloneOptions opts;
-            opts.fromDB = dbname;
-            opts.logForRepl = ! fromRepl;
-
-            // See if there's any collections we should ignore
-            if( cmdObj["collsToIgnore"].type() == Array ){
-                BSONObjIterator it( cmdObj["collsToIgnore"].Obj() );
-
-                while( it.more() ){
-                    BSONElement e = it.next();
-                    if( e.type() == String ){
-                        opts.collsToIgnore.insert( e.String() );
-                    }
-                }
-            }
-
-            set<string> clonedColls;
-            Client::Context context( dbname );
-
-            Cloner cloner;
-            bool rval = cloner.go(context, from, opts, &clonedColls, errmsg);
-
-            BSONArrayBuilder barr;
-            barr.append( clonedColls );
-
-            result.append( "clonedColls", barr.arr() );
-
-            return rval;
-
-        }
-    } cmdClone;
-
-    class CmdCloneCollection : public Command {
-    public:
-        virtual bool slaveOk() const {
-            return false;
-        }
-        virtual LockType locktype() const { return NONE; }
-        CmdCloneCollection() : Command("cloneCollection") { }
-
-        virtual std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const {
-            return parseNsFullyQualified(dbname, cmdObj);
-        }
-        virtual Status checkAuthForCommand(ClientBasic* client,
-                                           const std::string& dbname,
-                                           const BSONObj& cmdObj) {
-            std::string ns = parseNs(dbname, cmdObj);
-
-            ActionSet actions;
-            actions.addAction(ActionType::insert);
-            actions.addAction(ActionType::createIndex); // SERVER-11418
-
-            if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
-                    ResourcePattern::forExactNamespace(NamespaceString(ns)), actions)) {
-                return Status(ErrorCodes::Unauthorized, "Unauthorized");
-            }
-            return Status::OK();
-        }
-        virtual void help( stringstream &help ) const {
-            help << "{ cloneCollection: <collection>, from: <host> [,query: <query_filter>] [,copyIndexes:<bool>] }"
-                 "\nCopies a collection from one server to another. Do not use on a single server as the destination "
-                 "is placed at the same db.collection (namespace) as the source.\n"
-                 ;
-        }
-        virtual bool run(const string& dbname , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            string fromhost = cmdObj.getStringField("from");
-            if ( fromhost.empty() ) {
-                errmsg = "missing 'from' parameter";
-                return false;
-            }
-            {
-                HostAndPort h(fromhost);
-                if( h.isSelf() ) {
-                    errmsg = "can't cloneCollection from self";
-                    return false;
-                }
-            }
-            string collection = parseNs(dbname, cmdObj);
-            Status allowedWriteStatus = userAllowedWriteNS(dbname, collection);
-            if (!allowedWriteStatus.isOK()) {
-                return appendCommandStatus(result, allowedWriteStatus);
-            }
-            BSONObj query = cmdObj.getObjectField("query");
-            if ( query.isEmpty() )
-                query = BSONObj();
-
-            BSONElement copyIndexesSpec = cmdObj.getField("copyindexes");
-            bool copyIndexes = copyIndexesSpec.isBoolean() ? copyIndexesSpec.boolean() : true;
-
-            log() << "cloneCollection.  db:" << dbname << " collection:" << collection << " from: " << fromhost
-                  << " query: " << query << " " << ( copyIndexes ? "" : ", not copying indexes" ) << endl;
-
-            Cloner cloner;
-            auto_ptr<DBClientConnection> myconn;
-            myconn.reset( new DBClientConnection() );
-            if ( ! myconn->connect( fromhost , errmsg ) )
-                return false;
-
-            cloner.setConnection( myconn.release() );
-
-            return cloner.copyCollection(collection, query, errmsg, true, false, copyIndexes);
-        }
-    } cmdCloneCollection;
-
-
-    // SERVER-4328 todo review for concurrency
-    thread_specific_ptr< DBClientBase > authConn_;
-    /* Usage:
-     * admindb.$cmd.findOne( { copydbgetnonce: 1, fromhost: <connection string> } );
-     *
-     * Run against the mongod that is the intended target for the "copydb" command.  Used to get a
-     * nonce from the source of a "copydb" operation for authentication purposes.  See the
-     * description of the "copydb" command below.
-     */
-    class CmdCopyDbGetNonce : public Command {
-    public:
-        CmdCopyDbGetNonce() : Command("copydbgetnonce") { }
-        virtual bool adminOnly() const {
-            return true;
-        }
-        virtual bool slaveOk() const {
-            return false;
-        }
-        virtual LockType locktype() const { return NONE; }
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {} // No auth required
-        virtual void help( stringstream &help ) const {
-            help << "get a nonce for subsequent copy db request from secure server\n";
-            help << "usage: {copydbgetnonce: 1, fromhost: <hostname>}";
-        }
-        virtual bool run(const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            string fromhost = cmdObj.getStringField("fromhost");
-            if ( fromhost.empty() ) {
-                /* copy from self */
-                stringstream ss;
-                ss << "localhost:" << serverGlobalParams.port;
-                fromhost = ss.str();
-            }
-            BSONObj ret;
-            ConnectionString cs = ConnectionString::parse(fromhost, errmsg);
-            if (!cs.isValid()) {
-                return false;
-            }
-            authConn_.reset(cs.connect(errmsg));
-            if (!authConn_.get()) {
-                return false;
-            }
-            if( !authConn_->runCommand( "admin", BSON( "getnonce" << 1 ), ret ) ) {
-                errmsg = "couldn't get nonce " + ret.toString();
-                return false;
-            }
-            result.appendElements( ret );
-            return true;
-        }
-    } cmdCopyDBGetNonce;
-
-    /* Usage:
-     * admindb.$cmd.findOne( { copydb: 1, fromhost: <connection string>, fromdb: <db>,
-     *                         todb: <db>[, username: <username>, nonce: <nonce>, key: <key>] } );
-     *
-     * The "copydb" command is used to copy a database.  Note that this is a very broad definition.
-     * This means that the "copydb" command can be used in the following ways:
-     *
-     * 1. To copy a database within a single node
-     * 2. To copy a database within a sharded cluster, possibly to another shard
-     * 3. To copy a database from one cluster to another
-     *
-     * Note that in all cases both the target and source database must be unsharded.
-     *
-     * The "copydb" command gets sent by the client or the mongos to the destination of the copy
-     * operation.  The node, cluster, or shard that recieves the "copydb" command must then query
-     * the source of the database to be copied for all the contents and metadata of the database.
-     *
-     *
-     *
-     * When used with auth, there are two different considerations.
-     *
-     * The first is authentication with the target.  The only entity that needs to authenticate with
-     * the target node is the client, so authentication works there the same as it would with any
-     * other command.
-     *
-     * The second is the authentication of the target with the source, which is needed because the
-     * target must query the source directly for the contents of the database.  To do this, the
-     * client must use the "copydbgetnonce" command, in which the target will get a nonce from the
-     * source and send it back to the client.  The client can then hash its password with the nonce,
-     * send it to the target when it runs the "copydb" command, which can then use that information
-     * to authenticate with the source.
-     *
-     * NOTE: mongos doesn't know how to call or handle the "copydbgetnonce" command.  See
-     * SERVER-6427.
-     *
-     * NOTE: Since internal cluster auth works differently, "copydb" currently doesn't work between
-     * shards in a cluster when auth is enabled.  See SERVER-13080.
-     */
-    class CmdCopyDb : public Command {
-    public:
-        CmdCopyDb() : Command("copydb") { }
-        virtual bool adminOnly() const {
-            return true;
-        }
-        virtual bool slaveOk() const {
-            return false;
-        }
-        virtual LockType locktype() const { return NONE; }
-        virtual Status checkAuthForCommand(ClientBasic* client,
-                                           const std::string& dbname,
-                                           const BSONObj& cmdObj) {
-            return copydb::checkAuthForCopydbCommand(client, dbname, cmdObj);
-        }
-        virtual void help( stringstream &help ) const {
-            help << "copy a database from another host to this host\n";
-            help << "usage: {copydb: 1, fromhost: <connection string>, fromdb: <db>, todb: <db>"
-                 << "[, slaveOk: <bool>, username: <username>, nonce: <nonce>, key: <key>]}";
-        }
-        virtual bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            string fromhost = cmdObj.getStringField("fromhost");
-            bool fromSelf = fromhost.empty();
-            if ( fromSelf ) {
-                /* copy from self */
-                stringstream ss;
-                ss << "localhost:" << serverGlobalParams.port;
-                fromhost = ss.str();
-            }
-
-            CloneOptions cloneOptions;
-            cloneOptions.fromDB = cmdObj.getStringField("fromdb");
-            cloneOptions.logForRepl = !fromRepl;
-            cloneOptions.slaveOk = cmdObj["slaveOk"].trueValue();
-            cloneOptions.useReplAuth = false;
-            cloneOptions.snapshot = true;
-            cloneOptions.mayYield = true;
-            cloneOptions.mayBeInterrupted = false;
-
-            string todb = cmdObj.getStringField("todb");
-            if ( fromhost.empty() || todb.empty() || cloneOptions.fromDB.empty() ) {
-                errmsg = "parms missing - {copydb: 1, fromhost: <connection string>, "
-                         "fromdb: <db>, todb: <db>}";
-                return false;
-            }
-
-            // SERVER-4328 todo lock just the two db's not everything for the fromself case
-            scoped_ptr<Lock::ScopedLock> lk( fromSelf ?
-                                             static_cast<Lock::ScopedLock*>( new Lock::GlobalWrite() ) :
-                                             static_cast<Lock::ScopedLock*>( new Lock::DBWrite( todb ) ) );
-
-            Cloner cloner;
-            string username = cmdObj.getStringField( "username" );
-            string nonce = cmdObj.getStringField( "nonce" );
-            string key = cmdObj.getStringField( "key" );
-            if ( !username.empty() && !nonce.empty() && !key.empty() ) {
-                uassert( 13008, "must call copydbgetnonce first", authConn_.get() );
-                BSONObj ret;
-                {
-                    dbtemprelease t;
-                    if ( !authConn_->runCommand( cloneOptions.fromDB,
-                                                 BSON( "authenticate" << 1 << "user" << username
-                                                       << "nonce" << nonce << "key" << key ), ret ) ) {
-                        errmsg = "unable to login " + ret.toString();
-                        return false;
-                    }
-                }
-                cloner.setConnection( authConn_.release() );
-            }
-            else if (!fromSelf) {
-                // If fromSelf leave the cloner's conn empty, it will use a DBDirectClient instead.
-
-                ConnectionString cs = ConnectionString::parse(fromhost, errmsg);
-                if (!cs.isValid()) {
-                    return false;
-                }
-                DBClientBase* conn = cs.connect(errmsg);
-                if (!conn) {
-                    return false;
-                }
-                cloner.setConnection(conn);
-            }
-            Client::Context ctx(todb);
-            return cloner.go(ctx, fromhost, cloneOptions, NULL, errmsg );
-        }
-    } cmdCopyDB;
-
-} // namespace mongo
+}  // namespace mongo

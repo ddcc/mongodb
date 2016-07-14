@@ -35,47 +35,40 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/fts/fts_language.h"
-#include "mongo/platform/unordered_map.h"
-#include "mongo/platform/unordered_set.h"
 
 namespace mongo {
 
-    namespace fts {
+namespace fts {
 
-        struct Token {
-            enum Type { WHITESPACE, DELIMITER, TEXT, INVALID };
-            Token( Type type, const StringData& data, unsigned offset, bool previousWhiteSpace )
-                : type( type ),
-                  data( data ),
-                  offset( offset ),
-                  previousWhiteSpace( previousWhiteSpace ) {}
+struct Token {
+    enum Type { WHITESPACE, DELIMITER, TEXT, INVALID };
+    Token(Type type, StringData data, unsigned offset) : type(type), data(data), offset(offset) {}
 
-            bool ok() const { return type != INVALID; }
-
-            Type type;
-            StringData data;
-            unsigned offset;
-            bool previousWhiteSpace;
-        };
-
-        class Tokenizer {
-        public:
-
-            Tokenizer( const FTSLanguage& language, const StringData& str );
-
-            bool more() const;
-            Token next();
-
-        private:
-            Token::Type _type( char c ) const;
-            bool _skipWhitespace();
-
-            unsigned _pos;
-            bool _previousWhiteSpace;
-            const StringData _raw;
-            bool _english;
-        };
-
+    bool ok() const {
+        return type != INVALID;
     }
-}
 
+    Type type;
+    StringData data;
+    unsigned offset;
+};
+
+class Tokenizer {
+    MONGO_DISALLOW_COPYING(Tokenizer);
+
+public:
+    Tokenizer(const FTSLanguage* language, StringData str);
+
+    bool more() const;
+    Token next();
+
+private:
+    Token::Type _type(char c) const;
+    bool _skipWhitespace();
+
+    unsigned _pos;
+    const StringData _raw;
+    bool _english;
+};
+}
+}

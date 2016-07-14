@@ -26,332 +26,163 @@
 *    it in the license file.
 */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kAccessControl
+
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/auth/authz_manager_external_state_s.h"
 
-#include <boost/thread/mutex.hpp>
-#include <boost/scoped_ptr.hpp>
 #include <string>
+#include <vector>
 
-#include "mongo/client/auth_helpers.h"
-#include "mongo/client/dbclientinterface.h"
 #include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_manager_global.h"
+#include "mongo/db/auth/authz_session_external_state_s.h"
 #include "mongo/db/auth/user_name.h"
+#include "mongo/db/commands.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/s/cluster_write.h"
-#include "mongo/s/config.h"
-#include "mongo/s/distlock.h"
-#include "mongo/s/type_database.h"
+#include "mongo/s/catalog/catalog_manager.h"
 #include "mongo/s/grid.h"
-#include "mongo/util/assert_util.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-    AuthzManagerExternalStateMongos::AuthzManagerExternalStateMongos() {}
+AuthzManagerExternalStateMongos::AuthzManagerExternalStateMongos() = default;
 
-    AuthzManagerExternalStateMongos::~AuthzManagerExternalStateMongos() {}
+AuthzManagerExternalStateMongos::~AuthzManagerExternalStateMongos() = default;
 
-    Status AuthzManagerExternalStateMongos::initialize() {
-        return Status::OK();
+Status AuthzManagerExternalStateMongos::initialize(OperationContext* txn) {
+    return Status::OK();
+}
+
+std::unique_ptr<AuthzSessionExternalState>
+AuthzManagerExternalStateMongos::makeAuthzSessionExternalState(AuthorizationManager* authzManager) {
+    return stdx::make_unique<AuthzSessionExternalStateMongos>(authzManager);
+}
+
+Status AuthzManagerExternalStateMongos::getStoredAuthorizationVersion(OperationContext* txn,
+                                                                      int* outVersion) {
+    // Note: we are treating
+    // { 'getParameter' : 1, <authSchemaVersionServerParameter> : 1 }
+    // as a user management command since this is the *only* part of mongos
+    // that runs this command
+    BSONObj getParameterCmd = BSON("getParameter" << 1 << authSchemaVersionServerParameter << 1);
+    BSONObjBuilder builder;
+    const bool ok = grid.catalogManager(txn)
+                        ->runUserManagementReadCommand(txn, "admin", getParameterCmd, &builder);
+    BSONObj cmdResult = builder.obj();
+    if (!ok) {
+        return Command::getStatusFromCommandResult(cmdResult);
     }
 
-    namespace {
-        ScopedDbConnection* getConnectionForAuthzCollection(const NamespaceString& ns) {
-            //
-            // Note: The connection mechanism here is *not* ideal, and should not be used elsewhere.
-            // If the primary for the collection moves, this approach may throw rather than handle
-            // version exceptions.
-            //
+    BSONElement versionElement = cmdResult[authSchemaVersionServerParameter];
+    if (versionElement.eoo()) {
+        return Status(ErrorCodes::UnknownError, "getParameter misbehaved.");
+    }
+    *outVersion = versionElement.numberInt();
 
-            DBConfigPtr config = grid.getDBConfig(ns.ns());
-            Shard s = config->getShard(ns.ns());
+    return Status::OK();
+}
 
-            return new ScopedDbConnection(s.getConnString(), 30.0);
-        }
+Status AuthzManagerExternalStateMongos::getUserDescription(OperationContext* txn,
+                                                           const UserName& userName,
+                                                           BSONObj* result) {
+    BSONObj usersInfoCmd =
+        BSON("usersInfo" << BSON_ARRAY(BSON(AuthorizationManager::USER_NAME_FIELD_NAME
+                                            << userName.getUser()
+                                            << AuthorizationManager::USER_DB_FIELD_NAME
+                                            << userName.getDB())) << "showPrivileges" << true
+                         << "showCredentials" << true);
+    BSONObjBuilder builder;
+    const bool ok = grid.catalogManager(txn)
+                        ->runUserManagementReadCommand(txn, "admin", usersInfoCmd, &builder);
+    BSONObj cmdResult = builder.obj();
+    if (!ok) {
+        return Command::getStatusFromCommandResult(cmdResult);
     }
 
-    Status AuthzManagerExternalStateMongos::getStoredAuthorizationVersion(int* outVersion) {
-        scoped_ptr<ScopedDbConnection> conn(getConnectionForAuthzCollection(
-                AuthorizationManager::usersCollectionNamespace));
-        Status status = auth::getRemoteStoredAuthorizationVersion(conn->get(), outVersion);
-        conn->done();
-        return status;
+    std::vector<BSONElement> foundUsers = cmdResult["users"].Array();
+    if (foundUsers.size() == 0) {
+        return Status(ErrorCodes::UserNotFound, "User \"" + userName.toString() + "\" not found");
     }
 
-    Status AuthzManagerExternalStateMongos::getUserDescription(const UserName& userName,
-                                                               BSONObj* result) {
-        try {
-            scoped_ptr<ScopedDbConnection> conn(getConnectionForAuthzCollection(
-                    AuthorizationManager::usersCollectionNamespace));
-            BSONObj cmdResult;
-            conn->get()->runCommand(
-                    "admin",
-                    BSON("usersInfo" <<
-                         BSON_ARRAY(BSON(AuthorizationManager::USER_NAME_FIELD_NAME <<
-                                         userName.getUser() <<
-                                         AuthorizationManager::USER_DB_FIELD_NAME <<
-                                         userName.getDB())) <<
-                         "showPrivileges" << true <<
-                         "showCredentials" << true),
-                    cmdResult);
-            if (!cmdResult["ok"].trueValue()) {
-                int code = cmdResult["code"].numberInt();
-                if (code == 0) code = ErrorCodes::UnknownError;
-                return Status(ErrorCodes::Error(code), cmdResult["errmsg"].str());
-            }
+    if (foundUsers.size() > 1) {
+        return Status(ErrorCodes::UserDataInconsistent,
+                      str::stream() << "Found multiple users on the \"" << userName.getDB()
+                                    << "\" database with name \"" << userName.getUser() << "\"");
+    }
+    *result = foundUsers[0].Obj().getOwned();
+    return Status::OK();
+}
 
-            std::vector<BSONElement> foundUsers = cmdResult["users"].Array();
-            if (foundUsers.size() == 0) {
-                return Status(ErrorCodes::UserNotFound,
-                              "User \"" + userName.toString() + "\" not found");
-            }
-            if (foundUsers.size() > 1) {
-                return Status(ErrorCodes::UserDataInconsistent,
-                              mongoutils::str::stream() << "Found multiple users on the \"" <<
-                                      userName.getDB() << "\" database with name \"" <<
-                                      userName.getUser() << "\"");
-            }
-            *result = foundUsers[0].Obj().getOwned();
-            conn->done();
-            return Status::OK();
-        } catch (const DBException& e) {
-            return e.toStatus();
-        }
+Status AuthzManagerExternalStateMongos::getRoleDescription(OperationContext* txn,
+                                                           const RoleName& roleName,
+                                                           bool showPrivileges,
+                                                           BSONObj* result) {
+    BSONObj rolesInfoCmd =
+        BSON("rolesInfo" << BSON_ARRAY(BSON(
+                                AuthorizationManager::ROLE_NAME_FIELD_NAME
+                                << roleName.getRole() << AuthorizationManager::ROLE_DB_FIELD_NAME
+                                << roleName.getDB())) << "showPrivileges" << showPrivileges);
+    BSONObjBuilder builder;
+    const bool ok = grid.catalogManager(txn)
+                        ->runUserManagementReadCommand(txn, "admin", rolesInfoCmd, &builder);
+    BSONObj cmdResult = builder.obj();
+    if (!ok) {
+        return Command::getStatusFromCommandResult(cmdResult);
     }
 
-    Status AuthzManagerExternalStateMongos::getRoleDescription(const RoleName& roleName,
-                                                               bool showPrivileges,
-                                                               BSONObj* result) {
-        try {
-            scoped_ptr<ScopedDbConnection> conn(getConnectionForAuthzCollection(
-                    AuthorizationManager::rolesCollectionNamespace));
-            BSONObj cmdResult;
-            conn->get()->runCommand(
-                    "admin",
-                    BSON("rolesInfo" <<
-                         BSON_ARRAY(BSON(AuthorizationManager::ROLE_NAME_FIELD_NAME <<
-                                         roleName.getRole() <<
-                                         AuthorizationManager::ROLE_SOURCE_FIELD_NAME <<
-                                         roleName.getDB())) <<
-                         "showPrivileges" << showPrivileges),
-                    cmdResult);
-            if (!cmdResult["ok"].trueValue()) {
-                int code = cmdResult["code"].numberInt();
-                if (code == 0) code = ErrorCodes::UnknownError;
-                return Status(ErrorCodes::Error(code), cmdResult["errmsg"].str());
-            }
-
-            std::vector<BSONElement> foundRoles = cmdResult["roles"].Array();
-            if (foundRoles.size() == 0) {
-                return Status(ErrorCodes::RoleNotFound,
-                              "Role \"" + roleName.toString() + "\" not found");
-            }
-            if (foundRoles.size() > 1) {
-                return Status(ErrorCodes::RoleDataInconsistent,
-                              mongoutils::str::stream() << "Found multiple roles on the \"" <<
-                                      roleName.getDB() << "\" database with name \"" <<
-                                      roleName.getRole() << "\"");
-            }
-            *result = foundRoles[0].Obj().getOwned();
-            conn->done();
-            return Status::OK();
-        } catch (const DBException& e) {
-            return e.toStatus();
-        }
+    std::vector<BSONElement> foundRoles = cmdResult["roles"].Array();
+    if (foundRoles.size() == 0) {
+        return Status(ErrorCodes::RoleNotFound, "Role \"" + roleName.toString() + "\" not found");
     }
 
-    Status AuthzManagerExternalStateMongos::getRoleDescriptionsForDB(const std::string dbname,
-                                                                     bool showPrivileges,
-                                                                     bool showBuiltinRoles,
-                                                                     vector<BSONObj>* result) {
-        try {
-            scoped_ptr<ScopedDbConnection> conn(getConnectionForAuthzCollection(
-                    AuthorizationManager::rolesCollectionNamespace));
-            BSONObj cmdResult;
-            conn->get()->runCommand(
-                    dbname,
-                    BSON("rolesInfo" << 1 <<
-                         "showPrivileges" << showPrivileges <<
-                         "showBuiltinRoles" << showBuiltinRoles),
-                    cmdResult);
-            if (!cmdResult["ok"].trueValue()) {
-                int code = cmdResult["code"].numberInt();
-                if (code == 0) code = ErrorCodes::UnknownError;
-                return Status(ErrorCodes::Error(code), cmdResult["errmsg"].str());
-            }
-            for (BSONObjIterator it(cmdResult["roles"].Obj()); it.more(); it.next()) {
-                result->push_back((*it).Obj().getOwned());
-            }
-            conn->done();
-            return Status::OK();
-        } catch (const DBException& e) {
-            return e.toStatus();
-        }
+    if (foundRoles.size() > 1) {
+        return Status(ErrorCodes::RoleDataInconsistent,
+                      str::stream() << "Found multiple roles on the \"" << roleName.getDB()
+                                    << "\" database with name \"" << roleName.getRole() << "\"");
     }
+    *result = foundRoles[0].Obj().getOwned();
+    return Status::OK();
+}
 
-    Status AuthzManagerExternalStateMongos::findOne(
-            const NamespaceString& collectionName,
-            const BSONObj& queryDoc,
-            BSONObj* result) {
-        try {
-            scoped_ptr<ScopedDbConnection> conn(getConnectionForAuthzCollection(collectionName));
-            Query query(queryDoc);
-            query.readPref(ReadPreference_PrimaryPreferred, BSONArray());
-            *result = conn->get()->findOne(collectionName, query).getOwned();
-            conn->done();
-            if (result->isEmpty()) {
-                return Status(ErrorCodes::NoMatchingDocument, mongoutils::str::stream() <<
-                              "No document in " << collectionName.ns() << " matches " << queryDoc);
-            }
-            return Status::OK();
-        } catch (const DBException& e) {
-            return e.toStatus();
-        }
+Status AuthzManagerExternalStateMongos::getRoleDescriptionsForDB(OperationContext* txn,
+                                                                 const std::string dbname,
+                                                                 bool showPrivileges,
+                                                                 bool showBuiltinRoles,
+                                                                 std::vector<BSONObj>* result) {
+    BSONObj rolesInfoCmd = BSON("rolesInfo" << 1 << "showPrivileges" << showPrivileges
+                                            << "showBuiltinRoles" << showBuiltinRoles);
+    BSONObjBuilder builder;
+    const bool ok =
+        grid.catalogManager(txn)->runUserManagementReadCommand(txn, dbname, rolesInfoCmd, &builder);
+    BSONObj cmdResult = builder.obj();
+    if (!ok) {
+        return Command::getStatusFromCommandResult(cmdResult);
     }
-
-    Status AuthzManagerExternalStateMongos::query(
-            const NamespaceString& collectionName,
-            const BSONObj& queryDoc,
-            const BSONObj& projection,
-            const boost::function<void(const BSONObj&)>& resultProcessor) {
-        try {
-            scoped_ptr<ScopedDbConnection> conn(getConnectionForAuthzCollection(collectionName));
-            Query query(queryDoc);
-            query.readPref(ReadPreference_PrimaryPreferred, BSONArray());
-            conn->get()->query(resultProcessor, collectionName.ns(), query, &projection);
-            return Status::OK();
-        } catch (const DBException& e) {
-            return e.toStatus();
-        }
+    for (BSONObjIterator it(cmdResult["roles"].Obj()); it.more(); it.next()) {
+        result->push_back((*it).Obj().getOwned());
     }
+    return Status::OK();
+}
 
-    Status AuthzManagerExternalStateMongos::getAllDatabaseNames(
-            std::vector<std::string>* dbnames) {
-        try {
-            scoped_ptr<ScopedDbConnection> conn(
-                    getConnectionForAuthzCollection(NamespaceString(DatabaseType::ConfigNS)));
-            auto_ptr<DBClientCursor> c = conn->get()->query(DatabaseType::ConfigNS, Query());
-
-            while (c->more()) {
-                DatabaseType dbInfo;
-                std::string errmsg;
-                if (!dbInfo.parseBSON( c->nextSafe(), &errmsg) || !dbInfo.isValid( &errmsg )) {
-                    return Status(ErrorCodes::FailedToParse, errmsg);
-                }
-                dbnames->push_back(dbInfo.getName());
-            }
-            conn->done();
-            dbnames->push_back("config"); // config db isn't listed in config.databases
-            return Status::OK();
-        } catch (const DBException& e) {
-            return e.toStatus();
-        }
-    }
-
-    Status AuthzManagerExternalStateMongos::insert(
-            const NamespaceString& collectionName,
-            const BSONObj& document,
-            const BSONObj& writeConcern) {
-        return clusterInsert(collectionName, document, writeConcern, NULL);
-    }
-
-    Status AuthzManagerExternalStateMongos::update(const NamespaceString& collectionName,
-                                                   const BSONObj& query,
-                                                   const BSONObj& updatePattern,
-                                                   bool upsert,
-                                                   bool multi,
-                                                   const BSONObj& writeConcern,
-                                                   int* nMatched) {
-        BatchedCommandResponse response;
-        Status res = clusterUpdate(collectionName,
-                query,
-                updatePattern,
-                upsert,
-                multi,
-                writeConcern,
-                &response);
-
-        if (res.isOK()) {
-            *nMatched = response.getN();
-        }
-
-        return res;
-    }
-
-    Status AuthzManagerExternalStateMongos::remove(
-            const NamespaceString& collectionName,
-            const BSONObj& query,
-            const BSONObj& writeConcern,
-            int* numRemoved) {
-        BatchedCommandResponse response;
-        Status res = clusterDelete(collectionName, query, 0 /* limit */, writeConcern, &response);
-
-        if (res.isOK()) {
-            *numRemoved = response.getN();
-        }
-
-        return res;
-    }
-
-    Status AuthzManagerExternalStateMongos::createIndex(
-            const NamespaceString& collectionName,
-            const BSONObj& pattern,
-            bool unique,
-            const BSONObj& writeConcern) {
-        return clusterCreateIndex(collectionName, pattern, unique, writeConcern, NULL);
-    }
-
-    Status AuthzManagerExternalStateMongos::dropIndexes(
-            const NamespaceString& collectionName,
-            const BSONObj& writeConcern) {
-
-        scoped_ptr<ScopedDbConnection> conn(getConnectionForAuthzCollection(collectionName));
-        try {
-            conn->get()->dropIndexes(collectionName.ns());
-            BSONObjBuilder gleBuilder;
-            gleBuilder.append("getLastError", 1);
-            gleBuilder.appendElements(writeConcern);
-            BSONObj res;
-            conn->get()->runCommand("admin", gleBuilder.done(), res);
-            string errstr = conn->get()->getLastErrorString(res);
-            if (!errstr.empty()) {
-                conn->done();
-                return Status(ErrorCodes::UnknownError, errstr);
-            }
-            conn->done();
-            return Status::OK();
-        }
-        catch (const DBException& ex) {
-            return ex.toStatus();
-        }
-    }
-
-    bool AuthzManagerExternalStateMongos::tryAcquireAuthzUpdateLock(const StringData& why) {
-        boost::lock_guard<boost::mutex> lkLocal(_distLockGuard);
-        if (_authzDataUpdateLock.get()) {
-            return false;
-        }
-
-        // Temporarily put into an auto_ptr just in case there is an exception thrown during
-        // lock acquisition.
-        std::auto_ptr<ScopedDistributedLock> lockHolder(new ScopedDistributedLock(
-                configServer.getConnectionString(), "authorizationData"));
-        lockHolder->setLockMessage(why.toString());
-
-        std::string errmsg;
-        if (!lockHolder->acquire(_authzUpdateLockAcquisitionTimeoutMillis, &errmsg)) {
-            warning() <<
-                    "Error while attempting to acquire distributed lock for user modification: " <<
-                    errmsg << endl;
-            return false;
-        }
-        _authzDataUpdateLock.reset(lockHolder.release());
+bool AuthzManagerExternalStateMongos::hasAnyPrivilegeDocuments(OperationContext* txn) {
+    BSONObj usersInfoCmd = BSON("usersInfo" << 1);
+    BSONObjBuilder builder;
+    const bool ok = grid.catalogManager(txn)
+                        ->runUserManagementReadCommand(txn, "admin", usersInfoCmd, &builder);
+    if (!ok) {
+        // If we were unable to complete the query,
+        // it's best to assume that there _are_ privilege documents.  This might happen
+        // if the node contaning the users collection becomes transiently unavailable.
+        // See SERVER-12616, for example.
         return true;
     }
 
-    void AuthzManagerExternalStateMongos::releaseAuthzUpdateLock() {
-        boost::lock_guard<boost::mutex> lkLocal(_distLockGuard);
-        _authzDataUpdateLock.reset();
-    }
+    BSONObj cmdResult = builder.obj();
+    std::vector<BSONElement> foundUsers = cmdResult["users"].Array();
+    return foundUsers.size() > 0;
+}
 
-} // namespace mongo
+}  // namespace mongo

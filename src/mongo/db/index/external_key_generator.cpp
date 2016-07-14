@@ -28,92 +28,83 @@
 
 #include "mongo/db/index/external_key_generator.h"
 
-#include "mongo/db/index/2d_key_generator.h"
-#include "mongo/db/index/btree_key_generator.h"
-#include "mongo/db/index/expression_params.h"
-#include "mongo/db/index/fts_key_generator.h"
-#include "mongo/db/index/hash_key_generator.h"
-#include "mongo/db/index/haystack_key_generator.h"
-#include "mongo/db/index/s2_key_generator.h"
+#include <cmath>
+#include <string>
+
+#include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/index_names.h"
+#include "mongo/db/index/2d_common.h"
+#include "mongo/db/index/btree_key_generator.h"
+#include "mongo/db/index/expression_keys_private.h"
+#include "mongo/db/index/expression_params.h"
+#include "mongo/db/index/s2_common.h"
 #include "mongo/db/jsobj.h"
 
 namespace mongo {
 
 namespace {
-    void getKeysForUpgradeChecking(const BSONObj& infoObj,
-                                   const BSONObj& doc,
-                                   BSONObjSet* keys) {
+void getKeysForUpgradeChecking(const BSONObj& infoObj, const BSONObj& doc, BSONObjSet* keys) {
+    BSONObj keyPattern = infoObj.getObjectField("key");
 
-        BSONObj keyPattern = infoObj.getObjectField("key");
+    std::string type = IndexNames::findPluginName(keyPattern);
 
-        string type = IndexNames::findPluginName(keyPattern);
+    if (IndexNames::GEO_2D == type) {
+        TwoDIndexingParams params;
+        ExpressionParams::parseTwoDParams(infoObj, &params);
+        ExpressionKeysPrivate::get2DKeys(doc, params, keys, NULL);
+    } else if (IndexNames::GEO_HAYSTACK == type) {
+        std::string geoField;
+        std::vector<std::string> otherFields;
+        double bucketSize;
+        ExpressionParams::parseHaystackParams(infoObj, &geoField, &otherFields, &bucketSize);
+        ExpressionKeysPrivate::getHaystackKeys(doc, geoField, otherFields, bucketSize, keys);
+    } else if (IndexNames::GEO_2DSPHERE == type) {
+        S2IndexingParams params;
+        ExpressionParams::parse2dsphereParams(infoObj, &params);
+        ExpressionKeysPrivate::getS2Keys(doc, keyPattern, params, keys);
+    } else if (IndexNames::TEXT == type) {
+        fts::FTSSpec spec(infoObj);
+        ExpressionKeysPrivate::getFTSKeys(doc, spec, keys);
+    } else if (IndexNames::HASHED == type) {
+        HashSeed seed;
+        int version;
+        std::string field;
+        ExpressionParams::parseHashParams(infoObj, &seed, &version, &field);
+        ExpressionKeysPrivate::getHashKeys(
+            doc, field, seed, version, infoObj["sparse"].trueValue(), keys);
+    } else {
+        invariant(IndexNames::BTREE == type);
 
-        if (IndexNames::GEO_2D == type) {
-            TwoDIndexingParams params;
-            ExpressionParams::parseTwoDParams(infoObj, &params);
-            TwoDKeyGenerator gen( params );
-            gen.getKeys( doc, keys );
+        std::vector<const char*> fieldNames;
+        std::vector<BSONElement> fixed;
+        BSONObjIterator keyIt(keyPattern);
+        while (keyIt.more()) {
+            BSONElement patternElt = keyIt.next();
+            fieldNames.push_back(patternElt.fieldName());
+            fixed.push_back(BSONElement());
         }
-        else if (IndexNames::GEO_HAYSTACK == type) {
-            string geoField;
-            vector<string> otherFields;
-            double bucketSize;
-            ExpressionParams::parseHaystackParams(infoObj, &geoField, &otherFields, &bucketSize);
-            HaystackKeyGenerator gen( geoField, otherFields, bucketSize );
-            gen.getKeys( doc, keys );
-        }
-        else if (IndexNames::GEO_2DSPHERE == type) {
-            S2IndexingParams params;
-            ExpressionParams::parse2dsphereParams(infoObj, &params);
-            S2KeyGenerator gen( keyPattern, params );
-            gen.getKeys( doc, keys );
-        }
-        else if (IndexNames::TEXT == type) {
-            FTSKeyGenerator gen(infoObj);
-            gen.getKeys( doc, keys );
-        }
-        else if (IndexNames::HASHED == type) {
-            HashSeed seed;
-            int version;
-            string field;
-            ExpressionParams::parseHashParams(infoObj, &seed, &version, &field);
-            HashKeyGenerator gen( field, seed, version, infoObj["sparse"].trueValue() );
-            gen.getKeys( doc, keys );
-        }
-        else {
-            invariant(IndexNames::BTREE == type);
 
-            std::vector<const char *> fieldNames;
-            std::vector<BSONElement> fixed;
-            BSONObjIterator keyIt(keyPattern);
-            while (keyIt.more()) {
-                BSONElement patternElt = keyIt.next();
-                fieldNames.push_back(patternElt.fieldName());
-                fixed.push_back(BSONElement());
-            }
+        // XXX: do we care about version
+        BtreeKeyGeneratorV1 keyGen(fieldNames, fixed, infoObj["sparse"].trueValue());
 
-            // XXX: do we care about version
-            BtreeKeyGeneratorV1 keyGen(fieldNames, fixed, infoObj["sparse"].trueValue());
-
-            keyGen.getKeys(doc, keys);
-        }
+        keyGen.getKeys(doc, keys);
     }
+}
 
-    // cloned from key.cpp to build the below set
-    const int binDataCodeLengths[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 32};
-    const std::set<int> acceptableBinDataLengths(
-            binDataCodeLengths,
-            binDataCodeLengths + (sizeof(binDataCodeLengths) / sizeof(int)));
+// cloned from key.cpp to build the below set
+const int binDataCodeLengths[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 32};
+const std::set<int> acceptableBinDataLengths(binDataCodeLengths,
+                                             binDataCodeLengths +
+                                                 (sizeof(binDataCodeLengths) / sizeof(int)));
 
-    // modified version of the KeyV1Owned constructor that returns the would-be-key's datasize()
-    int keyV1Size(const BSONObj& obj) {
-        BSONObj::iterator i(obj);
-        int size = 0;
-        const int traditionalSize = obj.objsize() + 1;
-        while (i.more()) { 
-            BSONElement e = i.next();
-            switch (e.type()) { 
+// modified version of the KeyV1Owned constructor that returns the would-be-key's datasize()
+int keyV1Size(const BSONObj& obj) {
+    BSONObj::iterator i(obj);
+    int size = 0;
+    const int traditionalSize = obj.objsize() + 1;
+    while (i.more()) {
+        BSONElement e = i.next();
+        switch (e.type()) {
             case MinKey:
             case jstNULL:
             case MaxKey:
@@ -122,88 +113,84 @@ namespace {
                 break;
             case jstOID:
                 size += 1;
-                size += sizeof(OID);
+                size += OID::kOIDSize;
                 break;
-            case BinData:
-                {
-                    int t = e.binDataType();
-                    // 0-7 and 0x80 to 0x87 are supported by Key
-                    if( (t & 0x78) == 0 && t != ByteArrayDeprecated ) {
-                        int len;
-                        e.binData(len);
-                        if (acceptableBinDataLengths.count(len)) {
-                            size += 1;
-                            size += 1;
-                            size += len;
-                            break;
-                        }
+            case BinData: {
+                int t = e.binDataType();
+                // 0-7 and 0x80 to 0x87 are supported by Key
+                if ((t & 0x78) == 0 && t != ByteArrayDeprecated) {
+                    int len;
+                    e.binData(len);
+                    if (acceptableBinDataLengths.count(len)) {
+                        size += 1;
+                        size += 1;
+                        size += len;
+                        break;
                     }
-                    return traditionalSize;
                 }
+                return traditionalSize;
+            }
             case Date:
                 size += 1;
                 size += sizeof(Date_t);
                 break;
-            case String:
-                {
-                    size += 1;
-                    // note we do not store the terminating null, to save space.
-                    unsigned x = (unsigned) e.valuestrsize() - 1;
-                    if (x > 255) { 
-                        return traditionalSize;
-                    }
-                    size += 1;
-                    size += x;
-                    break;
+            case String: {
+                size += 1;
+                // note we do not store the terminating null, to save space.
+                unsigned x = (unsigned)e.valuestrsize() - 1;
+                if (x > 255) {
+                    return traditionalSize;
                 }
+                size += 1;
+                size += x;
+                break;
+            }
             case NumberInt:
                 size += 1;
                 size += sizeof(double);
                 break;
-            case NumberLong:
-                {
-                    long long n = e._numberLong();
-                    long long m = 2LL << 52;
-                    if( n >= m || n <= -m ) {
-                        // can't represent exactly as a double
-                        return traditionalSize;
-                    }
-                    size += 1;
-                    size += sizeof(double);
-                    break;
+            case NumberLong: {
+                long long n = e._numberLong();
+                long long m = 2LL << 52;
+                if (n >= m || n <= -m) {
+                    // can't represent exactly as a double
+                    return traditionalSize;
                 }
-            case NumberDouble:
-                {
-                    double d = e._numberDouble();
-                    if (isNaN(d)) {
-                        return traditionalSize;
-                    }
-                    size += 1;
-                    size += sizeof(double);
-                    break;
+                size += 1;
+                size += sizeof(double);
+                break;
+            }
+            case NumberDouble: {
+                double d = e._numberDouble();
+                if (std::isnan(d)) {
+                    return traditionalSize;
                 }
+                size += 1;
+                size += sizeof(double);
+                break;
+            }
             default:
                 // if other types involved, store as traditional BSON
                 return traditionalSize;
-            }
         }
-        return size;
+    }
+    return size;
+}
+
+}  // namespace
+
+bool isAnyIndexKeyTooLarge(const BSONObj& index, const BSONObj& doc) {
+    BSONObjSet keys;
+    getKeysForUpgradeChecking(index, doc, &keys);
+
+    int largestKeySize = 0;
+
+    for (BSONObjSet::const_iterator it = keys.begin(); it != keys.end(); ++it) {
+        largestKeySize = std::max(largestKeySize, keyV1Size(*it));
     }
 
-} // namespace
-
-    bool isAnyIndexKeyTooLarge(const BSONObj& index, const BSONObj& doc) {
-        BSONObjSet keys;
-        getKeysForUpgradeChecking(index, doc, &keys);
-
-        int largestKeySize = 0;
-
-        for (BSONObjSet::const_iterator it = keys.begin(); it != keys.end(); ++it) {
-            largestKeySize = std::max(largestKeySize, keyV1Size(*it));
-        }
-
-        // BtreeData_V1::KeyMax is 1024
-        return largestKeySize > 1024;
-    }
+    // BtreeData_V1::KeyMax is 1024
+    return largestKeySize > 1024;
+}
 
 }  // namespace mongo

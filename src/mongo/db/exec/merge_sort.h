@@ -32,121 +32,127 @@
 #include <queue>
 #include <vector>
 
-#include "mongo/db/diskloc.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/record_id.h"
 
 namespace mongo {
 
-    // External params for the merge sort stage.  Declared below.
-    class MergeSortStageParams;
+// External params for the merge sort stage.  Declared below.
+class MergeSortStageParams;
 
-    /**
-     * Merges the outputs of N children, each of which is sorted in the order specified by
-     * 'pattern'.  The output is sorted by 'pattern'.  Practically speaking, all of this stage's
-     * children are indices.
-     *
-     * AKA the SERVER-1205 stage.  Allows very efficient handling of the following query:
-     * find($or[{a:1}, {b:1}]).sort({c:1}) with indices {a:1, c:1} and {b:1, c:1}.
-     *
-     * Preconditions: For each field in 'pattern' all inputs in the child must handle a
-     * getFieldDotted for that field.
-     */
-    class MergeSortStage : public PlanStage {
+/**
+ * Merges the outputs of N children, each of which is sorted in the order specified by
+ * 'pattern'.  The output is sorted by 'pattern'.  Practically speaking, all of this stage's
+ * children are indices.
+ *
+ * AKA the SERVER-1205 stage.  Allows very efficient handling of the following query:
+ * find($or[{a:1}, {b:1}]).sort({c:1}) with indices {a:1, c:1} and {b:1, c:1}.
+ *
+ * Preconditions: For each field in 'pattern' all inputs in the child must handle a
+ * getFieldDotted for that field.
+ */
+class MergeSortStage final : public PlanStage {
+public:
+    MergeSortStage(OperationContext* opCtx,
+                   const MergeSortStageParams& params,
+                   WorkingSet* ws,
+                   const Collection* collection);
+
+    void addChild(PlanStage* child);
+
+    bool isEOF() final;
+    StageState work(WorkingSetID* out) final;
+
+    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
+
+    StageType stageType() const final {
+        return STAGE_SORT_MERGE;
+    }
+
+    std::unique_ptr<PlanStageStats> getStats();
+
+    const SpecificStats* getSpecificStats() const final;
+
+    static const char* kStageType;
+
+private:
+    // Not owned by us.
+    const Collection* _collection;
+
+    // Not owned by us.
+    WorkingSet* _ws;
+
+    // The pattern that we're sorting by.
+    BSONObj _pattern;
+
+    // Are we deduplicating on RecordId?
+    bool _dedup;
+
+    // Which RecordIds have we seen?
+    unordered_set<RecordId, RecordId::Hasher> _seen;
+
+    // In order to pick the next smallest value, we need each child work(...) until it produces
+    // a result.  This is the queue of children that haven't given us a result yet.
+    std::queue<PlanStage*> _noResultToMerge;
+
+    // There is some confusing STL wrangling going on below.  Here's a guide:
+    //
+    // We want to keep a priority_queue of results so we can quickly return the min result.
+    //
+    // If we receive an invalidate, we need to iterate over any cached state to see if the
+    // invalidate is relevant.
+    //
+    // We can't iterate over a priority_queue, so we keep the actual cached state in a list and
+    // have a priority_queue of iterators into that list.
+    //
+    // Why an iterator instead of a pointer?  We need to be able to use the information in the
+    // priority_queue to remove the item from the list and quickly.
+
+    struct StageWithValue {
+        StageWithValue() : id(WorkingSet::INVALID_ID), stage(NULL) {}
+        WorkingSetID id;
+        PlanStage* stage;
+    };
+
+    // We have a priority queue of these.
+    typedef std::list<StageWithValue>::iterator MergingRef;
+
+    // The comparison function used in our priority queue.
+    class StageWithValueComparison {
     public:
-        MergeSortStage(const MergeSortStageParams& params, WorkingSet* ws);
-        virtual ~MergeSortStage();
+        StageWithValueComparison(WorkingSet* ws, BSONObj pattern) : _ws(ws), _pattern(pattern) {}
 
-        void addChild(PlanStage* child);
-
-        virtual bool isEOF();
-        virtual StageState work(WorkingSetID* out);
-
-        virtual void prepareToYield();
-        virtual void recoverFromYield();
-        virtual void invalidate(const DiskLoc& dl, InvalidationType type);
-
-        PlanStageStats* getStats();
+        // Is lhs less than rhs?  Note that priority_queue is a max heap by default so we invert
+        // the return from the expected value.
+        bool operator()(const MergingRef& lhs, const MergingRef& rhs);
 
     private:
-        // Not owned by us.
         WorkingSet* _ws;
-
-        // The pattern that we're sorting by.
         BSONObj _pattern;
-
-        // Are we deduplicating on DiskLoc?
-        bool _dedup;
-
-        // Which DiskLocs have we seen?
-        unordered_set<DiskLoc, DiskLoc::Hasher> _seen;
-
-        // Owned by us.  All the children we're reading from.
-        vector<PlanStage*> _children;
-
-        // In order to pick the next smallest value, we need each child work(...) until it produces
-        // a result.  This is the queue of children that haven't given us a result yet.
-        std::queue<PlanStage*> _noResultToMerge;
-
-        // There is some confusing STL wrangling going on below.  Here's a guide:
-        //
-        // We want to keep a priority_queue of results so we can quickly return the min result.
-        //
-        // If we receive an invalidate, we need to iterate over any cached state to see if the
-        // invalidate is relevant.
-        //
-        // We can't iterate over a priority_queue, so we keep the actual cached state in a list and
-        // have a priority_queue of iterators into that list.
-        //
-        // Why an iterator instead of a pointer?  We need to be able to use the information in the
-        // priority_queue to remove the item from the list and quickly.
-
-        struct StageWithValue {
-            StageWithValue() : id(WorkingSet::INVALID_ID), stage(NULL) { }
-            WorkingSetID id;
-            PlanStage* stage;
-        };
-
-        // We have a priority queue of these.
-        typedef list<StageWithValue>::iterator MergingRef;
-
-        // The comparison function used in our priority queue.
-        class StageWithValueComparison {
-        public:
-            StageWithValueComparison(WorkingSet* ws, BSONObj pattern)
-                : _ws(ws), _pattern(pattern) {}
-
-            // Is lhs less than rhs?  Note that priority_queue is a max heap by default so we invert
-            // the return from the expected value.
-            bool operator()(const MergingRef& lhs, const MergingRef& rhs);
-
-        private:
-            WorkingSet* _ws;
-            BSONObj _pattern;
-        };
-
-        // The min heap of the results we're returning.
-        std::priority_queue<MergingRef, vector<MergingRef>, StageWithValueComparison> _merging;
-
-        // The data referred to by the _merging queue above.
-        list<StageWithValue> _mergingData;
-
-        // Stats
-        CommonStats _commonStats;
-        MergeSortStats _specificStats;
     };
 
-    // Parameters that must be provided to a MergeSortStage
-    class MergeSortStageParams {
-    public:
-        MergeSortStageParams() : dedup(true) { }
+    // The min heap of the results we're returning.
+    std::priority_queue<MergingRef, std::vector<MergingRef>, StageWithValueComparison> _merging;
 
-        // How we're sorting.
-        BSONObj pattern;
+    // The data referred to by the _merging queue above.
+    std::list<StageWithValue> _mergingData;
 
-        // Do we deduplicate on DiskLoc?
-        bool dedup;
-    };
+    // Stats
+    MergeSortStats _specificStats;
+};
+
+// Parameters that must be provided to a MergeSortStage
+class MergeSortStageParams {
+public:
+    MergeSortStageParams() : dedup(true) {}
+
+    // How we're sorting.
+    BSONObj pattern;
+
+    // Do we deduplicate on RecordId?
+    bool dedup;
+};
 
 }  // namespace mongo

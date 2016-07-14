@@ -32,96 +32,113 @@
 
 namespace mongo {
 
-    class ParsedProjection {
-    public:
-        // TODO: this is duplicated in here and in the proj exec code.  When we have
-        // ProjectionExpression we can remove dups.
-        enum ArrayOpType {
-            ARRAY_OP_NORMAL = 0,
-            ARRAY_OP_ELEM_MATCH,
-            ARRAY_OP_POSITIONAL
-        };
+class ParsedProjection {
+public:
+    // TODO: this is duplicated in here and in the proj exec code.  When we have
+    // ProjectionExpression we can remove dups.
+    enum ArrayOpType { ARRAY_OP_NORMAL = 0, ARRAY_OP_ELEM_MATCH, ARRAY_OP_POSITIONAL };
 
-        /**
-         * Parses the projection 'spec' and checks its validity with respect to the query 'query'.
-         * Puts covering information into 'out'.
-         *
-         * Returns Status::OK() if it's a valid spec.
-         * Returns a Status indicating how it's invalid otherwise.
-         */
-        static Status make(const BSONObj& spec, const MatchExpression* const query,
-                           ParsedProjection** out);
+    /**
+     * Parses the projection 'spec' and checks its validity with respect to the query 'query'.
+     * Puts covering information into 'out'.
+     *
+     * Returns Status::OK() if it's a valid spec.
+     * Returns a Status indicating how it's invalid otherwise.
+     */
+    static Status make(const BSONObj& spec,
+                       const MatchExpression* const query,
+                       ParsedProjection** out,
+                       const ExtensionsCallback& extensionsCallback = ExtensionsCallback());
 
-        /**
-         * Is the full document required to compute this projection?
-         */
-        bool requiresDocument() const { return _requiresDocument; }
+    /**
+     * Returns true if the projection requires match details from the query,
+     * and false otherwise.
+     */
+    bool requiresMatchDetails() const {
+        return _requiresMatchDetails;
+    }
 
-        /**
-         * If requiresDocument() == false, what fields are required to compute
-         * the projection?
-         */
-        const vector<string>& getRequiredFields() const {
-            return _requiredFields;
-        }
+    /**
+     * Is the full document required to compute this projection?
+     */
+    bool requiresDocument() const {
+        return _requiresDocument;
+    }
 
-        /**
-         * Get the raw BSONObj proj spec obj
-         */
-        const BSONObj& getProjObj() const {
-            return _source;
-        }
+    /**
+     * If requiresDocument() == false, what fields are required to compute
+     * the projection?
+     */
+    const std::vector<std::string>& getRequiredFields() const {
+        return _requiredFields;
+    }
 
-        /**
-         * Does the projection want geoNear metadata?  If so any geoNear stage should include them.
-         */
-        bool wantGeoNearDistance() const {
-            return _wantGeoNearDistance;
-        }
+    /**
+     * Get the raw BSONObj proj spec obj
+     */
+    const BSONObj& getProjObj() const {
+        return _source;
+    }
 
-        bool wantGeoNearPoint() const {
-            return _wantGeoNearPoint;
-        }
+    /**
+     * Does the projection want geoNear metadata?  If so any geoNear stage should include them.
+     */
+    bool wantGeoNearDistance() const {
+        return _wantGeoNearDistance;
+    }
 
-        bool wantIndexKey() const {
-            return _returnKey;
-        }
+    bool wantGeoNearPoint() const {
+        return _wantGeoNearPoint;
+    }
 
-    private:
-        /**
-         * Must go through ::make
-         */
-        ParsedProjection() : _requiresDocument(true) { }
+    bool wantIndexKey() const {
+        return _returnKey;
+    }
 
-        /**
-         * Returns true if field name refers to a positional projection.
-         */
-        static bool _isPositionalOperator(const char* fieldName);
+    bool wantSortKey() const {
+        return _wantSortKey;
+    }
 
-        /**
-         * Returns true if the MatchExpression 'query' queries against
-         * the field named by 'matchfield'. This deeply traverses logical
-         * nodes in the matchfield and returns true if any of the children
-         * have the field (so if 'query' is {$and: [{a: 1}, {b: 1}]} and
-         * 'matchfield' is "b", the return value is true).
-         *
-         * Does not take ownership of 'query'.
-         */
-        static bool _hasPositionalOperatorMatch(const MatchExpression* const query,
-                                                const std::string& matchfield);
+private:
+    /**
+     * Must go through ::make
+     */
+    ParsedProjection() = default;
 
-        // TODO: stringdata?
-        vector<string> _requiredFields;
+    /**
+     * Returns true if field name refers to a positional projection.
+     */
+    static bool _isPositionalOperator(const char* fieldName);
 
-        bool _requiresDocument;
+    /**
+     * Returns true if the MatchExpression 'query' queries against
+     * the field named by 'matchfield'. This deeply traverses logical
+     * nodes in the matchfield and returns true if any of the children
+     * have the field (so if 'query' is {$and: [{a: 1}, {b: 1}]} and
+     * 'matchfield' is "b", the return value is true).
+     *
+     * Does not take ownership of 'query'.
+     */
+    static bool _hasPositionalOperatorMatch(const MatchExpression* const query,
+                                            const std::string& matchfield);
 
-        BSONObj _source;
+    // TODO: stringdata?
+    std::vector<std::string> _requiredFields;
 
-        bool _wantGeoNearDistance;
+    bool _requiresMatchDetails = false;
 
-        bool _wantGeoNearPoint;
+    bool _requiresDocument = true;
 
-        bool _returnKey;
-    };
+    BSONObj _source;
+
+    bool _wantGeoNearDistance = false;
+
+    bool _wantGeoNearPoint = false;
+
+    bool _returnKey = false;
+
+    // Whether this projection includes a sortKey meta-projection.
+    bool _wantSortKey = false;
+};
 
 }  // namespace mongo

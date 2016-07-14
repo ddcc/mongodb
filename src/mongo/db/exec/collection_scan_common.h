@@ -28,35 +28,36 @@
 
 #pragma once
 
-#include "mongo/db/diskloc.h"
+#include "mongo/db/record_id.h"
 
 namespace mongo {
 
-    struct CollectionScanParams {
-        enum Direction {
-            FORWARD = 1,
-            BACKWARD = -1,
-        };
+class Collection;
 
-        CollectionScanParams() : start(DiskLoc()),
-                                 direction(FORWARD),
-                                 tailable(false),
-                                 maxScan(0) { }
-
-        // What collection?
-        string ns;
-
-        // isNull by default.  If you specify any value for this, you're responsible for the DiskLoc
-        // not being invalidated before the first call to work(...).
-        DiskLoc start;
-
-        Direction direction;
-
-        // Do we want the scan to be 'tailable'?  Only meaningful if the collection is capped.
-        bool tailable;
-
-        // If non-zero, how many documents will we look at?
-        size_t maxScan;
+struct CollectionScanParams {
+    enum Direction {
+        FORWARD = 1,
+        BACKWARD = -1,
     };
+
+    CollectionScanParams()
+        : collection(NULL), start(RecordId()), direction(FORWARD), tailable(false), maxScan(0) {}
+
+    // What collection?
+    // not owned
+    const Collection* collection;
+
+    // isNull by default.  If you specify any value for this, you're responsible for the RecordId
+    // not being invalidated before the first call to work(...).
+    RecordId start;
+
+    Direction direction;
+
+    // Do we want the scan to be 'tailable'?  Only meaningful if the collection is capped.
+    bool tailable;
+
+    // If non-zero, how many documents will we look at?
+    size_t maxScan;
+};
 
 }  // namespace mongo

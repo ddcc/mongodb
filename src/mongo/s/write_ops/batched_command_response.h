@@ -28,12 +28,12 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <string>
 #include <vector>
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/repl/optime.h"
 #include "mongo/s/bson_serializable.h"
 #include "mongo/s/write_ops/write_error_detail.h"
 #include "mongo/s/write_ops/batched_upsert_detail.h"
@@ -41,161 +41,162 @@
 
 namespace mongo {
 
+/**
+ * This class represents the layout and content of a insert/update/delete runCommand,
+ * the response side.
+ */
+class BatchedCommandResponse : public BSONSerializable {
+    MONGO_DISALLOW_COPYING(BatchedCommandResponse);
+
+public:
+    //
+    // schema declarations
+    //
+
+    static const BSONField<int> ok;
+    static const BSONField<int> errCode;
+    static const BSONField<std::string> errMessage;
+    static const BSONField<long long> n;
+    static const BSONField<long long> nModified;
+    static const BSONField<std::vector<BatchedUpsertDetail*>> upsertDetails;
+    static const BSONField<OID> electionId;
+    static const BSONField<std::vector<WriteErrorDetail*>> writeErrors;
+    static const BSONField<WCErrorDetail*> writeConcernError;
+
+    //
+    // construction / destruction
+    //
+
+    BatchedCommandResponse();
+    virtual ~BatchedCommandResponse();
+
+    /** Copies all the fields present in 'this' to 'other'. */
+    void cloneTo(BatchedCommandResponse* other) const;
+
+    //
+    // bson serializable interface implementation
+    //
+
+    virtual bool isValid(std::string* errMsg) const;
+    virtual BSONObj toBSON() const;
+    virtual bool parseBSON(const BSONObj& source, std::string* errMsg);
+    virtual void clear();
+    virtual std::string toString() const;
+
+    //
+    // individual field accessors
+    //
+
+    void setOk(int ok);
+    int getOk() const;
+
+    void setErrCode(int errCode);
+    void unsetErrCode();
+    bool isErrCodeSet() const;
+    int getErrCode() const;
+
+    void setErrMessage(StringData errMessage);
+    bool isErrMessageSet() const;
+    const std::string& getErrMessage() const;
+
+    void setNModified(long long n);
+    void unsetNModified();
+    bool isNModified() const;
+    long long getNModified() const;
+
+    void setN(long long n);
+    void unsetN();
+    bool isNSet() const;
+    long long getN() const;
+
+    void setUpsertDetails(const std::vector<BatchedUpsertDetail*>& upsertDetails);
+    void addToUpsertDetails(BatchedUpsertDetail* upsertDetails);
+    void unsetUpsertDetails();
+    bool isUpsertDetailsSet() const;
+    std::size_t sizeUpsertDetails() const;
+    const std::vector<BatchedUpsertDetail*>& getUpsertDetails() const;
+    const BatchedUpsertDetail* getUpsertDetailsAt(std::size_t pos) const;
+
+    void setLastOp(repl::OpTime lastOp);
+    void unsetLastOp();
+    bool isLastOpSet() const;
+    repl::OpTime getLastOp() const;
+
+    void setElectionId(const OID& electionId);
+    void unsetElectionId();
+    bool isElectionIdSet() const;
+    OID getElectionId() const;
+
+    void setErrDetails(const std::vector<WriteErrorDetail*>& errDetails);
+    // errDetails ownership is transferred to here.
+    void addToErrDetails(WriteErrorDetail* errDetails);
+    void unsetErrDetails();
+    bool isErrDetailsSet() const;
+    std::size_t sizeErrDetails() const;
+    const std::vector<WriteErrorDetail*>& getErrDetails() const;
+    const WriteErrorDetail* getErrDetailsAt(std::size_t pos) const;
+
+    void setWriteConcernError(WCErrorDetail* error);
+    void unsetWriteConcernError();
+    bool isWriteConcernErrorSet() const;
+    const WCErrorDetail* getWriteConcernError() const;
+
     /**
-     * This class represents the layout and content of a insert/update/delete runCommand,
-     * the response side.
+     * Converts the specified command response into a status, based on its contents.
      */
-    class BatchedCommandResponse : public BSONSerializable {
-        MONGO_DISALLOW_COPYING(BatchedCommandResponse);
-    public:
+    Status toStatus() const;
 
-        //
-        // schema declarations
-        //
+private:
+    // Convention: (M)andatory, (O)ptional
 
-        static const BSONField<int> ok;
-        static const BSONField<int> errCode;
-        static const BSONField<string> errMessage;
-        static const BSONField<long long> n;
-        static const BSONField<long long> nModified;
-        static const BSONField<std::vector<BatchedUpsertDetail*> > upsertDetails;
-        static const BSONField<OpTime> lastOp;
-        static const BSONField<OID> electionId;
-        static const BSONField<std::vector<WriteErrorDetail*> > writeErrors;
-        static const BSONField<WCErrorDetail*> writeConcernError;
+    // (M)  0 if batch didn't get to be applied for any reason
+    int _ok;
+    bool _isOkSet;
 
-        //
-        // construction / destruction
-        //
+    // (O)  whether all items in the batch applied correctly
+    int _errCode;
+    bool _isErrCodeSet;
 
-        BatchedCommandResponse();
-        virtual ~BatchedCommandResponse();
+    // (O)  whether all items in the batch applied correctly
+    std::string _errMessage;
+    bool _isErrMessageSet;
 
-        /** Copies all the fields present in 'this' to 'other'. */
-        void cloneTo(BatchedCommandResponse* other) const;
+    // (M)  number of documents affected
+    long long _n;
+    bool _isNSet;
 
-        //
-        // bson serializable interface implementation
-        //
+    // (O)  number of documents updated
+    long long _nModified;
+    bool _isNModifiedSet;
 
-        virtual bool isValid(std::string* errMsg) const;
-        virtual BSONObj toBSON() const;
-        virtual bool parseBSON(const BSONObj& source, std::string* errMsg);
-        virtual void clear();
-        virtual std::string toString() const;
+    // (O)  "promoted" _upserted, if the corresponding request contained only one batch item
+    //      Should only be present if _upserted is not.
+    BSONObj _singleUpserted;
+    bool _isSingleUpsertedSet;
 
-        //
-        // individual field accessors
-        //
+    // (O)  Array of upserted items' _id's
+    //      Should only be present if _singleUpserted is not.
+    std::unique_ptr<std::vector<BatchedUpsertDetail*>> _upsertDetails;
 
-        void setOk(int ok);
-        void unsetOk();
-        bool isOkSet() const;
-        int getOk() const;
+    // (O)  repl::OpTime assigned to the write op when it was written to the oplog.
+    //      Normally, getLastError can use Client::_lastOp, but this is not valid for
+    //      mongos which loses track of the session due to RCAR.  Therefore, we must
+    //      keep track of the lastOp manually ourselves.
+    repl::OpTime _lastOp;
+    bool _isLastOpSet;
 
-        void setErrCode(int errCode);
-        void unsetErrCode();
-        bool isErrCodeSet() const;
-        int getErrCode() const;
+    // (O)  In addition to keeping track of the above lastOp repl::OpTime, we must also keep
+    //      track of the primary we talked to.  This is because if the primary moves,
+    //      subsequent calls to getLastError are invalid.  The only way we know if an
+    //      election has occurred is to use the unique electionId.
+    OID _electionId;
+    bool _isElectionIdSet;
 
-        void setErrMessage(const StringData& errMessage);
-        void unsetErrMessage();
-        bool isErrMessageSet() const;
-        const std::string& getErrMessage() const;
+    // (O)  Array of item-level error information
+    std::unique_ptr<std::vector<WriteErrorDetail*>> _writeErrorDetails;
 
-        void setNModified(long long n);
-        void unsetNModified();
-        bool isNModified() const;
-        long long getNModified() const;
+    // (O)  errors that occurred while trying to satisfy the write concern.
+    std::unique_ptr<WCErrorDetail> _wcErrDetails;
+};
 
-        void setN(long long n);
-        void unsetN();
-        bool isNSet() const;
-        long long getN() const;
-
-        void setUpsertDetails(const std::vector<BatchedUpsertDetail*>& upsertDetails);
-        void addToUpsertDetails(BatchedUpsertDetail* upsertDetails);
-        void unsetUpsertDetails();
-        bool isUpsertDetailsSet() const;
-        std::size_t sizeUpsertDetails() const;
-        const std::vector<BatchedUpsertDetail*>& getUpsertDetails() const;
-        const BatchedUpsertDetail* getUpsertDetailsAt(std::size_t pos) const;
-
-        void setLastOp(OpTime lastOp);
-        void unsetLastOp();
-        bool isLastOpSet() const;
-        OpTime getLastOp() const;
-
-        void setElectionId(const OID& electionId);
-        void unsetElectionId();
-        bool isElectionIdSet() const;
-        OID getElectionId() const;
-
-        void setErrDetails(const std::vector<WriteErrorDetail*>& errDetails);
-        // errDetails ownership is transferred to here.
-        void addToErrDetails(WriteErrorDetail* errDetails);
-        void unsetErrDetails();
-        bool isErrDetailsSet() const;
-        std::size_t sizeErrDetails() const;
-        const std::vector<WriteErrorDetail*>& getErrDetails() const;
-        const WriteErrorDetail* getErrDetailsAt(std::size_t pos) const;
-
-        void setWriteConcernError(WCErrorDetail* error);
-        void unsetWriteConcernError();
-        bool isWriteConcernErrorSet() const;
-        const WCErrorDetail* getWriteConcernError() const;
-
-    private:
-        // Convention: (M)andatory, (O)ptional
-
-        // (M)  0 if batch didn't get to be applied for any reason
-        int _ok;
-        bool _isOkSet;
-
-        // (O)  whether all items in the batch applied correctly
-        int _errCode;
-        bool _isErrCodeSet;
-
-        // (O)  whether all items in the batch applied correctly
-        string _errMessage;
-        bool _isErrMessageSet;
-
-        // (M)  number of documents affected
-        long long _n;
-        bool _isNSet;
-
-        // (O)  number of documents updated
-        long long _nModified;
-        bool _isNModifiedSet;
-
-        // (O)  "promoted" _upserted, if the corresponding request contained only one batch item
-        //      Should only be present if _upserted is not.
-        BSONObj _singleUpserted;
-        bool _isSingleUpsertedSet;
-
-        // (O)  Array of upserted items' _id's
-        //      Should only be present if _singleUpserted is not.
-        boost::scoped_ptr<std::vector<BatchedUpsertDetail*> >_upsertDetails;
-
-        // (O)  Timestamp assigned to the write op when it was written to the oplog.
-        //      Normally, getLastError can use Client::_lastOp, but this is not valid for
-        //      mongos which loses track of the session due to RCAR.  Therefore, we must
-        //      keep track of the lastOp manually ourselves.
-        OpTime _lastOp;
-        bool _isLastOpSet;
-
-        // (O)  In addition to keeping track of the above lastOp timestamp, we must also keep
-        //      track of the primary we talked to.  This is because if the primary moves,
-        //      subsequent calls to getLastError are invalid.  The only way we know if an
-        //      election has occurred is to use the unique electionId.
-        OID _electionId;
-        bool _isElectionIdSet;
-
-        // (O)  Array of item-level error information
-        boost::scoped_ptr<std::vector<WriteErrorDetail*> >_writeErrorDetails;
-
-        // (O)  errors that occurred while trying to satisfy the write concern.
-        boost::scoped_ptr<WCErrorDetail> _wcErrDetails;
-    };
-
-} // namespace mongo
+}  // namespace mongo

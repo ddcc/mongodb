@@ -28,7 +28,7 @@
 *    it in the license file.
 */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/base/parse_number.h"
 #include "mongo/client/replica_set_monitor.h"
@@ -36,81 +36,92 @@
 
 namespace mongo {
 
-    namespace {
-        ServerParameterSet* GLOBAL = NULL;
+using std::string;
+using std::vector;
+
+namespace {
+ServerParameterSet* GLOBAL = NULL;
+}
+
+ServerParameter::ServerParameter(ServerParameterSet* sps,
+                                 const std::string& name,
+                                 bool allowedToChangeAtStartup,
+                                 bool allowedToChangeAtRuntime)
+    : _name(name),
+      _allowedToChangeAtStartup(allowedToChangeAtStartup),
+      _allowedToChangeAtRuntime(allowedToChangeAtRuntime) {
+    if (sps) {
+        sps->add(this);
     }
+}
 
-    ServerParameter::ServerParameter( ServerParameterSet* sps, const std::string& name,
-                                      bool allowedToChangeAtStartup, bool allowedToChangeAtRuntime )
-        : _name( name ),
-          _allowedToChangeAtStartup( allowedToChangeAtStartup ),
-          _allowedToChangeAtRuntime( allowedToChangeAtRuntime ) {
-
-        if ( sps ) {
-            sps->add( this );
-        }
+ServerParameter::ServerParameter(ServerParameterSet* sps, const std::string& name)
+    : _name(name), _allowedToChangeAtStartup(true), _allowedToChangeAtRuntime(true) {
+    if (sps) {
+        sps->add(this);
     }
+}
 
-    ServerParameter::ServerParameter( ServerParameterSet* sps, const std::string& name )
-        : _name( name ),
-          _allowedToChangeAtStartup( true ),
-          _allowedToChangeAtRuntime( true ) {
+ServerParameter::~ServerParameter() {}
 
-        if ( sps ) {
-            sps->add( this );
-        }
+ServerParameterSet* ServerParameterSet::getGlobal() {
+    if (!GLOBAL) {
+        GLOBAL = new ServerParameterSet();
     }
+    return GLOBAL;
+}
 
-    ServerParameter::~ServerParameter() {
-    }
+void ServerParameterSet::add(ServerParameter* sp) {
+    ServerParameter*& x = _map[sp->name()];
+    if (x)
+        abort();
+    x = sp;
+}
 
-    ServerParameterSet* ServerParameterSet::getGlobal() {
-        if ( !GLOBAL ) {
-            GLOBAL = new ServerParameterSet();
-        }
-        return GLOBAL;
-    }
+template <typename T, ServerParameterType paramType>
+Status ExportedServerParameter<T, paramType>::setFromString(const string& str) {
+    T value;
+    Status status = parseNumberFromString(str, &value);
+    if (!status.isOK())
+        return status;
+    return set(value);
+}
 
-    void ServerParameterSet::add( ServerParameter* sp ) {
-        ServerParameter*& x = _map[sp->name()];
-        if ( x ) abort();
-        x = sp;
-    }
+#define EXPORTED_SERVER_PARAMETER(PARAM_TYPE)                                                   \
+    template <>                                                                                 \
+    Status ExportedServerParameter<bool, PARAM_TYPE>::setFromString(const string& str) {        \
+        if (str == "true" || str == "1")                                                        \
+            return set(true);                                                                   \
+        if (str == "false" || str == "0")                                                       \
+            return set(false);                                                                  \
+        return Status(ErrorCodes::BadValue, "can't convert string to bool");                    \
+    }                                                                                           \
+                                                                                                \
+    template Status ExportedServerParameter<int, PARAM_TYPE>::setFromString(const string& str); \
+                                                                                                \
+    template Status ExportedServerParameter<long long, PARAM_TYPE>::setFromString(              \
+        const string& str);                                                                     \
+                                                                                                \
+    template Status ExportedServerParameter<double, PARAM_TYPE>::setFromString(const string& str);
 
-    template <typename T>
-    Status ExportedServerParameter<T>::setFromString( const string& str ) {
-        T value;
-        Status status = parseNumberFromString( str, &value );
-        if ( !status.isOK() )
-            return status;
-        return set( value );
-    }
+// Define instances for each possible combination of number types we support, and
+// ServerParameterType
+EXPORTED_SERVER_PARAMETER(ServerParameterType::kStartupOnly);
+EXPORTED_SERVER_PARAMETER(ServerParameterType::kRuntimeOnly);
+EXPORTED_SERVER_PARAMETER(ServerParameterType::kStartupAndRuntime);
 
-    template Status ExportedServerParameter<int>::setFromString( const string& str );
-    template Status ExportedServerParameter<long long>::setFromString( const string& str );
-    template Status ExportedServerParameter<double>::setFromString( const string& str );
+template <>
+Status ExportedServerParameter<string, ServerParameterType::kStartupOnly>::setFromString(
+    const string& str) {
+    return set(str);
+}
 
-    template<>
-    Status ExportedServerParameter<string>::setFromString( const string& str ) {
-        return set( str );
-    }
-
-    template<>
-    Status ExportedServerParameter<bool>::setFromString( const string& str ) {
-        if ( str == "true" ||
-             str == "1" )
-            return set(true);
-        if ( str == "false" ||
-             str == "0" )
-            return set(false);
-        return Status( ErrorCodes::BadValue, "can't convert string to bool" );
-    }
-
-    template<>
-    Status ExportedServerParameter< vector<string> >::setFromString( const string& str ) {
-        vector<string> v;
-        splitStringDelim( str, &v, ',' );
-        return set( v );
-    }
+template <>
+Status ExportedServerParameter<vector<string>, ServerParameterType::kStartupOnly>::setFromString(
+    const string& str) {
+    vector<string> v;
+    splitStringDelim(str, &v, ',');
+    return set(v);
+}
 
 }  // namespace mongo

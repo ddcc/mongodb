@@ -41,21 +41,39 @@
 
 namespace mongo {
 
-    bool inShutdown() {
-        return false;
-    }
+class Client;
 
-    DBClientBase *createDirectClient() {
-        fassertFailed(17249);
-        return NULL;
-    }
+bool inShutdown() {
+    return false;
+}
 
-    bool haveLocalShardingInfo(const std::string& ns) {
-        return false;
-    }
+class OperationContext;
 
-    void dbexit(ExitCode rc, const char *why) {
-        fassertFailed(17250);
-    }
+DBClientBase* createDirectClient(OperationContext* txn) {
+    fassertFailed(17249);
+    return NULL;
+}
+
+bool haveLocalShardingInfo(Client* client, const std::string& ns) {
+    return false;
+}
+
+void dbexit(ExitCode rc, const char* why) {
+    invariant(!"unittests shouldn't call dbexit");
+}
+
+void exitCleanly(ExitCode code) {
+    invariant(!"unittests shouldn't call exitCleanly");
+}
+
+#ifdef _WIN32
+void signalShutdown() {}
+
+namespace ntservice {
+bool shouldStartService() {
+    return false;
+}
+}
+#endif
 
 }  // namespace mongo

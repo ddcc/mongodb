@@ -37,35 +37,27 @@
 
 namespace mongo {
 
-    class CanonicalQuery;
-    class UpdateDriver;
+class CanonicalQuery;
+class Database;
+class OperationContext;
+class UpdateDriver;
 
-    /**
-     * Utility method to execute an update described by "request".
-     *
-     * Caller must hold the appropriate database locks.
-     */
-    UpdateResult update(const UpdateRequest& request, OpDebug* opDebug);
+/**
+ * Utility method to execute an update described by "request".
+ *
+ * Caller must hold the appropriate database locks.
+ */
+UpdateResult update(OperationContext* txn,
+                    Database* db,
+                    const UpdateRequest& request,
+                    OpDebug* opDebug);
 
-    /**
-     * Execute the update described by "request", using the given already-parsed
-     * driver and canonical query.
-     *
-     * NOTE: This function is really a utility method for UpdateExecutor.
-     *
-     * TODO: Move this into a private method of UpdateExecutor.
-     */
-    UpdateResult update(const UpdateRequest& request,
-                        OpDebug* opDebug,
-                        UpdateDriver* driver,
-                        CanonicalQuery* cq);
-
-    /**
-     * takes the from document and returns a new document
-     * after apply all the operators
-     * e.g.
-     *   applyUpdateOperators( BSON( "x" << 1 ) , BSON( "$inc" << BSON( "x" << 1 ) ) );
-     *   returns: { x : 2 }
-     */
-    BSONObj applyUpdateOperators( const BSONObj& from, const BSONObj& operators );
+/**
+ * takes the from document and returns a new document
+ * after apply all the operators
+ * e.g.
+ *   applyUpdateOperators( BSON( "x" << 1 ) , BSON( "$inc" << BSON( "x" << 1 ) ) );
+ *   returns: { x : 2 }
+ */
+BSONObj applyUpdateOperators(const BSONObj& from, const BSONObj& operators);
 }  // namespace mongo

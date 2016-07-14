@@ -36,37 +36,37 @@
 
 namespace mongo {
 
-    MatchDetails::MatchDetails() :
-        _elemMatchKeyRequested() {
-        resetOutput();
-    }
+using std::string;
 
-    void MatchDetails::resetOutput() {
-        _loadedRecord = false;
-        _elemMatchKey.reset();
-    }
+MatchDetails::MatchDetails() : _elemMatchKeyRequested() {
+    resetOutput();
+}
 
-    bool MatchDetails::hasElemMatchKey() const {
-        return _elemMatchKey.get();
-    }
+void MatchDetails::resetOutput() {
+    _loadedRecord = false;
+    _elemMatchKey.reset();
+}
 
-    std::string MatchDetails::elemMatchKey() const {
-        verify( hasElemMatchKey() );
-        return *(_elemMatchKey.get());
-    }
+bool MatchDetails::hasElemMatchKey() const {
+    return _elemMatchKey.get();
+}
 
-    void MatchDetails::setElemMatchKey( const std::string &elemMatchKey ) {
-        if ( _elemMatchKeyRequested ) {
-            _elemMatchKey.reset( new std::string( elemMatchKey ) );
-        }
-    }
+std::string MatchDetails::elemMatchKey() const {
+    verify(hasElemMatchKey());
+    return *(_elemMatchKey.get());
+}
 
-    string MatchDetails::toString() const {
-        std::stringstream ss;
-        ss << "loadedRecord: " << _loadedRecord << " ";
-        ss << "elemMatchKeyRequested: " << _elemMatchKeyRequested << " ";
-        ss << "elemMatchKey: " << ( _elemMatchKey ? _elemMatchKey->c_str() : "NONE" ) << " ";
-        return ss.str();
+void MatchDetails::setElemMatchKey(const std::string& elemMatchKey) {
+    if (_elemMatchKeyRequested) {
+        _elemMatchKey.reset(new std::string(elemMatchKey));
     }
+}
 
+string MatchDetails::toString() const {
+    std::stringstream ss;
+    ss << "loadedRecord: " << _loadedRecord << " ";
+    ss << "elemMatchKeyRequested: " << _elemMatchKeyRequested << " ";
+    ss << "elemMatchKey: " << (_elemMatchKey ? _elemMatchKey->c_str() : "NONE") << " ";
+    return ss.str();
+}
 }

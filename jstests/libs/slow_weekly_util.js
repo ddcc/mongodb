@@ -1,20 +1,19 @@
 
-SlowWeeklyMongod = function( name ) {
+SlowWeeklyMongod = function(name) {
     this.name = name;
-    this.port = 30201;
-    
     this.start = new Date();
 
-    this.conn = startMongodEmpty("--port", this.port, "--dbpath", MongoRunner.dataPath + this.name , "--smallfiles", "--nojournal" );
+    this.conn = MongoRunner.runMongod({smallfiles: "", nojournal: ""});
+    this.port = this.conn.port;
 };
 
-SlowWeeklyMongod.prototype.getDB = function( name ) {
-    return this.conn.getDB( name );
-}
+SlowWeeklyMongod.prototype.getDB = function(name) {
+    return this.conn.getDB(name);
+};
 
-SlowWeeklyMongod.prototype.stop = function(){
-    stopMongod( this.port );
+SlowWeeklyMongod.prototype.stop = function() {
+    MongoRunner.stopMongod(this.conn);
     var end = new Date();
-    print( "slowWeekly test: " + this.name + " completed succesfully in " + ( ( end.getTime() - this.start.getTime() ) / 1000 ) + " seconds" );
+    print("slowWeekly test: " + this.name + " completed successfully in " +
+          ((end.getTime() - this.start.getTime()) / 1000) + " seconds");
 };
-

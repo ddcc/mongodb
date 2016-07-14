@@ -31,75 +31,76 @@
 #include <queue>
 #include <vector>
 
-#include "mongo/db/diskloc.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
+#include "mongo/db/record_id.h"
 #include "mongo/platform/unordered_set.h"
 
 namespace mongo {
 
-    /**
-     * Reads from N children, each of which must have a valid DiskLoc.  Assumes each child produces
-     * DiskLocs in sorted order.  Outputs the intersection of the DiskLocs outputted by the
-     * children.
-     *
-     * Preconditions: Valid DiskLoc.  More than one child.
-     *
-     * Any DiskLoc that we keep a reference to that is invalidated before we are able to return it
-     * is fetched and added to the WorkingSet as "flagged for further review."  Because this stage
-     * operates with DiskLocs, we are unable to evaluate the AND for the invalidated DiskLoc, and it
-     * must be fully matched later.
-     */
-    class AndSortedStage : public PlanStage {
-    public:
-        AndSortedStage(WorkingSet* ws, const MatchExpression* filter);
-        virtual ~AndSortedStage();
+/**
+ * Reads from N children, each of which must have a valid RecordId.  Assumes each child produces
+ * RecordIds in sorted order.  Outputs the intersection of the RecordIds outputted by the
+ * children.
+ *
+ * Preconditions: Valid RecordId.  More than one child.
+ *
+ * Any RecordId that we keep a reference to that is invalidated before we are able to return it
+ * is fetched and added to the WorkingSet as "flagged for further review."  Because this stage
+ * operates with RecordIds, we are unable to evaluate the AND for the invalidated RecordId, and it
+ * must be fully matched later.
+ */
+class AndSortedStage final : public PlanStage {
+public:
+    AndSortedStage(OperationContext* opCtx, WorkingSet* ws, const Collection* collection);
 
-        void addChild(PlanStage* child);
+    void addChild(PlanStage* child);
 
-        virtual StageState work(WorkingSetID* out);
-        virtual bool isEOF();
+    StageState work(WorkingSetID* out) final;
+    bool isEOF() final;
 
-        virtual void prepareToYield();
-        virtual void recoverFromYield();
-        virtual void invalidate(const DiskLoc& dl, InvalidationType type);
+    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
 
-        virtual PlanStageStats* getStats();
+    StageType stageType() const final {
+        return STAGE_AND_SORTED;
+    }
 
-    private:
-        // Find a node to AND against.
-        PlanStage::StageState getTargetLoc(WorkingSetID* out);
+    std::unique_ptr<PlanStageStats> getStats() final;
 
-        // Move a child which hasn't advanced to the target node forward.
-        // Returns the target node in 'out' if all children successfully advance to it.
-        PlanStage::StageState moveTowardTargetLoc(WorkingSetID* out);
+    const SpecificStats* getSpecificStats() const final;
 
-        // Not owned by us.
-        WorkingSet* _ws;
+    static const char* kStageType;
 
-        // Not owned by us.
-        const MatchExpression* _filter;
+private:
+    // Find a node to AND against.
+    PlanStage::StageState getTargetLoc(WorkingSetID* out);
 
-        // Owned by us.
-        vector<PlanStage*> _children;
+    // Move a child which hasn't advanced to the target node forward.
+    // Returns the target node in 'out' if all children successfully advance to it.
+    PlanStage::StageState moveTowardTargetLoc(WorkingSetID* out);
 
-        // The current node we're AND-ing against.
-        size_t _targetNode;
-        DiskLoc _targetLoc;
-        WorkingSetID _targetId;
+    // Not owned by us.
+    const Collection* _collection;
 
-        // Nodes we're moving forward until they hit the element we're AND-ing.
-        // Everything in here has not advanced to _targetLoc yet.
-        // These are indices into _children.
-        std::queue<size_t> _workingTowardRep;
+    // Not owned by us.
+    WorkingSet* _ws;
 
-        // If any child hits EOF or if we have any errors, we're EOF.
-        bool _isEOF;
+    // The current node we're AND-ing against.
+    size_t _targetNode;
+    RecordId _targetLoc;
+    WorkingSetID _targetId;
 
-        // Stats
-        CommonStats _commonStats;
-        AndSortedStats _specificStats;
-    };
+    // Nodes we're moving forward until they hit the element we're AND-ing.
+    // Everything in here has not advanced to _targetLoc yet.
+    // These are indices into _children.
+    std::queue<size_t> _workingTowardRep;
+
+    // If any child hits EOF or if we have any errors, we're EOF.
+    bool _isEOF;
+
+    // Stats
+    AndSortedStats _specificStats;
+};
 
 }  // namespace mongo

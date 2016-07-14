@@ -1,29 +1,38 @@
 // Test mongod start with FIPS mode enabled
-if (0) { // SERVER-11005
-ports = allocatePorts(1);
-port1 = ports[0];
-var baseName = "jstests_ssl_ssl_fips";
+var port = allocatePort();
+var md = MongoRunner.runMongod({
+    port: port,
+    sslMode: "requireSSL",
+    sslPEMKeyFile: "jstests/libs/server.pem",
+    sslCAFile: "jstests/libs/ca.pem",
+    sslFIPSMode: ""
+});
 
-
-var md = startMongod("--port", port1, "--dbpath",
-                     MongoRunner.dataPath + baseName, "--sslMode", "requireSSL",
-                     "--sslPEMKeyFile", "jstests/libs/server.pem",
-                     "--sslFIPSMode");
-
-var mongo = runMongoProgram("mongo", "--port", port1, "--ssl",
-                            "--sslPEMKeyFile", "jstests/libs/client.pem",
+var mongo = runMongoProgram("mongo",
+                            "--port",
+                            port,
+                            "--ssl",
+                            "--sslAllowInvalidCertificates",
+                            "--sslPEMKeyFile",
+                            "jstests/libs/client.pem",
                             "--sslFIPSMode",
-                            "--eval", ";");
+                            "--eval",
+                            ";");
 
 // if mongo shell didn't start/connect properly
 if (mongo != 0) {
     print("mongod failed to start, checking for FIPS support");
-    mongoOutput = rawMongoProgramOutput()
+    mongoOutput = rawMongoProgramOutput();
     assert(mongoOutput.match(/this version of mongodb was not compiled with FIPS support/) ||
-        mongoOutput.match(/FIPS_mode_set:fips mode not supported/))
-}
-else {
+           mongoOutput.match(/FIPS_mode_set:fips mode not supported/) ||
+           // Ubuntu 16.04's OpenSSL produces an unexpected error message, remove this check when
+           // SERVER-24350 is resolved
+           mongoOutput.match(/error:00000000:lib\(0\):func\(0\):reason\(0\)/));
+} else {
+    // verify that auth works, SERVER-18051
+    md.getDB("admin").createUser({user: "root", pwd: "root", roles: ["root"]});
+    assert(md.getDB("admin").auth("root", "root"), "auth failed");
+
     // kill mongod
-    stopMongod(port1);
-}
+    MongoRunner.stopMongod(md);
 }

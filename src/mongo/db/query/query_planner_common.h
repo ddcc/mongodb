@@ -31,102 +31,56 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/query/query_solution.h"
-#include "mongo/db/query/qlog.h"
 
 namespace mongo {
 
+/**
+ * Methods used by several parts of the planning process.
+ */
+class QueryPlannerCommon {
+public:
     /**
-     * Methods used by several parts of the planning process.
+     * Does the tree rooted at 'root' have a node with matchType 'type'?
+     *
+     * If 'out' is not NULL, sets 'out' to the first node of type 'type' encountered.
      */
-    class QueryPlannerCommon {
-    public:
-        /**
-         * Does the tree rooted at 'root' have a node with matchType 'type'?
-         *
-         * If 'out' is not NULL, sets 'out' to the first node of type 'type' encountered.
-         */
-        static bool hasNode(MatchExpression* root, MatchExpression::MatchType type,
-                            MatchExpression** out = NULL) {
-            if (type == root->matchType()) {
-                if (NULL != out) {
-                    *out = root;
-                }
+    static bool hasNode(const MatchExpression* root,
+                        MatchExpression::MatchType type,
+                        const MatchExpression** out = NULL) {
+        if (type == root->matchType()) {
+            if (NULL != out) {
+                *out = root;
+            }
+            return true;
+        }
+
+        for (size_t i = 0; i < root->numChildren(); ++i) {
+            if (hasNode(root->getChild(i), type, out)) {
                 return true;
             }
-
-            for (size_t i = 0; i < root->numChildren(); ++i) {
-                if (hasNode(root->getChild(i), type, out)) {
-                    return true;
-                }
-            }
-            return false;
         }
+        return false;
+    }
 
-        /**
-         * Assumes the provided BSONObj is of the form {field1: -+1, ..., field2: -+1}
-         * Returns a BSONObj with the values negated.
-         */
-        static BSONObj reverseSortObj(const BSONObj& sortObj) {
-            BSONObjBuilder reverseBob;
-            BSONObjIterator it(sortObj);
-            while (it.more()) {
-                BSONElement elt = it.next();
-                reverseBob.append(elt.fieldName(), elt.numberInt() * -1);
-            }
-            return reverseBob.obj();
+    /**
+     * Assumes the provided BSONObj is of the form {field1: -+1, ..., field2: -+1}
+     * Returns a BSONObj with the values negated.
+     */
+    static BSONObj reverseSortObj(const BSONObj& sortObj) {
+        BSONObjBuilder reverseBob;
+        BSONObjIterator it(sortObj);
+        while (it.more()) {
+            BSONElement elt = it.next();
+            reverseBob.append(elt.fieldName(), elt.numberInt() * -1);
         }
+        return reverseBob.obj();
+    }
 
-        /**
-         * Traverses the tree rooted at 'node'.  For every STAGE_IXSCAN encountered, reverse
-         * the scan direction and index bounds.
-         */
-        static void reverseScans(QuerySolutionNode* node) {
-            StageType type = node->getType();
-
-            if (STAGE_IXSCAN == type) {
-                IndexScanNode* isn = static_cast<IndexScanNode*>(node);
-                isn->direction *= -1;
-
-                if (isn->bounds.isSimpleRange) {
-                    std::swap(isn->bounds.startKey, isn->bounds.endKey);
-                    // XXX: Not having a startKeyInclusive means that if we reverse a max/min query
-                    // we have different results with and without the reverse...
-                    isn->bounds.endKeyInclusive = true;
-                }
-                else {
-                    for (size_t i = 0; i < isn->bounds.fields.size(); ++i) {
-                        vector<Interval>& iv = isn->bounds.fields[i].intervals;
-                        // Step 1: reverse the list.
-                        std::reverse(iv.begin(), iv.end());
-                        // Step 2: reverse each interval.
-                        for (size_t j = 0; j < iv.size(); ++j) {
-                            iv[j].reverse();
-                        }
-                    }
-                }
-
-                if (!isn->bounds.isValidFor(isn->indexKeyPattern, isn->direction)) {
-                    QLOG() << "Invalid bounds: " << isn->bounds.toString() << endl;
-                    verify(0);
-                }
-
-                // TODO: we can just negate every value in the already computed properties.
-                isn->computeProperties();
-            }
-            else if (STAGE_SORT_MERGE == type) {
-                // reverse direction of comparison for merge
-                MergeSortNode* msn = static_cast<MergeSortNode*>(node);
-                msn->sort = reverseSortObj(msn->sort);
-            }
-            else {
-                verify(STAGE_SORT != type);
-                // This shouldn't be here...
-            }
-
-            for (size_t i = 0; i < node->children.size(); ++i) {
-                reverseScans(node->children[i]);
-            }
-        }
-    };
+    /**
+     * Traverses the tree rooted at 'node'.  For every STAGE_IXSCAN encountered, reverse
+     * the scan direction and index bounds.
+     */
+    static void reverseScans(QuerySolutionNode* node);
+};
 
 }  // namespace mongo

@@ -35,19 +35,21 @@
 
 namespace mongo {
 
-    /**
-     * The implementation of AuthzSessionExternalState functionality for mongod.
-     */
-    class AuthzSessionExternalStateMongod : public AuthzSessionExternalStateServerCommon {
-        MONGO_DISALLOW_COPYING(AuthzSessionExternalStateMongod);
+/**
+ * The implementation of AuthzSessionExternalState functionality for mongod.
+ */
+class AuthzSessionExternalStateMongod : public AuthzSessionExternalStateServerCommon {
+    MONGO_DISALLOW_COPYING(AuthzSessionExternalStateMongod);
 
-    public:
-        AuthzSessionExternalStateMongod(AuthorizationManager* authzManager);
-        virtual ~AuthzSessionExternalStateMongod();
+public:
+    AuthzSessionExternalStateMongod(AuthorizationManager* authzManager);
+    virtual ~AuthzSessionExternalStateMongod();
 
-        virtual bool shouldIgnoreAuthChecks() const;
+    virtual bool shouldIgnoreAuthChecks() const;
 
-        virtual void startRequest();
-    };
+    virtual bool serverIsArbiter() const;
 
-} // namespace mongo
+    virtual void startRequest(OperationContext* txn);
+};
+
+}  // namespace mongo

@@ -3,23 +3,41 @@
 /*
  *    Copyright 2010 10gen Inc.
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *    This program is free software: you can redistribute it and/or  modify
+ *    it under the terms of the GNU Affero General Public License, version 3,
+ *    as published by the Free Software Foundation.
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *    You should have received a copy of the GNU Affero General Public License
+ *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 #pragma once
 
 #if !defined(_WIN32)
 #error "windows_basic included but _WIN32 is not defined"
+#endif
+
+// "If you define NTDDI_VERSION, you must also define _WIN32_WINNT":
+// http://msdn.microsoft.com/en-us/library/windows/desktop/aa383745(v=vs.85).aspx
+#if defined(NTDDI_VERSION) && !defined(_WIN32_WINNT)
+#error NTDDI_VERSION defined but _WIN32_WINNT is undefined
 #endif
 
 // Ensure that _WIN32_WINNT is set to something before we include windows.h. For server builds
@@ -52,22 +70,35 @@
 // No need to set WINVER, SdkDdkVer.h does that for us, we double check this below.
 
 // for rand_s() usage:
-# define _CRT_RAND_S
-# ifndef NOMINMAX
-#  define NOMINMAX
-# endif
+#define _CRT_RAND_S
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 
 // Do not complain that about standard library functions that Windows believes should have
 // underscores in front of them, such as unlink().
 #define _CRT_NONSTDC_NO_DEPRECATE
 
 // tell windows.h not to include a bunch of headers we don't need:
-# define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
 
-# include <winsock2.h> //this must be included before the first windows.h include
-# include <ws2tcpip.h>
-# include <wspiapi.h>
-# include <windows.h>
+// Tell windows.h not to define any NT status codes, so that we can
+// get the definitions from ntstatus.h, which has a more complete list.
+#define WIN32_NO_STATUS
+
+#include <winsock2.h>  //this must be included before the first windows.h include
+#include <ws2tcpip.h>
+#include <windows.h>
+
+#undef WIN32_NO_STATUS
+
+// Obtain a definition for the ntstatus type.
+#include <winternl.h>
+
+// Add back in the status definitions so that macro expansions for
+// things like STILL_ACTIVE and WAIT_OBJECT_O can be resolved (they
+// expand to STATUS_ codes).
+#include <ntstatus.h>
 
 // Should come either from the command line, or if not set there, the inclusion of sdkddkver.h
 // via windows.h above should set it based in _WIN32_WINNT, which is assuredly set by now.
@@ -79,12 +110,10 @@
 #error "Expected WINVER to have been defined and to equal _WIN32_WINNT"
 #endif
 
-#if defined(_WIN64)
-#if !defined(NTDDI_WS03SP2) || (NTDDI_VERSION < NTDDI_WS03SP2)
-#error "64 bit mongo does not support Windows versions older than Windows Server 2003 SP 2"
+#if !defined(NTDDI_WINBLUE)
+#error "MongoDB requires Windows SDK 8.1 or higher to build"
 #endif
-#else
-#if !defined(NTDDI_WINXPSP3) || (NTDDI_VERSION < NTDDI_WINXPSP3)
-#error "32 bit mongo does not support Windows versions older than XP Service Pack 3"
-#endif
+
+#if !defined(NTDDI_VISTA) || NTDDI_VERSION < NTDDI_VISTA
+#error "MongoDB does not support Windows versions older than Windows Vista"
 #endif

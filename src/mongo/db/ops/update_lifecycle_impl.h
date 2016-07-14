@@ -31,35 +31,37 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/update_lifecycle.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/s/chunk_version.h"
 
 namespace mongo {
 
-    class UpdateLifecycleImpl : public UpdateLifecycle {
-        MONGO_DISALLOW_COPYING(UpdateLifecycleImpl);
+class Collection;
 
-    public:
+class UpdateLifecycleImpl : public UpdateLifecycle {
+    MONGO_DISALLOW_COPYING(UpdateLifecycleImpl);
 
-        /**
-         * ignoreVersion is for shard version checking and
-         * means that version checks will not be done
-         *
-         * nsString represents the namespace for the
-         */
-        UpdateLifecycleImpl(bool ignoreVersion, const NamespaceString& nsString);
+public:
+    /**
+     * ignoreVersion is for shard version checking and
+     * means that version checks will not be done
+     *
+     * nsString represents the namespace for the
+     */
+    UpdateLifecycleImpl(bool ignoreVersion, const NamespaceString& nsString);
 
-        virtual void setCollection(Collection* collection);
+    virtual void setCollection(Collection* collection);
 
-        virtual bool canContinue() const;
+    virtual bool canContinue() const;
 
-        virtual const UpdateIndexData* getIndexKeys() const;
+    virtual const UpdateIndexData* getIndexKeys(OperationContext* opCtx) const;
 
-        virtual const std::vector<FieldRef*>* getImmutableFields() const;
+    virtual const std::vector<FieldRef*>* getImmutableFields() const;
 
-    private:
-        Collection* _collection;
-        const NamespaceString& _nsString;
-        ChunkVersion _shardVersion;
-    };
+private:
+    const NamespaceString& _nsString;
+    const ChunkVersion _shardVersion;
+
+    Collection* _collection;
+};
 
 } /* namespace mongo */

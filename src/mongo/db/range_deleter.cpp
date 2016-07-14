@@ -26,598 +26,561 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kSharding
+
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/range_deleter.h"
 
 #include <boost/date_time/posix_time/posix_time_duration.hpp>
 #include <memory>
 
-#include "mongo/s/range_arithmetic.h"
-#include "mongo/db/range_deleter_stats.h"
+#include "mongo/db/client.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/write_concern_options.h"
 #include "mongo/util/concurrency/synchronization.h"
+#include "mongo/util/exit.h"
+#include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/time_support.h"
+#include "mongo/util/timer.h"
 
-using std::auto_ptr;
+using std::unique_ptr;
+using std::endl;
 using std::set;
 using std::pair;
 using std::string;
 
-using mongoutils::str::stream;
-
 namespace {
+const long int kNotEmptyTimeoutMillis = 200;
+const long long int kMaxCursorCheckIntervalMillis = 500;
+const size_t kDeleteJobsHistory = 10;  // entries
 
-    const long int NotEmptyTimeoutMillis = 200;
-    const long long int MaxCurorCheckIntervalMillis = 500;
+/**
+ * Removes an element from the container that holds a pointer type, and deletes the
+ * pointer as well. Returns true if the element was found.
+ */
+template <typename ContainerType, typename ContainerElementType>
+bool deletePtrElement(ContainerType* container, ContainerElementType elem) {
+    typename ContainerType::iterator iter = container->find(elem);
 
-    /**
-     * Removes an element from the container that holds a pointer type, and deletes the
-     * pointer as well. Returns true if the element was found.
-     */
-    template <typename ContainerType, typename ContainerElementType>
-    bool deletePtrElement(ContainerType* container, ContainerElementType elem) {
-        typename ContainerType::iterator iter = container->find(elem);
-
-        if (iter == container->end()) {
-            return false;
-        }
-
-        delete *iter;
-        container->erase(iter);
-        return true;
+    if (iter == container->end()) {
+        return false;
     }
+
+    delete *iter;
+    container->erase(iter);
+    return true;
+}
 }
 
 namespace mongo {
 
-    namespace duration = boost::posix_time;
+namespace duration = boost::posix_time;
 
-    struct RangeDeleter::RangeDeleteEntry {
-        RangeDeleteEntry():
-                secondaryThrottle(true),
-                queueStartTS(0),
-                lastLoggedTS(0),
-                notifyDone(NULL) {
-        }
+static void logCursorsWaiting(RangeDeleteEntry* entry) {
+    // We always log the first cursors waiting message (so we have cursor ids in the logs).
+    // After 15 minutes (the cursor timeout period), we start logging additional messages at
+    // a 1 minute interval.
+    static const auto kLogCursorsThreshold = stdx::chrono::minutes{15};
+    static const auto kLogCursorsInterval = stdx::chrono::minutes{1};
 
-        std::string ns;
+    Date_t currentTime = jsTime();
+    Milliseconds elapsedMillisSinceQueued{0};
 
-        // Inclusive lower range.
-        BSONObj min;
+    // We always log the first message when lastLoggedTime == 0
+    if (entry->lastLoggedTS != Date_t()) {
+        if (currentTime > entry->stats.queueStartTS)
+            elapsedMillisSinceQueued = currentTime - entry->stats.queueStartTS;
 
-        // Exclusive upper range.
-        BSONObj max;
+        // Not logging, threshold not passed
+        if (elapsedMillisSinceQueued < kLogCursorsThreshold)
+            return;
 
-        // The key pattern of the index the range refers to.
-        // This is relevant especially with special indexes types
-        // like hash indexes.
-        BSONObj shardKeyPattern;
+        Milliseconds elapsedMillisSinceLog{0};
+        if (currentTime > entry->lastLoggedTS)
+            elapsedMillisSinceLog = currentTime - entry->lastLoggedTS;
 
-        bool secondaryThrottle;
-
-        // Sets of cursors to wait to close until this can be ready
-        // for deletion.
-        std::set<CursorId> cursorsToWait;
-
-        // Time we started waiting for cursors to disappear
-        Date_t queueStartTS;
-        // Time we last reported the cursors
-        Date_t lastLoggedTS;
-
-        // Not owned here.
-        // Important invariant: Can only be set and used by one thread.
-        Notification* notifyDone;
-
-        // For debugging only
-        BSONObj toBSON() const {
-            return BSON("ns" << ns
-                    << "min" << min
-                    << "max" << max
-                    << "notifyDoneAddr" << reinterpret_cast<long long>(notifyDone));
-        }
-    };
-
-    struct RangeDeleter::NSMinMax {
-        NSMinMax(std::string ns, const BSONObj min, const BSONObj max):
-            ns(ns), min(min), max(max) {
-        }
-
-        std::string ns;
-
-        // Inclusive lower range.
-        BSONObj min;
-
-        // Exclusive upper range.
-        BSONObj max;
-    };
-
-    bool RangeDeleter::NSMinMaxCmp::operator()(
-            const NSMinMax* lhs, const NSMinMax* rhs) const {
-        const int nsComp = lhs->ns.compare(rhs->ns);
-
-        if (nsComp < 0) {
-            return true;
-        }
-
-        if (nsComp > 0) {
-            return false;
-        }
-
-        return compareRanges(lhs->min, lhs->max, rhs->min, rhs->max) < 0;
+        // Not logging, logged a short time ago
+        if (elapsedMillisSinceLog < kLogCursorsInterval)
+            return;
     }
 
-    RangeDeleter::RangeDeleter(RangeDeleterEnv* env):
-        _env(env), // ownership xfer
-        _stopMutex("stopRangeDeleter"),
-        _stopRequested(false),
-        _queueMutex("RangeDeleter"),
-        _stats(new RangeDeleterStats(&_queueMutex)) {
+    str::stream cursorList;
+    for (std::set<CursorId>::const_iterator it = entry->cursorsToWait.begin();
+         it != entry->cursorsToWait.end();
+         ++it) {
+        if (it != entry->cursorsToWait.begin())
+            cursorList << ", ";
+        cursorList << *it;
     }
 
-    RangeDeleter::~RangeDeleter() {
-        for(TaskList::iterator it = _notReadyQueue.begin();
-            it != _notReadyQueue.end();
-            ++it) {
-            delete (*it);
-        }
+    log() << "waiting for open cursors before removing range "
+          << "[" << entry->options.range.minKey << ", " << entry->options.range.maxKey << ") "
+          << "in " << entry->options.range.ns
+          << (entry->lastLoggedTS == Date_t()
+                  ? string("")
+                  : string(str::stream() << ", elapsed secs: "
+                                         << durationCount<Seconds>(elapsedMillisSinceQueued)))
+          << ", cursor ids: [" << string(cursorList) << "]";
 
-        for(TaskList::iterator it = _taskQueue.begin();
-            it != _taskQueue.end();
-            ++it) {
-            delete (*it);
-        }
+    entry->lastLoggedTS = currentTime;
+}
 
-        for(NSMinMaxSet::iterator it = _deleteSet.begin();
-            it != _deleteSet.end();
-            ++it) {
-            delete (*it);
-        }
+struct RangeDeleter::NSMinMax {
+    NSMinMax(std::string ns, const BSONObj min, const BSONObj max) : ns(ns), min(min), max(max) {}
 
-        for(NSMinMaxSet::iterator it = _blackList.begin();
-            it != _blackList.end();
-            ++it) {
-            delete (*it);
-        }
-    }
+    std::string ns;
 
-    void RangeDeleter::startWorkers() {
-        if (!_worker) {
-            _worker.reset(new boost::thread(boost::bind(&RangeDeleter::doWork, this)));
-        }
-    }
+    // Inclusive lower range.
+    BSONObj min;
 
-    void RangeDeleter::stopWorkers() {
-        {
-            scoped_lock sl(_stopMutex);
-            _stopRequested = true;
-        }
+    // Exclusive upper range.
+    BSONObj max;
+};
 
-        if (_worker) {
-            _worker->join();
-        }
+bool RangeDeleter::NSMinMaxCmp::operator()(const NSMinMax* lhs, const NSMinMax* rhs) const {
+    const int nsComp = lhs->ns.compare(rhs->ns);
 
-        scoped_lock sl(_queueMutex);
-        while (_stats->hasInProgress_inlock()) {
-            _nothingInProgressCV.wait(sl.boost());
-        }
-    }
-
-    /**
-     * Logs a periodic "waiting for cursors" message after a predefined time threshold.
-     * Returns the new time of the last log message.
-     */
-    static Date_t logCursorsWaiting(const std::string& ns,
-                                    const mongo::BSONObj& min,
-                                    const mongo::BSONObj& max,
-                                    const std::set<mongo::CursorId>& cursorsToWait,
-                                    Date_t queueStartTS,
-                                    Date_t lastLoggedTS) {
-
-        // We always log the first cursors waiting message (so we have cursor ids in the logs).
-        // After 15 minutes (the cursor timeout period), we start logging additional messages at
-        // a 1 minute interval.
-        static const long long kLogCursorsThresholdMillis = 15 * 60 * 1000;
-        static const long long kLogCursorsIntervalMillis = 1 * 60 * 1000;
-
-        if (cursorsToWait.empty())
-            return false;
-
-        Date_t currentTime = jsTime();
-        long long elapsedMillisSinceQueued = 0;
-
-        // We always log the first message when lastLoggedTS == 0
-        if (lastLoggedTS != 0) {
-
-            if (currentTime > queueStartTS)
-                elapsedMillisSinceQueued = currentTime - queueStartTS;
-
-            if (elapsedMillisSinceQueued < kLogCursorsThresholdMillis)
-                return lastLoggedTS;
-
-            long long elapsedMillisSinceLog = 0;
-            if (currentTime > lastLoggedTS)
-                elapsedMillisSinceLog = currentTime - lastLoggedTS;
-
-            if (elapsedMillisSinceLog < kLogCursorsIntervalMillis)
-                return lastLoggedTS;
-        }
-
-        mongo::StringBuilder cursorList;
-        for (std::set<mongo::CursorId>::const_iterator it = cursorsToWait.begin();
-        it != cursorsToWait.end(); ++it) {
-            cursorList << *it << " ";
-        }
-
-        mongo::log() << "rangeDeleter waiting for open cursors in: " << ns
-                     << ", min: " << min << ", max: " << max
-                     << (lastLoggedTS == 0 ? string("") :
-                         string(stream() << ", elapsedSecs: " << elapsedMillisSinceQueued / 1000))
-                     << ", cursors: [ " << cursorList.str() << "]";
-
-        return currentTime;
-    }
-
-    bool RangeDeleter::queueDelete(const std::string& ns,
-                                   const BSONObj& min,
-                                   const BSONObj& max,
-                                   const BSONObj& shardKeyPattern,
-                                   bool secondaryThrottle,
-                                   Notification* notifyDone,
-                                   std::string* errMsg) {
-        string dummy;
-        if (errMsg == NULL) errMsg = &dummy;
-
-        auto_ptr<RangeDeleteEntry> toDelete(new RangeDeleteEntry);
-        toDelete->ns = ns;
-        toDelete->min = min.getOwned();
-        toDelete->max = max.getOwned();
-        toDelete->shardKeyPattern = shardKeyPattern.getOwned();
-        toDelete->secondaryThrottle = secondaryThrottle;
-        toDelete->notifyDone = notifyDone;
-
-        {
-            scoped_lock sl(_queueMutex);
-            if (_stopRequested) {
-                *errMsg = "deleter is already stopped.";
-                return false;
-            }
-
-            if (!canEnqueue_inlock(ns, min, max, errMsg)) {
-                return false;
-            }
-
-            _deleteSet.insert(new NSMinMax(ns, min, max));
-            _stats->incTotalDeletes_inlock();
-            _stats->incPendingDeletes_inlock();
-        }
-
-        _env->getCursorIds(ns, &toDelete->cursorsToWait);
-
-        // Log first waiting message (if we have cursors to wait for)
-        toDelete->lastLoggedTS = logCursorsWaiting(toDelete->ns, toDelete->min, toDelete->max,
-                                                   toDelete->cursorsToWait, 0, 0);
-        toDelete->queueStartTS = toDelete->lastLoggedTS;
-
-        {
-            scoped_lock sl(_queueMutex);
-
-            if (toDelete->cursorsToWait.empty()) {
-                _taskQueue.push_back(toDelete.release());
-                _taskQueueNotEmptyCV.notify_one();
-            }
-            else {
-                _notReadyQueue.push_back(toDelete.release());
-            }
-        }
-
+    if (nsComp < 0) {
         return true;
     }
 
-    bool RangeDeleter::deleteNow(const std::string& ns,
-                                 const BSONObj& min,
-                                 const BSONObj& max,
-                                 const BSONObj& shardKeyPattern,
-                                 bool secondaryThrottle,
-                                 string* errMsg) {
-        if (stopRequested()) {
+    if (nsComp > 0) {
+        return false;
+    }
+
+    return compareRanges(lhs->min, lhs->max, rhs->min, rhs->max) < 0;
+}
+
+RangeDeleter::RangeDeleter(RangeDeleterEnv* env)
+    : _env(env),  // ownership xfer
+      _stopRequested(false),
+      _deletesInProgress(0) {}
+
+RangeDeleter::~RangeDeleter() {
+    for (TaskList::iterator it = _notReadyQueue.begin(); it != _notReadyQueue.end(); ++it) {
+        delete (*it);
+    }
+
+    for (TaskList::iterator it = _taskQueue.begin(); it != _taskQueue.end(); ++it) {
+        delete (*it);
+    }
+
+    for (NSMinMaxSet::iterator it = _deleteSet.begin(); it != _deleteSet.end(); ++it) {
+        delete (*it);
+    }
+
+    for (std::deque<DeleteJobStats*>::iterator it = _statsHistory.begin();
+         it != _statsHistory.end();
+         ++it) {
+        delete (*it);
+    }
+}
+
+void RangeDeleter::startWorkers() {
+    if (!_worker) {
+        _worker.reset(new stdx::thread(stdx::bind(&RangeDeleter::doWork, this)));
+    }
+}
+
+void RangeDeleter::stopWorkers() {
+    {
+        stdx::lock_guard<stdx::mutex> sl(_stopMutex);
+        _stopRequested = true;
+    }
+
+    if (_worker) {
+        _worker->join();
+    }
+
+    stdx::unique_lock<stdx::mutex> sl(_queueMutex);
+    while (_deletesInProgress > 0) {
+        _nothingInProgressCV.wait(sl);
+    }
+}
+
+bool RangeDeleter::queueDelete(OperationContext* txn,
+                               const RangeDeleterOptions& options,
+                               Notification* notifyDone,
+                               std::string* errMsg) {
+    string dummy;
+    if (errMsg == NULL)
+        errMsg = &dummy;
+
+    const string& ns(options.range.ns);
+    const BSONObj& min(options.range.minKey);
+    const BSONObj& max(options.range.maxKey);
+
+    unique_ptr<RangeDeleteEntry> toDelete(new RangeDeleteEntry(options));
+    toDelete->notifyDone = notifyDone;
+
+    {
+        stdx::lock_guard<stdx::mutex> sl(_queueMutex);
+        if (_stopRequested) {
             *errMsg = "deleter is already stopped.";
             return false;
         }
 
-        string dummy;
-        if (errMsg == NULL) errMsg = &dummy;
-
-        NSMinMax deleteRange(ns, min, max);
-        {
-            scoped_lock sl(_queueMutex);
-            if (!canEnqueue_inlock(ns, min, max, errMsg)) {
-                return false;
-            }
-
-            _deleteSet.insert(&deleteRange);
-            _stats->incTotalDeletes_inlock();
-
-            // Note: count for pending deletes is an integral part of the shutdown story.
-            // Therefore, to simplify things, there is no "pending" state for deletes in
-            // deleteNow, the state transition is simply inProgress -> done.
-            _stats->incInProgressDeletes_inlock();
-        }
-
-        set<CursorId> cursorsToWait;
-        _env->getCursorIds(ns, &cursorsToWait);
-
-        long long checkIntervalMillis = 5;
-
-        // Log first waiting message (if we have cursors to wait for)
-        Date_t lastLoggedTS = logCursorsWaiting(ns, min, max, cursorsToWait, 0, 0);
-        Date_t queueStartTS = lastLoggedTS;
-
-        while (!cursorsToWait.empty()) {
-
-            // Log waiting for cursor messages
-            lastLoggedTS = logCursorsWaiting(ns, min, max, cursorsToWait,
-                                             queueStartTS, lastLoggedTS);
-
-            set<CursorId> cursorsNow;
-            _env->getCursorIds(ns, &cursorsNow);
-
-            set<CursorId> cursorsLeft;
-            std::set_intersection(cursorsToWait.begin(),
-                                  cursorsToWait.end(),
-                                  cursorsNow.begin(),
-                                  cursorsNow.end(),
-                                  std::inserter(cursorsLeft, cursorsLeft.end()));
-
-            cursorsToWait.swap(cursorsLeft);
-
-            if (stopRequested()) {
-                *errMsg = "deleter was stopped.";
-
-                scoped_lock sl(_queueMutex);
-                _deleteSet.erase(&deleteRange);
-
-                _stats->decInProgressDeletes_inlock();
-                _stats->decTotalDeletes_inlock();
-
-                if (!_stats->hasInProgress_inlock()) {
-                    _nothingInProgressCV.notify_one();
-                }
-
-                return false;
-            }
-
-            if (checkIntervalMillis < MaxCurorCheckIntervalMillis) {
-                checkIntervalMillis *= 2;
-            }
-
-            sleepmillis(checkIntervalMillis);
-        }
-
-        bool result = _env->deleteRange(ns, min, max, shardKeyPattern,
-                                        secondaryThrottle, errMsg);
-
-        {
-            scoped_lock sl(_queueMutex);
-            _deleteSet.erase(&deleteRange);
-
-            _stats->decInProgressDeletes_inlock();
-            _stats->decTotalDeletes_inlock();
-
-            if (!_stats->hasInProgress_inlock()) {
-                _nothingInProgressCV.notify_one();
-            }
-        }
-
-        return result;
-    }
-
-    bool RangeDeleter::addToBlackList(const StringData& ns,
-                                      const BSONObj& min,
-                                      const BSONObj& max,
-                                      std::string* errMsg) {
-        string dummy;
-        if (errMsg == NULL) errMsg = &dummy;
-
-        scoped_lock sl(_queueMutex);
-
-        if (isBlacklisted_inlock(ns, min, max, errMsg)) {
+        if (!canEnqueue_inlock(ns, min, max, errMsg)) {
             return false;
         }
 
-        for (NSMinMaxSet::const_iterator iter = _deleteSet.begin();
-                iter != _deleteSet.end(); ++iter) {
-            const NSMinMax* const entry = *iter;
-            if (entry->ns == ns && rangeOverlaps(entry->min, entry->max, min, max)) {
-                *errMsg = stream() << "Cannot black list ns: " << ns
-                        << ", min: " << min
-                        << ", max: " << max
-                        << " since it is already queued for deletion.";
-                return false;
+        _deleteSet.insert(new NSMinMax(ns, min.getOwned(), max.getOwned()));
+    }
+
+    if (options.waitForOpenCursors) {
+        _env->getCursorIds(txn, ns, &toDelete->cursorsToWait);
+    }
+
+    toDelete->stats.queueStartTS = jsTime();
+
+    if (!toDelete->cursorsToWait.empty())
+        logCursorsWaiting(toDelete.get());
+
+    {
+        stdx::lock_guard<stdx::mutex> sl(_queueMutex);
+
+        if (toDelete->cursorsToWait.empty()) {
+            toDelete->stats.queueEndTS = jsTime();
+            _taskQueue.push_back(toDelete.release());
+            _taskQueueNotEmptyCV.notify_one();
+        } else {
+            _notReadyQueue.push_back(toDelete.release());
+        }
+    }
+
+    return true;
+}
+
+namespace {
+const int kWTimeoutMillis = 60 * 60 * 1000;
+
+bool _waitForMajority(OperationContext* txn, std::string* errMsg) {
+    const WriteConcernOptions writeConcern(
+        WriteConcernOptions::kMajority, WriteConcernOptions::SyncMode::UNSET, kWTimeoutMillis);
+
+    repl::ReplicationCoordinator::StatusAndDuration replStatus =
+        repl::getGlobalReplicationCoordinator()->awaitReplicationOfLastOpForClient(txn,
+                                                                                   writeConcern);
+    if (!replStatus.status.isOK()) {
+        *errMsg = str::stream() << "rangeDeleter failed while waiting for replication after "
+                                << durationCount<Seconds>(replStatus.duration) << " seconds due to "
+                                << replStatus.status.toString();
+        log() << *errMsg;
+    }
+
+    return replStatus.status.isOK();
+}
+}  // namespace
+
+bool RangeDeleter::deleteNow(OperationContext* txn,
+                             const RangeDeleterOptions& options,
+                             string* errMsg) {
+    if (stopRequested()) {
+        *errMsg = "deleter is already stopped.";
+        return false;
+    }
+
+    string dummy;
+    if (errMsg == NULL)
+        errMsg = &dummy;
+
+    const string& ns(options.range.ns);
+    const BSONObj& min(options.range.minKey);
+    const BSONObj& max(options.range.maxKey);
+
+    NSMinMax deleteRange(ns, min, max);
+    {
+        stdx::lock_guard<stdx::mutex> sl(_queueMutex);
+        if (!canEnqueue_inlock(ns, min, max, errMsg)) {
+            return false;
+        }
+
+        _deleteSet.insert(&deleteRange);
+
+        // Note: count for pending deletes is an integral part of the shutdown story.
+        // Therefore, to simplify things, there is no "pending" state for deletes in
+        // deleteNow, the state transition is simply inProgress -> done.
+        _deletesInProgress++;
+    }
+
+    RangeDeleteEntry taskDetails(options);
+    if (options.waitForOpenCursors) {
+        _env->getCursorIds(txn, ns, &taskDetails.cursorsToWait);
+    }
+
+    long long checkIntervalMillis = 5;
+
+
+    taskDetails.stats.queueStartTS = jsTime();
+
+    for (; !taskDetails.cursorsToWait.empty(); sleepmillis(checkIntervalMillis)) {
+        logCursorsWaiting(&taskDetails);
+
+        set<CursorId> cursorsNow;
+        _env->getCursorIds(txn, ns, &cursorsNow);
+
+        set<CursorId> cursorsLeft;
+        std::set_intersection(taskDetails.cursorsToWait.begin(),
+                              taskDetails.cursorsToWait.end(),
+                              cursorsNow.begin(),
+                              cursorsNow.end(),
+                              std::inserter(cursorsLeft, cursorsLeft.end()));
+
+        taskDetails.cursorsToWait.swap(cursorsLeft);
+
+        if (stopRequested()) {
+            *errMsg = "deleter was stopped.";
+
+            stdx::lock_guard<stdx::mutex> sl(_queueMutex);
+            _deleteSet.erase(&deleteRange);
+
+            _deletesInProgress--;
+
+            if (_deletesInProgress == 0) {
+                _nothingInProgressCV.notify_one();
             }
+
+            return false;
         }
 
-        _blackList.insert(new NSMinMax(ns.toString(), min, max));
-        return true;
-    }
-
-    bool RangeDeleter::removeFromBlackList(const StringData& ns,
-                                           const BSONObj& min,
-                                           const BSONObj& max) {
-        scoped_lock sl(_queueMutex);
-        NSMinMax entry(ns.toString(), min, max);
-        return deletePtrElement(&_blackList, &entry);
-    }
-
-    const RangeDeleterStats* RangeDeleter::getStats() const {
-        return _stats.get();
-    }
-
-    BSONObj RangeDeleter::toBSON() const {
-        scoped_lock sl(_queueMutex);
-
-        BSONObjBuilder builder;
-
-        BSONArrayBuilder notReadyBuilder(builder.subarrayStart("notReady"));
-        for (TaskList::const_iterator iter = _notReadyQueue.begin();
-                iter != _notReadyQueue.end(); ++iter) {
-            notReadyBuilder.append((*iter)->toBSON());
+        if (checkIntervalMillis < kMaxCursorCheckIntervalMillis) {
+            checkIntervalMillis *= 2;
         }
-        notReadyBuilder.doneFast();
+    }
+    taskDetails.stats.queueEndTS = jsTime();
 
-        BSONArrayBuilder readyBuilder(builder.subarrayStart("ready"));
-        for (TaskList::const_iterator iter = _taskQueue.begin();
-                iter != _taskQueue.end(); ++iter) {
-            readyBuilder.append((*iter)->toBSON());
-        }
-        readyBuilder.doneFast();
+    taskDetails.stats.deleteStartTS = jsTime();
+    bool result = _env->deleteRange(txn, taskDetails, &taskDetails.stats.deletedDocCount, errMsg);
 
-        return builder.obj();
+    taskDetails.stats.deleteEndTS = jsTime();
+
+    if (result) {
+        taskDetails.stats.waitForReplStartTS = jsTime();
+        result = _waitForMajority(txn, errMsg);
+        taskDetails.stats.waitForReplEndTS = jsTime();
     }
 
-    void RangeDeleter::doWork() {
-        _env->initThread();
+    {
+        stdx::lock_guard<stdx::mutex> sl(_queueMutex);
+        _deleteSet.erase(&deleteRange);
 
-        while (!inShutdown() && !stopRequested()) {
-            string errMsg;
+        _deletesInProgress--;
 
-            RangeDeleteEntry* nextTask = NULL;
+        if (_deletesInProgress == 0) {
+            _nothingInProgressCV.notify_one();
+        }
+    }
 
-            {
-                scoped_lock sl(_queueMutex);
-                while (_taskQueue.empty()) {
-                    _taskQueueNotEmptyCV.timed_wait(
-                        sl.boost(), duration::milliseconds(NotEmptyTimeoutMillis));
+    recordDelStats(new DeleteJobStats(taskDetails.stats));
+    return result;
+}
 
-                    if (stopRequested()) {
-                        log() << "stopping range deleter worker" << endl;
-                        return;
-                    }
+void RangeDeleter::getStatsHistory(std::vector<DeleteJobStats*>* stats) const {
+    stats->clear();
+    stats->reserve(kDeleteJobsHistory);
 
-                    if (_taskQueue.empty()) {
-                        // Try to check if some deletes are ready and move them to the
-                        // ready queue.
+    stdx::lock_guard<stdx::mutex> sl(_statsHistoryMutex);
+    for (std::deque<DeleteJobStats*>::const_iterator it = _statsHistory.begin();
+         it != _statsHistory.end();
+         ++it) {
+        stats->push_back(new DeleteJobStats(**it));
+    }
+}
 
-                        TaskList::iterator iter = _notReadyQueue.begin();
-                        while (iter != _notReadyQueue.end()) {
-                            RangeDeleteEntry* entry = *iter;
+BSONObj RangeDeleter::toBSON() const {
+    stdx::lock_guard<stdx::mutex> sl(_queueMutex);
 
-                            set<CursorId> cursorsNow;
-                            _env->getCursorIds(entry->ns, &cursorsNow);
+    BSONObjBuilder builder;
 
-                            set<CursorId> cursorsLeft;
-                            std::set_intersection(entry->cursorsToWait.begin(),
-                                                  entry->cursorsToWait.end(),
-                                                  cursorsNow.begin(),
-                                                  cursorsNow.end(),
-                                                  std::inserter(cursorsLeft,
-                                                                cursorsLeft.end()));
+    BSONArrayBuilder notReadyBuilder(builder.subarrayStart("notReady"));
+    for (TaskList::const_iterator iter = _notReadyQueue.begin(); iter != _notReadyQueue.end();
+         ++iter) {
+        notReadyBuilder.append((*iter)->toBSON());
+    }
+    notReadyBuilder.doneFast();
 
-                            entry->cursorsToWait.swap(cursorsLeft);
+    BSONArrayBuilder readyBuilder(builder.subarrayStart("ready"));
+    for (TaskList::const_iterator iter = _taskQueue.begin(); iter != _taskQueue.end(); ++iter) {
+        readyBuilder.append((*iter)->toBSON());
+    }
+    readyBuilder.doneFast();
 
-                            if (entry->cursorsToWait.empty()) {
-                                _taskQueue.push_back(*iter);
-                                _taskQueueNotEmptyCV.notify_one();
-                                iter = _notReadyQueue.erase(iter);
-                            }
-                            else {
-                                // Log waiting for cursor messages
-                                entry->lastLoggedTS = logCursorsWaiting(entry->ns,
-                                                                        entry->min,
-                                                                        entry->max,
-                                                                        entry->cursorsToWait,
-                                                                        entry->queueStartTS,
-                                                                        entry->lastLoggedTS);
-                                ++iter;
-                            }
-                        }
-                    }
-                }
+    return builder.obj();
+}
+
+void RangeDeleter::doWork() {
+    Client::initThreadIfNotAlready("RangeDeleter");
+    Client* client = &cc();
+
+    while (!inShutdown() && !stopRequested()) {
+        string errMsg;
+
+        RangeDeleteEntry* nextTask = NULL;
+
+        {
+            stdx::unique_lock<stdx::mutex> sl(_queueMutex);
+            while (_taskQueue.empty()) {
+                _taskQueueNotEmptyCV.wait_for(sl,
+                                              stdx::chrono::milliseconds(kNotEmptyTimeoutMillis));
 
                 if (stopRequested()) {
                     log() << "stopping range deleter worker" << endl;
                     return;
                 }
 
-                nextTask = _taskQueue.front();
-                _taskQueue.pop_front();
+                if (_taskQueue.empty()) {
+                    // Try to check if some deletes are ready and move them to the
+                    // ready queue.
 
-                _stats->decPendingDeletes_inlock();
-                _stats->incInProgressDeletes_inlock();
+                    TaskList::iterator iter = _notReadyQueue.begin();
+                    while (iter != _notReadyQueue.end()) {
+                        RangeDeleteEntry* entry = *iter;
+
+                        set<CursorId> cursorsNow;
+                        if (entry->options.waitForOpenCursors) {
+                            auto txn = client->makeOperationContext();
+                            _env->getCursorIds(txn.get(), entry->options.range.ns, &cursorsNow);
+                        }
+
+                        set<CursorId> cursorsLeft;
+                        std::set_intersection(entry->cursorsToWait.begin(),
+                                              entry->cursorsToWait.end(),
+                                              cursorsNow.begin(),
+                                              cursorsNow.end(),
+                                              std::inserter(cursorsLeft, cursorsLeft.end()));
+
+                        entry->cursorsToWait.swap(cursorsLeft);
+
+                        if (entry->cursorsToWait.empty()) {
+                            (*iter)->stats.queueEndTS = jsTime();
+                            _taskQueue.push_back(*iter);
+                            _taskQueueNotEmptyCV.notify_one();
+                            iter = _notReadyQueue.erase(iter);
+                        } else {
+                            logCursorsWaiting(entry);
+                            ++iter;
+                        }
+                    }
+                }
             }
 
-            if (!_env->deleteRange(nextTask->ns,
-                                   nextTask->min,
-                                   nextTask->max,
-                                   nextTask->shardKeyPattern,
-                                   nextTask->secondaryThrottle,
-                                   &errMsg)) {
-                warning() << "Error encountered while trying to delete range: "
-                          << errMsg << endl;
+            if (stopRequested()) {
+                log() << "stopping range deleter worker" << endl;
+                return;
             }
 
-            {
-                scoped_lock sl(_queueMutex);
+            nextTask = _taskQueue.front();
+            _taskQueue.pop_front();
 
-                NSMinMax setEntry(nextTask->ns, nextTask->min, nextTask->max);
-                deletePtrElement(&_deleteSet, &setEntry);
-                _stats->decInProgressDeletes_inlock();
-                _stats->decTotalDeletes_inlock();
+            _deletesInProgress++;
+        }
 
-                if (nextTask->notifyDone) {
-                    nextTask->notifyDone->notifyOne();
+        {
+            auto txn = client->makeOperationContext();
+            nextTask->stats.deleteStartTS = jsTime();
+            bool delResult =
+                _env->deleteRange(txn.get(), *nextTask, &nextTask->stats.deletedDocCount, &errMsg);
+            nextTask->stats.deleteEndTS = jsTime();
+
+            if (delResult) {
+                nextTask->stats.waitForReplStartTS = jsTime();
+
+                if (!_waitForMajority(txn.get(), &errMsg)) {
+                    warning() << "Error encountered while waiting for replication: " << errMsg;
                 }
 
-                delete nextTask;
-                nextTask = NULL;
+                nextTask->stats.waitForReplEndTS = jsTime();
+            } else {
+                warning() << "Error encountered while trying to delete range: " << errMsg << endl;
             }
         }
+
+        {
+            stdx::lock_guard<stdx::mutex> sl(_queueMutex);
+
+            NSMinMax setEntry(nextTask->options.range.ns,
+                              nextTask->options.range.minKey,
+                              nextTask->options.range.maxKey);
+            deletePtrElement(&_deleteSet, &setEntry);
+            _deletesInProgress--;
+
+            if (nextTask->notifyDone) {
+                nextTask->notifyDone->notifyOne();
+            }
+        }
+
+        recordDelStats(new DeleteJobStats(nextTask->stats));
+        delete nextTask;
+        nextTask = NULL;
     }
+}
 
-    bool RangeDeleter::isBlacklisted_inlock(const StringData& ns,
-                                            const BSONObj& min,
-                                            const BSONObj& max,
-                                            std::string* errMsg) const {
-        for (NSMinMaxSet::const_iterator iter = _blackList.begin();
-                iter != _blackList.end(); ++iter) {
-            const NSMinMax* const entry = *iter;
-            if (ns != entry->ns) continue;
-
-            if (rangeOverlaps(min, max, entry->min, entry->max)) {
-                *errMsg = stream() << "ns: " << ns
-                        << ", min: " << min
-                        << ", max: " << max
-                        << " intersects with black list"
-                        << " min: " << entry->min
-                        << ", max: " << entry->max;
-                return true;
-            }
-        }
-
+bool RangeDeleter::canEnqueue_inlock(StringData ns,
+                                     const BSONObj& min,
+                                     const BSONObj& max,
+                                     string* errMsg) const {
+    NSMinMax toDelete(ns.toString(), min, max);
+    if (_deleteSet.count(&toDelete) > 0) {
+        *errMsg = str::stream() << "ns: " << ns << ", min: " << min << ", max: " << max
+                                << " is already being processed for deletion.";
         return false;
     }
 
-    bool RangeDeleter::canEnqueue_inlock(const StringData& ns,
-                                         const BSONObj& min,
-                                         const BSONObj& max,
-                                         string* errMsg) const {
-        if (isBlacklisted_inlock(ns, min, max, errMsg)) {
-            return false;
-        }
+    return true;
+}
 
-        NSMinMax toDelete(ns.toString(), min, max);
-        if (_deleteSet.count(&toDelete) > 0) {
-            *errMsg = stream() << "ns: " << ns
-                    << ", min: " << min
-                    << ", max: " << max
-                    << " is already being processed for deletion.";
-            return false;
-        }
+bool RangeDeleter::stopRequested() const {
+    stdx::lock_guard<stdx::mutex> sl(_stopMutex);
+    return _stopRequested;
+}
 
-        return true;
+size_t RangeDeleter::getTotalDeletes() const {
+    stdx::lock_guard<stdx::mutex> sl(_queueMutex);
+    return _deleteSet.size();
+}
+
+size_t RangeDeleter::getPendingDeletes() const {
+    stdx::lock_guard<stdx::mutex> sl(_queueMutex);
+    return _notReadyQueue.size() + _taskQueue.size();
+}
+
+size_t RangeDeleter::getDeletesInProgress() const {
+    stdx::lock_guard<stdx::mutex> sl(_queueMutex);
+    return _deletesInProgress;
+}
+
+void RangeDeleter::recordDelStats(DeleteJobStats* newStat) {
+    stdx::lock_guard<stdx::mutex> sl(_statsHistoryMutex);
+    if (_statsHistory.size() == kDeleteJobsHistory) {
+        delete _statsHistory.front();
+        _statsHistory.pop_front();
     }
 
-    bool RangeDeleter::stopRequested() const {
-        scoped_lock sl(_stopMutex);
-        return _stopRequested;
-    }
+    _statsHistory.push_back(newStat);
+}
 
+RangeDeleteEntry::RangeDeleteEntry(const RangeDeleterOptions& options)
+    : options(options), notifyDone(NULL) {}
+
+BSONObj RangeDeleteEntry::toBSON() const {
+    BSONObjBuilder builder;
+    builder.append("ns", options.range.ns);
+    builder.append("min", options.range.minKey);
+    builder.append("max", options.range.maxKey);
+    BSONArrayBuilder cursorBuilder(builder.subarrayStart("cursors"));
+
+    for (std::set<CursorId>::const_iterator it = cursorsToWait.begin(); it != cursorsToWait.end();
+         ++it) {
+        cursorBuilder.append((long long)*it);
+    }
+    cursorBuilder.doneFast();
+
+    return builder.done().copy();
+}
+
+RangeDeleterOptions::RangeDeleterOptions(const KeyRange& range)
+    : range(range), fromMigrate(false), onlyRemoveOrphanedDocs(false), waitForOpenCursors(false) {}
 }

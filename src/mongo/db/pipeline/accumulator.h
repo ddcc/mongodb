@@ -28,163 +28,260 @@
 
 #pragma once
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
-#include <boost/unordered_set.hpp>
+#include <boost/intrusive_ptr.hpp>
+#include <unordered_set>
+#include <vector>
 
+#include "mongo/base/init.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/pipeline/value.h"
+#include "mongo/stdx/functional.h"
 
 namespace mongo {
-    class Accumulator : public RefCountable {
-    public:
-        /** Process input and update internal state.
-         *  merging should be true when processing outputs from getValue(true).
-         */
-        void process(const Value& input, bool merging) {
-            processInternal(input, merging);
-        }
+/**
+ * Registers an Accumulator to have the name 'key'. When an accumulator with name '$key' is found
+ * during parsing of a $group stage, 'factory' will be called to construct the Accumulator.
+ *
+ * As an example, if your accumulator looks like {"$foo": <args>}, with a factory method 'create',
+ * you would add this line:
+ * REGISTER_EXPRESSION(foo, AccumulatorFoo::create);
+ */
+#define REGISTER_ACCUMULATOR(key, factory)                                     \
+    MONGO_INITIALIZER(addToAccumulatorFactoryMap_##key)(InitializerContext*) { \
+        Accumulator::registerAccumulator("$" #key, (factory));                 \
+        return Status::OK();                                                   \
+    }
 
-        /** Marks the end of the evaluate() phase and return accumulated result.
-         *  toBeMerged should be true when the outputs will be merged by process().
-         */
-        virtual Value getValue(bool toBeMerged) const = 0;
+class Accumulator : public RefCountable {
+public:
+    using Factory = boost::intrusive_ptr<Accumulator>(*)();
 
-        /// The name of the op as used in a serialization of the pipeline.
-        virtual const char* getOpName() const = 0;
+    Accumulator() = default;
 
-        int memUsageForSorter() const {
-            dassert(_memUsageBytes != 0); // This would mean subclass didn't set it
-            return _memUsageBytes;
-        }
+    /** Process input and update internal state.
+     *  merging should be true when processing outputs from getValue(true).
+     */
+    void process(const Value& input, bool merging) {
+        processInternal(input, merging);
+    }
 
-        /// Reset this accumulator to a fresh state ready to receive input.
-        virtual void reset() = 0;
+    /** Marks the end of the evaluate() phase and return accumulated result.
+     *  toBeMerged should be true when the outputs will be merged by process().
+     */
+    virtual Value getValue(bool toBeMerged) const = 0;
 
-    protected:
-        Accumulator() : _memUsageBytes(0) {}
+    /// The name of the op as used in a serialization of the pipeline.
+    virtual const char* getOpName() const = 0;
 
-        /// Update subclass's internal state based on input
-        virtual void processInternal(const Value& input, bool merging) = 0;
+    int memUsageForSorter() const {
+        dassert(_memUsageBytes != 0);  // This would mean subclass didn't set it
+        return _memUsageBytes;
+    }
 
-        /// subclasses are expected to update this as necessary
-        int _memUsageBytes;
+    /// Reset this accumulator to a fresh state ready to receive input.
+    virtual void reset() = 0;
+
+    /**
+     * Registers an Accumulator with a parsing function, so that when an accumulator with the given
+     * name is encountered during parsing of the $group stage, it will call 'factory' to construct
+     * that Accumulator.
+     *
+     * DO NOT call this method directly. Instead, use the REGISTER_ACCUMULATOR macro defined in this
+     * file.
+     */
+    static void registerAccumulator(std::string name, Factory factory);
+
+    /**
+     * Retrieves the Factory for the accumulator specified by the given name, and raises an error if
+     * there is no such Accumulator registered.
+     */
+    static Factory getFactory(StringData name);
+
+    virtual bool isAssociativeAndCommutative() const {
+        return false;
+    }
+
+protected:
+    /// Update subclass's internal state based on input
+    virtual void processInternal(const Value& input, bool merging) = 0;
+
+    /// subclasses are expected to update this as necessary
+    int _memUsageBytes = 0;
+};
+
+
+class AccumulatorAddToSet final : public Accumulator {
+public:
+    AccumulatorAddToSet();
+
+    void processInternal(const Value& input, bool merging) final;
+    Value getValue(bool toBeMerged) const final;
+    const char* getOpName() const final;
+    void reset() final;
+
+    static boost::intrusive_ptr<Accumulator> create();
+
+    bool isAssociativeAndCommutative() const final {
+        return true;
+    }
+
+private:
+    typedef std::unordered_set<Value, Value::Hash> SetType;
+    SetType set;
+};
+
+
+class AccumulatorFirst final : public Accumulator {
+public:
+    AccumulatorFirst();
+
+    void processInternal(const Value& input, bool merging) final;
+    Value getValue(bool toBeMerged) const final;
+    const char* getOpName() const final;
+    void reset() final;
+
+    static boost::intrusive_ptr<Accumulator> create();
+
+private:
+    bool _haveFirst;
+    Value _first;
+};
+
+
+class AccumulatorLast final : public Accumulator {
+public:
+    AccumulatorLast();
+
+    void processInternal(const Value& input, bool merging) final;
+    Value getValue(bool toBeMerged) const final;
+    const char* getOpName() const final;
+    void reset() final;
+
+    static boost::intrusive_ptr<Accumulator> create();
+
+private:
+    Value _last;
+};
+
+
+class AccumulatorSum final : public Accumulator {
+public:
+    AccumulatorSum();
+
+    void processInternal(const Value& input, bool merging) final;
+    Value getValue(bool toBeMerged) const final;
+    const char* getOpName() const final;
+    void reset() final;
+
+    static boost::intrusive_ptr<Accumulator> create();
+
+    bool isAssociativeAndCommutative() const final {
+        return true;
+    }
+
+private:
+    BSONType totalType;
+    long long longTotal;
+    double doubleTotal;
+};
+
+
+class AccumulatorMinMax : public Accumulator {
+public:
+    enum Sense : int {
+        MIN = 1,
+        MAX = -1,  // Used to "scale" comparison.
     };
 
+    explicit AccumulatorMinMax(Sense sense);
 
-    class AccumulatorAddToSet : public Accumulator {
-    public:
-        virtual void processInternal(const Value& input, bool merging);
-        virtual Value getValue(bool toBeMerged) const;
-        virtual const char* getOpName() const;
-        virtual void reset();
+    void processInternal(const Value& input, bool merging) final;
+    Value getValue(bool toBeMerged) const final;
+    const char* getOpName() const final;
+    void reset() final;
 
-        static intrusive_ptr<Accumulator> create();
+    bool isAssociativeAndCommutative() const final {
+        return true;
+    }
 
-    private:
-        AccumulatorAddToSet();
-        typedef boost::unordered_set<Value, Value::Hash> SetType;
-        SetType set;
-    };
+private:
+    Value _val;
+    const Sense _sense;
+};
 
+class AccumulatorMax final : public AccumulatorMinMax {
+public:
+    AccumulatorMax() : AccumulatorMinMax(MAX) {}
+    static boost::intrusive_ptr<Accumulator> create();
+};
 
-    class AccumulatorFirst : public Accumulator {
-    public:
-        virtual void processInternal(const Value& input, bool merging);
-        virtual Value getValue(bool toBeMerged) const;
-        virtual const char* getOpName() const;
-        virtual void reset();
-
-        static intrusive_ptr<Accumulator> create();
-
-    private:
-        AccumulatorFirst();
-
-        bool _haveFirst;
-        Value _first;
-    };
+class AccumulatorMin final : public AccumulatorMinMax {
+public:
+    AccumulatorMin() : AccumulatorMinMax(MIN) {}
+    static boost::intrusive_ptr<Accumulator> create();
+};
 
 
-    class AccumulatorLast : public Accumulator {
-    public:
-        virtual void processInternal(const Value& input, bool merging);
-        virtual Value getValue(bool toBeMerged) const;
-        virtual const char* getOpName() const;
-        virtual void reset();
+class AccumulatorPush final : public Accumulator {
+public:
+    AccumulatorPush();
 
-        static intrusive_ptr<Accumulator> create();
+    void processInternal(const Value& input, bool merging) final;
+    Value getValue(bool toBeMerged) const final;
+    const char* getOpName() const final;
+    void reset() final;
 
-    private:
-        AccumulatorLast();
-        Value _last;
-    };
+    static boost::intrusive_ptr<Accumulator> create();
 
-
-    class AccumulatorSum : public Accumulator {
-    public:
-        virtual void processInternal(const Value& input, bool merging);
-        virtual Value getValue(bool toBeMerged) const;
-        virtual const char* getOpName() const;
-        virtual void reset();
-
-        static intrusive_ptr<Accumulator> create();
-
-    private:
-        AccumulatorSum();
-
-        BSONType totalType;
-        long long longTotal;
-        double doubleTotal;
-    };
+private:
+    std::vector<Value> vpValue;
+};
 
 
-    class AccumulatorMinMax : public Accumulator {
-    public:
-        virtual void processInternal(const Value& input, bool merging);
-        virtual Value getValue(bool toBeMerged) const;
-        virtual const char* getOpName() const;
-        virtual void reset();
+class AccumulatorAvg final : public Accumulator {
+public:
+    AccumulatorAvg();
 
-        static intrusive_ptr<Accumulator> createMin();
-        static intrusive_ptr<Accumulator> createMax();
+    void processInternal(const Value& input, bool merging) final;
+    Value getValue(bool toBeMerged) const final;
+    const char* getOpName() const final;
+    void reset() final;
 
-    private:
-        AccumulatorMinMax(int theSense);
+    static boost::intrusive_ptr<Accumulator> create();
 
-        Value _val;
-        const int _sense; /* 1 for min, -1 for max; used to "scale" comparison */
-    };
-
-
-    class AccumulatorPush : public Accumulator {
-    public:
-        virtual void processInternal(const Value& input, bool merging);
-        virtual Value getValue(bool toBeMerged) const;
-        virtual const char* getOpName() const;
-        virtual void reset();
-
-        static intrusive_ptr<Accumulator> create();
-
-    private:
-        AccumulatorPush();
-
-        vector<Value> vpValue;
-    };
+private:
+    double _total;
+    long long _count;
+};
 
 
-    class AccumulatorAvg : public Accumulator {
-    public:
-        virtual void processInternal(const Value& input, bool merging);
-        virtual Value getValue(bool toBeMerged) const;
-        virtual const char* getOpName() const;
-        virtual void reset();
+class AccumulatorStdDev : public Accumulator {
+public:
+    explicit AccumulatorStdDev(bool isSamp);
 
-        static intrusive_ptr<Accumulator> create();
+    void processInternal(const Value& input, bool merging) final;
+    Value getValue(bool toBeMerged) const final;
+    const char* getOpName() const final;
+    void reset() final;
 
-    private:
-        AccumulatorAvg();
+private:
+    const bool _isSamp;
+    long long _count;
+    double _mean;
+    double _m2;  // Running sum of squares of delta from mean. Named to match algorithm.
+};
 
-        double _total;
-        long long _count;
-    };
+class AccumulatorStdDevPop final : public AccumulatorStdDev {
+public:
+    AccumulatorStdDevPop() : AccumulatorStdDev(false) {}
+    static boost::intrusive_ptr<Accumulator> create();
+};
+
+class AccumulatorStdDevSamp final : public AccumulatorStdDev {
+public:
+    AccumulatorStdDevSamp() : AccumulatorStdDev(true) {}
+    static boost::intrusive_ptr<Accumulator> create();
+};
 }

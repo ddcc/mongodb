@@ -26,7 +26,12 @@
 *    then also delete it in the license file.
 */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kControl
+
+#include "mongo/platform/basic.h"
+
 #ifdef _WIN32
+#include <mmsystem.h>
 #include <crtdbg.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -40,21 +45,28 @@
 
 namespace mongo {
 
-    MONGO_INITIALIZER(Behaviors_Win32)(InitializerContext*) {
+MONGO_INITIALIZER(Behaviors_Win32)(InitializerContext*) {
+    // do not display dialog on abort()
+    _set_abort_behavior(0, _CALL_REPORTFAULT | _WRITE_ABORT_MSG);
 
-        // do not display dialog on abort()
-        _set_abort_behavior(0, _CALL_REPORTFAULT | _WRITE_ABORT_MSG);
+    // hook the C runtime's error display
+    _CrtSetReportHook(crtDebugCallback);
 
-        // hook the C runtime's error display
-        _CrtSetReportHook(crtDebugCallback);
-
-        if (_setmaxstdio(2048) == -1) {
-            warning() << "Failed to increase max open files limit from default of 512 to 2048";
-        }
-
-        return Status::OK();
+    if (_setmaxstdio(2048) == -1) {
+        warning() << "Failed to increase max open files limit from default of 512 to 2048";
     }
 
-} // namespace mongo
+    // Let's set minimum Windows Kernel quantum length to 1ms in order to allow sleepmillis()
+    // to support waiting periods below Windows default quantum length (which can vary per
+    // Windows version)
+    // see http://msdn.microsoft.com/en-us/library/windows/desktop/dd757624(v=vs.85).aspx
+    if (timeBeginPeriod(1) != TIMERR_NOERROR) {
+        warning() << "Failed to set minimum timer resolution to 1 millisecond";
+    }
 
-#endif // _WIN32
+    return Status::OK();
+}
+
+}  // namespace mongo
+
+#endif  // _WIN32

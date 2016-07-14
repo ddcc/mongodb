@@ -26,7 +26,7 @@
 *    it in the license file.
 */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/pipeline/document.h"
@@ -37,72 +37,68 @@
 
 namespace mongo {
 
-    const char DocumentSourceSkip::skipName[] = "$skip";
+using boost::intrusive_ptr;
 
-    DocumentSourceSkip::DocumentSourceSkip(const intrusive_ptr<ExpressionContext> &pExpCtx):
-        DocumentSource(pExpCtx),
-        _skip(0),
-        _needToSkip(true) {
-    }
+DocumentSourceSkip::DocumentSourceSkip(const intrusive_ptr<ExpressionContext>& pExpCtx)
+    : DocumentSource(pExpCtx), _skip(0), _needToSkip(true) {}
 
-    const char *DocumentSourceSkip::getSourceName() const {
-        return skipName;
-    }
+REGISTER_DOCUMENT_SOURCE(skip, DocumentSourceSkip::createFromBson);
 
-    bool DocumentSourceSkip::coalesce(
-        const intrusive_ptr<DocumentSource> &pNextSource) {
-        DocumentSourceSkip *pSkip =
-            dynamic_cast<DocumentSourceSkip *>(pNextSource.get());
+const char* DocumentSourceSkip::getSourceName() const {
+    return "$skip";
+}
 
-        /* if it's not another $skip, we can't coalesce */
-        if (!pSkip)
-            return false;
+bool DocumentSourceSkip::coalesce(const intrusive_ptr<DocumentSource>& pNextSource) {
+    DocumentSourceSkip* pSkip = dynamic_cast<DocumentSourceSkip*>(pNextSource.get());
 
-        /* we need to skip over the sum of the two consecutive $skips */
-        _skip += pSkip->_skip;
-        return true;
-    }
+    /* if it's not another $skip, we can't coalesce */
+    if (!pSkip)
+        return false;
 
-    boost::optional<Document> DocumentSourceSkip::getNext() {
-        pExpCtx->checkForInterrupt();
+    /* we need to skip over the sum of the two consecutive $skips */
+    _skip += pSkip->_skip;
+    return true;
+}
 
-        if (_needToSkip) {
-            _needToSkip = false;
-            for (long long i=0; i < _skip; i++) {
-                if (!pSource->getNext())
-                    return boost::none;
-            }
+boost::optional<Document> DocumentSourceSkip::getNext() {
+    pExpCtx->checkForInterrupt();
+
+    if (_needToSkip) {
+        _needToSkip = false;
+        for (long long i = 0; i < _skip; i++) {
+            if (!pSource->getNext())
+                return boost::none;
         }
-
-        return pSource->getNext();
     }
 
-    Value DocumentSourceSkip::serialize(bool explain) const {
-        return Value(DOC(getSourceName() << _skip));
-    }
+    return pSource->getNext();
+}
 
-    intrusive_ptr<DocumentSourceSkip> DocumentSourceSkip::create(
-        const intrusive_ptr<ExpressionContext> &pExpCtx) {
-        intrusive_ptr<DocumentSourceSkip> pSource(
-            new DocumentSourceSkip(pExpCtx));
-        return pSource;
-    }
+Value DocumentSourceSkip::serialize(bool explain) const {
+    return Value(DOC(getSourceName() << _skip));
+}
 
-    intrusive_ptr<DocumentSource> DocumentSourceSkip::createFromBson(
-            BSONElement elem,
-            const intrusive_ptr<ExpressionContext> &pExpCtx) {
-        uassert(15972, str::stream() << DocumentSourceSkip::skipName <<
-                ":  the value to skip must be a number",
-                elem.isNumber());
+intrusive_ptr<DocumentSource> DocumentSourceSkip::optimize() {
+    return _skip == 0 ? nullptr : this;
+}
 
-        intrusive_ptr<DocumentSourceSkip> pSkip(
-            DocumentSourceSkip::create(pExpCtx));
+intrusive_ptr<DocumentSourceSkip> DocumentSourceSkip::create(
+    const intrusive_ptr<ExpressionContext>& pExpCtx) {
+    intrusive_ptr<DocumentSourceSkip> pSource(new DocumentSourceSkip(pExpCtx));
+    return pSource;
+}
 
-        pSkip->_skip = elem.numberLong();
-        uassert(15956, str::stream() << DocumentSourceSkip::skipName <<
-                ":  the number to skip cannot be negative",
-                pSkip->_skip >= 0);
+intrusive_ptr<DocumentSource> DocumentSourceSkip::createFromBson(
+    BSONElement elem, const intrusive_ptr<ExpressionContext>& pExpCtx) {
+    uassert(15972,
+            str::stream() << "Argument to $skip must be a number not a " << typeName(elem.type()),
+            elem.isNumber());
 
-        return pSkip;
-    }
+    intrusive_ptr<DocumentSourceSkip> pSkip(DocumentSourceSkip::create(pExpCtx));
+
+    pSkip->_skip = elem.numberLong();
+    uassert(15956, "Argument to $skip cannot be negative", pSkip->_skip >= 0);
+
+    return pSkip;
+}
 }

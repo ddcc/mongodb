@@ -102,7 +102,7 @@ typedef uint16_t u_int16_t;
 
 #endif
 
-#if defined __sunos__ || defined __freebsd__
+#if defined __sun || defined __FreeBSD__ || defined __OpenBSD__
 #ifdef _LITTLE_ENDIAN
 #define IS_LITTLE_ENDIAN
 #elif defined _BIG_ENDIAN
@@ -124,16 +124,21 @@ typedef uint16_t u_int16_t;
 #define bswap_16(x) OSSwapInt16(x)
 #define bswap_32(x) OSSwapInt32(x)
 #define bswap_64(x) OSSwapInt64(x)
-#elif defined __sunos__
+#elif defined __sun
 #include <sys/byteorder.h>
 #define bswap_16(x) BSWAP_16(x)
 #define bswap_32(x) BSWAP_32(x)
 #define bswap_64(x) BSWAP_64(x)
-#elif defined __freebsd__
+#elif defined __FreeBSD__
 #include <sys/endian.h>
 #define bswap_16(x) bswap16(x)
 #define bswap_32(x) bswap32(x)
 #define bswap_64(x) bswap64(x)
+#elif defined __OpenBSD__
+#include <sys/endian.h>
+#define bswap_16(x) swap16(x)
+#define bswap_32(x) swap32(x)
+#define bswap_64(x) swap64(x)
 #else
 #include <byteswap.h>
 #endif
@@ -680,7 +685,7 @@ extern inline void prefetch(const char *x) {}
 
 #endif  // !HAVE_ATTRIBUTE_SECTION
 
-#if defined __sunos__ || defined _WIN32
+#if defined __sun || defined _WIN32
 inline double drem(double x, double y) {
     double quot = x/y;
     int iquot;
@@ -704,24 +709,10 @@ inline double drem(double x, double y) {
 #define strtoll  _strtoi64
 #define strtoull _strtoui64
 #define safe_vsnprintf _vsnprintf
+#if _MSC_VER < 1900
 #define snprintf _snprintf
-
-#if _MSC_VER < 1800
-inline void va_copy(va_list& a, va_list& b) {
-  a = b;
-}
 #endif
-using namespace std;
-#define isnan _isnan
-#define snprintf _snprintf
-#include "float.h"
-inline double sqrt(int x) { return sqrt((double)x); }
-inline int isinf(double x) {
-  const int float_point_class =_fpclass(x);
-  if (float_point_class == _FPCLASS_PINF) return 1;
-  if (float_point_class == _FPCLASS_NINF) return -1;
-  return 0;
-}
+
 #endif
 
 #ifdef COMPILER_MSVC     /* if Visual C++ */

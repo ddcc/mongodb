@@ -28,7 +28,6 @@
 // *    then also delete it in the license file.
 // */
 //
-// #include "mongo/pch.h"
 
 #pragma once
 
@@ -38,19 +37,25 @@
 
 namespace mongo {
 
-    inline string GetWinErrMsg(DWORD err) {
-        LPTSTR errMsg;
-        ::FormatMessage( FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM, NULL, err, 0, (LPTSTR)&errMsg, 0, NULL );
-        std::string errMsgStr = toUtf8String( errMsg );
-        ::LocalFree( errMsg );
-        // FormatMessage() appends a newline to the end of error messages, we trim it because endl flushes the buffer.
-        errMsgStr = errMsgStr.erase( errMsgStr.length() - 2 );
-        std::ostringstream output;
-        output << errMsgStr << " (" << err << ")";
+inline std::string GetWinErrMsg(DWORD err) {
+    LPTSTR errMsg;
+    ::FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
+                    NULL,
+                    err,
+                    0,
+                    (LPTSTR)&errMsg,
+                    0,
+                    NULL);
+    std::string errMsgStr = toUtf8String(errMsg);
+    ::LocalFree(errMsg);
+    // FormatMessage() appends a newline to the end of error messages, we trim it because std::endl
+    // flushes the buffer.
+    errMsgStr = errMsgStr.erase(errMsgStr.length() - 2);
+    std::ostringstream output;
+    output << errMsgStr << " (" << err << ")";
 
-        return output.str();
-    }
+    return output.str();
+}
 }
 
 #endif
-

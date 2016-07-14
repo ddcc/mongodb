@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2012 10gen Inc.
+ *    Copyright (C) 2012-2015 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -17,35 +17,33 @@
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the GNU Affero General Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
-#include "mongo/client/connpool.h"
-#include "mongo/client/dbclientinterface.h"
-#include "mongo/client/dbclient_rs.h"
+#include "mongo/platform/basic.h"
+
+
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/replica_set_monitor_internal.h"
-#include "mongo/dbtests/mock/mock_conn_registry.h"
-#include "mongo/dbtests/mock/mock_replica_set.h"
 #include "mongo/unittest/unittest.h"
 
+namespace {
+
 using namespace mongo;
+using std::set;
 
 // Pull nested types to top-level scope
 typedef ReplicaSetMonitor::IsMasterReply IsMasterReply;
-typedef ReplicaSetMonitor::ScanState ScanState;
-typedef ReplicaSetMonitor::ScanStatePtr ScanStatePtr;
 typedef ReplicaSetMonitor::SetState SetState;
 typedef ReplicaSetMonitor::SetStatePtr SetStatePtr;
 typedef ReplicaSetMonitor::Refresher Refresher;
 typedef Refresher::NextStep NextStep;
-typedef ScanState::UnconfirmedReplies UnconfirmedReplies;
 typedef SetState::Node Node;
 typedef SetState::Nodes Nodes;
 
@@ -64,8 +62,8 @@ const std::set<HostAndPort> basicSeedsSet(basicSeeds.begin(), basicSeeds.end());
 // current (only) thread, so they do not lock SetState::mutex before examining state. This is
 // NOT something that non-test code should do.
 
-TEST(ReplicaSetMonitorTests, InitialState) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, InitialState) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     ASSERT_EQUALS(state->name, "name");
     ASSERT(state->seedNodes == basicSeedsSet);
     ASSERT(state->lastSeenMaster.empty());
@@ -80,26 +78,20 @@ TEST(ReplicaSetMonitorTests, InitialState) {
     }
 }
 
-TEST(ReplicaSetMonitorTests, IsMasterBadParse) {
+TEST(ReplicaSetMonitor, IsMasterBadParse) {
     BSONObj ismaster = BSON("hosts" << BSON_ARRAY("mongo.example:badport"));
     IsMasterReply imr(HostAndPort("mongo.example:27017"), -1, ismaster);
     ASSERT_EQUALS(imr.ok, false);
 }
 
-TEST(ReplicaSetMonitorTests, IsMasterReplyRSNotInitiated) {
+TEST(ReplicaSetMonitor, IsMasterReplyRSNotInitiated) {
     BSONObj ismaster = BSON(
-           "ismaster" << false
-        << "secondary" << false
-        << "info" << "can't get local.system.replset config from self or any seed (EMPTYCONFIG)"
-        << "isreplicaset" << true
-        << "maxBsonObjectSize" << 16777216
-        << "maxMessageSizeBytes" << 48000000
-        << "maxWriteBatchSize" << 1000
-        << "localTime" << mongo::jsTime()
-        << "maxWireVersion" << 2
-        << "minWireVersion" << 0
-        << "ok" << 1
-        );
+        "ismaster" << false << "secondary" << false << "info"
+                   << "can't get local.system.replset config from self or any seed (EMPTYCONFIG)"
+                   << "isreplicaset" << true << "maxBsonObjectSize" << 16777216
+                   << "maxMessageSizeBytes" << 48000000 << "maxWriteBatchSize" << 1000
+                   << "localTime" << mongo::jsTime() << "maxWireVersion" << 2 << "minWireVersion"
+                   << 0 << "ok" << 1);
 
     IsMasterReply imr(HostAndPort(), -1, ismaster);
 
@@ -108,34 +100,33 @@ TEST(ReplicaSetMonitorTests, IsMasterReplyRSNotInitiated) {
     ASSERT_EQUALS(imr.hidden, false);
     ASSERT_EQUALS(imr.secondary, false);
     ASSERT_EQUALS(imr.isMaster, false);
+    ASSERT_EQUALS(imr.configVersion, 0);
+    ASSERT(!imr.electionId.isSet());
     ASSERT(imr.primary.empty());
     ASSERT(imr.normalHosts.empty());
     ASSERT(imr.tags.isEmpty());
 }
 
-TEST(ReplicaSetMonitorTests, IsMasterReplyRSPrimary) {
-    BSONObj ismaster = BSON(
-           "setName" << "test"
-        << "setVersion" << 1
-        << "ismaster" << true
-        << "secondary" << false
-        << "hosts" << BSON_ARRAY("mongo.example:3000")
-        << "primary" << "mongo.example:3000"
-        << "me" << "mongo.example:3000"
-        << "maxBsonObjectSize" << 16777216
-        << "maxMessageSizeBytes" << 48000000
-        << "maxWriteBatchSize" << 1000
-        << "localTime" << mongo::jsTime()
-        << "maxWireVersion" << 2
-        << "minWireVersion" << 0
-        << "ok" << 1
-        );
+TEST(ReplicaSetMonitor, IsMasterReplyRSPrimary) {
+    BSONObj ismaster = BSON("setName"
+                            << "test"
+                            << "setVersion" << 1 << "electionId" << OID("7fffffff0000000000000001")
+                            << "ismaster" << true << "secondary" << false << "hosts"
+                            << BSON_ARRAY("mongo.example:3000") << "primary"
+                            << "mongo.example:3000"
+                            << "me"
+                            << "mongo.example:3000"
+                            << "maxBsonObjectSize" << 16777216 << "maxMessageSizeBytes" << 48000000
+                            << "maxWriteBatchSize" << 1000 << "localTime" << mongo::jsTime()
+                            << "maxWireVersion" << 2 << "minWireVersion" << 0 << "ok" << 1);
 
     IsMasterReply imr(HostAndPort("mongo.example:3000"), -1, ismaster);
 
     ASSERT_EQUALS(imr.ok, true);
     ASSERT_EQUALS(imr.host.toString(), HostAndPort("mongo.example:3000").toString());
     ASSERT_EQUALS(imr.setName, "test");
+    ASSERT_EQUALS(imr.configVersion, 1);
+    ASSERT_EQUALS(imr.electionId, OID("7fffffff0000000000000001"));
     ASSERT_EQUALS(imr.hidden, false);
     ASSERT_EQUALS(imr.secondary, false);
     ASSERT_EQUALS(imr.isMaster, true);
@@ -144,31 +135,26 @@ TEST(ReplicaSetMonitorTests, IsMasterReplyRSPrimary) {
     ASSERT(imr.tags.isEmpty());
 }
 
-TEST(ReplicaSetMonitorTests, IsMasterReplyPassiveSecondary) {
-    BSONObj ismaster = BSON(
-           "setName" << "test"
-        << "setVersion" << 1
-        << "ismaster" << false
-        << "secondary" << true
-        << "hosts" << BSON_ARRAY("mongo.example:3000")
-        << "passives" << BSON_ARRAY("mongo.example:3001")
-        << "primary" << "mongo.example:3000"
-        << "passive" << true
-        << "me" << "mongo.example:3001"
-        << "maxBsonObjectSize" << 16777216
-        << "maxMessageSizeBytes" << 48000000
-        << "maxWriteBatchSize" << 1000
-        << "localTime" << mongo::jsTime()
-        << "maxWireVersion" << 2
-        << "minWireVersion" << 0
-        << "ok" << 1
-        );
+TEST(ReplicaSetMonitor, IsMasterReplyPassiveSecondary) {
+    BSONObj ismaster = BSON("setName"
+                            << "test"
+                            << "setVersion" << 2 << "electionId" << OID("7fffffff0000000000000001")
+                            << "ismaster" << false << "secondary" << true << "hosts"
+                            << BSON_ARRAY("mongo.example:3000") << "passives"
+                            << BSON_ARRAY("mongo.example:3001") << "primary"
+                            << "mongo.example:3000"
+                            << "passive" << true << "me"
+                            << "mongo.example:3001"
+                            << "maxBsonObjectSize" << 16777216 << "maxMessageSizeBytes" << 48000000
+                            << "maxWriteBatchSize" << 1000 << "localTime" << mongo::jsTime()
+                            << "maxWireVersion" << 2 << "minWireVersion" << 0 << "ok" << 1);
 
     IsMasterReply imr(HostAndPort("mongo.example:3001"), -1, ismaster);
 
     ASSERT_EQUALS(imr.ok, true);
     ASSERT_EQUALS(imr.host.toString(), HostAndPort("mongo.example:3001").toString());
     ASSERT_EQUALS(imr.setName, "test");
+    ASSERT_EQUALS(imr.configVersion, 2);
     ASSERT_EQUALS(imr.hidden, false);
     ASSERT_EQUALS(imr.secondary, true);
     ASSERT_EQUALS(imr.isMaster, false);
@@ -176,65 +162,61 @@ TEST(ReplicaSetMonitorTests, IsMasterReplyPassiveSecondary) {
     ASSERT(imr.normalHosts.count(HostAndPort("mongo.example:3000")));
     ASSERT(imr.normalHosts.count(HostAndPort("mongo.example:3001")));
     ASSERT(imr.tags.isEmpty());
+    ASSERT(!imr.electionId.isSet());
 }
 
-TEST(ReplicaSetMonitorTests, IsMasterReplyHiddenSecondary) {
-    BSONObj ismaster = BSON(
-           "setName" << "test"
-        << "setVersion" << 1
-        << "ismaster" << false
-        << "secondary" << true
-        << "hosts" << BSON_ARRAY("mongo.example:3000")
-        << "primary" << "mongo.example:3000"
-        << "passive" << true
-        << "hidden" << true
-        << "me" << "mongo.example:3001"
-        << "maxBsonObjectSize" << 16777216
-        << "maxMessageSizeBytes" << 48000000
-        << "maxWriteBatchSize" << 1000
-        << "localTime" << mongo::jsTime()
-        << "maxWireVersion" << 2
-        << "minWireVersion" << 0
-        << "ok" << 1
-        );
+TEST(ReplicaSetMonitor, IsMasterReplyHiddenSecondary) {
+    BSONObj ismaster = BSON("setName"
+                            << "test"
+                            << "setVersion" << 2 << "electionId" << OID("7fffffff0000000000000001")
+                            << "ismaster" << false << "secondary" << true << "hosts"
+                            << BSON_ARRAY("mongo.example:3000") << "primary"
+                            << "mongo.example:3000"
+                            << "passive" << true << "hidden" << true << "me"
+                            << "mongo.example:3001"
+                            << "maxBsonObjectSize" << 16777216 << "maxMessageSizeBytes" << 48000000
+                            << "maxWriteBatchSize" << 1000 << "localTime" << mongo::jsTime()
+                            << "maxWireVersion" << 2 << "minWireVersion" << 0 << "ok" << 1);
 
     IsMasterReply imr(HostAndPort("mongo.example:3001"), -1, ismaster);
 
     ASSERT_EQUALS(imr.ok, true);
     ASSERT_EQUALS(imr.host.toString(), HostAndPort("mongo.example:3001").toString());
     ASSERT_EQUALS(imr.setName, "test");
+    ASSERT_EQUALS(imr.configVersion, 2);
     ASSERT_EQUALS(imr.hidden, true);
     ASSERT_EQUALS(imr.secondary, true);
     ASSERT_EQUALS(imr.isMaster, false);
     ASSERT_EQUALS(imr.primary.toString(), HostAndPort("mongo.example:3000").toString());
     ASSERT(imr.normalHosts.count(HostAndPort("mongo.example:3000")));
     ASSERT(imr.tags.isEmpty());
+    ASSERT(!imr.electionId.isSet());
 }
 
-TEST(ReplicaSetMonitorTests, IsMasterSecondaryWithTags) {
-    BSONObj ismaster = BSON(
-           "setName" << "test"
-        << "setVersion" << 1
-        << "ismaster" << false
-        << "secondary" << true
-        << "hosts" << BSON_ARRAY("mongo.example:3000" << "mongo.example:3001")
-        << "primary" << "mongo.example:3000"
-        << "me" << "mongo.example:3001"
-        << "maxBsonObjectSize" << 16777216
-        << "maxMessageSizeBytes" << 48000000
-        << "maxWriteBatchSize" << 1000
-        << "localTime" << mongo::jsTime()
-        << "maxWireVersion" << 2
-        << "minWireVersion" << 0
-        << "tags" << BSON("dc" << "nyc" << "use" << "production")
-        << "ok" << 1
-        );
+TEST(ReplicaSetMonitor, IsMasterSecondaryWithTags) {
+    BSONObj ismaster = BSON("setName"
+                            << "test"
+                            << "setVersion" << 2 << "electionId" << OID("7fffffff0000000000000001")
+                            << "ismaster" << false << "secondary" << true << "hosts"
+                            << BSON_ARRAY("mongo.example:3000"
+                                          << "mongo.example:3001") << "primary"
+                            << "mongo.example:3000"
+                            << "me"
+                            << "mongo.example:3001"
+                            << "maxBsonObjectSize" << 16777216 << "maxMessageSizeBytes" << 48000000
+                            << "maxWriteBatchSize" << 1000 << "localTime" << mongo::jsTime()
+                            << "maxWireVersion" << 2 << "minWireVersion" << 0 << "tags"
+                            << BSON("dc"
+                                    << "nyc"
+                                    << "use"
+                                    << "production") << "ok" << 1);
 
     IsMasterReply imr(HostAndPort("mongo.example:3001"), -1, ismaster);
 
     ASSERT_EQUALS(imr.ok, true);
     ASSERT_EQUALS(imr.host.toString(), HostAndPort("mongo.example:3001").toString());
     ASSERT_EQUALS(imr.setName, "test");
+    ASSERT_EQUALS(imr.configVersion, 2);
     ASSERT_EQUALS(imr.hidden, false);
     ASSERT_EQUALS(imr.secondary, true);
     ASSERT_EQUALS(imr.isMaster, false);
@@ -243,12 +225,13 @@ TEST(ReplicaSetMonitorTests, IsMasterSecondaryWithTags) {
     ASSERT(imr.normalHosts.count(HostAndPort("mongo.example:3001")));
     ASSERT(imr.tags.hasElement("dc"));
     ASSERT(imr.tags.hasElement("use"));
+    ASSERT(!imr.electionId.isSet());
     ASSERT_EQUALS(imr.tags["dc"].str(), "nyc");
     ASSERT_EQUALS(imr.tags["use"].str(), "production");
 }
 
-TEST(ReplicaSetMonitorTests, CheckAllSeedsSerial) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, CheckAllSeedsSerial) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     set<HostAndPort> seen;
@@ -262,13 +245,14 @@ TEST(ReplicaSetMonitorTests, CheckAllSeedsSerial) {
 
         // mock a reply
         bool primary = ns.host.host() == "a";
-        refresher.receivedIsMaster(ns.host, -1, BSON(
-                "setName" << "name"
-             << "ismaster" << primary
-             << "secondary" << !primary
-             << "hosts" << BSON_ARRAY("a" << "b" << "c")
-             << "ok" << true
-             ));
+        refresher.receivedIsMaster(ns.host,
+                                   -1,
+                                   BSON("setName"
+                                        << "name"
+                                        << "ismaster" << primary << "secondary" << !primary
+                                        << "hosts" << BSON_ARRAY("a"
+                                                                 << "b"
+                                                                 << "c") << "ok" << true));
     }
 
     NextStep ns = refresher.getNextStep();
@@ -287,8 +271,8 @@ TEST(ReplicaSetMonitorTests, CheckAllSeedsSerial) {
     }
 }
 
-TEST(ReplicaSetMonitorTests, CheckAllSeedsParallel) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, CheckAllSeedsParallel) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     set<HostAndPort> seen;
@@ -311,13 +295,14 @@ TEST(ReplicaSetMonitorTests, CheckAllSeedsParallel) {
         ASSERT(ns.host.empty());
 
         bool primary = i == 0;
-        refresher.receivedIsMaster(basicSeeds[i], -1, BSON(
-                "setName" << "name"
-             << "ismaster" << primary
-             << "secondary" << !primary
-             << "hosts" << BSON_ARRAY("a" << "b" << "c")
-             << "ok" << true
-             ));
+        refresher.receivedIsMaster(basicSeeds[i],
+                                   -1,
+                                   BSON("setName"
+                                        << "name"
+                                        << "ismaster" << primary << "secondary" << !primary
+                                        << "hosts" << BSON_ARRAY("a"
+                                                                 << "b"
+                                                                 << "c") << "ok" << true));
     }
 
     // Now all hosts have returned data
@@ -337,8 +322,8 @@ TEST(ReplicaSetMonitorTests, CheckAllSeedsParallel) {
     }
 }
 
-TEST(ReplicaSetMonitorTests, NoMasterInitAllUp) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, NoMasterInitAllUp) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     set<HostAndPort> seen;
@@ -351,13 +336,14 @@ TEST(ReplicaSetMonitorTests, NoMasterInitAllUp) {
         seen.insert(ns.host);
 
         // mock a reply
-        refresher.receivedIsMaster(ns.host, -1, BSON(
-                "setName" << "name"
-             << "ismaster" << false
-             << "secondary" << true
-             << "hosts" << BSON_ARRAY("a" << "b" << "c")
-             << "ok" << true
-             ));
+        refresher.receivedIsMaster(ns.host,
+                                   -1,
+                                   BSON("setName"
+                                        << "name"
+                                        << "ismaster" << false << "secondary" << true << "hosts"
+                                        << BSON_ARRAY("a"
+                                                      << "b"
+                                                      << "c") << "ok" << true));
     }
 
     NextStep ns = refresher.getNextStep();
@@ -376,8 +362,8 @@ TEST(ReplicaSetMonitorTests, NoMasterInitAllUp) {
     }
 }
 
-TEST(ReplicaSetMonitorTests, MasterNotInSeeds_NoPrimaryInIsMaster) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, MasterNotInSeeds_NoPrimaryInIsMaster) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     set<HostAndPort> seen;
@@ -390,26 +376,30 @@ TEST(ReplicaSetMonitorTests, MasterNotInSeeds_NoPrimaryInIsMaster) {
         seen.insert(ns.host);
 
         // mock a reply
-        refresher.receivedIsMaster(ns.host, -1, BSON(
-                "setName" << "name"
-             << "ismaster" << false
-             << "secondary" << true
-             << "hosts" << BSON_ARRAY("a" << "b" << "c" << "d")
-             << "ok" << true
-             ));
+        refresher.receivedIsMaster(ns.host,
+                                   -1,
+                                   BSON("setName"
+                                        << "name"
+                                        << "ismaster" << false << "secondary" << true << "hosts"
+                                        << BSON_ARRAY("a"
+                                                      << "b"
+                                                      << "c"
+                                                      << "d") << "ok" << true));
     }
 
     // Only look at "d" after exhausting all other hosts
     NextStep ns = refresher.getNextStep();
     ASSERT_EQUALS(ns.step, NextStep::CONTACT_HOST);
     ASSERT_EQUALS(ns.host.host(), "d");
-    refresher.receivedIsMaster(ns.host, -1, BSON(
-            "setName" << "name"
-         << "ismaster" << true
-         << "secondary" << false
-         << "hosts" << BSON_ARRAY("a" << "b" << "c" << "d")
-         << "ok" << true
-         ));
+    refresher.receivedIsMaster(ns.host,
+                               -1,
+                               BSON("setName"
+                                    << "name"
+                                    << "ismaster" << true << "secondary" << false << "hosts"
+                                    << BSON_ARRAY("a"
+                                                  << "b"
+                                                  << "c"
+                                                  << "d") << "ok" << true));
 
 
     ns = refresher.getNextStep();
@@ -435,8 +425,8 @@ TEST(ReplicaSetMonitorTests, MasterNotInSeeds_NoPrimaryInIsMaster) {
     ASSERT(node->tags.isEmpty());
 }
 
-TEST(ReplicaSetMonitorTests, MasterNotInSeeds_PrimaryInIsMaster) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, MasterNotInSeeds_PrimaryInIsMaster) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     set<HostAndPort> seen;
@@ -444,24 +434,28 @@ TEST(ReplicaSetMonitorTests, MasterNotInSeeds_PrimaryInIsMaster) {
     for (size_t i = 0; i < basicSeeds.size() + 1; i++) {
         NextStep ns = refresher.getNextStep();
         ASSERT_EQUALS(ns.step, NextStep::CONTACT_HOST);
-        if (i == 1) // d should be the second host we contact since we are told it is primary
+        if (i == 1) {  // d should be the second host we contact since we are told it is primary
             ASSERT_EQUALS(ns.host.host(), "d");
-        else
+        } else {
             ASSERT(basicSeedsSet.count(ns.host));
+        }
 
         ASSERT(!seen.count(ns.host));
         seen.insert(ns.host);
 
         // mock a reply
         bool primary = ns.host.host() == "d";
-        refresher.receivedIsMaster(ns.host, -1, BSON(
-                "setName" << "name"
-             << "ismaster" << primary
-             << "secondary" << !primary
-             << "primary" << "d"
-             << "hosts" << BSON_ARRAY("a" << "b" << "c" << "d")
-             << "ok" << true
-             ));
+        refresher.receivedIsMaster(ns.host,
+                                   -1,
+                                   BSON("setName"
+                                        << "name"
+                                        << "ismaster" << primary << "secondary" << !primary
+                                        << "primary"
+                                        << "d"
+                                        << "hosts" << BSON_ARRAY("a"
+                                                                 << "b"
+                                                                 << "c"
+                                                                 << "d") << "ok" << true));
     }
 
     NextStep ns = refresher.getNextStep();
@@ -488,13 +482,13 @@ TEST(ReplicaSetMonitorTests, MasterNotInSeeds_PrimaryInIsMaster) {
 }
 
 // Make sure we can use slaves we find even if we can't find a primary
-TEST(ReplicaSetMonitorTests, SlavesUsableEvenIfNoMaster) {
+TEST(ReplicaSetMonitor, SlavesUsableEvenIfNoMaster) {
     std::set<HostAndPort> seeds;
     seeds.insert(HostAndPort("a"));
-    SetStatePtr state = boost::make_shared<SetState>("name", seeds);
+    SetStatePtr state = std::make_shared<SetState>("name", seeds);
     Refresher refresher(state);
 
-    const ReadPreferenceSetting secondary(ReadPreference_SecondaryOnly, TagSet());
+    const ReadPreferenceSetting secondary(ReadPreference::SecondaryOnly, TagSet());
 
     // Mock a reply from the only host we know about and have it claim to not be master or know
     // about any other hosts. This leaves the scan with no more hosts to scan, but all hosts are
@@ -503,13 +497,12 @@ TEST(ReplicaSetMonitorTests, SlavesUsableEvenIfNoMaster) {
     NextStep ns = refresher.getNextStep();
     ASSERT_EQUALS(ns.step, NextStep::CONTACT_HOST);
     ASSERT_EQUALS(ns.host.host(), "a");
-    refresher.receivedIsMaster(ns.host, -1, BSON(
-            "setName" << "name"
-         << "ismaster" << false
-         << "secondary" << true
-         << "hosts" << BSON_ARRAY("a")
-         << "ok" << true
-         ));
+    refresher.receivedIsMaster(ns.host,
+                               -1,
+                               BSON("setName"
+                                    << "name"
+                                    << "ismaster" << false << "secondary" << true << "hosts"
+                                    << BSON_ARRAY("a") << "ok" << true));
 
     // Check intended conditions for entry to refreshUntilMatches.
     ASSERT(state->currentScan->hostsToScan.empty());
@@ -526,8 +519,8 @@ TEST(ReplicaSetMonitorTests, SlavesUsableEvenIfNoMaster) {
 }
 
 // Test multiple nodes that claim to be master (we use a last-wins policy)
-TEST(ReplicaSetMonitorTests, MultipleMasterLastNodeWins) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, MultipleMasterLastNodeWins) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     set<HostAndPort> seen;
@@ -541,7 +534,7 @@ TEST(ReplicaSetMonitorTests, MultipleMasterLastNodeWins) {
         seen.insert(ns.host);
     }
 
-    const ReadPreferenceSetting primaryOnly(ReadPreference_PrimaryOnly, TagSet());
+    const ReadPreferenceSetting primaryOnly(ReadPreference::PrimaryOnly, TagSet());
 
     // mock all replies
     for (size_t i = 0; i != basicSeeds.size(); ++i) {
@@ -550,13 +543,14 @@ TEST(ReplicaSetMonitorTests, MultipleMasterLastNodeWins) {
         ASSERT_EQUALS(ns.step, NextStep::WAIT);
         ASSERT(ns.host.empty());
 
-        refresher.receivedIsMaster(basicSeeds[i], -1, BSON(
-                "setName" << "name"
-             << "ismaster" << true
-             << "secondary" << false
-             << "hosts" << BSON_ARRAY("a" << "b" << "c")
-             << "ok" << true
-             ));
+        refresher.receivedIsMaster(basicSeeds[i],
+                                   -1,
+                                   BSON("setName"
+                                        << "name"
+                                        << "ismaster" << true << "secondary" << false << "hosts"
+                                        << BSON_ARRAY("a"
+                                                      << "b"
+                                                      << "c") << "ok" << true));
 
         // Ensure the set primary is the host we just got a reply from
         HostAndPort currentPrimary = state->getMatchingHost(primaryOnly);
@@ -581,24 +575,28 @@ TEST(ReplicaSetMonitorTests, MultipleMasterLastNodeWins) {
 }
 
 // Test nodes disagree about who is in the set, master is source of truth
-TEST(ReplicaSetMonitorTests, MasterIsSourceOfTruth) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, MasterIsSourceOfTruth) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
-    BSONArray primaryHosts = BSON_ARRAY("a" << "b" << "d");
-    BSONArray secondaryHosts = BSON_ARRAY("a" << "b" << "c");
+    BSONArray primaryHosts = BSON_ARRAY("a"
+                                        << "b"
+                                        << "d");
+    BSONArray secondaryHosts = BSON_ARRAY("a"
+                                          << "b"
+                                          << "c");
 
     // mock all replies
     NextStep ns = refresher.getNextStep();
     while (ns.step == NextStep::CONTACT_HOST) {
         bool primary = ns.host.host() == "a";
-        refresher.receivedIsMaster(ns.host, -1, BSON(
-                "setName" << "name"
-             << "ismaster" << primary
-             << "secondary" << !primary
-             << "hosts" << (primary ? primaryHosts : secondaryHosts)
-             << "ok" << true
-             ));
+        refresher.receivedIsMaster(ns.host,
+                                   -1,
+                                   BSON("setName"
+                                        << "name"
+                                        << "ismaster" << primary << "secondary" << !primary
+                                        << "hosts" << (primary ? primaryHosts : secondaryHosts)
+                                        << "ok" << true));
 
         ns = refresher.getNextStep();
     }
@@ -612,13 +610,19 @@ TEST(ReplicaSetMonitorTests, MasterIsSourceOfTruth) {
 }
 
 // Test multiple master nodes that disagree about set membership
-TEST(ReplicaSetMonitorTests, MultipleMastersDisagree) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, MultipleMastersDisagree) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     BSONArray hostsForSeed[3];
-    hostsForSeed[0] = BSON_ARRAY("a" << "b" << "c" << "d");
-    hostsForSeed[1] = BSON_ARRAY("a" << "b" << "c" << "e");
+    hostsForSeed[0] = BSON_ARRAY("a"
+                                 << "b"
+                                 << "c"
+                                 << "d");
+    hostsForSeed[1] = BSON_ARRAY("a"
+                                 << "b"
+                                 << "c"
+                                 << "e");
     hostsForSeed[2] = hostsForSeed[0];
 
     set<HostAndPort> seen;
@@ -631,17 +635,16 @@ TEST(ReplicaSetMonitorTests, MultipleMastersDisagree) {
         seen.insert(ns.host);
     }
 
-    const ReadPreferenceSetting primaryOnly(ReadPreference_PrimaryOnly, TagSet());
+    const ReadPreferenceSetting primaryOnly(ReadPreference::PrimaryOnly, TagSet());
 
     // mock all replies
     for (size_t i = 0; i != basicSeeds.size(); ++i) {
-        refresher.receivedIsMaster(basicSeeds[i], -1, BSON(
-                "setName" << "name"
-             << "ismaster" << true
-             << "secondary" << false
-             << "hosts" << hostsForSeed[i % 2]
-             << "ok" << true
-             ));
+        refresher.receivedIsMaster(basicSeeds[i],
+                                   -1,
+                                   BSON("setName"
+                                        << "name"
+                                        << "ismaster" << true << "secondary" << false << "hosts"
+                                        << hostsForSeed[i % 2] << "ok" << true));
 
         // Ensure the primary is the host we just got a reply from
         HostAndPort currentPrimary = state->getMatchingHost(primaryOnly);
@@ -652,8 +655,7 @@ TEST(ReplicaSetMonitorTests, MultipleMastersDisagree) {
             // "b" thinks node "e" is a member but "d" is not
             ASSERT(state->findNode(HostAndPort("e")));
             ASSERT(!state->findNode(HostAndPort("d")));
-        }
-        else {
+        } else {
             // "a" and "c" think node "d" is a member but "e" is not
             ASSERT(state->findNode(HostAndPort("d")));
             ASSERT(!state->findNode(HostAndPort("e")));
@@ -667,13 +669,12 @@ TEST(ReplicaSetMonitorTests, MultipleMastersDisagree) {
     seen.insert(ns.host);
 
     // reply from "d"
-    refresher.receivedIsMaster(HostAndPort("d"), -1, BSON(
-           "setName" << "name"
-        << "ismaster" << false
-        << "secondary" << true
-        << "hosts" << hostsForSeed[0]
-        << "ok" << true
-        ));
+    refresher.receivedIsMaster(HostAndPort("d"),
+                               -1,
+                               BSON("setName"
+                                    << "name"
+                                    << "ismaster" << false << "secondary" << true << "hosts"
+                                    << hostsForSeed[0] << "ok" << true));
 
     // scan should be complete
     ns = refresher.getNextStep();
@@ -693,15 +694,15 @@ TEST(ReplicaSetMonitorTests, MultipleMastersDisagree) {
 }
 
 // Ensure getMatchingHost returns hosts even if scan is ongoing
-TEST(ReplicaSetMonitorTests, GetMatchingDuringScan) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, GetMatchingDuringScan) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
-    const ReadPreferenceSetting primaryOnly(ReadPreference_PrimaryOnly, TagSet());
-    const ReadPreferenceSetting secondaryOnly(ReadPreference_SecondaryOnly, TagSet());
+    const ReadPreferenceSetting primaryOnly(ReadPreference::PrimaryOnly, TagSet());
+    const ReadPreferenceSetting secondaryOnly(ReadPreference::SecondaryOnly, TagSet());
 
     for (std::vector<HostAndPort>::const_iterator it = basicSeeds.begin(); it != basicSeeds.end();
-            ++it) {
+         ++it) {
         NextStep ns = refresher.getNextStep();
         ASSERT_EQUALS(ns.step, NextStep::CONTACT_HOST);
         ASSERT(basicSeedsSet.count(ns.host));
@@ -716,13 +717,14 @@ TEST(ReplicaSetMonitorTests, GetMatchingDuringScan) {
         ASSERT(ns.host.empty());
 
         bool primary = (i == 1);
-        refresher.receivedIsMaster(basicSeeds[i], -1, BSON(
-                "setName" << "name"
-             << "ismaster" << primary
-             << "secondary" << !primary
-             << "hosts" << BSON_ARRAY("a" << "b" << "c")
-             << "ok" << true
-             ));
+        refresher.receivedIsMaster(basicSeeds[i],
+                                   -1,
+                                   BSON("setName"
+                                        << "name"
+                                        << "ismaster" << primary << "secondary" << !primary
+                                        << "hosts" << BSON_ARRAY("a"
+                                                                 << "b"
+                                                                 << "c") << "ok" << true));
 
         bool hasPrimary = !(state->getMatchingHost(primaryOnly).empty());
         bool hasSecondary = !(state->getMatchingHost(secondaryOnly).empty());
@@ -731,8 +733,7 @@ TEST(ReplicaSetMonitorTests, GetMatchingDuringScan) {
         if (i >= 1) {
             ASSERT(hasPrimary);
             ASSERT(hasSecondary);
-        }
-        else {
+        } else {
             ASSERT(!hasPrimary);
             ASSERT(!hasSecondary);
         }
@@ -744,9 +745,9 @@ TEST(ReplicaSetMonitorTests, GetMatchingDuringScan) {
 }
 
 // Ensure nothing breaks when out-of-band failedHost is called during scan
-TEST(ReplicaSetMonitorTests, OutOfBandFailedHost) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
-    ReplicaSetMonitorPtr rsm = boost::make_shared<ReplicaSetMonitor>(state);
+TEST(ReplicaSetMonitor, OutOfBandFailedHost) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
+    ReplicaSetMonitorPtr rsm = std::make_shared<ReplicaSetMonitor>(state);
     Refresher refresher = rsm->startOrContinueRefresh();
 
     for (size_t i = 0; i != basicSeeds.size(); ++i) {
@@ -756,13 +757,14 @@ TEST(ReplicaSetMonitorTests, OutOfBandFailedHost) {
     for (size_t i = 0; i != basicSeeds.size(); ++i) {
         bool primary = (i == 0);
 
-        refresher.receivedIsMaster(basicSeeds[i], -1, BSON(
-                "setName" << "name"
-             << "ismaster" << primary
-             << "secondary" << !primary
-             << "hosts" << BSON_ARRAY("a" << "b" << "c")
-             << "ok" << true
-             ));
+        refresher.receivedIsMaster(basicSeeds[i],
+                                   -1,
+                                   BSON("setName"
+                                        << "name"
+                                        << "ismaster" << primary << "secondary" << !primary
+                                        << "hosts" << BSON_ARRAY("a"
+                                                                 << "b"
+                                                                 << "c") << "ok" << true));
 
         if (i >= 1) {
             HostAndPort a("a");
@@ -771,8 +773,7 @@ TEST(ReplicaSetMonitorTests, OutOfBandFailedHost) {
             ASSERT(node);
             ASSERT(!node->isUp);
             ASSERT(!node->isMaster);
-        }
-        else {
+        } else {
             Node* node = state->findNode(HostAndPort("a"));
             ASSERT(node);
             ASSERT(node->isUp);
@@ -783,7 +784,7 @@ TEST(ReplicaSetMonitorTests, OutOfBandFailedHost) {
 
 // Newly elected primary with electionId >= maximum electionId seen by the Refresher
 TEST(ReplicaSetMonitorTests, NewPrimaryWithMaxElectionId) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     set<HostAndPort> seen;
@@ -797,7 +798,7 @@ TEST(ReplicaSetMonitorTests, NewPrimaryWithMaxElectionId) {
         seen.insert(ns.host);
     }
 
-    const ReadPreferenceSetting primaryOnly(ReadPreference_PrimaryOnly, TagSet());
+    const ReadPreferenceSetting primaryOnly(ReadPreference::PrimaryOnly, TagSet());
 
     // mock all replies
     for (size_t i = 0; i != basicSeeds.size(); ++i) {
@@ -808,12 +809,13 @@ TEST(ReplicaSetMonitorTests, NewPrimaryWithMaxElectionId) {
 
         refresher.receivedIsMaster(basicSeeds[i],
                                    -1,
-                                   BSON("setName" << "name"
-                                        << "ismaster" << true
-                                        << "secondary" << false
-                                        << "hosts" << BSON_ARRAY("a" << "b" << "c")
-                                        << "electionId" << OID::gen()
-                                        << "ok" << true));
+                                   BSON("setName"
+                                        << "name"
+                                        << "ismaster" << true << "secondary" << false << "hosts"
+                                        << BSON_ARRAY("a"
+                                                      << "b"
+                                                      << "c") << "electionId" << OID::gen() << "ok"
+                                        << true));
 
         // Ensure the set primary is the host we just got a reply from
         HostAndPort currentPrimary = state->getMatchingHost(primaryOnly);
@@ -839,7 +841,7 @@ TEST(ReplicaSetMonitorTests, NewPrimaryWithMaxElectionId) {
 
 // Ignore electionId of secondaries
 TEST(ReplicaSetMonitorTests, IgnoreElectionIdFromSecondaries) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     set<HostAndPort> seen;
@@ -858,13 +860,14 @@ TEST(ReplicaSetMonitorTests, IgnoreElectionIdFromSecondaries) {
         const bool primary = ns.host.host() == "a";
         refresher.receivedIsMaster(ns.host,
                                    -1,
-                                   BSON("setName" << "name"
-                                        << "ismaster" << primary
-                                        << "secondary" << !primary
-                                        << "electionId" << (primary ?
-                                                            primaryElectionId : OID::gen())
-                                        << "hosts" << BSON_ARRAY("a" << "b" << "c")
-                                        << "ok" << true));
+                                   BSON("setName"
+                                        << "name"
+                                        << "ismaster" << primary << "secondary" << !primary
+                                        << "electionId"
+                                        << (primary ? primaryElectionId : OID::gen()) << "hosts"
+                                        << BSON_ARRAY("a"
+                                                      << "b"
+                                                      << "c") << "ok" << true));
     }
 
     // check that the SetState's maxElectionId == primary's electionId
@@ -878,7 +881,7 @@ TEST(ReplicaSetMonitorTests, IgnoreElectionIdFromSecondaries) {
 
 // Stale Primary with obsolete electionId
 TEST(ReplicaSetMonitorTests, StalePrimaryWithObsoleteElectionId) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     const OID firstElectionId = OID::gen();
@@ -896,12 +899,13 @@ TEST(ReplicaSetMonitorTests, StalePrimaryWithObsoleteElectionId) {
 
         refresher.receivedIsMaster(ns.host,
                                    -1,
-                                   BSON("setName" << "name"
-                                        << "ismaster" << true
-                                        << "secondary" << false
-                                        << "electionId" << secondElectionId
-                                        << "hosts" << BSON_ARRAY("a" << "b" << "c")
-                                        << "ok" << true));
+                                   BSON("setName"
+                                        << "name"
+                                        << "ismaster" << true << "secondary" << false
+                                        << "setVersion" << 1 << "electionId" << secondElectionId
+                                        << "hosts" << BSON_ARRAY("a"
+                                                                 << "b"
+                                                                 << "c") << "ok" << true));
 
         Node* node = state->findNode(ns.host);
         ASSERT(node);
@@ -919,12 +923,13 @@ TEST(ReplicaSetMonitorTests, StalePrimaryWithObsoleteElectionId) {
 
         refresher.receivedIsMaster(ns.host,
                                    -1,
-                                   BSON("setName" << "name"
-                                        << "ismaster" << true
-                                        << "secondary" << false
-                                        << "electionId" << firstElectionId
-                                        << "hosts" << BSON_ARRAY("a" << "b" << "c")
-                                        << "ok" << true));
+                                   BSON("setName"
+                                        << "name"
+                                        << "ismaster" << true << "secondary" << false
+                                        << "electionId" << firstElectionId << "hosts"
+                                        << BSON_ARRAY("a"
+                                                      << "b"
+                                                      << "c") << "ok" << true));
 
         Node* node = state->findNode(ns.host);
         ASSERT(node);
@@ -944,11 +949,12 @@ TEST(ReplicaSetMonitorTests, StalePrimaryWithObsoleteElectionId) {
 
         refresher.receivedIsMaster(ns.host,
                                    -1,
-                                   BSON("setName" << "name"
-                                        << "ismaster" << false
-                                        << "secondary" << true
-                                        << "hosts" << BSON_ARRAY("a" << "b" << "c")
-                                        << "ok" << true));
+                                   BSON("setName"
+                                        << "name"
+                                        << "ismaster" << false << "secondary" << true << "hosts"
+                                        << BSON_ARRAY("a"
+                                                      << "b"
+                                                      << "c") << "ok" << true));
 
         Node* node = state->findNode(ns.host);
         ASSERT(node);
@@ -962,3 +968,100 @@ TEST(ReplicaSetMonitorTests, StalePrimaryWithObsoleteElectionId) {
     ASSERT_EQUALS(ns.step, NextStep::DONE);
     ASSERT(ns.host.empty());
 }
+
+TEST(ReplicaSetMonitor, NoPrimaryUpCheck) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
+    ReplicaSetMonitor rsm(state);
+    ASSERT_FALSE(rsm.isKnownToHaveGoodPrimary());
+}
+
+TEST(ReplicaSetMonitor, PrimaryIsUpCheck) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
+    state->nodes.front().isMaster = true;
+    ReplicaSetMonitor rsm(state);
+    ASSERT_TRUE(rsm.isKnownToHaveGoodPrimary());
+}
+
+/**
+ * Repl protocol verion 0 and 1 compatibility checking.
+ */
+TEST(ReplicaSetMonitorTests, TwoPrimaries2ndHasNewerConfigVersion) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
+    Refresher refresher(state);
+
+    auto ns = refresher.getNextStep();
+    ASSERT_EQUALS(ns.step, NextStep::CONTACT_HOST);
+    ASSERT(basicSeedsSet.count(ns.host));
+
+    refresher.receivedIsMaster(ns.host,
+                               -1,
+                               BSON("setName"
+                                    << "name"
+                                    << "ismaster" << true << "secondary" << false << "setVersion"
+                                    << 1 << "electionId" << OID("7fffffff0000000000000001")
+                                    << "hosts" << BSON_ARRAY("a"
+                                                             << "b"
+                                                             << "c") << "ok" << true));
+
+    // check that the SetState's maxElectionId == primary's electionId
+    ASSERT_EQUALS(state->maxElectionId, OID("7fffffff0000000000000001"));
+    ASSERT_EQUALS(state->configVersion, 1);
+
+    const OID primaryElectionId = OID::gen();
+
+    // Newer setVersion, no election id
+    refresher.receivedIsMaster(ns.host,
+                               -1,
+                               BSON("setName"
+                                    << "name"
+                                    << "ismaster" << true << "secondary" << false << "setVersion"
+                                    << 2 << "electionId" << primaryElectionId << "hosts"
+                                    << BSON_ARRAY("a"
+                                                  << "b"
+                                                  << "c") << "ok" << true));
+
+    ASSERT_EQUALS(state->maxElectionId, primaryElectionId);
+    ASSERT_EQUALS(state->configVersion, 2);
+}
+
+/**
+ * Repl protocol verion 0 and 1 compatibility checking.
+ */
+TEST(ReplicaSetMonitorTests, TwoPrimaries2ndHasOlderConfigVersion) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
+    Refresher refresher(state);
+
+    auto ns = refresher.getNextStep();
+    ASSERT_EQUALS(ns.step, NextStep::CONTACT_HOST);
+    ASSERT(basicSeedsSet.count(ns.host));
+
+    const OID primaryElectionId = OID::gen();
+    refresher.receivedIsMaster(ns.host,
+                               -1,
+                               BSON("setName"
+                                    << "name"
+                                    << "ismaster" << true << "secondary" << false << "electionId"
+                                    << primaryElectionId << "setVersion" << 2 << "hosts"
+                                    << BSON_ARRAY("a"
+                                                  << "b"
+                                                  << "c") << "ok" << true));
+
+    ASSERT_EQUALS(state->maxElectionId, primaryElectionId);
+    ASSERT_EQUALS(state->configVersion, 2);
+
+    // Older setVersion, but election id > previous election id. Newer setVersion should win.
+    refresher.receivedIsMaster(ns.host,
+                               -1,
+                               BSON("setName"
+                                    << "name"
+                                    << "ismaster" << true << "secondary" << false << "setVersion"
+                                    << 1 << "electionId" << OID("7fffffff0000000000000001")
+                                    << "hosts" << BSON_ARRAY("a"
+                                                             << "b"
+                                                             << "c") << "ok" << true));
+
+    ASSERT_EQUALS(state->maxElectionId, primaryElectionId);
+    ASSERT_EQUALS(state->configVersion, 2);
+}
+
+}  // namespace

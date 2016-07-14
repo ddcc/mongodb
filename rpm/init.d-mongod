@@ -10,27 +10,20 @@
 
 . /etc/rc.d/init.d/functions
 
-# things from mongod.conf get there by mongod reading it
-
-
 # NOTE: if you change any OPTIONS here, you get what you pay for:
 # this script assumes all options are in the config file.
 CONFIGFILE="/etc/mongod.conf"
 OPTIONS=" -f $CONFIGFILE"
-SYSCONFIG="/etc/sysconfig/mongod"
-
-# FIXME: 1.9.x has a --shutdown flag that parses the config file and
-# shuts down the correct running pid, but that's unavailable in 1.8
-# for now.  This can go away when this script stops supporting 1.8.
-DBPATH=`awk -F'[:=]' -v IGNORECASE=1 '/^[[:blank:]]*dbpath[[:blank:]]*[:=][[:blank:]]*/{print $2}' "$CONFIGFILE" | tr -d '[:blank:]'`
-PIDFILE=`awk -F'[:=]' -v IGNORECASE=1 '/^[[:blank:]]*pidfilepath[[:blank:]]*[:=][[:blank:]]*/{print $2}' "$CONFIGFILE" | tr -d '[:blank:]'`
-PIDDIR=`dirname $PIDFILE`
 
 mongod=${MONGOD-/usr/bin/mongod}
 
 MONGO_USER=mongod
 MONGO_GROUP=mongod
 
+# All variables set before this point can be overridden by users, by
+# setting them directly in the SYSCONFIG file. Use this to explicitly
+# override these values, at your own risk.
+SYSCONFIG="/etc/sysconfig/mongod"
 if [ -f "$SYSCONFIG" ]; then
     . "$SYSCONFIG"
 fi
@@ -44,6 +37,10 @@ then
 else
     NUMACTL=""
 fi
+
+# things from mongod.conf get there by mongod reading it
+PIDFILEPATH=`awk -F'[:=]' -v IGNORECASE=1 '/^[[:blank:]]*(processManagement\.)?pidfilepath[[:blank:]]*[:=][[:blank:]]*/{print $2}' "$CONFIGFILE" | tr -d "[:blank:]\"'" | awk -F'#' '{print $1}'`
+PIDDIR=`dirname $PIDFILEPATH`
 
 start()
 {
@@ -72,17 +69,47 @@ start()
 stop()
 {
   echo -n $"Stopping mongod: "
-  killproc -p "$PIDFILE" -d 300 /usr/bin/mongod
+  mongo_killproc "$PIDFILEPATH" $mongod
   RETVAL=$?
   echo
   [ $RETVAL -eq 0 ] && rm -f /var/lock/subsys/mongod
 }
 
 restart () {
-	stop
-	start
+        stop
+        start
 }
 
+# Send TERM signal to process and wait up to 300 seconds for process to go away.
+# If process is still alive after 300 seconds, send KILL signal.
+# Built-in killproc() (found in /etc/init.d/functions) is on certain versions of Linux
+# where it sleeps for the full $delay seconds if process does not respond fast enough to
+# the initial TERM signal.
+mongo_killproc()
+{
+  local pid_file=$1
+  local procname=$2
+  local -i delay=300
+  local -i duration=10
+  local pid=`pidofproc -p "${pid_file}" ${procname}`
+
+  kill -TERM $pid >/dev/null 2>&1
+  usleep 100000
+  local -i x=0
+  while [ $x -le $delay ] && checkpid $pid; do
+    sleep $duration
+    x=$(( $x + $duration))
+  done
+
+  kill -KILL $pid >/dev/null 2>&1
+  usleep 100000
+
+  checkpid $pid # returns 0 only if the process exists
+  local RC=$?
+  [ "$RC" -eq 0 ] && failure "${procname} shutdown" || rm -f "${pid_file}"; success "${procname} shutdown"
+  RC=$((! $RC)) # invert return code so we return 0 when process is dead.
+  return $RC
+}
 
 RETVAL=0
 

@@ -1,14 +1,13 @@
 // Check that username information gets recorded properly in profiler.
-var conn = startMongodTest();
+var conn = MongoRunner.runMongod();
 var db1 = conn.getDB("profile-a");
 var db2 = db1.getSisterDB("profile-b");
 var username = "user";
-db1.createUser({user:username, pwd: "password", roles: jsTest.basicUserRoles});
-db2.createUser({user:username, pwd: "password", roles: jsTest.basicUserRoles});
-
+db1.createUser({user: username, pwd: "password", roles: jsTest.basicUserRoles});
+db2.createUser({user: username, pwd: "password", roles: jsTest.basicUserRoles});
 
 function lastOp(db) {
-    return db.system.profile.find().sort( { $natural:-1 } ).next();
+    return db.system.profile.find().sort({$natural: -1}).next();
 }
 
 function principalName(user, db) {

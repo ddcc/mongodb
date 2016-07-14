@@ -34,35 +34,70 @@
 
 namespace mongo {
 
+/**
+ * "Types" are the interface to a known data structure that will be deserialized from BSON.
+ */
+class BSONSerializable {
+public:
+    virtual ~BSONSerializable() {}
+
     /**
-     * "Types" are the interface to a known data structure that will be serialized to and
-     * deserialized from BSON.
+     * Returns true if all the mandatory fields are present and have valid
+     * representations. Otherwise returns false and fills in the optional 'errMsg' string.
      */
-    class BSONSerializable {
-    public:
+    virtual bool isValid(std::string* errMsg) const = 0;
 
-        virtual ~BSONSerializable() {}
+    /**
+     * Clears and populates the internal state using the 'source' BSON object if the
+     * latter contains valid values. Otherwise sets errMsg and returns false.
+     */
+    virtual bool parseBSON(const BSONObj& source, std::string* errMsg) = 0;
 
-        /**
-         * Returns true if all the mandatory fields are present and have valid
-         * representations. Otherwise returns false and fills in the optional 'errMsg' string.
-         */
-        virtual bool isValid( std::string* errMsg ) const = 0;
+    /** Clears the internal state. */
+    virtual void clear() = 0;
 
-        /** Returns the BSON representation of the entry. */
-        virtual BSONObj toBSON() const = 0;
+    /** Returns a std::string representation of the current internal state. */
+    virtual std::string toString() const = 0;
+};
 
-        /**
-         * Clears and populates the internal state using the 'source' BSON object if the
-         * latter contains valid values. Otherwise sets errMsg and returns false.
-         */
-        virtual bool parseBSON( const BSONObj& source, std::string* errMsg ) = 0;
+/**
+ * Generic implementation which accepts and stores any BSON object
+ *
+ * Generally this should only be used for compatibility reasons - newer requests should be
+ * fully typed.
+ */
+class RawBSONSerializable : public BSONSerializable {
+public:
+    RawBSONSerializable() {}
 
-        /** Clears the internal state. */
-        virtual void clear() = 0;
+    explicit RawBSONSerializable(const BSONObj& raw) : _raw(raw) {}
 
-        /** Returns a string representation of the current internal state. */
-        virtual std::string toString() const = 0;
-    };
+    virtual ~RawBSONSerializable() {}
 
-} // namespace mongo
+    virtual bool isValid(std::string* errMsg) const {
+        return true;
+    }
+
+    virtual BSONObj toBSON() const {
+        return _raw;
+    }
+
+    virtual bool parseBSON(const BSONObj& source, std::string* errMsg) {
+        _raw = source.getOwned();
+        return true;
+    }
+
+    virtual void clear() {
+        _raw = BSONObj();
+    }
+
+    virtual std::string toString() const {
+        return toBSON().toString();
+    }
+
+private:
+    BSONObj _raw;
+};
+
+
+}  // namespace mongo

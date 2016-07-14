@@ -28,76 +28,19 @@
 
 #pragma once
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/client.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/pdfile.h"
 #include "mongo/util/net/message.h"
 
 namespace mongo {
 
-    // todo: relocked is being called when there was no unlock below. 
-    //       that is weird.
+namespace repl {
+class ReplSettings;
+}  // namespace repl
 
-    /**
-     * Releases the current lock for the duration of its lifetime.
-     *
-     * WARNING: do not put in a smart pointer or any other class. If you absolutely must, you need
-     * to add the throw(DBException) annotation to it's destructor.
-     */
-    struct dbtemprelease {
-        Client::Context * _context;
-        scoped_ptr<Lock::TempRelease> tr;
-        dbtemprelease() {
-            const Client& c = cc();
-            _context = c.getContext();
-            verify( Lock::isLocked() );
-            if( Lock::nested() ) {
-                massert(10298 , "can't temprelease nested lock", false);
-            }
-            if ( _context ) {
-                _context->unlocked();
-            }
-            tr.reset(new Lock::TempRelease);
-            verify( c.curop() );
-            c.curop()->yielded();
-        }
-        ~dbtemprelease() throw(DBException) {
-            tr.reset();
-            if ( _context ) 
-                _context->relocked();
-        }
-    };
+extern void (*snmpInit)();
 
-    /**
-     * only does a temp release if we're not nested and have a lock
-     *
-     * WARNING: do not put in a smart pointer or any other class. If you absolutely must, you need
-     * to add the throw(DBException) annotation to it's destructor.
-     */
-    class dbtempreleasecond : boost::noncopyable {
-        dbtemprelease * real;
-    public:
-        dbtempreleasecond() {
-            real = 0;
-            if( Lock::isLocked() ) {
-                // if nested don't temprelease, and we don't complain either for this class
-                if( !Lock::nested() ) {
-                    real = new dbtemprelease();
-                }
-            }
-        }
-        ~dbtempreleasecond() throw(DBException) {
-            if ( real ) {
-                delete real;
-                real = 0;
-            }
-        }
-        bool unlocked() const { return real != 0; }
-    };
-
-    extern void (*snmpInit)();
-
-} // namespace mongo
+}  // namespace mongo

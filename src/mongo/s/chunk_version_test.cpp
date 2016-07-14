@@ -26,7 +26,7 @@
  *    then also delete it in the license file.
  */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/jsobj.h"
 #include "mongo/s/chunk_version.h"
@@ -35,95 +35,53 @@
 namespace mongo {
 namespace {
 
-    /**
-     * Tests parsing of BSON for versions.  In version 2.2, this parsing is meant to be very
-     * flexible so different formats can be tried and enforced later.
-     *
-     * Formats are:
-     *
-     * A) { vFieldName : <TSTYPE>, [ vFieldNameEpoch : <OID> ], ... }
-     * B) { fieldName : [ <TSTYPE>, <OID> ], ... }
-     *
-     * vFieldName is a specifyable name - usually "version" (default) or "lastmod".  <TSTYPE> is a
-     * type convertible to Timestamp, ideally Timestamp but also numeric.
-     * <OID> is a value of type OID.
-     *
-     */
+TEST(Parsing, EpochIsOptional) {
+    const OID oid = OID::gen();
+    bool canParse = false;
 
-    TEST(Compatibility, LegacyFormatA) {
-        BSONObjBuilder versionObjB;
-        versionObjB.appendTimestamp( "testVersion",
-                                     ChunkVersion( 1, 1, OID() ).toLong() );
-        versionObjB.append( "testVersionEpoch", OID::gen() );
-        BSONObj versionObj = versionObjB.obj();
+    ChunkVersion chunkVersionComplete = ChunkVersion::fromBSON(
+        BSON("lastmod" << Timestamp(Seconds(2), 3) << "lastmodEpoch" << oid), "lastmod", &canParse);
+    ASSERT(canParse);
+    ASSERT(chunkVersionComplete.epoch().isSet());
+    ASSERT(chunkVersionComplete.epoch() == oid);
+    ASSERT_EQ(2, chunkVersionComplete.majorVersion());
+    ASSERT_EQ(3, chunkVersionComplete.minorVersion());
 
-        ChunkVersion parsed =
-            ChunkVersion::fromBSON( versionObj[ "testVersion" ] );
+    canParse = false;
+    ChunkVersion chunkVersionNoEpoch =
+        ChunkVersion::fromBSON(BSON("lastmod" << Timestamp(Seconds(3), 4)), "lastmod", &canParse);
+    ASSERT(canParse);
+    ASSERT(!chunkVersionNoEpoch.epoch().isSet());
+    ASSERT_EQ(3, chunkVersionNoEpoch.majorVersion());
+    ASSERT_EQ(4, chunkVersionNoEpoch.minorVersion());
+}
 
-        ASSERT( ChunkVersion::canParseBSON( versionObj[ "testVersion" ] ) );
-        ASSERT( parsed.majorVersion() == 1 );
-        ASSERT( parsed.minorVersion() == 1 );
-        ASSERT( ! parsed.epoch().isSet() );
+TEST(Comparison, StrictEqual) {
+    OID epoch = OID::gen();
 
-        parsed = ChunkVersion::fromBSON( versionObj, "testVersion" );
+    ASSERT(ChunkVersion(3, 1, epoch).isStrictlyEqualTo(ChunkVersion(3, 1, epoch)));
+    ASSERT(!ChunkVersion(3, 1, epoch).isStrictlyEqualTo(ChunkVersion(3, 1, OID())));
+    ASSERT(!ChunkVersion(3, 1, OID()).isStrictlyEqualTo(ChunkVersion(3, 1, epoch)));
+    ASSERT(ChunkVersion(3, 1, OID()).isStrictlyEqualTo(ChunkVersion(3, 1, OID())));
+    ASSERT(!ChunkVersion(4, 2, epoch).isStrictlyEqualTo(ChunkVersion(4, 1, epoch)));
+}
 
-        ASSERT( ChunkVersion::canParseBSON( versionObj, "testVersion" ) );
-        ASSERT( parsed.majorVersion() == 1 );
-        ASSERT( parsed.minorVersion() == 1 );
-        ASSERT( parsed.epoch().isSet() );
-    }
+TEST(Comparison, OlderThan) {
+    OID epoch = OID::gen();
 
-    TEST(Compatibility, SubArrayFormatB) {
-        BSONObjBuilder tsObjB;
-        tsObjB.appendTimestamp( "ts", ChunkVersion( 1, 1, OID() ).toLong() );
-        BSONObj tsObj = tsObjB.obj();
+    ASSERT(ChunkVersion(3, 1, epoch).isOlderThan(ChunkVersion(4, 1, epoch)));
+    ASSERT(!ChunkVersion(4, 1, epoch).isOlderThan(ChunkVersion(3, 1, epoch)));
 
-        BSONObjBuilder versionObjB;
-        BSONArrayBuilder subArrB( versionObjB.subarrayStart( "testVersion" ) );
-        // Append this weird way so we're sure we get a timestamp type
-        subArrB.append( tsObj.firstElement() );
-        subArrB.append( OID::gen() );
-        subArrB.done();
-        BSONObj versionObj = versionObjB.obj();
+    ASSERT(ChunkVersion(3, 1, epoch).isOlderThan(ChunkVersion(3, 2, epoch)));
+    ASSERT(!ChunkVersion(3, 2, epoch).isOlderThan(ChunkVersion(3, 1, epoch)));
 
-        ChunkVersion parsed =
-            ChunkVersion::fromBSON( versionObj[ "testVersion" ] );
+    ASSERT(!ChunkVersion(3, 1, epoch).isOlderThan(ChunkVersion(4, 1, OID())));
+    ASSERT(!ChunkVersion(4, 1, OID()).isOlderThan(ChunkVersion(3, 1, epoch)));
 
-        ASSERT( ChunkVersion::canParseBSON( versionObj[ "testVersion" ] ) );
-        ASSERT( ChunkVersion::canParseBSON( BSONArray( versionObj[ "testVersion" ].Obj() ) ) );
-        ASSERT( parsed.majorVersion() == 1 );
-        ASSERT( parsed.minorVersion() == 1 );
-        ASSERT( parsed.epoch().isSet() );
-    }
+    ASSERT(ChunkVersion(3, 2, epoch).isOlderThan(ChunkVersion(4, 1, epoch)));
 
-    TEST(Comparison, StrictEqual) {
+    ASSERT(!ChunkVersion(3, 1, epoch).isOlderThan(ChunkVersion(3, 1, epoch)));
+}
 
-        OID epoch = OID::gen();
-
-        ASSERT( ChunkVersion( 3, 1, epoch ).isStrictlyEqualTo( ChunkVersion( 3, 1, epoch ) ) );
-        ASSERT( !ChunkVersion( 3, 1, epoch ).isStrictlyEqualTo( ChunkVersion( 3, 1, OID() ) ) );
-        ASSERT( !ChunkVersion( 3, 1, OID() ).isStrictlyEqualTo( ChunkVersion( 3, 1, epoch ) ) );
-        ASSERT( ChunkVersion( 3, 1, OID() ).isStrictlyEqualTo( ChunkVersion( 3, 1, OID() ) ) );
-        ASSERT( !ChunkVersion( 4, 2, epoch ).isStrictlyEqualTo( ChunkVersion( 4, 1, epoch ) ) );
-    }
-
-    TEST(Comparison, OlderThan) {
-
-        OID epoch = OID::gen();
-
-        ASSERT( ChunkVersion( 3, 1, epoch ).isOlderThan( ChunkVersion( 4, 1, epoch ) ) );
-        ASSERT( !ChunkVersion( 4, 1, epoch ).isOlderThan( ChunkVersion( 3, 1, epoch ) ) );
-
-        ASSERT( ChunkVersion( 3, 1, epoch ).isOlderThan( ChunkVersion( 3, 2, epoch ) ) );
-        ASSERT( !ChunkVersion( 3, 2, epoch ).isOlderThan( ChunkVersion( 3, 1, epoch ) ) );
-
-        ASSERT( !ChunkVersion( 3, 1, epoch ).isOlderThan( ChunkVersion( 4, 1, OID() ) ) );
-        ASSERT( !ChunkVersion( 4, 1, OID() ).isOlderThan( ChunkVersion( 3, 1, epoch ) ) );
-
-        ASSERT( ChunkVersion( 3, 2, epoch ).isOlderThan( ChunkVersion( 4, 1, epoch ) ) );
-
-        ASSERT( !ChunkVersion( 3, 1, epoch ).isOlderThan( ChunkVersion( 3, 1, epoch ) ) );
-    }
-
-} // unnamed namespace
-} // namespace mongo
+}  // unnamed namespace
+}  // namespace mongo

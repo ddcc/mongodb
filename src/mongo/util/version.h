@@ -34,25 +34,37 @@
 #include "mongo/bson/bsonobj.h"
 
 namespace mongo {
-    struct BSONArray;
+struct BSONArray;
+class BSONObjBuilder;
 
-    // mongo version
-    extern const char versionString[];
-    extern const BSONArray versionArray;
-    std::string mongodVersion();
+// mongo version
+extern const char versionString[];
+extern const int versionNumber;
+std::string mongodVersion();
 
-    // Convert a version string into a numeric array
-    BSONArray toVersionArray(const char* version);
+// mongo git version
+const char* gitVersion();
+const char* distName();
+std::vector<std::string> compiledModules();
 
-    // Checks whether another version is the same major version as us
-    bool isSameMajorVersion(const char* version);
+// Checks whether another version is the same major version as us
+bool isSameMajorVersion(const char* version);
 
-    const char * gitVersion();
-    const char * compiledJSEngine();
-    const char * allocator();
-    const char * loaderFlags();
-    const char * compilerFlags();
-    std::string sysInfo();
+// Get/print the version of OpenSSL that's used at runtime
+const std::string openSSLVersion(const std::string& prefix = "", const std::string& suffix = "");
+
+// Append build info data to a BSONObjBuilder
+void appendBuildInfo(BSONObjBuilder& result);
+
+void printTargetMinOS();
+void printBuildInfo();
+void show_warnings();
+
+extern const int kMongoVersionMajor;
+extern const int kMongoVersionMinor;
+extern const int kMongoVersionPatch;
+extern const int kMongoVersionExtra;
+extern const char kMongoVersionExtraStr[];
 
 }  // namespace mongo
 

@@ -26,6 +26,10 @@
 *    it in the license file.
 */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
+
+#include "mongo/platform/basic.h"
+
 #include <sstream>
 #include <string>
 #include <vector>
@@ -35,133 +39,164 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/jsobj.h"
+#include "mongo/db/catalog/apply_ops.h"
+#include "mongo/db/catalog/document_validation.h"
+#include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/dbhash.h"
-#include "mongo/db/instance.h"
-#include "mongo/db/matcher.h"
+#include "mongo/db/db_raii.h"
+#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/db/matcher/matcher.h"
+#include "mongo/db/operation_context_impl.h"
+#include "mongo/db/op_observer.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/write_concern.h"
+#include "mongo/util/log.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
-    class ApplyOpsCmd : public Command {
-    public:
-        virtual bool slaveOk() const { return false; }
-        virtual LockType locktype() const { return WRITE; }
-        virtual bool lockGlobally() const { return true; } // SERVER-4328 todo : is global ok or does this take a long time? i believe multiple ns used so locking individually requires more analysis
-        ApplyOpsCmd() : Command( "applyOps" ) {}
-        virtual void help( stringstream &help ) const {
-            help << "internal (sharding)\n{ applyOps : [ ] , preCondition : [ { ns : ... , q : ... , res : ... } ] }";
+
+using std::string;
+using std::stringstream;
+
+class ApplyOpsCmd : public Command {
+public:
+    virtual bool slaveOk() const {
+        return false;
+    }
+    virtual bool isWriteCommandForConfigServer() const {
+        return true;
+    }
+
+    ApplyOpsCmd() : Command("applyOps") {}
+    virtual void help(stringstream& help) const {
+        help << "internal (sharding)\n{ applyOps : [ ] , preCondition : [ { ns : ... , q : ... , "
+                "res : ... } ] }";
+    }
+    virtual void addRequiredPrivileges(const std::string& dbname,
+                                       const BSONObj& cmdObj,
+                                       std::vector<Privilege>* out) {
+        // applyOps can do pretty much anything, so require all privileges.
+        RoleGraph::generateUniversalPrivileges(out);
+    }
+    virtual bool run(OperationContext* txn,
+                     const string& dbname,
+                     BSONObj& cmdObj,
+                     int,
+                     string& errmsg,
+                     BSONObjBuilder& result) {
+        boost::optional<DisableDocumentValidation> maybeDisableValidation;
+        if (shouldBypassDocumentValidationForCommand(cmdObj))
+            maybeDisableValidation.emplace(txn);
+
+        if (cmdObj.firstElement().type() != Array) {
+            errmsg = "ops has to be an array";
+            return false;
         }
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {
-            // applyOps can do pretty much anything, so require all privileges.
-            RoleGraph::generateUniversalPrivileges(out);
-        }
-        virtual bool run(const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
 
-            if ( cmdObj.firstElement().type() != Array ) {
-                errmsg = "ops has to be an array";
-                return false;
-            }
+        BSONObj ops = cmdObj.firstElement().Obj();
 
-            BSONObj ops = cmdObj.firstElement().Obj();
-
-            {
-                // check input
-                BSONObjIterator i( ops );
-                while ( i.more() ) {
-                    BSONElement e = i.next();
-                    if ( e.type() == Object )
-                        continue;
-                    errmsg = "op not an object: ";
-                    errmsg += e.fieldName();
+        {
+            // check input
+            BSONObjIterator i(ops);
+            while (i.more()) {
+                BSONElement e = i.next();
+                if (!_checkOperation(e, errmsg)) {
                     return false;
                 }
             }
-
-            if ( cmdObj["preCondition"].type() == Array ) {
-                BSONObjIterator i( cmdObj["preCondition"].Obj() );
-                while ( i.more() ) {
-                    BSONObj f = i.next().Obj();
-
-                    BSONObj realres = db.findOne( f["ns"].String() , f["q"].Obj() );
-
-                    Matcher m( f["res"].Obj() );
-                    if ( ! m.matches( realres ) ) {
-                        result.append( "got" , realres );
-                        result.append( "whatFailed" , f );
-                        errmsg = "pre-condition failed";
-                        return false;
-                    }
-                }
-            }
-
-            // apply
-            int num = 0;
-            int errors = 0;
-            
-            BSONObjIterator i( ops );
-            BSONArrayBuilder ab;
-            const bool alwaysUpsert = cmdObj.hasField("alwaysUpsert") ?
-                    cmdObj["alwaysUpsert"].trueValue() : true;
-            
-            while ( i.more() ) {
-                BSONElement e = i.next();
-                const BSONObj& temp = e.Obj();
-
-                string ns = temp["ns"].String();
-
-                // Run operations under a nested lock as a hack to prevent them from yielding.
-                //
-                // The list of operations is supposed to be applied atomically; yielding would break
-                // atomicity by allowing an interruption or a shutdown to occur after only some
-                // operations are applied.  We are already locked globally at this point, so taking
-                // a DBWrite on the namespace creates a nested lock, and yields are disallowed for
-                // operations that hold a nested lock.
-                Lock::DBWrite lk(ns);
-                invariant(Lock::nested());
-
-                Client::Context ctx(ns);
-                bool failed = applyOperation_inlock(temp, false, alwaysUpsert);
-                ab.append(!failed);
-                if ( failed )
-                    errors++;
-
-                num++;
-
-                logOpForDbHash( "u", ns.c_str(), BSONObj(), NULL, NULL, false );
-            }
-
-            result.append( "applied" , num );
-            result.append( "results" , ab.arr() );
-
-            if ( ! fromRepl ) {
-                // We want this applied atomically on slaves
-                // so we re-wrap without the pre-condition for speed
-
-                string tempNS = str::stream() << dbname << ".$cmd";
-
-                // TODO: possibly use mutable BSON to remove preCondition field
-                // once it is available
-                BSONObjIterator iter(cmdObj);
-                BSONObjBuilder cmdBuilder;
-
-                while (iter.more()) {
-                    BSONElement elem(iter.next());
-                    if (strcmp(elem.fieldName(), "preCondition") != 0) {
-                        cmdBuilder.append(elem);
-                    }
-                }
-
-                logOp("c", tempNS.c_str(), cmdBuilder.done());
-            }
-
-            return errors == 0;
         }
 
-        DBDirectClient db;
+        StatusWith<WriteConcernOptions> wcResult = extractWriteConcern(txn, cmdObj, dbname);
+        if (!wcResult.isOK()) {
+            return appendCommandStatus(result, wcResult.getStatus());
+        }
+        txn->setWriteConcern(wcResult.getValue());
+        setupSynchronousCommit(txn);
 
-    } applyOpsCmd;
 
+        auto client = txn->getClient();
+        auto lastOpAtOperationStart = repl::ReplClientInfo::forClient(client).getLastOp();
+        ScopeGuard lastOpSetterGuard =
+            MakeObjGuard(repl::ReplClientInfo::forClient(client),
+                         &repl::ReplClientInfo::setLastOpToSystemLastOpTime,
+                         txn);
+
+        auto applyOpsStatus = appendCommandStatus(result, applyOps(txn, dbname, cmdObj, &result));
+
+        if (repl::ReplClientInfo::forClient(client).getLastOp() != lastOpAtOperationStart) {
+            // If this operation has already generated a new lastOp, don't bother setting it
+            // here. No-op applyOps will not generate a new lastOp, so we still need the guard to
+            // fire in that case.
+            lastOpSetterGuard.Dismiss();
+        }
+
+        WriteConcernResult res;
+        auto waitForWCStatus =
+            waitForWriteConcern(txn,
+                                repl::ReplClientInfo::forClient(txn->getClient()).getLastOp(),
+                                txn->getWriteConcern(),
+                                &res);
+        appendCommandWCStatus(result, waitForWCStatus);
+
+        return applyOpsStatus;
+    }
+
+private:
+    /**
+     * Returns true if 'e' contains a valid operation.
+     */
+    bool _checkOperation(const BSONElement& e, string& errmsg) {
+        if (e.type() != Object) {
+            errmsg = str::stream() << "op not an object: " << e.fieldName();
+            return false;
+        }
+        BSONObj obj = e.Obj();
+        // op - operation type
+        BSONElement opElement = obj.getField("op");
+        if (opElement.eoo()) {
+            errmsg = str::stream()
+                << "op does not contain required \"op\" field: " << e.fieldName();
+            return false;
+        }
+        if (opElement.type() != mongo::String) {
+            errmsg = str::stream() << "\"op\" field is not a string: " << e.fieldName();
+            return false;
+        }
+        // operation type -- see logOp() comments for types
+        const char* opType = opElement.valuestrsafe();
+        if (*opType == '\0') {
+            errmsg = str::stream() << "\"op\" field value cannot be empty: " << e.fieldName();
+            return false;
+        }
+
+        // ns - namespace
+        // Only operations of type 'n' are allowed to have an empty namespace.
+        BSONElement nsElement = obj.getField("ns");
+        if (nsElement.eoo()) {
+            errmsg = str::stream()
+                << "op does not contain required \"ns\" field: " << e.fieldName();
+            return false;
+        }
+        if (nsElement.type() != mongo::String) {
+            errmsg = str::stream() << "\"ns\" field is not a string: " << e.fieldName();
+            return false;
+        }
+        if (nsElement.String().find('\0') != std::string::npos) {
+            errmsg = str::stream() << "namespaces cannot have embedded null characters";
+            return false;
+        }
+        if (*opType != 'n' && nsElement.String().empty()) {
+            errmsg = str::stream()
+                << "\"ns\" field value cannot be empty when op type is not 'n': " << e.fieldName();
+            return false;
+        }
+        return true;
+    }
+} applyOpsCmd;
 }

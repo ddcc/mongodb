@@ -27,45 +27,44 @@ var runTest = function(adminDB) {
         }
     };
 
-    expectedFPState(adminDB.runCommand({ configureFailPoint: 'dummy' }), 0, {});
+    expectedFPState(adminDB.runCommand({configureFailPoint: 'dummy'}), 0, {});
 
     // Test non-existing fail point
-    assert.commandFailed(adminDB.runCommand({ configureFailPoint: 'fpNotExist',
-        mode: 'alwaysOn', data: { x: 1 }}));
+    assert.commandFailed(
+        adminDB.runCommand({configureFailPoint: 'fpNotExist', mode: 'alwaysOn', data: {x: 1}}));
 
     // Test bad mode string
-    assert.commandFailed(adminDB.runCommand({ configureFailPoint: 'dummy',
-        mode: 'madMode', data: { x: 1 }}));
-    expectedFPState(adminDB.runCommand({ configureFailPoint: 'dummy' }), 0, {});
+    assert.commandFailed(
+        adminDB.runCommand({configureFailPoint: 'dummy', mode: 'madMode', data: {x: 1}}));
+    expectedFPState(adminDB.runCommand({configureFailPoint: 'dummy'}), 0, {});
 
     // Test bad mode obj
-    assert.commandFailed(adminDB.runCommand({ configureFailPoint: 'dummy',
-        mode: { foo: 3 }, data: { x: 1 }}));
-    expectedFPState(adminDB.runCommand({ configureFailPoint: 'dummy' }), 0, {});
+    assert.commandFailed(
+        adminDB.runCommand({configureFailPoint: 'dummy', mode: {foo: 3}, data: {x: 1}}));
+    expectedFPState(adminDB.runCommand({configureFailPoint: 'dummy'}), 0, {});
 
     // Test bad mode type
-    assert.commandFailed(adminDB.runCommand({ configureFailPoint: 'dummy',
-        mode: true, data: { x: 1 }}));
-    expectedFPState(adminDB.runCommand({ configureFailPoint: 'dummy' }), 0, {});
+    assert.commandFailed(
+        adminDB.runCommand({configureFailPoint: 'dummy', mode: true, data: {x: 1}}));
+    expectedFPState(adminDB.runCommand({configureFailPoint: 'dummy'}), 0, {});
 
     // Test bad data type
-    assert.commandFailed(adminDB.runCommand({ configureFailPoint: 'dummy',
-        mode: 'alwaysOn', data: 'data'}));
-    expectedFPState(adminDB.runCommand({ configureFailPoint: 'dummy' }), 0, {});
+    assert.commandFailed(
+        adminDB.runCommand({configureFailPoint: 'dummy', mode: 'alwaysOn', data: 'data'}));
+    expectedFPState(adminDB.runCommand({configureFailPoint: 'dummy'}), 0, {});
 
     // Test good command w/ data
-    assert.commandWorked(adminDB.runCommand({ configureFailPoint: 'dummy',
-        mode: 'alwaysOn', data: { x: 1 }}));
-    expectedFPState(adminDB.runCommand({ configureFailPoint: 'dummy' }), 1, { x: 1 });
+    assert.commandWorked(
+        adminDB.runCommand({configureFailPoint: 'dummy', mode: 'alwaysOn', data: {x: 1}}));
+    expectedFPState(adminDB.runCommand({configureFailPoint: 'dummy'}), 1, {x: 1});
 };
 
-var conn = MongoRunner.runMongod({ port: 29000 });
+var conn = MongoRunner.runMongod();
 runTest(conn.getDB('admin'));
 MongoRunner.stopMongod(conn.port);
 
 ///////////////////////////////////////////////////////////
 // Test mongos
-var st = new ShardingTest({ shards: 1 });
+var st = new ShardingTest({shards: 1});
 runTest(st.s.getDB('admin'));
 st.stop();
-

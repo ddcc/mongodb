@@ -28,49 +28,49 @@
 *    it in the license file.
 */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
+
 #include "mongo/db/server_parameters.h"
 
+#include "mongo/util/log.h"
+
 namespace mongo {
-    namespace fts {
-        namespace {
+namespace fts {
+namespace {
 
-            bool dummyEnabledFlag = true; // Unused, needed for server parameter.
+std::atomic<bool> dummyEnabledFlag(true);  // Unused, needed for server parameter.  NOLINT
 
-            /**
-             * Declaration for the "textSearchEnabled" server parameter, which is now deprecated.
-             * Note that:
-             * - setting to true performs a no-op and logs a deprecation message.
-             * - setting to false will fail.
-             */
-            class ExportedTextSearchEnabledParameter : public ExportedServerParameter<bool> {
-            public:
-                ExportedTextSearchEnabledParameter() :
-                    ExportedServerParameter<bool>( ServerParameterSet::getGlobal(),
-                                                   "textSearchEnabled",
-                                                   &dummyEnabledFlag,
-                                                   true,
-                                                   true ) {}
+/**
+ * Declaration for the "textSearchEnabled" server parameter, which is now deprecated.
+ * Note that:
+ * - setting to true performs a no-op and logs a deprecation message.
+ * - setting to false will fail.
+ */
+class ExportedTextSearchEnabledParameter
+    : public ExportedServerParameter<bool, ServerParameterType::kStartupAndRuntime> {
+public:
+    ExportedTextSearchEnabledParameter()
+        : ExportedServerParameter<bool, ServerParameterType::kStartupAndRuntime>(
+              ServerParameterSet::getGlobal(), "textSearchEnabled", &dummyEnabledFlag) {}
 
-                virtual Status validate( const bool& potentialNewValue ) {
-                    if ( !potentialNewValue ) {
-                        return Status( ErrorCodes::BadValue,
-                                       "textSearchEnabled cannot be set to false");
-                    }
-
-                    log() << "Attempted to set textSearchEnabled server parameter.";
-                    log() << "Text search is enabled by default and cannot be disabled.";
-                    log() << "The following are now deprecated and will be removed in a future "
-                          << "release:";
-                    log() << "- the \"textSearchEnabled\" server parameter (setting it has no "
-                          << "effect)";
-                    log() << "- the \"text\" command (has been replaced by the $text query "
-                             "operator)";
-
-                    return Status::OK();
-                }
-
-            } exportedTextSearchEnabledParam;
-
+    virtual Status validate(const bool& potentialNewValue) {
+        if (!potentialNewValue) {
+            return Status(ErrorCodes::BadValue, "textSearchEnabled cannot be set to false");
         }
+
+        log() << "Attempted to set textSearchEnabled server parameter.";
+        log() << "Text search is enabled by default and cannot be disabled.";
+        log() << "The following are now deprecated and will be removed in a future "
+              << "release:";
+        log() << "- the \"textSearchEnabled\" server parameter (setting it has no "
+              << "effect)";
+        log() << "- the \"text\" command (has been replaced by the $text query "
+                 "operator)";
+
+        return Status::OK();
     }
+
+} exportedTextSearchEnabledParam;
+}
+}
 }

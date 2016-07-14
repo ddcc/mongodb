@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2013-2014 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -34,21 +34,26 @@
 
 namespace mongo {
 
+class OperationContext;
+
+/**
+ * The StageBuilder converts a QuerySolution to an executable tree of PlanStage(s).
+ */
+class StageBuilder {
+public:
     /**
-     * The StageBuilder converts a QuerySolution to an executable tree of PlanStage(s).
+     * Turns 'solution' into an executable tree of PlanStage(s).
+     *
+     * Returns true if the PlanStage tree was built successfully.  The root of the tree is in
+     * *rootOut and the WorkingSet that the tree uses is in wsIn.
+     *
+     * Returns false otherwise.  *rootOut and *wsOut are invalid.
      */
-    class StageBuilder {
-    public:
-        /**
-         * Turns 'solution' into an executable tree of PlanStage(s).  This function accesses cc()
-         * and catalog information and as such the caller must have a lock.
-         *
-         * Returns true if the PlanStage tree was built successfully.  The root of the tree is in
-         * *rootOut and the WorkingSet that the tree uses is in *wsOut.
-         *
-         * Returns false otherwise.  *rootOut and *wsOut are invalid.
-         */
-        static bool build(const QuerySolution& solution, PlanStage** rootOut, WorkingSet** wsOut);
-    };
+    static bool build(OperationContext* txn,
+                      Collection* collection,
+                      const QuerySolution& solution,
+                      WorkingSet* wsIn,
+                      PlanStage** rootOut);
+};
 
 }  // namespace mongo

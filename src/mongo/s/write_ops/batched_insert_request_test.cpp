@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2013-2015 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -17,134 +17,120 @@
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the GNU Affero General Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
-#include "mongo/s/write_ops/batched_insert_request.h"
+#include "mongo/platform/basic.h"
 
 #include <string>
 
 #include "mongo/db/jsobj.h"
-#include "mongo/unittest/unittest.h"
 #include "mongo/s/write_ops/batched_command_request.h"
+#include "mongo/s/write_ops/batched_insert_request.h"
+#include "mongo/unittest/unittest.h"
+
+namespace mongo {
+
+using std::unique_ptr;
+using std::string;
 
 namespace {
 
-    using namespace mongo;
-    using std::auto_ptr;
-    using std::string;
+TEST(BatchedInsertRequest, Basic) {
+    BSONArray insertArray = BSON_ARRAY(BSON("a" << 1) << BSON("b" << 1));
 
-    TEST(RoundTrip, Normal) {
-        BSONArray insertArray = BSON_ARRAY(BSON("a" << 1) << BSON("b" << 1));
+    BSONObj origInsertRequestObj = BSON(BatchedInsertRequest::collName("test")
+                                        << BatchedInsertRequest::documents() << insertArray
+                                        << BatchedInsertRequest::writeConcern(BSON("w" << 1))
+                                        << BatchedInsertRequest::ordered(true));
 
-        BSONObj writeConcernObj = BSON("w" << 1);
+    string errMsg;
+    BatchedInsertRequest request;
+    ASSERT_TRUE(request.parseBSON("foo", origInsertRequestObj, &errMsg));
 
-        // The BSON_ARRAY macro doesn't support Timestamps.
-        BSONArrayBuilder arrBuilder;
-        arrBuilder.appendTimestamp(OpTime(1,1).asDate());
-        arrBuilder.append(OID::gen());
-        BSONArray shardVersionArray = arrBuilder.arr();
+    ASSERT_EQ("foo.test", request.getNS().ns());
 
-        BSONObj origInsertRequestObj =
-            BSON(BatchedInsertRequest::collName("test") <<
-                 BatchedInsertRequest::documents() << insertArray <<
-                 BatchedInsertRequest::writeConcern(writeConcernObj) <<
-                 BatchedInsertRequest::ordered(true) <<
-                 BatchedInsertRequest::metadata() << BSON(
-                     BatchedRequestMetadata::shardName("shard0000") <<
-                     BatchedRequestMetadata::shardVersion() << shardVersionArray <<
-                     BatchedRequestMetadata::session(0)));
+    ASSERT_EQUALS(origInsertRequestObj, request.toBSON());
+}
 
-        string errMsg;
-        BatchedInsertRequest request;
-        bool ok = request.parseBSON(origInsertRequestObj, &errMsg);
-        ASSERT_TRUE(ok);
+TEST(BatchedInsertRequest, GenIDAll) {
+    BatchedCommandRequest cmdRequest(BatchedCommandRequest::BatchType_Insert);
+    BatchedInsertRequest& request = *cmdRequest.getInsertRequest();
 
-        BSONObj genInsertRequestObj = request.toBSON();
-        ASSERT_EQUALS(0, genInsertRequestObj.woCompare(origInsertRequestObj));
-    }
+    request.setNS(NamespaceString("foo.bar"));
+    request.setOrdered(false);
 
-    TEST(GenID, All) {
+    BSONObj insertA = BSON("a" << 1);
+    BSONObj insertB = BSON("b" << 1);
+    request.addToDocuments(insertA);
+    request.addToDocuments(insertB);
 
-        BatchedCommandRequest cmdRequest(BatchedCommandRequest::BatchType_Insert);
-        BatchedInsertRequest& request = *cmdRequest.getInsertRequest();
+    unique_ptr<BatchedCommandRequest> idCmdRequest;
+    idCmdRequest.reset(BatchedCommandRequest::cloneWithIds(cmdRequest));
+    ASSERT(idCmdRequest.get());
 
-        request.setCollName("foo.bar");
-        request.setOrdered(false);
+    BatchedInsertRequest* idRequest = idCmdRequest->getInsertRequest();
+    ASSERT_EQUALS(idRequest->getNS().ns(), request.getNS().ns());
+    ASSERT_EQUALS(idRequest->getOrdered(), request.getOrdered());
 
-        BSONObj insertA = BSON( "a" << 1 );
-        BSONObj insertB = BSON( "b" << 1 );
-        request.addToDocuments(insertA);
-        request.addToDocuments(insertB);
+    ASSERT(!idRequest->getDocumentsAt(0)["_id"].eoo());
+    ASSERT_EQUALS(idRequest->getDocumentsAt(0).nFields(), 2);
+    ASSERT(!idRequest->getDocumentsAt(1)["_id"].eoo());
+    ASSERT_EQUALS(idRequest->getDocumentsAt(1).nFields(), 2);
+}
 
-        auto_ptr<BatchedCommandRequest> idCmdRequest;
-        idCmdRequest.reset(BatchedCommandRequest::cloneWithIds(cmdRequest));
-        ASSERT(idCmdRequest.get());
+TEST(BatchedInsertRequest, GenIDPartial) {
+    BatchedCommandRequest cmdRequest(BatchedCommandRequest::BatchType_Insert);
+    BatchedInsertRequest& request = *cmdRequest.getInsertRequest();
 
-        BatchedInsertRequest* idRequest = idCmdRequest->getInsertRequest();
-        ASSERT_EQUALS(idRequest->getCollName(), request.getCollName());
-        ASSERT_EQUALS(idRequest->getOrdered(), request.getOrdered());
+    request.setNS(NamespaceString("foo.bar"));
+    request.setOrdered(false);
 
-        ASSERT(!idRequest->getDocumentsAt(0)["_id"].eoo());
-        ASSERT_EQUALS(idRequest->getDocumentsAt(0).nFields(), 2);
-        ASSERT(!idRequest->getDocumentsAt(1)["_id"].eoo());
-        ASSERT_EQUALS(idRequest->getDocumentsAt(1).nFields(), 2);
-    }
+    BSONObj insertA = BSON("a" << 1);
+    BSONObj insertB = BSON("b" << 1 << "_id" << 1);
+    BSONObj insertC = BSON("c" << 1);
+    request.addToDocuments(insertA);
+    request.addToDocuments(insertB);
+    request.addToDocuments(insertC);
 
-    TEST(GenID, Partial) {
+    unique_ptr<BatchedCommandRequest> idCmdRequest;
+    idCmdRequest.reset(BatchedCommandRequest::cloneWithIds(cmdRequest));
+    ASSERT(idCmdRequest.get());
 
-        BatchedCommandRequest cmdRequest(BatchedCommandRequest::BatchType_Insert);
-        BatchedInsertRequest& request = *cmdRequest.getInsertRequest();
+    BatchedInsertRequest* idRequest = idCmdRequest->getInsertRequest();
+    ASSERT_EQUALS(idRequest->getNS().ns(), request.getNS().ns());
+    ASSERT_EQUALS(idRequest->getOrdered(), request.getOrdered());
 
-        request.setCollName("foo.bar");
-        request.setOrdered(false);
+    ASSERT(!idRequest->getDocumentsAt(0)["_id"].eoo());
+    ASSERT_EQUALS(idRequest->getDocumentsAt(0).nFields(), 2);
+    ASSERT(!idRequest->getDocumentsAt(1)["_id"].eoo());
+    ASSERT_EQUALS(idRequest->getDocumentsAt(1).nFields(), 2);
+    ASSERT(!idRequest->getDocumentsAt(2)["_id"].eoo());
+    ASSERT_EQUALS(idRequest->getDocumentsAt(1).nFields(), 2);
+}
 
-        BSONObj insertA = BSON( "a" << 1 );
-        BSONObj insertB = BSON( "b" << 1 << "_id" << 1 );
-        BSONObj insertC = BSON( "c" << 1 );
-        request.addToDocuments(insertA);
-        request.addToDocuments(insertB);
-        request.addToDocuments(insertC);
+TEST(BatchedInsertRequest, GenIDNone) {
+    BatchedCommandRequest cmdRequest(BatchedCommandRequest::BatchType_Insert);
+    BatchedInsertRequest& request = *cmdRequest.getInsertRequest();
 
-        auto_ptr<BatchedCommandRequest> idCmdRequest;
-        idCmdRequest.reset(BatchedCommandRequest::cloneWithIds(cmdRequest));
-        ASSERT(idCmdRequest.get());
+    // We need to check for system.indexes namespace
+    request.setNS(NamespaceString("foo.bar"));
 
-        BatchedInsertRequest* idRequest = idCmdRequest->getInsertRequest();
-        ASSERT_EQUALS(idRequest->getCollName(), request.getCollName());
-        ASSERT_EQUALS(idRequest->getOrdered(), request.getOrdered());
+    BSONObj insertA = BSON("_id" << 0 << "a" << 1);
+    BSONObj insertB = BSON("b" << 1 << "_id" << 1);
+    request.addToDocuments(insertA);
+    request.addToDocuments(insertB);
 
-        ASSERT(!idRequest->getDocumentsAt(0)["_id"].eoo());
-        ASSERT_EQUALS(idRequest->getDocumentsAt(0).nFields(), 2);
-        ASSERT(!idRequest->getDocumentsAt(1)["_id"].eoo());
-        ASSERT_EQUALS(idRequest->getDocumentsAt(1).nFields(), 2);
-        ASSERT(!idRequest->getDocumentsAt(2)["_id"].eoo());
-        ASSERT_EQUALS(idRequest->getDocumentsAt(1).nFields(), 2);
-    }
+    unique_ptr<BatchedCommandRequest> idCmdRequest;
+    idCmdRequest.reset(BatchedCommandRequest::cloneWithIds(cmdRequest));
+    ASSERT(!idCmdRequest.get());
+}
 
-    TEST(GenID, None) {
-
-        BatchedCommandRequest cmdRequest(BatchedCommandRequest::BatchType_Insert);
-        BatchedInsertRequest& request = *cmdRequest.getInsertRequest();
-
-        // We need to check for system.indexes namespace
-        request.setCollName("foo.bar");
-
-        BSONObj insertA = BSON( "_id" << 0 << "a" << 1 );
-        BSONObj insertB = BSON( "b" << 1 << "_id" << 1 );
-        request.addToDocuments(insertA);
-        request.addToDocuments(insertB);
-
-        auto_ptr<BatchedCommandRequest> idCmdRequest;
-        idCmdRequest.reset(BatchedCommandRequest::cloneWithIds(cmdRequest));
-        ASSERT(!idCmdRequest.get());
-    }
-
-
-} // unnamed namespace
+}  // namespace
+}  // namespace mongo

@@ -32,24 +32,22 @@
 
 namespace mongo {
 
-    class Collection;
+class Collection;
+class OperationContext;
 
 namespace authindex {
 
-    /**
-     * Creates the appropriate indexes on _new_ system collections supporting authentication and
-     * authorization.
-     */
-    void createSystemIndexes(Collection* collection);
+/**
+ * Creates the appropriate indexes on _new_ system collections supporting authentication and
+ * authorization.
+ */
+void createSystemIndexes(OperationContext* txn, Collection* collection);
 
-    /**
-     * Ensures that exactly the appropriate indexes to support authentication and authorization
-     * are present for the given database.
-     *
-     * It is appropriate to call this function on new or existing databases, though it is
-     * primarily intended for use on existing databases.
-     */
-    void configureSystemIndexes(const StringData& dbname);
+/**
+ * Verifies that only the appropriate indexes to support authentication and authorization
+ * are present in the admin database
+ */
+Status verifySystemIndexes(OperationContext* txn);
 
 }  // namespace authindex
 }  // namespace mongo

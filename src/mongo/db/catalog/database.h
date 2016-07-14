@@ -30,229 +30,201 @@
 
 #pragma once
 
-#include "mongo/db/structure/catalog/namespace_details.h"
-#include "mongo/db/storage/extent_manager.h"
-#include "mongo/db/storage/record.h"
-#include "mongo/db/storage_options.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/storage/storage_options.h"
+#include "mongo/util/mongoutils/str.h"
 #include "mongo/util/string_map.h"
 
 namespace mongo {
 
-    class Collection;
-    class Extent;
-    class DataFile;
-    class IndexCatalog;
-    class IndexDetails;
+class Collection;
+class DataFile;
+class DatabaseCatalogEntry;
+class ExtentManager;
+class IndexCatalog;
+class NamespaceDetails;
+class OperationContext;
 
-    struct CollectionOptions {
-        CollectionOptions() {
-            reset();
-        }
-
-        void reset() {
-            capped = false;
-            cappedSize = 0;
-            cappedMaxDocs = 0;
-            initialNumExtents = 0;
-            initialExtentSizes.clear();
-            autoIndexId = DEFAULT;
-            flags = 0;
-            flagsSet = false;
-            temp = false;
-        }
-
-        Status parse( const BSONObj& obj );
-        BSONObj toBSON() const;
-
-        // ----
-
-        bool capped;
-        long long cappedSize;
-        long long cappedMaxDocs;
-
-        // following 2 are mutually exclusive, can only have one set
-        long long initialNumExtents;
-        vector<long long> initialExtentSizes;
-
-        // behavior of _id index creation when collection created
-        void setNoIdIndex() { autoIndexId = NO; }
-        enum {
-            DEFAULT, // currently yes for most collections, NO for some system ones
-            YES, // create _id index
-            NO // do not create _id index
-        } autoIndexId;
-
-        // user flags
-        int flags;
-        bool flagsSet;
-
-        bool temp;
-    };
+/**
+ * Represents a logical database containing Collections.
+ *
+ * The semantics for a const Database are that you can mutate individual collections but not add or
+ * remove them.
+ */
+class Database {
+public:
+    typedef StringMap<Collection*> CollectionMap;
 
     /**
-     * Database represents a database database
-     * Each database database has its own set of files -- dbname.ns, dbname.0, dbname.1, ...
-     * NOT memory mapped
-    */
-    class Database {
+     * Iterating over a Database yields Collection* pointers.
+     */
+    class iterator {
     public:
-        // you probably need to be in dbHolderMutex when constructing this
-        Database(const char *nm, /*out*/ bool& newDb,
-                 const string& path = storageGlobalParams.dbpath);
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = Collection*;
+        using pointer = const value_type*;
+        using reference = const value_type&;
+        using difference_type = ptrdiff_t;
 
-        /* you must use this to close - there is essential code in this method that is not in the ~Database destructor.
-           thus the destructor is private.  this could be cleaned up one day...
-        */
-        static void closeDatabase( const string& db, const string& path );
+        iterator() = default;
+        iterator(CollectionMap::const_iterator it) : _it(it) {}
 
-        const string& name() const { return _name; }
-        const string& path() const { return _path; }
-
-        void clearTmpCollections();
-
-        /**
-         * tries to make sure that this hasn't been deleted
-         */
-        bool isOk() const { return _magic == 781231; }
-
-        bool isEmpty() { return ! _namespaceIndex.allocated(); }
-
-        /**
-         * total file size of Database in bytes
-         */
-        long long fileSize() const { return _extentManager.fileSize(); }
-
-        int numFiles() const { return _extentManager.numFiles(); }
-
-        void getFileFormat( int* major, int* minor );
-
-        /**
-         * makes sure we have an extra file at the end that is empty
-         * safe to call this multiple times - the implementation will only preallocate one file
-         */
-        void preallocateAFile() { _extentManager.preallocateAFile(); }
-
-        /**
-         * @return true if success.  false if bad level or error creating profile ns
-         */
-        bool setProfilingLevel( int newLevel , string& errmsg );
-
-        void flushFiles( bool sync ) { return _extentManager.flushFiles( sync ); }
-
-        /**
-         * @return true if ns is part of the database
-         *         ns=foo.bar, db=foo returns true
-         */
-        bool ownsNS( const string& ns ) const {
-            if ( ! startsWith( ns , _name ) )
-                return false;
-            return ns[_name.size()] == '.';
+        reference operator*() const {
+            return _it->second;
         }
 
-        const RecordStats& recordStats() const { return _recordStats; }
-        RecordStats& recordStats() { return _recordStats; }
+        pointer operator->() const {
+            return &_it->second;
+        }
 
-        int getProfilingLevel() const { return _profile; }
-        const char* getProfilingNS() const { return _profileName.c_str(); }
+        bool operator==(const iterator& other) {
+            return _it == other._it;
+        }
 
-        const NamespaceIndex& namespaceIndex() const { return _namespaceIndex; }
-        NamespaceIndex& namespaceIndex() { return _namespaceIndex; }
+        bool operator!=(const iterator& other) {
+            return _it != other._it;
+        }
 
-        // TODO: do not think this method should exist, so should try and encapsulate better
-        ExtentManager& getExtentManager() { return _extentManager; }
-        const ExtentManager& getExtentManager() const { return _extentManager; }
+        iterator& operator++() {
+            ++_it;
+            return *this;
+        }
 
-        Status dropCollection( const StringData& fullns );
+        iterator operator++(int) {
+            auto oldPosition = *this;
+            ++_it;
+            return oldPosition;
+        }
 
-        Collection* createCollection( const StringData& ns,
-                                      const CollectionOptions& options = CollectionOptions(),
-                                      bool allocateSpace = true,
-                                      bool createDefaultIndexes = true );
-
-        /**
-         * @param ns - this is fully qualified, which is maybe not ideal ???
-         */
-        Collection* getCollection( const StringData& ns );
-
-        Collection* getCollection( const NamespaceString& ns ) { return getCollection( ns.ns() ); }
-
-        Collection* getOrCreateCollection( const StringData& ns );
-
-        Status renameCollection( const StringData& fromNS, const StringData& toNS, bool stayTemp );
-
-        /**
-         * @return name of an existing database with same text name but different
-         * casing, if one exists.  Otherwise the empty string is returned.  If
-         * 'duplicates' is specified, it is filled with all duplicate names.
-         */
-        static string duplicateUncasedName( bool inholderlockalready, const string &name, const string &path, set< string > *duplicates = 0 );
-
-        static Status validateDBName( const StringData& dbname );
-
-        const string& getSystemIndexesName() const { return _indexesName; }
-
-        /**
-         * Search system.namespaces for indexes on collection "system" that don't exist in the index
-         * catalog, and clean up any that are found.  These would exist due to a bug in 2.4
-         * (SERVER-13975).
-         */
-        void cleanUpOrphanIndexesOnSystemCollection();
     private:
-
-        void _clearCollectionCache( const StringData& fullns );
-
-        void _clearCollectionCache_inlock( const StringData& fullns );
-
-        ~Database(); // closes files and other cleanup see below.
-
-        void _addNamespaceToCatalog( const StringData& ns, const BSONObj* options );
-
-
-        /**
-         * removes from *.system.namespaces
-         * frees extents
-         * removes from NamespaceIndex
-         * NOT RIGHT NOW, removes cache entry in Database TODO?
-         */
-        Status _dropNS( const StringData& ns );
-
-        /**
-         * @throws DatabaseDifferCaseCode if the name is a duplicate based on
-         * case insensitive matching.
-         */
-        void checkDuplicateUncasedNames(bool inholderlockalready) const;
-
-        void openAllFiles();
-
-        Status _renameSingleNamespace( const StringData& fromNS, const StringData& toNS,
-                                       bool stayTemp );
-
-        const string _name; // "alleyinsider"
-        const string _path; // "/data/db"
-
-        NamespaceIndex _namespaceIndex;
-        ExtentManager _extentManager;
-
-        const string _profileName; // "alleyinsider.system.profile"
-        const string _namespacesName; // "alleyinsider.system.namespaces"
-        const string _indexesName; // "alleyinsider.system.indexes"
-
-        RecordStats _recordStats;
-        int _profile; // 0=off.
-
-        int _magic; // used for making sure the object is still loaded in memory
-
-        // TODO: make sure deletes go through
-        // this in some ways is a dupe of _namespaceIndex
-        // but it points to a much more useful data structure
-        typedef StringMap< Collection* > CollectionMap;
-        CollectionMap _collections;
-        mutex _collectionLock;
-
-        friend class Collection;
-        friend class NamespaceDetails;
-        friend class IndexDetails;
-        friend class IndexCatalog;
+        CollectionMap::const_iterator _it;
     };
 
-} // namespace mongo
+    Database(OperationContext* txn, StringData name, DatabaseCatalogEntry* dbEntry);
+
+    // must call close first
+    ~Database();
+
+    iterator begin() const {
+        return iterator(_collections.begin());
+    }
+
+    iterator end() const {
+        return iterator(_collections.end());
+    }
+
+    // closes files and other cleanup see below.
+    void close(OperationContext* txn);
+
+    const std::string& name() const {
+        return _name;
+    }
+
+    void clearTmpCollections(OperationContext* txn);
+
+    /**
+     * Sets a new profiling level for the database and returns the outcome.
+     *
+     * @param txn Operation context which to use for creating the profiling collection.
+     * @param newLevel New profiling level to use.
+     */
+    Status setProfilingLevel(OperationContext* txn, int newLevel);
+
+    int getProfilingLevel() const {
+        return _profile;
+    }
+    const char* getProfilingNS() const {
+        return _profileName.c_str();
+    }
+
+    void getStats(OperationContext* opCtx, BSONObjBuilder* output, double scale = 1);
+
+    const DatabaseCatalogEntry* getDatabaseCatalogEntry() const;
+
+    Status dropCollection(OperationContext* txn, StringData fullns);
+
+    Collection* createCollection(OperationContext* txn,
+                                 StringData ns,
+                                 const CollectionOptions& options = CollectionOptions(),
+                                 bool createDefaultIndexes = true);
+
+    /**
+     * @param ns - this is fully qualified, which is maybe not ideal ???
+     */
+    Collection* getCollection(StringData ns) const;
+
+    Collection* getCollection(const NamespaceString& ns) const {
+        return getCollection(ns.ns());
+    }
+
+    Collection* getOrCreateCollection(OperationContext* txn, StringData ns);
+
+    Status renameCollection(OperationContext* txn,
+                            StringData fromNS,
+                            StringData toNS,
+                            bool stayTemp);
+
+    /**
+     * @return name of an existing database with same text name but different
+     * casing, if one exists.  Otherwise the empty std::string is returned.  If
+     * 'duplicates' is specified, it is filled with all duplicate names.
+     // TODO move???
+     */
+    static std::string duplicateUncasedName(const std::string& name,
+                                            std::set<std::string>* duplicates = 0);
+
+    static Status validateDBName(StringData dbname);
+
+    const std::string& getSystemIndexesName() const {
+        return _indexesName;
+    }
+
+private:
+    /**
+     * Gets or creates collection instance from existing metadata,
+     * Returns NULL if invalid
+     *
+     * Note: This does not add the collection to _collections map, that must be done
+     * by the caller, who takes onership of the Collection*
+     */
+    Collection* _getOrCreateCollectionInstance(OperationContext* txn, StringData fullns);
+
+    /**
+     * Deregisters and invalidates all cursors on collection 'fullns'.  Callers must specify
+     * 'reason' for why the cache is being cleared.
+     */
+    void _clearCollectionCache(OperationContext* txn, StringData fullns, const std::string& reason);
+
+    class AddCollectionChange;
+    class RemoveCollectionChange;
+
+    const std::string _name;  // "alleyinsider"
+
+    DatabaseCatalogEntry* _dbEntry;  // not owned here
+
+    const std::string _profileName;  // "alleyinsider.system.profile"
+    const std::string _indexesName;  // "alleyinsider.system.indexes"
+
+    int _profile;  // 0=off.
+
+    CollectionMap _collections;
+
+    friend class Collection;
+    friend class NamespaceDetails;
+    friend class IndexCatalog;
+};
+
+void dropDatabase(OperationContext* txn, Database* db);
+
+void dropAllDatabasesExceptLocal(OperationContext* txn);
+
+Status userCreateNS(OperationContext* txn,
+                    Database* db,
+                    StringData ns,
+                    BSONObj options,
+                    bool createDefaultIndexes = true);
+
+}  // namespace mongo

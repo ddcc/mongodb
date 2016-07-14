@@ -30,34 +30,17 @@
 
 #include <string>
 
-#include "mongo/client/dbclientinterface.h"
-
 namespace mongo {
-    /**
-     * @return true if internal authentication parameters has been set up
-     */
-    extern bool isInternalAuthSet();
+template <class T>
+class StatusWith;
 
-    /**
-     * This method initializes the internalSecurity object with authentication
-     * credentials to be used by authenticateInternalUser. 
-     */
-    extern void setInternalUserAuthParams(const BSONObj& authParamsIn);
+/**
+ * This method checks the validity of filename as a security key, hashes its
+ * contents, and stores it in the internalSecurity variable.  Prints an
+ * error message to the logs if there's an error.
+ * @param filename the file containing the key
+ * @return if the key was successfully stored
+ */
+bool setUpSecurityKey(const std::string& filename);
 
-    /**
-     * This method authenticates to another cluster member using appropriate
-     * authentication data
-     * @return true if the authentication was succesful
-     */
-    extern bool authenticateInternalUser(DBClientWithCommands* conn);
-
-    /**
-     * This method checks the validity of filename as a security key, hashes its
-     * contents, and stores it in the internalSecurity variable.  Prints an
-     * error message to the logs if there's an error.
-     * @param filename the file containing the key
-     * @return if the key was successfully stored
-     */
-    bool setUpSecurityKey(const std::string& filename);
-
-} // namespace mongo
+}  // namespace mongo

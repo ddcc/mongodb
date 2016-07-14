@@ -9,6 +9,7 @@ Optionally replaces zero codes in source code with new distinct values.
 import os
 import re
 import utils
+import sys
 from collections import defaultdict, namedtuple
 from optparse import OptionParser
 
@@ -49,9 +50,9 @@ def parseSourceFiles( callback ):
     quick = [ "assert" , "Exception"]
 
     patterns = [
-        re.compile( r"[umsgf]asser(?:t|ted) *\( *(\d+)" ) ,
+        re.compile( r"[umsg]asser(?:t|ted)(?:NoTrace)? *\( *(\d+)" ) ,
         re.compile( r"(?:User|Msg|MsgAssertion)Exception *\( *(\d+)" ),
-        re.compile( r"fassertFailed(?:NoTrace)? *\( *(\d+)" )
+        re.compile( r"fassert(?:Failed)?(?:WithStatus)?(?:NoTrace)?(?:StatusOK)? *\( *(\d+)" ),
     ]
 
     bad = [ re.compile( r"^\s*assert *\(" ) ]
@@ -71,8 +72,8 @@ def parseSourceFiles( callback ):
 
                 for b in bad:
                     if b.search(line):
-                        print( "%s\n%d" % (sourceFile, line) )
                         msg = "Bare assert prohibited. Replace with [umwdf]assert"
+                        print( "%s:%s: %s\n%s" % (sourceFile, lineNum, msg, line) )
                         raise Exception(msg)
 
                 # no more than one pattern should ever match
@@ -291,6 +292,10 @@ def main():
     parser.add_option("-o", dest="outfile",
                       default="docs/errors.md",
                       help="Report file [default: %default]")
+    parser.add_option("--report", type="choice",
+                      choices=["none", "markdown"], default="none",
+                      help="What format report should be generated. " \
+                           "Possible options: [none, markdown]")
     (options, args) = parser.parse_args()
 
     (codes, errors) = readErrorCodes()
@@ -301,11 +306,14 @@ def main():
     print("next: %s" % next)
 
     if ok:
-        writeMarkdownReport(codes, options.outfile)
+        reportStyle = options.report
+        if reportStyle == "markdown":
+            writeMarkdownReport(codes, options.outfile)
     elif options.replace:
         replaceBadCodes(errors, next)
     else:
         print ERROR_HELP
+        sys.exit(1)
 
 
 ERROR_HELP = """

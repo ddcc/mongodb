@@ -31,136 +31,134 @@
 
 #pragma once
 
+
 #include "mongo/client/constants.h"
 #include "mongo/client/dbclientcursor.h"
+#include "mongo/util/net/hostandport.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 
-    extern const BSONObj reverseNaturalObj; // { $natural : -1 }
+class OperationContext;
+
+namespace repl {
+
+class ReplicationCoordinator;
+class OpTime;
+
+// {"$natural": -1 }
+extern const BSONObj reverseNaturalObj;
+
+/**
+ * Authenticates conn using the server's cluster-membership credentials.
+ *
+ * Returns true on successful authentication.
+ */
+bool replAuthenticate(DBClientBase* conn);
+
+/* started abstracting out the querying of the primary/master's oplog
+   still fairly awkward but a start.
+*/
+
+class OplogReader {
+private:
+    std::shared_ptr<DBClientConnection> _conn;
+    std::shared_ptr<DBClientCursor> cursor;
+    int _tailingQueryOptions;
+
+    // If _conn was actively connected, _host represents the current HostAndPort of the
+    // connection.
+    HostAndPort _host;
+
+public:
+    OplogReader();
+    ~OplogReader() {}
+    void resetCursor() {
+        cursor.reset();
+    }
+    void resetConnection() {
+        cursor.reset();
+        _conn.reset();
+        _host = HostAndPort();
+    }
+    DBClientConnection* conn() {
+        return _conn.get();
+    }
+    BSONObj findOne(const char* ns, const Query& q) {
+        return conn()->findOne(ns, q, 0, QueryOption_SlaveOk);
+    }
+    BSONObj getLastOp(const std::string& ns) {
+        return findOne(ns.c_str(), Query().sort(reverseNaturalObj));
+    }
+
+    /* SO_TIMEOUT (send/recv time out) for our DBClientConnections */
+    static const Seconds kSocketTimeout;
+
+    /* ok to call if already connected */
+    bool connect(const HostAndPort& host);
+
+    void tailCheck();
+
+    bool haveCursor() {
+        return cursor.get() != 0;
+    }
+
+    void query(const char* ns, Query query, int nToReturn, int nToSkip, const BSONObj* fields = 0);
+
+    void tailingQuery(const char* ns, const BSONObj& query);
+
+    void tailingQueryGTE(const char* ns, Timestamp t);
+
+    bool more() {
+        uassert(15910, "Doesn't have cursor for reading oplog", cursor.get());
+        return cursor->more();
+    }
+
+    bool moreInCurrentBatch() {
+        uassert(15911, "Doesn't have cursor for reading oplog", cursor.get());
+        return cursor->moreInCurrentBatch();
+    }
+
+    int currentBatchMessageSize() {
+        if (NULL == cursor->getMessage())
+            return 0;
+        return cursor->getMessage()->size();
+    }
+
+    BSONObj nextSafe() {
+        return cursor->nextSafe();
+    }
+    BSONObj next() {
+        return cursor->next();
+    }
+
+
+    // master/slave only
+    void peek(std::vector<BSONObj>& v, int n) {
+        if (cursor.get())
+            cursor->peek(v, n);
+    }
+
+    // master/slave only
+    void putBack(BSONObj op) {
+        cursor->putBack(op);
+    }
+
+    HostAndPort getHost() const;
+
     /**
-     * Authenticates conn using the server's cluster-membership credentials.
-     *
-     * Returns true on successful authentication.
+     * Connects this OplogReader to a valid sync source, using the provided lastOpTimeFetched
+     * and ReplicationCoordinator objects.
+     * If this function fails to connect to a sync source that is viable, this OplogReader
+     * is left unconnected, where this->conn() equals NULL.
+     * In the process of connecting, this function may add items to the repl coordinator's
+     * sync source blacklist.
+     * This function may throw DB exceptions.
      */
-    bool replAuthenticate(DBClientBase* conn);
+    void connectToSyncSource(OperationContext* txn,
+                             const OpTime& lastOpTimeFetched,
+                             ReplicationCoordinator* replCoord);
+};
 
-    /* started abstracting out the querying of the primary/master's oplog
-       still fairly awkward but a start.
-    */
-
-    class OplogReader {
-        shared_ptr<DBClientConnection> _conn;
-        shared_ptr<DBClientCursor> cursor;
-        int _tailingQueryOptions;
-    public:
-        OplogReader();
-        ~OplogReader() { }
-        void resetCursor() { cursor.reset(); }
-        void resetConnection() {
-            cursor.reset();
-            _conn.reset();
-        }
-        DBClientConnection* conn() { return _conn.get(); }
-        BSONObj findOne(const char *ns, const Query& q) {
-            return conn()->findOne(ns, q, 0, QueryOption_SlaveOk);
-        }
-        BSONObj getLastOp(const char *ns) {
-            return findOne(ns, Query().sort(reverseNaturalObj));
-        }
-
-        /* SO_TIMEOUT (send/recv time out) for our DBClientConnections */
-        static const int tcp_timeout = 30;
-
-        /* ok to call if already connected */
-        bool connect(const std::string& hostname);
-
-        bool connect(const std::string& hostname, const BSONObj& me);
-
-        bool connect(const mongo::OID& rid, const int from, const string& to);
-
-        void tailCheck() {
-            if( cursor.get() && cursor->isDead() ) {
-                log() << "repl: old cursor isDead, will initiate a new one" << endl;
-                resetCursor();
-            }
-        }
-
-        bool haveCursor() { return cursor.get() != 0; }
-
-        /** this is ok but commented out as when used one should consider if QueryOption_OplogReplay
-           is needed; if not fine, but if so, need to change.
-        *//*
-        void query(const char *ns, const BSONObj& query) {
-            verify( !haveCursor() );
-            cursor.reset( _conn->query(ns, query, 0, 0, 0, QueryOption_SlaveOk).release() );
-        }*/
-
-        /** this can be used; it is commented out as it does not indicate
-            QueryOption_OplogReplay and that is likely important.  could be uncommented
-            just need to add that.
-            */
-        /*
-        void queryGTE(const char *ns, OpTime t) {
-            BSONObjBuilder q;
-            q.appendDate("$gte", t.asDate());
-            BSONObjBuilder q2;
-            q2.append("ts", q.done());
-            query(ns, q2.done());
-        }
-        */
-
-        void query(const char *ns,
-                   Query query,
-                   int nToReturn,
-                   int nToSkip,
-                   const BSONObj* fields=0);
-
-        void tailingQuery(const char *ns, const BSONObj& query, const BSONObj* fields=0);
-
-        void tailingQueryGTE(const char *ns, OpTime t, const BSONObj* fields=0);
-
-        /* Do a tailing query, but only send the ts field back. */
-        void ghostQueryGTE(const char *ns, OpTime t) {
-            const BSONObj fields = BSON("ts" << 1 << "_id" << 0);
-            return tailingQueryGTE(ns, t, &fields);
-        }
-
-        bool more() {
-            uassert( 15910, "Doesn't have cursor for reading oplog", cursor.get() );
-            return cursor->more();
-        }
-
-        bool moreInCurrentBatch() {
-            uassert( 15911, "Doesn't have cursor for reading oplog", cursor.get() );
-            return cursor->moreInCurrentBatch();
-        }
-
-        int currentBatchMessageSize() {
-            if( NULL == cursor->getMessage() )
-                return 0;
-            return cursor->getMessage()->size();
-        }
-
-        /* old mongod's can't do the await flag... */
-        bool awaitCapable() {
-            return cursor->hasResultFlag(ResultFlag_AwaitCapable);
-        }
-
-        int getTailingQueryOptions() const { return _tailingQueryOptions; }
-        void setTailingQueryOptions( int tailingQueryOptions ) { _tailingQueryOptions = tailingQueryOptions; }
-
-        void peek(vector<BSONObj>& v, int n) {
-            if( cursor.get() )
-                cursor->peek(v,n);
-        }
-        BSONObj nextSafe() { return cursor->nextSafe(); }
-        BSONObj next() { return cursor->next(); }
-        void putBack(BSONObj op) { cursor->putBack(op); }
-        
-    private:
-        /** @return true iff connection was successful */ 
-        bool commonConnect(const string& hostName);
-        bool passthroughHandshake(const mongo::OID& rid, const int f);
-    };
-
-}
+}  // namespace repl
+}  // namespace mongo

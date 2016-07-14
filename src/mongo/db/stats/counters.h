@@ -29,74 +29,81 @@
 
 #pragma once
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/util/net/message.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/concurrency/spin_lock.h"
-#include "mongo/db/pdfile.h"
 
 namespace mongo {
 
-    /**
-     * for storing operation counters
-     * note: not thread safe.  ok with that for speed
-     */
-    class OpCounters {
-    public:
+/**
+ * for storing operation counters
+ * note: not thread safe.  ok with that for speed
+ */
+class OpCounters {
+public:
+    OpCounters();
+    void incInsertInWriteLock(int n);
+    void gotInsert();
+    void gotQuery();
+    void gotUpdate();
+    void gotDelete();
+    void gotGetMore();
+    void gotCommand();
 
-        OpCounters();
-        void incInsertInWriteLock(int n);
-        void gotInsert();
-        void gotQuery();
-        void gotUpdate();
-        void gotDelete();
-        void gotGetMore();
-        void gotCommand();
+    void gotOp(int op, bool isCommand);
 
-        void gotOp( int op , bool isCommand );
+    BSONObj getObj() const;
 
-        BSONObj getObj() const;
-        
-        // thse are used by snmp, and other things, do not remove
-        const AtomicUInt * getInsert() const { return &_insert; }
-        const AtomicUInt * getQuery() const { return &_query; }
-        const AtomicUInt * getUpdate() const { return &_update; }
-        const AtomicUInt * getDelete() const { return &_delete; }
-        const AtomicUInt * getGetMore() const { return &_getmore; }
-        const AtomicUInt * getCommand() const { return &_command; }
+    // thse are used by snmp, and other things, do not remove
+    const AtomicUInt32* getInsert() const {
+        return &_insert;
+    }
+    const AtomicUInt32* getQuery() const {
+        return &_query;
+    }
+    const AtomicUInt32* getUpdate() const {
+        return &_update;
+    }
+    const AtomicUInt32* getDelete() const {
+        return &_delete;
+    }
+    const AtomicUInt32* getGetMore() const {
+        return &_getmore;
+    }
+    const AtomicUInt32* getCommand() const {
+        return &_command;
+    }
 
+private:
+    void _checkWrap();
 
-    private:
-        void _checkWrap();
-        
-        // todo: there will be a lot of cache line contention on these.  need to do something 
-        //       else eventually.
-        AtomicUInt _insert;
-        AtomicUInt _query;
-        AtomicUInt _update;
-        AtomicUInt _delete;
-        AtomicUInt _getmore;
-        AtomicUInt _command;
-    };
+    // todo: there will be a lot of cache line contention on these.  need to do something
+    //       else eventually.
+    AtomicUInt32 _insert;
+    AtomicUInt32 _query;
+    AtomicUInt32 _update;
+    AtomicUInt32 _delete;
+    AtomicUInt32 _getmore;
+    AtomicUInt32 _command;
+};
 
-    extern OpCounters globalOpCounters;
-    extern OpCounters replOpCounters;
+extern OpCounters globalOpCounters;
+extern OpCounters replOpCounters;
 
-    class NetworkCounter {
-    public:
-        NetworkCounter() : _bytesIn(0), _bytesOut(0), _requests(0), _overflows(0) {}
-        void hit( long long bytesIn , long long bytesOut );
-        void append( BSONObjBuilder& b );
-    private:
-        long long _bytesIn;
-        long long _bytesOut;
-        long long _requests;
+class NetworkCounter {
+public:
+    NetworkCounter() : _bytesIn(0), _bytesOut(0), _requests(0) {}
+    void hit(long long bytesIn, long long bytesOut);
+    void append(BSONObjBuilder& b);
 
-        long long _overflows;
+private:
+    AtomicInt64 _bytesIn;
+    AtomicInt64 _bytesOut;
+    AtomicInt64 _requests;
+};
 
-        SpinLock _lock;
-    };
-
-    extern NetworkCounter networkCounter;
+extern NetworkCounter networkCounter;
 }

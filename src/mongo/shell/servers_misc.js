@@ -1,317 +1,262 @@
-/**
- * Run a mongod process.
- *
- * After initializing a MongodRunner, you must call start() on it.
- * @param {int} port port to run db on, use allocatePorts(num) to requision
- * @param {string} dbpath path to use
- * @param {boolean} peer pass in false (DEPRECATED, was used for replica pair host)
- * @param {boolean} arbiter pass in false (DEPRECATED, was used for replica pair host)
- * @param {array} extraArgs other arguments for the command line
- * @param {object} options other options include no_bind to not bind_ip to 127.0.0.1
- *    (necessary for replica set testing)
- */
-MongodRunner = function( port, dbpath, peer, arbiter, extraArgs, options ) {
-    this.port_ = port;
-    this.dbpath_ = dbpath;
-    this.peer_ = peer;
-    this.arbiter_ = arbiter;
-    this.extraArgs_ = extraArgs;
-    this.options_ = options ? options : {};
-};
-
-/**
- * Start this mongod process.
- *
- * @param {boolean} reuseData If the data directory should be left intact (default is to wipe it)
- */
-MongodRunner.prototype.start = function( reuseData ) {
-    var args = [];
-    if ( reuseData ) {
-        args.push( "mongod" );
-    }
-    args.push( "--port" );
-    args.push( this.port_ );
-    args.push( "--dbpath" );
-    args.push( this.dbpath_ );
-    args.push( "--nohttpinterface" );
-    args.push( "--noprealloc" );
-    args.push( "--smallfiles" );
-    if (!this.options_.no_bind) {
-      args.push( "--bind_ip" );
-      args.push( "127.0.0.1" );
-    }
-    if ( this.extraArgs_ ) {
-        args = args.concat( this.extraArgs_ );
-    }
-    removeFile( this.dbpath_ + "/mongod.lock" );
-    if ( reuseData ) {
-        return startMongoProgram.apply( null, args );
-    } else {
-        return startMongod.apply( null, args );
-    }
-}
-
-MongodRunner.prototype.port = function() { return this.port_; }
-
-MongodRunner.prototype.toString = function() { return [ this.port_, this.dbpath_, this.peer_, this.arbiter_ ].toString(); }
-
-ToolTest = function( name, extraOptions ){
+ToolTest = function(name, extraOptions) {
     this.name = name;
     this.options = extraOptions;
-    this.port = allocatePorts(1)[0];
+    this.port = allocatePort();
     this.baseName = "jstests_tool_" + name;
     this.root = MongoRunner.dataPath + this.baseName;
     this.dbpath = this.root + "/";
     this.ext = this.root + "_external/";
     this.extFile = this.root + "_external/a";
-    resetDbpath( this.dbpath );
-    resetDbpath( this.ext );
-}
+    resetDbpath(this.dbpath);
+    resetDbpath(this.ext);
+};
 
-ToolTest.prototype.startDB = function( coll ){
-    assert( ! this.m , "db already running" );
+ToolTest.prototype.startDB = function(coll) {
+    assert(!this.m, "db already running");
 
-    var options = {port : this.port,
-                   dbpath : this.dbpath,
-                   nohttpinterface : "",
-                   noprealloc : "",
-                   smallfiles : "",
-                   bind_ip : "127.0.0.1"};
+    var options = {
+        port: this.port,
+        dbpath: this.dbpath,
+        nohttpinterface: "",
+        noprealloc: "",
+        smallfiles: "",
+        bind_ip: "127.0.0.1"
+    };
 
     Object.extend(options, this.options);
 
     this.m = startMongoProgram.apply(null, MongoRunner.arrOptions("mongod", options));
-    this.db = this.m.getDB( this.baseName );
-    if ( coll )
-        return this.db.getCollection( coll );
+    this.db = this.m.getDB(this.baseName);
+    if (coll)
+        return this.db.getCollection(coll);
     return this.db;
-}
+};
 
-ToolTest.prototype.stop = function(){
-    if ( ! this.m )
+ToolTest.prototype.stop = function() {
+    if (!this.m)
         return;
-    stopMongod( this.port );
+    _stopMongoProgram(this.port);
     this.m = null;
     this.db = null;
 
     print('*** ' + this.name + " completed successfully ***");
-}
+};
 
-ToolTest.prototype.runTool = function(){
-    var a = [ "mongo" + arguments[0] ];
+ToolTest.prototype.runTool = function() {
+    var a = ["mongo" + arguments[0]];
 
     var hasdbpath = false;
-    
-    for ( var i=1; i<arguments.length; i++ ){
-        a.push( arguments[i] );
-        if ( arguments[i] == "--dbpath" )
+    var hasDialTimeout = false;
+
+    for (var i = 1; i < arguments.length; i++) {
+        a.push(arguments[i]);
+        if (arguments[i] === "--dbpath")
             hasdbpath = true;
+        if (arguments[i] === "--dialTimeout")
+            hasDialTimeout = true;
     }
 
-    if ( ! hasdbpath ){
-        a.push( "--host" );
-        a.push( "127.0.0.1:" + this.port );
+    if (!hasdbpath) {
+        a.push("--host");
+        a.push("127.0.0.1:" + this.port);
     }
 
-    return runMongoProgram.apply( null , a );
-}
+    if (!hasDialTimeout) {
+        a.push("--dialTimeout");
+        a.push("30");
+    }
 
+    return runMongoProgram.apply(null, a);
+};
 
-ReplTest = function( name, ports ){
+ReplTest = function(name, ports) {
     this.name = name;
-    this.ports = ports || allocatePorts( 2 );
-}
+    this.ports = ports || allocatePorts(2);
+};
 
-ReplTest.prototype.getPort = function( master ){
-    if ( master )
-        return this.ports[ 0 ];
-    return this.ports[ 1 ]
-}
+ReplTest.prototype.getPort = function(master) {
+    if (master)
+        return this.ports[0];
+    return this.ports[1];
+};
 
-ReplTest.prototype.getPath = function( master ){
+ReplTest.prototype.getPath = function(master) {
     var p = MongoRunner.dataPath + this.name + "-";
-    if ( master )
+    if (master)
         p += "master";
     else
-        p += "slave"
+        p += "slave";
     return p;
-}
+};
 
-ReplTest.prototype.getOptions = function( master , extra , putBinaryFirst, norepl ){
+ReplTest.prototype.getOptions = function(master, extra, putBinaryFirst, norepl) {
 
-    if ( ! extra )
+    if (!extra)
         extra = {};
 
-    if ( ! extra.oplogSize )
+    if (!extra.oplogSize)
         extra.oplogSize = "40";
-        
-    var a = []
-    if ( putBinaryFirst )
-        a.push( "mongod" )
-    a.push( "--nohttpinterface", "--noprealloc", "--bind_ip" , "127.0.0.1" , "--smallfiles" );
 
-    a.push( "--port" );
-    a.push( this.getPort( master ) );
+    var a = [];
+    if (putBinaryFirst)
+        a.push("mongod");
+    a.push("--nohttpinterface", "--noprealloc", "--bind_ip", "127.0.0.1", "--smallfiles");
 
-    a.push( "--dbpath" );
-    a.push( this.getPath( master ) );
-    
-    if( jsTestOptions().noJournal ) a.push( "--nojournal" )
-    if( jsTestOptions().noJournalPrealloc ) a.push( "--nopreallocj" )
-    if( jsTestOptions().keyFile ) {
-        a.push( "--keyFile" )
-        a.push( jsTestOptions().keyFile )
+    a.push("--port");
+    a.push(this.getPort(master));
+
+    a.push("--dbpath");
+    a.push(this.getPath(master));
+
+    if (jsTestOptions().noJournal && !('journal' in extra))
+        a.push("--nojournal");
+    if (jsTestOptions().noJournalPrealloc)
+        a.push("--nopreallocj");
+    if (jsTestOptions().keyFile) {
+        a.push("--keyFile");
+        a.push(jsTestOptions().keyFile);
     }
 
-    if( jsTestOptions().useSSL ) {
-        if (!a.contains("--sslMode")) {
-            a.push( "--sslMode" )
-            a.push( "requireSSL" )
+    if (!norepl) {
+        if (master) {
+            a.push("--master");
+        } else {
+            a.push("--slave");
+            a.push("--source");
+            a.push("127.0.0.1:" + this.ports[0]);
         }
-        if (!a.contains("--sslPEMKeyFile")) {
-            a.push( "--sslPEMKeyFile" )
-            a.push( "jstests/libs/server.pem" )
-        }
-        if (!a.contains("--sslCAFile")) {
-            a.push( "--sslCAFile" )
-            a.push( "jstests/libs/ca.pem" )
-        }
-        a.push( "--sslWeakCertificateValidation" )
-        a.push( "--sslAllowInvalidCertificates" )
-    }
-    if( jsTestOptions().useX509 && !a.contains("--clusterAuthMode")) {
-        a.push( "--clusterAuthMode" )
-        a.push( "x509" )
     }
 
-    if ( !norepl ) {
-        if ( master ){
-            a.push( "--master" );
-        }
-        else {
-            a.push( "--slave" );
-            a.push( "--source" );
-            a.push( "127.0.0.1:" + this.ports[0] );
-        }
-    }
-    
-    for ( var k in extra ){
+    for (var k in extra) {
         var v = extra[k];
-        if( k in MongoRunner.logicalOptions ) continue
-        a.push( "--" + k );
-        if ( v != null )
-            a.push( v );                    
+        if (k in MongoRunner.logicalOptions)
+            continue;
+        a.push("--" + k);
+        if (v != null && v !== "")
+            a.push(v);
     }
 
     return a;
-}
+};
 
-ReplTest.prototype.start = function( master , options , restart, norepl ){
-    var lockFile = this.getPath( master ) + "/mongod.lock";
-    removeFile( lockFile );
-    var o = this.getOptions( master , options , restart, norepl );
+ReplTest.prototype.start = function(master, options, restart, norepl) {
+    var lockFile = this.getPath(master) + "/mongod.lock";
+    removeFile(lockFile);
+    var o = this.getOptions(master, options, restart, norepl);
 
     if (restart) {
-        return startMongoProgram.apply(null, o);
+        var conn = startMongoProgram.apply(null, o);
+        if (!master) {
+            conn.setSlaveOk();
+        }
+        return conn;
     } else {
-        var conn = startMongod.apply(null, o);
-        if (jsTestOptions().keyFile || jsTestOptions().auth || jsTestOptions().useX509) {
+        var conn = _startMongod.apply(null, o);
+        if (jsTestOptions().keyFile || jsTestOptions().auth) {
             jsTest.authenticate(conn);
+        }
+        if (!master) {
+            conn.setSlaveOk();
         }
         return conn;
     }
-}
+};
 
-ReplTest.prototype.stop = function( master , signal ){
-    if ( arguments.length == 0 ){
-        this.stop( true );
-        this.stop( false );
+ReplTest.prototype.stop = function(master, signal) {
+    if (arguments.length == 0) {
+        this.stop(true);
+        this.stop(false);
         return;
     }
 
     print('*** ' + this.name + " completed successfully ***");
-    return stopMongod( this.getPort( master ) , signal || 15 );
-}
+    return _stopMongoProgram(this.getPort(master), signal || 15);
+};
 
-allocatePorts = function( n , startPort ) {
-    var ret = [];
-    var start = startPort || 31000;
-    for( var i = start; i < start + n; ++i )
-        ret.push( i );
-    return ret;
-}
+/**
+ * Returns a port number that has not been given out to any other caller from the same mongo shell.
+ */
+allocatePort = (function() {
+    // Defer initializing these variables until the first call, as TestData attributes may be
+    // initialized as part of the --eval argument (e.g. by resmoke.py), which will not be evaluated
+    // until after this has loaded.
+    var maxPort;
+    var nextPort;
 
+    return function() {
+        // The default port was chosen in an attempt to have a large number of unassigned ports that
+        // are also outside the ephemeral port range.
+        nextPort = nextPort || jsTestOptions().minPort || 20000;
+        maxPort = maxPort || jsTestOptions().maxPort || Math.pow(2, 16) - 1;
 
-SyncCCTest = function( testName , extraMongodOptions ){
+        if (nextPort === maxPort) {
+            throw new Error("Exceeded maximum port range in allocatePort()");
+        }
+        return nextPort++;
+    };
+})();
+
+/**
+ * Returns a list of 'numPorts' port numbers that have not been given out to any other caller from
+ * the same mongo shell.
+ */
+allocatePorts = function(numPorts) {
+    var ports = [];
+    for (var i = 0; i < numPorts; i++) {
+        ports.push(allocatePort());
+    }
+
+    return ports;
+};
+
+SyncCCTest = function(testName, extraMongodOptions) {
     this._testName = testName;
     this._connections = [];
-    
-    for ( var i=0; i<3; i++ ){
-        this._connections.push( startMongodTest( 30000 + i , testName + i , false, extraMongodOptions ) );
-    }
-    
-    this.url = this._connections.map( function(z){ return z.name; } ).join( "," );
-    this.conn = new Mongo( this.url );
-}
 
-SyncCCTest.prototype.stop = function(){
-    for ( var i=0; i<this._connections.length; i++){
-        stopMongod( 30000 + i );
+    for (var i = 0; i < 3; i++) {
+        this._connections.push(MongoRunner.runMongod(extraMongodOptions));
+    }
+
+    this.url = this._connections.map(function(z) {
+        return z.name;
+    }).join(",");
+    this.conn = new Mongo(this.url);
+};
+
+SyncCCTest.prototype.stop = function() {
+    for (var i = 0; i < this._connections.length; i++) {
+        _stopMongoProgram(30000 + i);
     }
 
     print('*** ' + this._testName + " completed successfully ***");
-}
+};
 
-SyncCCTest.prototype.checkHashes = function( dbname , msg ){
-    var hashes = this._connections.map(
-        function(z){
-            return z.getDB( dbname ).runCommand( "dbhash" );
-        }
-    );
+SyncCCTest.prototype.checkHashes = function(dbname, msg) {
+    var hashes = this._connections.map(function(z) {
+        return z.getDB(dbname).runCommand("dbhash");
+    });
 
-    for ( var i=1; i<hashes.length; i++ ){
-        assert.eq( hashes[0].md5 , hashes[i].md5 , "checkHash on " + dbname + " " + msg + "\n" + tojson( hashes ) )
+    for (var i = 1; i < hashes.length; i++) {
+        assert.eq(hashes[0].md5,
+                  hashes[i].md5,
+                  "checkHash on " + dbname + " " + msg + "\n" + tojson(hashes));
     }
-}
+};
 
-SyncCCTest.prototype.tempKill = function( num ){
+SyncCCTest.prototype.tempKill = function(num) {
     num = num || 0;
-    stopMongod( 30000 + num );
-}
+    MongoRunner.stopMongod(this._connections[num]);
+};
 
-SyncCCTest.prototype.tempStart = function( num ){
+SyncCCTest.prototype.tempStart = function(num) {
     num = num || 0;
-    this._connections[num] = startMongodTest( 30000 + num , this._testName + num , true );
-}
+    var old = this._connections[num];
+    this._connections[num] = MongoRunner.runMongod(
+        {restart: true, cleanData: false, port: old.port, dbpath: old.dbpath});
+};
 
-
-function startParallelShell( jsCode, port, noConnect ){
-    var x;
-
+function startParallelShell(jsCode, port, noConnect) {
     var args = ["mongo"];
-
-    // Convert function into call-string
-    if (typeof(jsCode) == "function") {
-        var id = Math.floor(Math.random() * 100000);
-        jsCode = "var f" + id + " = " + jsCode.toString() + ";f" + id + "();"; 
-    }
-    else if(typeof(jsCode) == "string") {}
-        // do nothing
-    else {
-        throw Error("bad first argument to startParallelShell");
-    }
-    
-    if (noConnect) {
-        args.push("--nodb");
-    } else if (typeof(db) == "object") {
-        jsCode = "db = db.getSiblingDB('" + db.getName() + "');" + jsCode;
-    }
-
-    if (TestData) {
-        jsCode = "TestData = " + tojson(TestData) + ";" + jsCode;
-    }
-
-    args.push("--eval", jsCode);
 
     if (typeof db == "object") {
         var hostAndPort = db.getMongo().host.split(':');
@@ -325,26 +270,49 @@ function startParallelShell( jsCode, port, noConnect ){
         args.push("--port", port);
     }
 
-    if( jsTestOptions().useSSL ) {
-        args.push( "--ssl" )
-        args.push( "--sslPEMKeyFile" )
-        args.push( "jstests/libs/client.pem" )
-        args.push( "--sslCAFile" )
-        args.push( "jstests/libs/ca.pem" )
-        args.push( "--sslAllowInvalidCertificates" )
+    // Convert function into call-string
+    if (typeof(jsCode) == "function") {
+        var id = Math.floor(Math.random() * 100000);
+        jsCode = "var f" + id + " = " + jsCode.toString() + ";f" + id + "();";
+    } else if (typeof(jsCode) == "string") {
+    }
+    // do nothing
+    else {
+        throw Error("bad first argument to startParallelShell");
     }
 
-    x = startMongoProgramNoConnect.apply(null, args);
-    return function(){
-        waitProgram( x );
+    if (noConnect) {
+        args.push("--nodb");
+    } else if (typeof(db) == "object") {
+        jsCode = "db = db.getSiblingDB('" + db.getName() + "');" + jsCode;
+    }
+
+    if (TestData) {
+        jsCode = "TestData = " + tojson(TestData) + ";" + jsCode;
+    }
+
+    args.push("--eval", jsCode);
+
+    var pid = startMongoProgramNoConnect.apply(null, args);
+
+    // Returns a function that when called waits for the parallel shell to exit and returns the exit
+    // code of the process. By default an error is thrown if the parallel shell exits with a nonzero
+    // exit code.
+    return function(options) {
+        if (arguments.length > 0) {
+            if (typeof options !== "object") {
+                throw new Error("options must be an object");
+            }
+            if (options === null) {
+                throw new Error("options cannot be null");
+            }
+        }
+        var exitCode = waitProgram(pid);
+        if (arguments.length === 0 || options.checkExitSuccess) {
+            assert.eq(0, exitCode, "encountered an error in the parallel shell");
+        }
+        return exitCode;
     };
 }
 
 var testingReplication = false;
-
-function skipIfTestingReplication(){
-    if (testingReplication) {
-        print("skipIfTestingReplication skipping");
-        quit(0);
-    }
-}

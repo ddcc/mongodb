@@ -1,5 +1,5 @@
 /**
-*    Copyright (C) 2013 10gen Inc.
+*    Copyright (C) 2013-2014 MongoDB Inc.
 *
 *    This program is free software: you can redistribute it and/or  modify
 *    it under the terms of the GNU Affero General Public License, version 3,
@@ -29,49 +29,51 @@
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/db/index/btree_based_access_method.h"
+#include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/jsobj.h"
 
 namespace mongo {
 
-    /**
-     * Maps (lat, lng) to the bucketSize-sided square bucket that contains it.
-     * Examines all documents in a given radius of a given point.
-     * Returns all documents that match a given search restriction.
-     * See http://dochub.mongodb.org/core/haystackindexes
-     *
-     * Use when you want to look for restaurants within 25 miles with a certain name.
-     * Don't use when you want to find the closest open restaurants; see 2d.cpp for that.
-     *
-     * Usage:
-     * db.foo.ensureIndex({ pos : "geoHaystack", type : 1 }, { bucketSize : 1 })
-     *   pos is the name of the field to be indexed that has lat/lng data in an array.
-     *   type is the name of the secondary field to be indexed. 
-     *   bucketSize specifies the dimension of the square bucket for the data in pos.
-     * ALL fields are mandatory.
-     */
-    class HaystackAccessMethod : public BtreeBasedAccessMethod {
-    public:
-        using BtreeBasedAccessMethod::_descriptor;
+class Collection;
+class OperationContext;
 
-        HaystackAccessMethod(IndexCatalogEntry* btreeState);
-        virtual ~HaystackAccessMethod() { }
+/**
+ * Maps (lat, lng) to the bucketSize-sided square bucket that contains it.
+ * Examines all documents in a given radius of a given point.
+ * Returns all documents that match a given search restriction.
+ * See http://dochub.mongodb.org/core/haystackindexes
+ *
+ * Use when you want to look for restaurants within 25 miles with a certain name.
+ * Don't use when you want to find the closest open restaurants; see 2d.cpp for that.
+ *
+ * Usage:
+ * db.foo.ensureIndex({ pos : "geoHaystack", type : 1 }, { bucketSize : 1 })
+ *   pos is the name of the field to be indexed that has lat/lng data in an array.
+ *   type is the name of the secondary field to be indexed.
+ *   bucketSize specifies the dimension of the square bucket for the data in pos.
+ * ALL fields are mandatory.
+ */
+class HaystackAccessMethod : public IndexAccessMethod {
+public:
+    HaystackAccessMethod(IndexCatalogEntry* btreeState, SortedDataInterface* btree);
 
-        virtual shared_ptr<KeyGenerator> getKeyGenerator() const { return _keyGenerator; }
-    protected:
-        friend class GeoHaystackSearchCommand;
-        void searchCommand(const BSONObj& nearObj, double maxDistance, const BSONObj& search,
-                           BSONObjBuilder* result, unsigned limit);
+protected:
+    friend class GeoHaystackSearchCommand;
+    void searchCommand(OperationContext* txn,
+                       Collection* collection,
+                       const BSONObj& nearObj,
+                       double maxDistance,
+                       const BSONObj& search,
+                       BSONObjBuilder* result,
+                       unsigned limit);
 
-    private:
-        virtual void getKeys(const BSONObj& obj, BSONObjSet* keys);
+private:
+    virtual void getKeys(const BSONObj& obj, BSONObjSet* keys) const;
 
-        string _geoField;
-        vector<string> _otherFields;
-        double _bucketSize;
-
-        shared_ptr<KeyGenerator> _keyGenerator;
-    };
+    std::string _geoField;
+    std::vector<std::string> _otherFields;
+    double _bucketSize;
+};
 
 }  // namespace mongo

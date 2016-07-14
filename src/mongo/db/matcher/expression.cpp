@@ -30,43 +30,47 @@
 
 #include "mongo/db/matcher/expression.h"
 
-#include "mongo/bson/bsonobjiterator.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonmisc.h"
-#include "mongo/util/log.h"
 
 namespace mongo {
 
-    MatchExpression::MatchExpression( MatchType type )
-        : _matchType( type ) { }
+using std::string;
 
-    string MatchExpression::toString() const {
-        StringBuilder buf;
-        debugString( buf, 0 );
-        return buf.str();
-    }
+MatchExpression::MatchExpression(MatchType type) : _matchType(type) {}
 
-    void MatchExpression::_debugAddSpace( StringBuilder& debug, int level ) const {
-        for ( int i = 0; i < level; i++ )
-            debug << "    ";
-    }
+string MatchExpression::toString() const {
+    StringBuilder buf;
+    debugString(buf, 0);
+    return buf.str();
+}
 
-    bool MatchExpression::matchesBSON( const BSONObj& doc, MatchDetails* details ) const {
-        BSONMatchableDocument mydoc( doc );
-        return matches( &mydoc, details );
-    }
+void MatchExpression::_debugAddSpace(StringBuilder& debug, int level) const {
+    for (int i = 0; i < level; i++)
+        debug << "    ";
+}
 
-
-    void AtomicMatchExpression::debugString( StringBuilder& debug, int level ) const {
-        _debugAddSpace( debug, level );
-        debug << "$atomic\n";
-    }
-
-    void FalseMatchExpression::debugString( StringBuilder& debug, int level ) const {
-        _debugAddSpace( debug, level );
-        debug << "$false\n";
-    }
-
+bool MatchExpression::matchesBSON(const BSONObj& doc, MatchDetails* details) const {
+    BSONMatchableDocument mydoc(doc);
+    return matches(&mydoc, details);
 }
 
 
+void AtomicMatchExpression::debugString(StringBuilder& debug, int level) const {
+    _debugAddSpace(debug, level);
+    debug << "$atomic\n";
+}
+
+void AtomicMatchExpression::toBSON(BSONObjBuilder* out) const {
+    out->append("$isolated", 1);
+}
+
+void FalseMatchExpression::debugString(StringBuilder& debug, int level) const {
+    _debugAddSpace(debug, level);
+    debug << "$false\n";
+}
+
+void FalseMatchExpression::toBSON(BSONObjBuilder* out) const {
+    out->append("$false", 1);
+}
+}

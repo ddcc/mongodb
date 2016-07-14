@@ -27,105 +27,110 @@
  */
 
 #include "mongo/db/exec/keep_mutations.h"
+
 #include "mongo/db/exec/filter.h"
+#include "mongo/db/exec/scoped_timer.h"
+#include "mongo/stdx/memory.h"
 
 namespace mongo {
 
-    KeepMutationsStage::KeepMutationsStage(const MatchExpression* filter,
-                                           WorkingSet* ws,
-                                           PlanStage* child)
-        : _workingSet(ws),
-          _child(child),
-          _filter(filter),
-          _doneReadingChild(false),
-          _doneReturningFlagged(false) { }
+using std::unique_ptr;
+using std::vector;
+using stdx::make_unique;
 
-    KeepMutationsStage::~KeepMutationsStage() { }
+// static
+const char* KeepMutationsStage::kStageType = "KEEP_MUTATIONS";
 
-    bool KeepMutationsStage::isEOF() {
-        return _doneReadingChild && _doneReturningFlagged;
+KeepMutationsStage::KeepMutationsStage(OperationContext* opCtx,
+                                       const MatchExpression* filter,
+                                       WorkingSet* ws,
+                                       PlanStage* child)
+    : PlanStage(kStageType, opCtx),
+      _workingSet(ws),
+      _filter(filter),
+      _doneReadingChild(false),
+      _doneReturningFlagged(false) {
+    _children.emplace_back(child);
+}
+
+KeepMutationsStage::~KeepMutationsStage() {}
+
+bool KeepMutationsStage::isEOF() {
+    return _doneReadingChild && _doneReturningFlagged;
+}
+
+PlanStage::StageState KeepMutationsStage::work(WorkingSetID* out) {
+    ++_commonStats.works;
+
+    // Adds the amount of time taken by work() to executionTimeMillis.
+    ScopedTimer timer(&_commonStats.executionTimeMillis);
+
+    // If we've returned as many results as we're limited to, isEOF will be true.
+    if (isEOF()) {
+        return PlanStage::IS_EOF;
     }
 
-    PlanStage::StageState KeepMutationsStage::work(WorkingSetID* out) {
-        ++_commonStats.works;
+    // Stream child results until the child is all done.
+    if (!_doneReadingChild) {
+        StageState status = child()->work(out);
 
-        // If we've returned as many results as we're limited to, isEOF will be true.
-        if (isEOF()) { return PlanStage::IS_EOF; }
-
-        // Stream child results until the child is all done.
-        if (!_doneReadingChild) {
-            StageState status = _child->work(out);
-
-            // Child is still returning results.  Pass them through.
-            if (PlanStage::IS_EOF != status) {
-                if (PlanStage::ADVANCED == status) {
-                    ++_commonStats.advanced;
-                }
-                else if (PlanStage::NEED_TIME == status) {
-                    ++_commonStats.needTime;
-                }
-                else if (PlanStage::NEED_FETCH == status) {
-                    ++_commonStats.needFetch;
-                }
-
-                return status;
+        // Child is still returning results.  Pass them through.
+        if (PlanStage::IS_EOF != status) {
+            if (PlanStage::ADVANCED == status) {
+                ++_commonStats.advanced;
+            } else if (PlanStage::NEED_TIME == status) {
+                ++_commonStats.needTime;
+            } else if (PlanStage::NEED_YIELD == status) {
+                ++_commonStats.needYield;
             }
 
-            // Child is EOF.  We want to stream flagged results if there are any.
-            _doneReadingChild = true;
-
-            // Read out all of the flagged results from the working set.  We can't iterate through
-            // the working set's flagged result set directly, since it may be modified later if
-            // further documents are invalidated during a yield.
-            std::copy(_workingSet->getFlagged().begin(), _workingSet->getFlagged().end(),
-                      std::back_inserter(_flagged));
-            _flaggedIterator = _flagged.begin();
+            return status;
         }
 
-        // We're streaming flagged results.
-        invariant(!_doneReturningFlagged);
-        if (_flaggedIterator == _flagged.end()) {
-            _doneReturningFlagged = true;
-            return PlanStage::IS_EOF;
-        }
+        // Child is EOF.  We want to stream flagged results if there are any.
+        _doneReadingChild = true;
 
-        WorkingSetID idToTest = *_flaggedIterator;
-        _flaggedIterator++;
-
-        WorkingSetMember* member = _workingSet->get(idToTest);
-        if (Filter::passes(member, _filter)) {
-            *out = idToTest;
-            ++_commonStats.advanced;
-            return PlanStage::ADVANCED;
-        }
-        else {
-            _workingSet->free(idToTest);
-            ++_commonStats.needTime;
-            return PlanStage::NEED_TIME;
-        }
+        // Read out all of the flagged results from the working set.  We can't iterate through
+        // the working set's flagged result set directly, since it may be modified later if
+        // further documents are invalidated during a yield.
+        std::copy(_workingSet->getFlagged().begin(),
+                  _workingSet->getFlagged().end(),
+                  std::back_inserter(_flagged));
+        _flaggedIterator = _flagged.begin();
     }
 
-    void KeepMutationsStage::prepareToYield() {
-        ++_commonStats.yields;
-        _child->prepareToYield();
+    // We're streaming flagged results.
+    invariant(!_doneReturningFlagged);
+    if (_flaggedIterator == _flagged.end()) {
+        _doneReturningFlagged = true;
+        return PlanStage::IS_EOF;
     }
 
-    void KeepMutationsStage::recoverFromYield() {
-        ++_commonStats.unyields;
-        _child->recoverFromYield();
-    }
+    WorkingSetID idToTest = *_flaggedIterator;
+    _flaggedIterator++;
 
-    void KeepMutationsStage::invalidate(const DiskLoc& dl, InvalidationType type) {
-        ++_commonStats.invalidates;
-        _child->invalidate(dl, type);
+    WorkingSetMember* member = _workingSet->get(idToTest);
+    if (Filter::passes(member, _filter)) {
+        *out = idToTest;
+        ++_commonStats.advanced;
+        return PlanStage::ADVANCED;
+    } else {
+        _workingSet->free(idToTest);
+        ++_commonStats.needTime;
+        return PlanStage::NEED_TIME;
     }
+}
 
-    PlanStageStats* KeepMutationsStage::getStats() {
-        _commonStats.isEOF = isEOF();
-        auto_ptr<PlanStageStats> ret(new PlanStageStats(_commonStats, STAGE_KEEP_MUTATIONS));
-        // Takes ownership of the object returned from _child->getStats().
-        ret->children.push_back(_child->getStats());
-        return ret.release();
-    }
+unique_ptr<PlanStageStats> KeepMutationsStage::getStats() {
+    _commonStats.isEOF = isEOF();
+    unique_ptr<PlanStageStats> ret =
+        make_unique<PlanStageStats>(_commonStats, STAGE_KEEP_MUTATIONS);
+    ret->children.emplace_back(child()->getStats());
+    return ret;
+}
+
+const SpecificStats* KeepMutationsStage::getSpecificStats() const {
+    return NULL;
+}
 
 }  // namespace mongo

@@ -28,7 +28,7 @@
 *    it in the license file.
 */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/base/init.h"
 #include "mongo/db/jsobj.h"
@@ -41,22 +41,22 @@
 
 namespace mongo {
 
-    Matcher2::Matcher2( const BSONObj& pattern, bool nested )
-        : _pattern( pattern ) {
+Matcher::Matcher(const BSONObj& pattern, const ExtensionsCallback& extensionsCallback)
+    : _pattern(pattern) {
+    StatusWithMatchExpression statusWithMatcher =
+        MatchExpressionParser::parse(pattern, extensionsCallback);
+    uassert(16810,
+            mongoutils::str::stream() << "bad query: " << statusWithMatcher.getStatus().toString(),
+            statusWithMatcher.isOK());
 
-        StatusWithMatchExpression result = MatchExpressionParser::parse( pattern );
-        uassert( 16810,
-                 mongoutils::str::stream() << "bad query: " << result.toString(),
-                 result.isOK() );
+    _expression = std::move(statusWithMatcher.getValue());
+}
 
-        _expression.reset( result.getValue() );
-    }
+bool Matcher::matches(const BSONObj& doc, MatchDetails* details) const {
+    if (!_expression)
+        return true;
 
-    bool Matcher2::matches(const BSONObj& doc, MatchDetails* details ) const {
-        if ( !_expression )
-            return true;
-
-        return _expression->matchesBSON( doc, details );
-    }
+    return _expression->matchesBSON(doc, details);
+}
 
 }  // namespace mongo

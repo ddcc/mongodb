@@ -42,14 +42,12 @@
  * The commands defined here, and profiling, are only available when enabled at
  * build-time with the "--use-cpu-profiler" argument to scons.
  *
- * Example SCons command line, assuming you've installed google-perftools in
- * /usr/local:
+ * Example SCons command line:
  *
- *     scons --release --use-cpu-profiler \
- *         --cpppath=/usr/local/include --libpath=/usr/local/lib
+ *     scons --release --use-cpu-profiler
  */
 
-#include "third_party/gperftools-2.0/src/gperftools/profiler.h"
+#include "gperftools/profiler.h"
 
 #include <string>
 #include <vector>
@@ -58,99 +56,116 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/client.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/jsobj.h"
 
 namespace mongo {
 
-    namespace {
+namespace {
 
-        /**
-         * Common code for the implementation of cpu profiler commands.
-         */
-        class CpuProfilerCommand : public Command {
-        public:
-            CpuProfilerCommand( char const *name ) : Command( name ) {}
-            virtual bool slaveOk() const { return true; }
-            virtual bool adminOnly() const { return true; }
-            virtual bool localHostOnlyIfNoAuth( const BSONObj& cmdObj ) { return true; }
-            virtual void addRequiredPrivileges(const std::string& dbname,
-                                               const BSONObj& cmdObj,
-                                               std::vector<Privilege>* out) {
-                ActionSet actions;
-                actions.addAction(ActionType::cpuProfiler);
-                out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
-            }
+/**
+ * Common code for the implementation of cpu profiler commands.
+ */
+class CpuProfilerCommand : public Command {
+public:
+    CpuProfilerCommand(char const* name) : Command(name) {}
+    virtual bool slaveOk() const {
+        return true;
+    }
+    virtual bool adminOnly() const {
+        return true;
+    }
+    virtual bool localHostOnlyIfNoAuth(const BSONObj& cmdObj) {
+        return true;
+    }
+    virtual void addRequiredPrivileges(const std::string& dbname,
+                                       const BSONObj& cmdObj,
+                                       std::vector<Privilege>* out) {
+        ActionSet actions;
+        actions.addAction(ActionType::cpuProfiler);
+        out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
+    }
 
-            // This is an abuse of the global dbmutex.  We only really need to
-            // ensure that only one cpuprofiler command runs at once; it would
-            // be fine for it to run concurrently with other operations.
-            virtual LockType locktype() const { return WRITE; }
-        };
+    // This is an abuse of the global dbmutex.  We only really need to
+    // ensure that only one cpuprofiler command runs at once; it would
+    // be fine for it to run concurrently with other operations.
+    virtual bool isWriteCommandForConfigServer() const {
+        return true;
+    }
+};
 
-        /**
-         * Class providing implementation of the _cpuProfilerStart command.
-         */
-        class CpuProfilerStartCommand : public CpuProfilerCommand {
-        public:
-            CpuProfilerStartCommand() : CpuProfilerCommand( commandName ) {}
+/**
+ * Class providing implementation of the _cpuProfilerStart command.
+ */
+class CpuProfilerStartCommand : public CpuProfilerCommand {
+public:
+    CpuProfilerStartCommand() : CpuProfilerCommand(commandName) {}
 
-            virtual bool run( string const &db,
-                              BSONObj &cmdObj,
-                              int options,
-                              string &errmsg,
-                              BSONObjBuilder &result,
-                              bool fromRepl );
+    virtual bool run(OperationContext* txn,
+                     std::string const& db,
+                     BSONObj& cmdObj,
+                     int options,
+                     std::string& errmsg,
+                     BSONObjBuilder& result);
 
-            static char const *const commandName;
-        } cpuProfilerStartCommandInstance;
+    static char const* const commandName;
+} cpuProfilerStartCommandInstance;
 
-        /**
-         * Class providing implementation of the _cpuProfilerStop command.
-         */
-        class CpuProfilerStopCommand : public CpuProfilerCommand {
-        public:
-            CpuProfilerStopCommand() : CpuProfilerCommand( commandName ) {}
+/**
+ * Class providing implementation of the _cpuProfilerStop command.
+ */
+class CpuProfilerStopCommand : public CpuProfilerCommand {
+public:
+    CpuProfilerStopCommand() : CpuProfilerCommand(commandName) {}
 
-            virtual bool run( string const &db,
-                              BSONObj &cmdObj,
-                              int options,
-                              string &errmsg,
-                              BSONObjBuilder &result,
-                              bool fromRepl );
+    virtual bool run(OperationContext* txn,
+                     std::string const& db,
+                     BSONObj& cmdObj,
+                     int options,
+                     std::string& errmsg,
+                     BSONObjBuilder& result);
 
-            static char const *const commandName;
-        } cpuProfilerStopCommandInstance;
+    static char const* const commandName;
+} cpuProfilerStopCommandInstance;
 
-        char const *const CpuProfilerStartCommand::commandName = "_cpuProfilerStart";
-        char const *const CpuProfilerStopCommand::commandName = "_cpuProfilerStop";
+char const* const CpuProfilerStartCommand::commandName = "_cpuProfilerStart";
+char const* const CpuProfilerStopCommand::commandName = "_cpuProfilerStop";
 
-        bool CpuProfilerStartCommand::run( string const &db,
-                                           BSONObj &cmdObj,
-                                           int options,
-                                           string &errmsg,
-                                           BSONObjBuilder &result,
-                                           bool fromRepl ) {
+bool CpuProfilerStartCommand::run(OperationContext* txn,
+                                  std::string const& db,
+                                  BSONObj& cmdObj,
+                                  int options,
+                                  std::string& errmsg,
+                                  BSONObjBuilder& result) {
+    ScopedTransaction transaction(txn, MODE_IX);
+    Lock::DBLock dbXLock(txn->lockState(), db, MODE_X);
+    // The lock here is just to prevent concurrency, nothing will write.
+    OldClientContext ctx(txn, db);
 
-            std::string profileFilename = cmdObj[commandName]["profileFilename"].String();
-            if ( ! ::ProfilerStart( profileFilename.c_str() ) ) {
-                errmsg = "Failed to start profiler";
-                return false;
-            }
-            return true;
-        }
+    std::string profileFilename = cmdObj[commandName]["profileFilename"].String();
+    if (!::ProfilerStart(profileFilename.c_str())) {
+        errmsg = "Failed to start profiler";
+        return false;
+    }
+    return true;
+}
 
-        bool CpuProfilerStopCommand::run( string const &db,
-                                          BSONObj &cmdObj,
-                                          int options,
-                                          string &errmsg,
-                                          BSONObjBuilder &result,
-                                          bool fromRepl ) {
-            ::ProfilerStop();
-            return true;
-        }
+bool CpuProfilerStopCommand::run(OperationContext* txn,
+                                 std::string const& db,
+                                 BSONObj& cmdObj,
+                                 int options,
+                                 std::string& errmsg,
+                                 BSONObjBuilder& result) {
+    ScopedTransaction transaction(txn, MODE_IX);
+    Lock::DBLock dbXLock(txn->lockState(), db, MODE_X);
+    OldClientContext ctx(txn, db);
 
-    }  // namespace
+    ::ProfilerStop();
+    return true;
+}
+
+}  // namespace
 
 }  // namespace mongo
-

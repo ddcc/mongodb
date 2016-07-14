@@ -26,165 +26,35 @@
  *    it in the license file.
  */
 
-#include "mongo/db/geo/s2common.h"
-#include "mongo/db/hasher.h"
-#include "mongo/db/index/2d_common.h"
-#include "mongo/db/index_names.h"
+#pragma once
+
+#include <string>
+#include <vector>
+
 #include "mongo/db/jsobj.h"
-#include "mongo/util/mongoutils/str.h"
+#include "mongo/db/hasher.h"
 
 namespace mongo {
 
-    class ExpressionParams {
-    public:
-        static void parseTwoDParams(const BSONObj& infoObj, TwoDIndexingParams* out) {
-            BSONObjIterator i(infoObj.getObjectField("key"));
+struct TwoDIndexingParams;
+struct S2IndexingParams;
 
-            while (i.more()) {
-                BSONElement e = i.next();
-                if (e.type() == String && IndexNames::GEO_2D == e.valuestr()) {
-                    uassert(16800, "can't have 2 geo fields", out->geo.size() == 0);
-                    uassert(16801, "2d has to be first in index", out->other.size() == 0);
-                    out->geo = e.fieldName();
-                } else {
-                    int order = 1;
-                    if (e.isNumber()) {
-                        order = static_cast<int>(e.Number());
-                    }
-                    out->other.push_back(make_pair(e.fieldName(), order));
-                }
-            }
+namespace ExpressionParams {
 
-            uassert(16802, "no geo field specified", out->geo.size());
+void parseTwoDParams(const BSONObj& infoObj, TwoDIndexingParams* out);
 
-            double bits =  configValueWithDefaultDouble(infoObj, "bits", 26);  // for lat/long, ~ 1ft
-            uassert(16803, "bits in geo index must be between 1 and 32", bits > 0 && bits <= 32);
+void parseHashParams(const BSONObj& infoObj,
+                     HashSeed* seedOut,
+                     int* versionOut,
+                     std::string* fieldOut);
 
-            GeoHashConverter::Parameters hashParams;
-            hashParams.bits = static_cast<unsigned>(bits);
-            hashParams.max = configValueWithDefaultDouble(infoObj, "max", 180.0);
-            hashParams.min = configValueWithDefaultDouble(infoObj, "min", -180.0);
-            double numBuckets = (1024 * 1024 * 1024 * 4.0);
-            hashParams.scaling = numBuckets / (hashParams.max - hashParams.min);
+void parseHaystackParams(const BSONObj& infoObj,
+                         std::string* geoFieldOut,
+                         std::vector<std::string>* otherFieldsOut,
+                         double* bucketSizeOut);
 
-            out->geoHashConverter.reset(new GeoHashConverter(hashParams));
-        }
+void parse2dsphereParams(const BSONObj& infoObj, S2IndexingParams* out);
 
-        static void parseHashParams(const BSONObj& infoObj,
-                                    HashSeed* seedOut,
-                                    int* versionOut,
-                                    string* fieldOut) {
-
-            // Default _seed to DEFAULT_HASH_SEED if "seed" is not included in the index spec
-            // or if the value of "seed" is not a number
-
-            // *** WARNING ***
-            // Choosing non-default seeds will invalidate hashed sharding
-            // Changing the seed default will break existing indexes and sharded collections
-            if (infoObj["seed"].eoo()) {
-                *seedOut = BSONElementHasher::DEFAULT_HASH_SEED;
-            }
-            else {
-                *seedOut = infoObj["seed"].numberInt();
-            }
-
-            // In case we have hashed indexes based on other hash functions in the future, we store
-            // a hashVersion number. If hashVersion changes, "makeSingleHashKey" will need to change
-            // accordingly.  Defaults to 0 if "hashVersion" is not included in the index spec or if
-            // the value of "hashversion" is not a number
-            *versionOut = infoObj["hashVersion"].numberInt();
-
-            // Get the hashfield name
-            BSONElement firstElt = infoObj.getObjectField("key").firstElement();
-            massert(16765, "error: no hashed index field",
-                    firstElt.str().compare(IndexNames::HASHED) == 0);
-            *fieldOut = firstElt.fieldName();
-        }
-
-        static void parseHaystackParams(const BSONObj& infoObj,
-                                        string* geoFieldOut,
-                                        vector<string>* otherFieldsOut,
-                                        double* bucketSizeOut) {
-
-            BSONElement e = infoObj["bucketSize"];
-            uassert(16777, "need bucketSize", e.isNumber());
-            *bucketSizeOut = e.numberDouble();
-            uassert(16769, "bucketSize cannot be zero", *bucketSizeOut != 0.0);
-
-            // Example:
-            // db.foo.ensureIndex({ pos : "geoHaystack", type : 1 }, { bucketSize : 1 })
-            BSONObjIterator i(infoObj.getObjectField("key"));
-            while (i.more()) {
-                BSONElement e = i.next();
-                if (e.type() == String && IndexNames::GEO_HAYSTACK == e.valuestr()) {
-                    uassert(16770, "can't have more than one geo field", geoFieldOut->size() == 0);
-                    uassert(16771, "the geo field has to be first in index",
-                            otherFieldsOut->size() == 0);
-                    *geoFieldOut = e.fieldName();
-                } else {
-                    uassert(16772, "geoSearch can only have 1 non-geo field for now",
-                            otherFieldsOut->size() == 0);
-                    otherFieldsOut->push_back(e.fieldName());
-                }
-            }
-        }
-
-        static void parse2dsphereParams(const BSONObj& infoObj,
-                                        S2IndexingParams* out) {
-            // Set up basic params.
-            out->maxKeysPerInsert = 200;
-
-            // This is advisory.
-            out->maxCellsInCovering = 50;
-
-            // Near distances are specified in meters...sometimes.
-            out->radius = kRadiusOfEarthInMeters;
-
-            // These are not advisory.
-            out->finestIndexedLevel = configValueWithDefaultInt(infoObj,
-                                                                "finestIndexedLevel",
-                S2::kAvgEdge.GetClosestLevel(500.0 / out->radius));
-
-            out->coarsestIndexedLevel = configValueWithDefaultInt(infoObj,
-                                                                  "coarsestIndexedLevel",
-                S2::kAvgEdge.GetClosestLevel(100 * 1000.0 / out->radius));
-
-            static const string kIndexVersionFieldName("2dsphereIndexVersion");
-
-            // Determine which version of this index we're using.  If none was set in the descriptor,
-            // assume S2_INDEX_VERSION_1 (alas, the first version predates the existence of the version
-            // field).
-            out->indexVersion = static_cast<S2IndexVersion>(configValueWithDefaultInt(infoObj,
-                                                                                      kIndexVersionFieldName,
-                                                                                      S2_INDEX_VERSION_1));
-
-            uassert(16747, "coarsestIndexedLevel must be >= 0", out->coarsestIndexedLevel >= 0);
-            uassert(16748, "finestIndexedLevel must be <= 30", out->finestIndexedLevel <= 30);
-            uassert(16749, "finestIndexedLevel must be >= coarsestIndexedLevel",
-                    out->finestIndexedLevel >= out->coarsestIndexedLevel);
-
-            massert(17395,
-                    mongoutils::str::stream() << "unsupported geo index version { " << kIndexVersionFieldName
-                                  << " : " << out->indexVersion << " }, only support versions: ["
-                                  << S2_INDEX_VERSION_1 << "," << S2_INDEX_VERSION_2 << "]",
-                    out->indexVersion == S2_INDEX_VERSION_2 || out->indexVersion == S2_INDEX_VERSION_1);
-        }
-
-    private:
-        static double configValueWithDefaultDouble(const BSONObj& infoObj,
-                                                   const string& name,
-                                                   double def) {
-            BSONElement e = infoObj[name];
-            if (e.isNumber()) { return e.numberDouble(); }
-            return def;
-        }
-
-        static int configValueWithDefaultInt(const BSONObj& infoObj, const string& name, int def) {
-            BSONElement e = infoObj[name];
-            if (e.isNumber()) { return e.numberInt(); }
-            return def;
-        }
-
-    };
+}  // namespace ExpressionParams
 
 }  // namespace mongo

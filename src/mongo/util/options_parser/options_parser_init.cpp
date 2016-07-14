@@ -28,28 +28,29 @@
 
 #include "mongo/util/options_parser/startup_options.h"
 
+#include <iostream>
+
 #include "mongo/util/exit_code.h"
 #include "mongo/util/options_parser/option_description.h"
 #include "mongo/util/options_parser/option_section.h"
 #include "mongo/util/options_parser/options_parser.h"
 #include "mongo/util/options_parser/startup_option_init.h"
+#include "mongo/util/quick_exit.h"
 
 namespace mongo {
 namespace optionenvironment {
 
 MONGO_STARTUP_OPTIONS_PARSE(StartupOptions)(InitializerContext* context) {
     OptionsParser parser;
-    Status ret = parser.run(startupOptions, context->args(), context->env(),
-                            &startupOptionsParsed);
+    Status ret = parser.run(startupOptions, context->args(), context->env(), &startupOptionsParsed);
     if (!ret.isOK()) {
         std::cerr << ret.reason() << std::endl;
         // TODO: Figure out if there's a use case for this help message ever being different
-        std::cerr << "try '" << context->args()[0]
-                    << " --help' for more information" << std::endl;
-        ::_exit(EXIT_BADOPTIONS);
+        std::cerr << "try '" << context->args()[0] << " --help' for more information" << std::endl;
+        quickExit(EXIT_BADOPTIONS);
     }
     return Status::OK();
 }
 
-} // namespace optionenvironment
-} // namespace mongo
+}  // namespace optionenvironment
+}  // namespace mongo

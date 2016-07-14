@@ -28,24 +28,28 @@
 
 #include "mongo/util/fail_point_service.h"
 
+
 namespace mongo {
-    MONGO_FP_DECLARE(dummy); // used by jstests/libs/fail_point.js
 
-    scoped_ptr<FailPointRegistry> _fpRegistry(NULL);
+using std::unique_ptr;
 
-    MONGO_INITIALIZER(FailPointRegistry)(InitializerContext* context) {
-        _fpRegistry.reset(new FailPointRegistry());
-        return Status::OK();
-    }
+MONGO_FP_DECLARE(dummy);  // used by jstests/libs/fail_point.js
 
-    MONGO_INITIALIZER_GENERAL(AllFailPointsRegistered,
-                              MONGO_NO_PREREQUISITES,
-                              MONGO_NO_DEPENDENTS)(InitializerContext* context) {
-        _fpRegistry->freeze();
-        return Status::OK();
-    }
+unique_ptr<FailPointRegistry> _fpRegistry(nullptr);
 
-    FailPointRegistry* getGlobalFailPointRegistry() {
-        return _fpRegistry.get();
-    }
+MONGO_INITIALIZER(FailPointRegistry)(InitializerContext* context) {
+    _fpRegistry.reset(new FailPointRegistry());
+    return Status::OK();
+}
+
+MONGO_INITIALIZER_GENERAL(AllFailPointsRegistered,
+                          MONGO_NO_PREREQUISITES,
+                          MONGO_NO_DEPENDENTS)(InitializerContext* context) {
+    _fpRegistry->freeze();
+    return Status::OK();
+}
+
+FailPointRegistry* getGlobalFailPointRegistry() {
+    return _fpRegistry.get();
+}
 }
