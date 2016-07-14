@@ -1,3 +1,9 @@
+mongodb (1:2.6.12-2) unstable; urgency=medium
+
+  * Do not use tcmalloc on ppc64el (fixes FTBFS on ppc64el).
+
+ -- Apollon Oikonomopoulos <apoikos@debian.org>  Thu, 14 Jul 2016 15:13:57 +0300
+
 mongodb (1:2.6.12-1) unstable; urgency=medium
 
   [ Apollon Oikonomopoulos ]
