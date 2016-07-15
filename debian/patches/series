@@ -1,6 +1,5 @@
 0001-Create-kfreebsd-like-linux-in-most-respects.patch
 0002-kfreebsd-has-dev-urandom.patch
-0006-Fix-ARM-alignment-problems.patch
 0012-support-gnu.patch
 no-unused-function.patch
 disable-warnings.patch
