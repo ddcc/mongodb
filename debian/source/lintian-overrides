@@ -3,9 +3,3 @@ mongodb source: source-is-missing jstests/core/*
 
 # False positive triggered by line length
 mongodb source: source-is-missing src/mongo/shell/utils.js line length *
-
-# Bundled PCRE not used during build
-mongodb source: outdated-autotools-helper-file src/third_party/pcre-8.30/config.*
-
-# Bundled PCRE not used during build
-mongodb source: configure-generated-file-in-source src/third_party/pcre-8.30/config.status
