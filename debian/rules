@@ -4,6 +4,10 @@
 # Uncomment this to turn on verbose mode.
 #export DH_VERBOSE=1
 
+# Use gcc and g++ by default, but allow setting them from the environment
+CC ?= gcc
+CXX ?= g++
+
 DEB_SCONS_OPTIONS :=
 ifneq (,$(filter debug,$(DEB_BUILD_OPTIONS)))
 	DEB_SCONS_OPTIONS := --d=DEBUGBUILD
@@ -22,7 +26,8 @@ COMMON_OPTIONS = --use-system-tcmalloc --use-system-pcre \
 		 --use-system-boost --use-system-snappy \
 		 --use-system-zlib --use-system-valgrind \
 		 --use-system-stemmer --use-system-yaml \
-		 --ssl $(DEB_SCONS_OPTIONS)
+		 --ssl $(DEB_SCONS_OPTIONS) \
+		 CC=$(CC) CXX=$(CXX)
 
 gperftools_archs = amd64 i386 armhf
 ifneq (,$(filter $(DEB_HOST_ARCH), $(gperftools_archs)))
