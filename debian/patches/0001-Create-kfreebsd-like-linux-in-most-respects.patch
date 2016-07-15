@@ -8,21 +8,12 @@ Subject: Create kfreebsd like linux in most respects
 
 --- a/SConstruct
 +++ b/SConstruct
-@@ -66,7 +66,7 @@
- if "darwin" == platform:
-     darwin = True
-     platform = "osx" # prettier than darwin
--elif platform.startswith("linux"):
-+elif platform.startswith("linux") or platform.startswith("gnukfreebsd"):
-     linux = True
-     platform = "linux"
- elif "sunos5" == platform:
-@@ -526,6 +526,8 @@
- 
- if env['PYSYSPLATFORM'] == 'linux3':
-     env['PYSYSPLATFORM'] = 'linux2'
-+if 'gnukfreebsd' in env['PYSYSPLATFORM']:
-+    env['PYSYSPLATFORM'] = 'linux2'
- if 'freebsd' in env['PYSYSPLATFORM']:
-     env['PYSYSPLATFORM'] = 'freebsd'
- 
+@@ -38,7 +38,7 @@
+ # command-line. Treat this output as the value of HOST_OS
+ def get_running_os_name():
+     running_os = os.sys.platform
+-    if running_os.startswith('linux'):
++    if running_os.startswith('linux') or running_os.startswith('gnukfreebsd'):
+         running_os = 'linux'
+     elif running_os.startswith('freebsd'):
+         running_os = 'freebsd'
