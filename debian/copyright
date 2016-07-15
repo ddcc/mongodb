@@ -205,7 +205,7 @@ Copyright: 2008 Jesse Beder
 Comment: Not used; the source is built with the Debian yaml-cpp libraries.
 License: Expat
 
-Files: src/third_party/zlib-1.2.8
+Files: src/third_party/zlib-1.2.8/*
 Copyright: 1995-2013 Jean-loup Gailly
            1995-2013 Mark Adler
 License: zlib
