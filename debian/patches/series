@@ -1,7 +1,5 @@
 0001-Create-kfreebsd-like-linux-in-most-respects.patch
 0002-kfreebsd-has-dev-urandom.patch
 0012-support-gnu.patch
-no-unused-function.patch
-disable-warnings.patch
 hardened-build.patch
 fix-gcc-6-ftbfs.patch
