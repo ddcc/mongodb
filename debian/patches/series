@@ -12,3 +12,4 @@ fix-yaml-detection.patch
 add-option-to-disable-javascript.patch
 hardened-build.patch
 fix-gcc-6-ftbfs.patch
+CVE-2016-6494.patch

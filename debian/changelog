@@ -1,3 +1,10 @@
+mongodb (1:2.6.12-3) unstable; urgency=high
+
+  * Fix CVE-2016-6494 , prevent group and other access to .dbshell
+    (closes: #832908).
+
+ -- Laszlo Boszormenyi (GCS) <gcs@debian.org>  Mon, 08 Aug 2016 21:56:32 +0000
+
 mongodb (1:2.6.12-2) unstable; urgency=medium
 
   * Do not use tcmalloc on ppc64el (fixes FTBFS on ppc64el).
