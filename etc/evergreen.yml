@@ -267,7 +267,11 @@ functions:
           # exit immediately if virtualenv is not found
           set -o errexit
           set -o verbose
-          virtualenv --system-site-packages ./venv
+          if [ ${build_variant} == enterprise-suse12-64 ]; then
+              virtualenv ./venv
+          else
+              virtualenv --system-site-packages ./venv
+          fi
 
   "run tests" :
     command: shell.exec
@@ -308,9 +312,12 @@ functions:
 
         # Default storageEngineCacheSizeGB to 1. Override on individual test config if needed.
         # resmoke will assign to the appropriate parameter on storage engines that support it.
-        if [[ "${resmoke_args}" != *storageEngineCacheSizeGB* ]]; then
+        set +o errexit
+        echo "${resmoke_args}" | grep -q storageEngineCacheSizeGB
+        if [ $? -eq 1 ]; then
           extra_args="$extra_args --storageEngineCacheSizeGB=1"
         fi
+        set -o errexit
 
         ${path_prefix} ${asan_symbolizer} ${enable_lsan} ${rlp_environment} ${python|python} buildscripts/resmoke.py ${resmoke_args} $extra_args ${test_flags} --log=buildlogger --reportFile=report.json
 
@@ -323,11 +330,6 @@ functions:
           set -o verbose
 
           git clone git@github.com:10gen/jstestfuzz.git
-
-          if [ "Windows_NT" != "$OS" ]; then
-            ${python|python} jstestfuzz/etc/download_nodejs.py
-            ${decompress} node.tar.gz > /dev/null
-          fi
 
           cp mongodb*/bin/mongod .
     - command: shell.exec
@@ -354,7 +356,7 @@ functions:
             export APPDATA=${workdir}/npm-app-data
             export PATH="$PATH:/cygdrive/c/Program Files (x86)/nodejs"
           else
-            export PATH="$PATH:${workdir}/src/node-v0.12.7-linux-x64/bin"
+            export PATH="$PATH:/opt/node/bin"
           fi
 
           npm start -- --jsTestsDir ../jstests
@@ -385,6 +387,17 @@ functions:
 
         rm -rf /data/install /data/multiversion
         ${python|python} buildscripts/setup_multiversion_mongodb.py /data/install /data/multiversion ${multiversion_platform_arch|"Linux/x86_64"} "2.4" "2.6" "3.0" "3.2.1"
+
+  "download mongod for validation checking" :
+    command: shell.exec
+    params:
+      working_dir: src
+      script: |
+        set -o errexit
+        set -o verbose
+
+        rm -rf /data/install /data/multiversion
+        ${python|python} buildscripts/setup_multiversion_mongodb.py /data/install /data/multiversion ${multiversion_platform_arch|"Linux/x86_64"} "3.3.10"
 
 pre:
   - command: shell.track
@@ -463,6 +476,10 @@ post:
       content_type: ${content_type|application/x-gzip}
       display_name: Core Dumps - Execution ${execution}
       optional: true
+  - command: shell.exec
+    params:
+      script: |
+        rm -rf ~/.aws
   - command: shell.exec
     params:
       system_log: true
@@ -605,6 +622,7 @@ tasks:
           - "./**.pdb"
           - "./**.msi"
           - "./etc/*san.suppressions"
+          - "./etc/repo_config.yaml"
           - "./build/integration_tests/**"
           - "./build/integration_tests.txt"
           - "repo/**"
@@ -679,7 +697,7 @@ tasks:
         script: |
           set -o errexit
           set -o verbose
-          ${scons|scons} ${compile_flags|} lint
+          ${scons|scons} ${compile_flags|} --stack-size=1024 lint
 
 ## jstestfuzz mmapv1 ##
 - <<: *jstestfuzz_template
@@ -1092,6 +1110,26 @@ tasks:
   - func: "run tests"
     vars:
       resmoke_args: --suites=core --storageEngine=mmapv1
+      run_multiple_jobs: true
+
+- <<: *task_template
+  name: jsCore_v33_validate
+  commands:
+  - func: "do setup"
+  - func: "download mongod for validation checking"
+  - func: "run tests"
+    vars:
+      resmoke_args: --suites=core_v33_validate --storageEngine=mmapv1
+      run_multiple_jobs: true
+
+- <<: *task_template
+  name: jsCore_v33_validate_WT
+  commands:
+  - func: "do setup"
+  - func: "download mongod for validation checking"
+  - func: "run tests"
+    vars:
+      resmoke_args: --suites=core_v33_validate --storageEngine=wiredTiger
       run_multiple_jobs: true
 
 - <<: *task_template
@@ -1872,11 +1910,31 @@ tasks:
         silent: true
         script: |
           set -o errexit
+
+          mkdir -p ~/.aws
+
+          cat <<EOF > ~/.aws/config
+          [default]
+          region = us-east-1
+          EOF
+
+          cat <<EOF > ~/.aws/credentials
+          [default]
+          aws_access_key_id = ${repo_aws_key}
+          aws_secret_access_key = ${repo_aws_secret}
+          EOF
+
+          cat <<EOF > notary_env.sh
+          export NOTARY_TOKEN=${signing_auth_token_32}
+          EOF
+
           echo "${signing_auth_token_32}" > signing_auth_token
     - command: shell.exec
       params:
         working_dir: src
         script: |
+          . ./notary_env.sh
+
           set -o errexit
           set -o verbose
 
@@ -1888,29 +1946,19 @@ tasks:
           /usr/bin/find build/ -type f | grep msi$ | xargs -I original_filename cp original_filename mongodb-win32-${push_arch}-${suffix}.msi || true
 
           # Extract shell and banner files out of scons-made archive for separate shell archive
-          ${platform_decompress|tar zxvf} mongodb-binaries.${ext|tgz} mongodb-\*/bin/mongo${exe} mongodb-\*/[A-Z]\*
+          ${platform_decompress|tar --wildcards -zxvf} mongodb-binaries.${ext|tgz} mongodb-*/bin/mongo${exe} mongodb-*/\[A-Z\]*
 
           # Create new shell archive (make_archive.py uses filename to determine what format archive to create)
           ${python|python} buildscripts/make_archive.py -o mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz} $(ls -d mongodb-*/bin/mongo${exe} mongodb-*/[A-Z]*)
 
           notary-client.py --key-name "server-3.2" --auth-token-file ${workdir}/src/signing_auth_token --comment "Evergreen Automatic Signing ${revision} - ${build_variant} - ${branch_name}" --notary-url http://notary-service.build.10gen.cc:5000 --skip-missing mongodb-${push_name}-${push_arch}-${suffix}.${ext|tgz} mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz} mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}.${ext|tgz} mongodb-win32-${push_arch}-${suffix}.msi mongodb-src-${src_suffix}.${ext|tar.gz}
 
-          if [ "${has_packages|}" = "true" ] ; then
-            for rpm in $(find repo/ -name \*.rpm) ; do
-              pushd $(dirname $rpm)
-              # Use --package-file-suffix "" to overwrite existing RPM's instead of saving new "-signed.rpm" RPM files
-              #
-              notary-client.py --key-name "server-3.2" --auth-token-file ${workdir}/src/signing_auth_token --comment "Evergreen Automatic Signing ${revision} - ${build_variant} - ${branch_name}" --notary-url http://notary-service.build.10gen.cc:5000 --archive-file-ext gpg --outputs sig --package-file-suffix "" $(basename $rpm)
-              popd
-            done
-            for release_file in $(find repo/ -name Release) ; do
-              pushd $(dirname $release_file)
-              notary-client.py --key-name "server-3.2" --auth-token-file ${workdir}/src/signing_auth_token --comment "Evergreen Automatic Signing ${revision} - ${build_variant} - ${branch_name}" --notary-url http://notary-service.build.10gen.cc:5000 --outputs sig Release
-              popd
-            done
+          if [ "${has_packages|}" = "true" ]; then
+             CURATOR_RELEASE="fe067ee52016852c049d61f9a08369d33b8e5da9"
+             curl -L -O http://boxes.10gen.com/build/curator/curator-dist-rhel70-$CURATOR_RELEASE.tar.gz
+             tar -zxvf curator-dist-rhel70-$CURATOR_RELEASE.tar.gz
+             ./curator repo --config ./etc/repo_config.yaml --distro ${packager_distro} --edition ${repo_edition} --version ${version} --arch ${packager_arch} --packages repo
           fi
-          tar zcvf repo-${push_arch}.tgz repo || true
-          rm signing_auth_token
 
     # Put the binaries tarball/zipfile
     - command: s3.put
@@ -2185,29 +2233,11 @@ tasks:
         content_type: text/plain
         remote_file: ${push_path}-STAGE/${push_name}/mongodb-win32-${push_arch}-${suffix}-${task_id}-signed.msi.md5
 
-    # Put the tarred up Package repo
-    - command: s3.put
-      params:
-        aws_key: ${aws_key}
-        aws_secret: ${aws_secret}
-        build_variants: *packaging_variants
-        local_file: src/repo-${push_arch}.tgz
-        bucket: build-push-testing
-        permissions: public-read
-        content_type: ${content_type|application/x-gzip}
-        remote_file: ${push_path}-STAGE/${push_name}/repo-${push_arch}-${task_id}.tgz
-
     - command: s3Copy.copy
       params:
         aws_key: ${aws_key}
         aws_secret: ${aws_secret}
         s3_copy_files:
-            #Package repo tarballs
-            - {'source': {'path': '${push_path}-STAGE/${push_name}/repo-${push_arch}-${task_id}.tgz', 'bucket': 'build-push-testing'},
-               'destination': {'path': 'packages/repo-${push_arch}-${suffix}.tgz', 'bucket': '${push_bucket}'},
-                build_variants: *packaging_variants
-                 }
-
             #Binaries
             - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}', 'bucket': 'build-push-testing'},
                'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-${suffix}.${ext|tgz}', 'bucket': '${push_bucket}'}}
@@ -2356,6 +2386,7 @@ modules:
 
 buildvariants:
 
+
 ###########################################
 #         Linux buildvariants             #
 ###########################################
@@ -2365,7 +2396,6 @@ buildvariants:
   modules:
   - mongo-tools
   run_on:
-  - rhel55
   - rhel55-test
   batchtime: 1440 # 1 day
   expansions:
@@ -2379,7 +2409,7 @@ buildvariants:
   tasks:
   - name: compile
     distros:
-    - rhel55
+    - rhel55-build
   - name: aggregation
   - name: aggregation_WT
   - name: aggregation_auth
@@ -2475,8 +2505,6 @@ buildvariants:
   - name: tool_WT
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
 
 - name: linux-64-repeated-execution
   stepback: false
@@ -2494,7 +2522,7 @@ buildvariants:
   tasks:
   - name: compile
     distros:
-    - rhel55
+    - rhel55-build
   - name: dbtest
   - name: dbtest_WT
   - name: integration_tests_standalone
@@ -2516,7 +2544,6 @@ buildvariants:
   modules:
   - mongo-tools
   run_on:
-  - rhel55
   - rhel55-test
   batchtime: 1440 # 1 day
   expansions:
@@ -2530,7 +2557,7 @@ buildvariants:
   tasks:
   - name: compile
     distros:
-    - rhel55
+    - rhel55-build
   - name: aggregation
   - name: aggregation_WT
   - name: aggregation_auth
@@ -2568,34 +2595,34 @@ buildvariants:
     # Some concurrency workloads require a lot of memory, so we use machines
     # with more RAM for these suites.
     distros:
-    - rhel55
+    - rhel55-build
   - name: concurrency_WT
     distros:
-    - rhel55
+    - rhel55-build
   - name: concurrency_replication
     distros:
-    - rhel55
+    - rhel55-build
   - name: concurrency_replication_WT
     distros:
-    - rhel55
+    - rhel55-build
   - name: concurrency_sharded
     distros:
-    - rhel55
+    - rhel55-build
   - name: concurrency_sharded_WT
     distros:
-    - rhel55
+    - rhel55-build
   - name: concurrency_sharded_sccc
     distros:
-    - rhel55
+    - rhel55-build
   - name: concurrency_sharded_sccc_WT
     distros:
-    - rhel55
+    - rhel55-build
   - name: concurrency_simultaneous
     distros:
-    - rhel55
+    - rhel55-build
   - name: concurrency_simultaneous_WT
     distros:
-    - rhel55
+    - rhel55-build
   - name: read_concern_majority_passthrough_WT
   - name: replicasets
   - name: replicasets_WT
@@ -2629,7 +2656,6 @@ buildvariants:
   modules:
   - mongo-tools
   run_on:
-  - rhel55
   - rhel55-test
   batchtime: 1440 # 1 day
   expansions:
@@ -2644,7 +2670,7 @@ buildvariants:
   tasks:
   - name: compile
     distros:
-    - rhel55
+    - rhel55-build
   - name: aggregation
   - name: aggregation_WT
   - name: aggregation_auth
@@ -2697,7 +2723,6 @@ buildvariants:
   modules:
   - mongo-tools
   run_on:
-  - rhel55
   - rhel55-test
   batchtime: 1440 # 1 day
   expansions:
@@ -2708,7 +2733,7 @@ buildvariants:
   tasks:
   - name: compile
     distros:
-    - rhel55
+    - rhel55-build
   - name: aggregation_WT
   - name: auth_WT
   - name: dbtest_WT
@@ -2766,6 +2791,7 @@ buildvariants:
     packager_script: packager.py
     packager_arch: x86_64
     packager_distro: ubuntu1204
+    repo_edition: org
   tasks:
   - name: compile
     distros:
@@ -2855,8 +2881,6 @@ buildvariants:
   - name: tool_WT
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
 
 - name: ubuntu1404
   display_name: SSL Ubuntu 14.04
@@ -2877,6 +2901,7 @@ buildvariants:
     packager_script: packager.py
     packager_arch: x86_64
     packager_distro: ubuntu1404
+    repo_edition: org
   tasks:
   - name: compile
     distros:
@@ -2966,9 +2991,6 @@ buildvariants:
   - name: tool_WT
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
-
 
 - name: ubuntu1604
   display_name: SSL Ubuntu 16.04
@@ -2989,6 +3011,7 @@ buildvariants:
     packager_script: packager.py
     packager_arch: x86_64
     packager_distro: ubuntu1604
+    repo_edition: org
   tasks:
   - name: compile
     distros:
@@ -3078,9 +3101,6 @@ buildvariants:
   - name: tool_WT
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
-
 
 - name: enterprise-linux-64-amazon-ami
   display_name: Enterprise Amazon Linux
@@ -3101,6 +3121,7 @@ buildvariants:
     packager_script: packager-enterprise.py
     packager_arch: x86_64
     packager_distro: amazon
+    repo_edition: enterprise
   tasks:
   - name: compile
     distros:
@@ -3156,8 +3177,6 @@ buildvariants:
   - name: sslSpecial
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
 
 - name: amazon
   display_name: SSL Amazon Linux
@@ -3178,6 +3197,7 @@ buildvariants:
     packager_script: packager.py
     packager_arch: x86_64
     packager_distro: amazon
+    repo_edition: org
   tasks:
   - name: compile
     distros:
@@ -3271,7 +3291,7 @@ buildvariants:
   - name: unittests
   - name: push
     distros:
-    - rhel55-test
+    - rhel70
 
 - name: linux-32
   display_name: Linux 32-bit
@@ -3292,7 +3312,7 @@ buildvariants:
   tasks:
   - name: compile
     distros:
-    - rhel55
+    - rhel55-build
   - name: dbtest
   - name: disk
   - name: jsCore
@@ -3301,14 +3321,14 @@ buildvariants:
   - name: unittests
   - name: push
     distros:
-    - rhel55-test
+    - rhel70
 
 - name: linux-64-decimal
   display_name: Linux (Decimal Enabled)
   modules:
   - mongo-tools
   run_on:
-  - rhel55
+  - rhel55-build
   batchtime: 1440 # 1 day
   expansions:
     gorootvars: GOROOT=/opt/go PATH="/opt/go/bin:$PATH"
@@ -3321,7 +3341,7 @@ buildvariants:
   tasks:
   - name: compile
     distros:
-    - rhel55
+    - rhel55-build
   - name: dbtest
   - name: dbtest_WT
   - name: jsCore
@@ -3433,7 +3453,7 @@ buildvariants:
   - name: unittests
   - name: push
     distros:
-    - rhel55-test
+    - rhel70
 
 - name: windows-64-2k8
   display_name: Windows 2008R2
@@ -3539,7 +3559,7 @@ buildvariants:
   - name: unittests
   - name: push
     distros:
-    - rhel55-test
+    - rhel70
 
 - name: windows-64-2k8-debug
   display_name: Windows 2008R2 DEBUG
@@ -3696,7 +3716,7 @@ buildvariants:
   - name: unittests
   - name: push
     distros:
-    - rhel55-test
+    - rhel70
 
 - name: enterprise-windows-64-inmem
   display_name: Enterprise Windows (inMemory)
@@ -3842,10 +3862,10 @@ buildvariants:
   - name: tool_WT
   - name: unittests
   - name: ssl
-  - name: sslSpecial
+  - name: sslspecial
   - name: push
     distros:
-    - rhel55-test
+    - rhel70
 
 - name: windows-32
   display_name: Windows 32-bit
@@ -3880,7 +3900,7 @@ buildvariants:
   - name: unittests
   - name: push
     distros:
-    - rhel55-test
+    - rhel70
 
 ###########################################
 #             OSX buildvariants           #
@@ -3974,7 +3994,7 @@ buildvariants:
   - name: unittests
   - name: push
     distros:
-    - rhel55-test
+    - rhel70
 
 - name: osx-107-ssl
   display_name: SSL OS X 10.7
@@ -4065,7 +4085,7 @@ buildvariants:
   - name: unittests
   - name: push
     distros:
-    - rhel55-test
+    - rhel70
 
 - name: osx-107-debug
   display_name: OS X 10.7 DEBUG
@@ -4145,7 +4165,7 @@ buildvariants:
   - name: unittests
   - name: push
     distros:
-    - rhel55-test
+    - rhel70
 
 ###########################################
 #          Redhat buildvariants           #
@@ -4172,10 +4192,11 @@ buildvariants:
     packager_script: packager-enterprise.py
     packager_arch: x86_64
     packager_distro: rhel57
+    repo_edition: enterprise
   tasks:
   - name: compile
     distros:
-    - rhel55
+    - rhel55-build
   - name: audit
   - name: audit_WT
   - name: dbtest
@@ -4198,8 +4219,6 @@ buildvariants:
   - name: sslSpecial
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
 
 - name: enterprise-rhel-62-64-bit
   display_name: Enterprise RHEL 6.2
@@ -4222,6 +4241,7 @@ buildvariants:
     packager_script: packager-enterprise.py
     packager_arch: x86_64
     packager_distro: rhel62
+    repo_edition: enterprise
   tasks:
   - name: compile
     distros:
@@ -4282,6 +4302,8 @@ buildvariants:
   - name: jsCore_small_oplog_WT
   - name: jsCore_small_oplog_rs
   - name: jsCore_small_oplog_rs_WT
+  - name: jsCore_v33_validate
+  - name: jsCore_v33_validate_WT
   - name: jstestfuzz
   - name: jstestfuzz_WT
   - name: jstestfuzz_replication_WT
@@ -4344,7 +4366,8 @@ buildvariants:
   - name: unittests
   - name: push
     distros:
-    - rhel55-test
+    - rhel70
+
 
 - name: enterprise-rhel-70-64-bit
   display_name: Enterprise RHEL 7.0
@@ -4367,6 +4390,7 @@ buildvariants:
     packager_script: packager-enterprise.py
     packager_arch: x86_64
     packager_distro: rhel70
+    repo_edition: enterprise
   tasks:
   - name: compile
   - name: audit
@@ -4391,8 +4415,6 @@ buildvariants:
   - name: sslSpecial
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
 
 - name: enterprise-rhel-71-ppc64le
   display_name: Enterprise RHEL 7.1 PPC64LE
@@ -4419,6 +4441,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: ppc64le-enterprise-rhel71
+    repo_edition: enterprise
   tasks:
   - name: compile
     distros:
@@ -4531,14 +4554,13 @@ buildvariants:
   - name: unittests
   - name: push
     distros:
-    - rhel55-test
+    - rhel70
 
 - name: rhel55
   display_name: SSL RHEL 5.5
   modules:
   - mongo-tools
   run_on:
-  - rhel55
   - rhel55-test
   batchtime: 1440 # 1 day
   expansions:
@@ -4554,10 +4576,11 @@ buildvariants:
     packager_script: packager.py
     packager_arch: x86_64
     packager_distro: rhel55
+    repo_edition: org
   tasks:
   - name: compile
     distros:
-    - rhel55
+    - rhel55-build
   - name: aggregation
   - name: aggregation_WT
   - name: aggregation_auth
@@ -4643,8 +4666,6 @@ buildvariants:
   - name: tool_WT
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
 
 - name: rhel62
   display_name: SSL RHEL 6.2
@@ -4666,6 +4687,7 @@ buildvariants:
     packager_script: packager.py
     packager_arch: x86_64
     packager_distro: rhel62
+    repo_edition: org
   tasks:
   - name: compile
     distros:
@@ -4754,7 +4776,7 @@ buildvariants:
   - name: unittests
   - name: push
     distros:
-    - rhel55-test
+    - rhel70
 
 - name: rhel70
   display_name: SSL RHEL 7.0
@@ -4776,10 +4798,9 @@ buildvariants:
     packager_script: packager.py
     packager_arch: x86_64
     packager_distro: rhel70
+    repo_edition: org
   tasks:
   - name: compile
-    distros:
-    - rhel70
   - name: aggregation
   - name: aggregation_WT
   - name: aggregation_auth
@@ -4865,8 +4886,6 @@ buildvariants:
   - name: tool_WT
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
 
 ###########################################
 #          Ubuntu buildvariants           #
@@ -4893,6 +4912,7 @@ buildvariants:
     packager_script: packager-enterprise.py
     packager_arch: x86_64
     packager_distro: ubuntu1204
+    repo_edition: enterprise
   tasks:
   - name: compile
     distros:
@@ -4919,8 +4939,6 @@ buildvariants:
   - name: sslSpecial
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
 
 - name: enterprise-ubuntu1404-64
   display_name: Enterprise Ubuntu 14.04
@@ -4943,6 +4961,7 @@ buildvariants:
     packager_script: packager-enterprise.py
     packager_arch: x86_64
     packager_distro: ubuntu1404
+    repo_edition: enterprise
   tasks:
   - name: compile
     distros:
@@ -4969,8 +4988,6 @@ buildvariants:
   - name: sslSpecial
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
 
 - name: enterprise-ubuntu1604-64
   display_name: Enterprise Ubuntu 16.04
@@ -4993,6 +5010,7 @@ buildvariants:
     packager_script: packager-enterprise.py
     packager_arch: x86_64
     packager_distro: ubuntu1604
+    repo_edition: enterprise
   tasks:
   - name: compile
     distros:
@@ -5019,8 +5037,6 @@ buildvariants:
   - name: sslSpecial
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
 
 
 
@@ -5049,6 +5065,7 @@ buildvariants:
     packager_script: packager-enterprise.py
     packager_arch: x86_64
     packager_distro: suse12
+    repo_edition: enterprise
   tasks:
   - name: compile
     distros:
@@ -5075,8 +5092,6 @@ buildvariants:
   - name: sslSpecial
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
 
 - name: suse12
   display_name: SSL SUSE 12
@@ -5098,6 +5113,7 @@ buildvariants:
     packager_script: packager.py
     packager_arch: x86_64
     packager_distro: suse12
+    repo_edition: org
   tasks:
   - name: compile
     distros:
@@ -5187,8 +5203,7 @@ buildvariants:
   - name: tool_WT
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
+
 
 - name: enterprise-suse11-64
   display_name: Enterprise SLES 11
@@ -5211,6 +5226,7 @@ buildvariants:
     packager_script: packager-enterprise.py
     packager_arch: x86_64
     packager_distro: suse11
+    repo_edition: enterprise
   tasks:
   - name: compile
     distros:
@@ -5237,8 +5253,6 @@ buildvariants:
   - name: sslSpecial
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
 
 - name: suse11
   display_name: SSL SUSE 11
@@ -5260,6 +5274,7 @@ buildvariants:
     packager_script: packager.py
     packager_arch: x86_64
     packager_distro: suse11
+    repo_edition: org
   tasks:
   - name: compile
     distros:
@@ -5349,8 +5364,6 @@ buildvariants:
   - name: tool_WT
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
 
 ###########################################
 #          Solaris buildvariants          #
@@ -5435,7 +5448,7 @@ buildvariants:
   - name: unittests
   - name: push
     distros:
-    - rhel55-test
+    - rhel70
 
 ###########################################
 #          Debian buildvariants           #
@@ -5462,6 +5475,7 @@ buildvariants:
     packager_script: packager-enterprise.py
     packager_arch: x86_64
     packager_distro: debian71
+    repo_edition: enterprise
   tasks:
   - name: compile
     distros:
@@ -5488,8 +5502,6 @@ buildvariants:
   - name: sslSpecial
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
 
 - name: enterprise-debian81-64
   display_name: Enterprise Debian 8.1
@@ -5512,6 +5524,7 @@ buildvariants:
     packager_script: packager-enterprise.py
     packager_arch: x86_64
     packager_distro: debian81
+    repo_edition: enterprise
   tasks:
   - name: compile
     distros:
@@ -5538,8 +5551,6 @@ buildvariants:
   - name: sslSpecial
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
 
 
 - name: debian71
@@ -5562,6 +5573,7 @@ buildvariants:
     packager_script: packager.py
     packager_arch: x86_64
     packager_distro: debian71
+    repo_edition: org
   tasks:
   - name: compile
     distros:
@@ -5654,9 +5666,6 @@ buildvariants:
   - name: tool_WT
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
-
 
 - name: debian81
   display_name: SSL Debian 8.1
@@ -5678,6 +5687,7 @@ buildvariants:
     packager_script: packager.py
     packager_arch: x86_64
     packager_distro: debian81
+    repo_edition: org
   tasks:
   - name: compile
     distros:
@@ -5770,8 +5780,6 @@ buildvariants:
   - name: tool_WT
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test
 
 
 ################################
@@ -5797,6 +5805,7 @@ buildvariants:
     packager_script: packager-enterprise.py
     packager_arch: x86_64
     packager_distro: rhel62
+    repo_edition: enterprise
   tasks:
   - name: compile
     distros:
@@ -5871,7 +5880,6 @@ buildvariants:
   modules:
   - mongo-tools
   run_on:
-  - rhel55
   - rhel55-test
   batchtime: 1440 # 1 day
   expansions:
@@ -5882,7 +5890,7 @@ buildvariants:
   tasks:
   - name: compile
     distros:
-    - rhel55
+    - rhel55-build
   - name: aggregation_WT
   - name: aggregation_auth
   - name: auth
@@ -6083,6 +6091,8 @@ buildvariants:
   - name: jsCore_small_oplog_WT
   - name: jsCore_small_oplog_rs
   - name: jsCore_small_oplog_rs_WT
+  - name: jsCore_v33_validate
+  - name: jsCore_v33_validate_WT
   - name: mmap
   - name: mongosTest
   - name: multiversion
@@ -6268,5 +6278,3 @@ buildvariants:
   - name: tool_WT
   - name: unittests
   - name: push
-    distros:
-    - rhel55-test

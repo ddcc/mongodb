@@ -15,9 +15,10 @@ static int __desc_read(WT_SESSION_IMPL *, WT_BLOCK *);
  *	Drop a file.
  */
 int
-__wt_block_manager_drop(WT_SESSION_IMPL *session, const char *filename)
+__wt_block_manager_drop(
+    WT_SESSION_IMPL *session, const char *filename, bool durable)
 {
-	 return (__wt_remove_if_exists(session, filename));
+	return (__wt_remove_if_exists(session, filename, durable));
 }
 
 /*
@@ -33,7 +34,6 @@ __wt_block_manager_create(
 	WT_FH *fh;
 	int suffix;
 	bool exists;
-	char *path;
 
 	/*
 	 * Create the underlying file and open a handle.
@@ -44,8 +44,9 @@ __wt_block_manager_create(
 	 * in our space. Move any existing files out of the way and complain.
 	 */
 	for (;;) {
-		if ((ret = __wt_open(session, filename, WT_FILE_TYPE_DATA,
-		    WT_OPEN_CREATE | WT_OPEN_EXCLUSIVE, &fh)) == 0)
+		if ((ret = __wt_open(session, filename,
+		    WT_FS_OPEN_FILE_TYPE_DATA, WT_FS_OPEN_CREATE |
+		    WT_FS_OPEN_DURABLE | WT_FS_OPEN_EXCLUSIVE, &fh)) == 0)
 			break;
 		WT_ERR_TEST(ret != EEXIST, ret);
 
@@ -54,13 +55,13 @@ __wt_block_manager_create(
 		for (suffix = 1;; ++suffix) {
 			WT_ERR(__wt_buf_fmt(
 			    session, tmp, "%s.%d", filename, suffix));
-			WT_ERR(__wt_exist(session, tmp->data, &exists));
+			WT_ERR(__wt_fs_exist(session, tmp->data, &exists));
 			if (!exists) {
-				WT_ERR(
-				    __wt_rename(session, filename, tmp->data));
+				WT_ERR(__wt_fs_rename(
+				    session, filename, tmp->data, false));
 				WT_ERR(__wt_msg(session,
 				    "unexpected file %s found, renamed to %s",
-				    filename, (char *)tmp->data));
+				    filename, (const char *)tmp->data));
 				break;
 			}
 		}
@@ -78,18 +79,9 @@ __wt_block_manager_create(
 	/* Close the file handle. */
 	WT_TRET(__wt_close(session, &fh));
 
-	/*
-	 * Some filesystems require that we sync the directory to be confident
-	 * that the file will appear.
-	 */
-	if (ret == 0 && (ret = __wt_filename(session, filename, &path)) == 0) {
-		ret = __wt_directory_sync(session, path);
-		__wt_free(session, path);
-	}
-
 	/* Undo any create on error. */
 	if (ret != 0)
-		WT_TRET(__wt_remove(session, filename));
+		WT_TRET(__wt_fs_remove(session, filename, false));
 
 err:	__wt_scr_free(session, &tmp);
 
@@ -156,8 +148,7 @@ __wt_block_open(WT_SESSION_IMPL *session,
 	WT_CONNECTION_IMPL *conn;
 	WT_DECL_RET;
 	uint64_t bucket, hash;
-
-	WT_UNUSED(readonly);
+	uint32_t flags;
 
 	WT_RET(__wt_verbose(session, WT_VERB_BLOCK, "open: %s", filename));
 
@@ -204,12 +195,18 @@ __wt_block_open(WT_SESSION_IMPL *session,
 	/* Set the file extension information. */
 	block->extend_len = conn->data_extend_len;
 
-	/* Set the asynchronous flush, preload availability. */
-	block->nowait_sync_available = true;
-	block->preload_available = true;
-
-	/* Open the underlying file handle. */
-	WT_ERR(__wt_open(session, filename, WT_FILE_TYPE_DATA, 0, &block->fh));
+	/*
+	 * Open the underlying file handle.
+	 *
+	 * "direct_io=checkpoint" configures direct I/O for readonly data files.
+	 */
+	flags = 0;
+	if (readonly && FLD_ISSET(conn->direct_io, WT_DIRECT_IO_CHECKPOINT))
+		LF_SET(WT_FS_OPEN_DIRECTIO);
+	if (!readonly && FLD_ISSET(conn->direct_io, WT_DIRECT_IO_DATA))
+		LF_SET(WT_FS_OPEN_DIRECTIO);
+	WT_ERR(__wt_open(
+	    session, filename, WT_FS_OPEN_FILE_TYPE_DATA, flags, &block->fh));
 
 	/* Set the file's size. */
 	WT_ERR(__wt_filesize(session, block->fh, &block->size));
@@ -422,5 +419,5 @@ int
 __wt_block_manager_named_size(
     WT_SESSION_IMPL *session, const char *name, wt_off_t *sizep)
 {
-	return (__wt_filesize_name(session, name, false, sizep));
+	return (__wt_fs_size(session, name, sizep));
 }

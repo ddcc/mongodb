@@ -420,40 +420,6 @@ connection_runtime_config = [
             interval in seconds at which to check for files that are
             inactive and close them''', min=1, max=100000),
         ]),
-    Config('log', '', r'''
-        enable logging. Enabling logging uses three sessions from the
-        configured session_max''',
-        type='category', subconfig=[
-        Config('archive', 'true', r'''
-            automatically archive unneeded log files''',
-            type='boolean'),
-        Config('compressor', 'none', r'''
-            configure a compressor for log records.  Permitted values are
-            \c "none" or custom compression engine name created with
-            WT_CONNECTION::add_compressor.  If WiredTiger has builtin support
-            for \c "snappy", \c "lz4" or \c "zlib" compression, these names
-            are also available. See @ref compression for more information'''),
-        Config('enabled', 'false', r'''
-            enable logging subsystem''',
-            type='boolean'),
-        Config('file_max', '100MB', r'''
-            the maximum size of log files''',
-            min='100KB', max='2GB'),
-        Config('path', '', r'''
-            the path to a directory into which the log files are written.
-            If the value is not an absolute path name, the files are created
-            relative to the database home'''),
-        Config('prealloc', 'true', r'''
-            pre-allocate log files.''',
-            type='boolean'),
-        Config('recover', 'on', r'''
-            run recovery or error if recovery needs to run after an
-            unclean shutdown.''',
-            choices=['error','on']),
-        Config('zero_fill', 'false', r'''
-            manually write zeroes into log files''',
-            type='boolean'),
-        ]),
     Config('lsm_manager', '', r'''
         configure database wide options for LSM tree management. The LSM
         manager is started automatically the first time an LSM tree is opened.
@@ -525,38 +491,6 @@ connection_runtime_config = [
         are logged using the \c statistics_log configuration.  See
         @ref statistics for more information''',
         type='list', choices=['all', 'fast', 'none', 'clear']),
-    Config('statistics_log', '', r'''
-        log any statistics the database is configured to maintain,
-        to a file.  See @ref statistics for more information. Enabling
-        the statistics log server uses a session from the configured
-        session_max''',
-        type='category', subconfig=[
-        Config('json', 'false', r'''
-            encode statistics in JSON format''',
-            type='boolean'),
-        Config('on_close', 'false', r'''log statistics on database close''',
-            type='boolean'),
-        Config('path', '"WiredTigerStat.%d.%H"', r'''
-            the pathname to a file into which the log records are written,
-            may contain ISO C standard strftime conversion specifications.
-            If the value is not an absolute path name, the file is created
-            relative to the database home'''),
-        Config('sources', '', r'''
-            if non-empty, include statistics for the list of data source
-            URIs, if they are open at the time of the statistics logging.
-            The list may include URIs matching a single data source
-            ("table:mytable"), or a URI matching all data sources of a
-            particular type ("table:")''',
-            type='list'),
-        Config('timestamp', '"%b %d %H:%M:%S"', r'''
-            a timestamp prepended to each log record, may contain strftime
-            conversion specifications, when \c json is configured, defaults
-            to \c "%FT%Y.000Z"'''),
-        Config('wait', '0', r'''
-            seconds to wait between each write of the log records; setting
-            this value above 0 configures statistics logging''',
-            min='0', max='100000'),
-        ]),
     Config('verbose', '', r'''
         enable messages for various events. Only available if WiredTiger
         is configured with --enable-verbose. Options are given as a
@@ -590,13 +524,113 @@ connection_runtime_config = [
             'write']),
 ]
 
+# wiredtiger_open and WT_CONNECTION.reconfigure log configurations.
+log_configuration_common = [
+    Config('archive', 'true', r'''
+        automatically archive unneeded log files''',
+        type='boolean'),
+    Config('prealloc', 'true', r'''
+        pre-allocate log files.''',
+        type='boolean'),
+    Config('zero_fill', 'false', r'''
+        manually write zeroes into log files''',
+        type='boolean')
+]
+connection_reconfigure_log_configuration = [
+    Config('log', '', r'''
+        enable logging. Enabling logging uses three sessions from the
+        configured session_max''',
+        type='category', subconfig=
+        log_configuration_common)
+]
+wiredtiger_open_log_configuration = [
+    Config('log', '', r'''
+        enable logging. Enabling logging uses three sessions from the
+        configured session_max''',
+        type='category', subconfig=
+        log_configuration_common + [
+        Config('enabled', 'false', r'''
+            enable logging subsystem''',
+            type='boolean'),
+        Config('compressor', 'none', r'''
+            configure a compressor for log records.  Permitted values are
+            \c "none" or custom compression engine name created with
+            WT_CONNECTION::add_compressor.  If WiredTiger has builtin support
+            for \c "snappy", \c "lz4" or \c "zlib" compression, these names
+            are also available. See @ref compression for more information'''),
+        Config('file_max', '100MB', r'''
+            the maximum size of log files''',
+            min='100KB', max='2GB'),
+            Config('path', '"."', r'''
+                the name of a directory into which log files are written. The
+                directory must already exist. If the value is not an absolute
+                path, the path is relative to the database home (see @ref
+                absolute_path for more information)'''),
+        Config('recover', 'on', r'''
+            run recovery or error if recovery needs to run after an
+            unclean shutdown''',
+            choices=['error','on'])
+    ]),
+]
+
+# wiredtiger_open and WT_CONNECTION.reconfigure statistics log configurations.
+statistics_log_configuration_common = [
+    Config('json', 'false', r'''
+        encode statistics in JSON format''',
+        type='boolean'),
+    Config('on_close', 'false', r'''log statistics on database close''',
+        type='boolean'),
+    Config('sources', '', r'''
+        if non-empty, include statistics for the list of data source
+        URIs, if they are open at the time of the statistics logging.
+        The list may include URIs matching a single data source
+        ("table:mytable"), or a URI matching all data sources of a
+        particular type ("table:")''',
+        type='list'),
+    Config('timestamp', '"%b %d %H:%M:%S"', r'''
+        a timestamp prepended to each log record, may contain strftime
+        conversion specifications, when \c json is configured, defaults
+        to \c "%FT%Y.000Z"'''),
+    Config('wait', '0', r'''
+        seconds to wait between each write of the log records; setting
+        this value above 0 configures statistics logging''',
+        min='0', max='100000'),
+]
+connection_reconfigure_statistics_log_configuration = [
+    Config('statistics_log', '', r'''
+        log any statistics the database is configured to maintain,
+        to a file.  See @ref statistics for more information. Enabling
+        the statistics log server uses a session from the configured
+        session_max''',
+        type='category', subconfig=
+        statistics_log_configuration_common)
+]
+wiredtiger_open_statistics_log_configuration = [
+    Config('statistics_log', '', r'''
+        log any statistics the database is configured to maintain,
+        to a file.  See @ref statistics for more information. Enabling
+        the statistics log server uses a session from the configured
+        session_max''',
+        type='category', subconfig=
+        statistics_log_configuration_common + [
+        Config('path', '"."', r'''
+            the name of a directory into which statistics files are written.
+            The directory must already exist. If the value is not an absolute
+            path, the path is relative to the database home (see @ref
+            absolute_path for more information)''')
+        ])
+]
+
 session_config = [
     Config('isolation', 'read-committed', r'''
         the default isolation level for operations in this session''',
         choices=['read-uncommitted', 'read-committed', 'snapshot']),
 ]
 
-wiredtiger_open_common = connection_runtime_config + [
+wiredtiger_open_common =\
+    connection_runtime_config +\
+    wiredtiger_open_log_configuration +\
+    wiredtiger_open_statistics_log_configuration + [
     Config('buffer_alignment', '-1', r'''
         in-memory alignment (in bytes) for buffers used for I/O.  The
         default value of -1 indicates a platform-specific alignment value
@@ -722,8 +756,8 @@ wiredtiger_open = wiredtiger_open_common + [
         \c create option''',
         type='boolean'),
     Config('in_memory', 'false', r'''
-        keep data in-memory only, minimize disk I/O''',
-        type='boolean', undoc=True),
+        keep data in-memory only. See @ref in_memory for more information''',
+        type='boolean'),
     Config('use_environment', 'true', r'''
         use the \c WIREDTIGER_CONFIG and \c WIREDTIGER_HOME environment
         variables if the process is not running with special privileges.
@@ -822,6 +856,13 @@ methods = {
     Config('bloom_hash_count', '8', r'''
         the number of hash values per item for the bloom filter''',
         min='2', max='100'),
+    Config('operation', '"and"', r'''
+        the operation applied between this and other joined cursors.
+        When "operation=and" is specified, all the conditions implied by
+        joins must be satisfied for an entry to be returned by the join cursor;
+        when "operation=or" is specified, only one must be satisfied.
+        All cursors joined to a join cursor must have matching operations''',
+        choices=['and', 'or']),
     Config('strategy', '', r'''
         when set to bloom, a bloom filter is created and populated for
         this index. This has an up front cost but may reduce the number
@@ -952,16 +993,17 @@ methods = {
         Display the contents of on-disk blocks as they are verified,
         using the application's message handler, intended for debugging''',
         type='boolean'),
+    Config('dump_layout', 'false', r'''
+        Display the layout of the files as they are verified, using the
+        application's message handler, intended for debugging; requires
+        optional support from the block manager''',
+        type='boolean'),
     Config('dump_offsets', '', r'''
         Display the contents of specific on-disk blocks,
         using the application's message handler, intended for debugging''',
         type='list'),
     Config('dump_pages', 'false', r'''
         Display the contents of in-memory pages as they are verified,
-        using the application's message handler, intended for debugging''',
-        type='boolean'),
-    Config('dump_shape', 'false', r'''
-        Display the shape of the tree after verification,
         using the application's message handler, intended for debugging''',
         type='boolean'),
     Config('strict', 'false', r'''
@@ -1076,12 +1118,22 @@ methods = {
         don't free memory during close''',
         type='boolean'),
 ]),
-'WT_CONNECTION.reconfigure' : Method(connection_runtime_config),
+'WT_CONNECTION.reconfigure' : Method(
+    connection_reconfigure_log_configuration +\
+    connection_reconfigure_statistics_log_configuration +\
+    connection_runtime_config
+),
+'WT_CONNECTION.set_file_system' : Method([]),
 
 'WT_CONNECTION.load_extension' : Method([
     Config('config', '', r'''
         configuration string passed to the entry point of the
         extension as its WT_CONFIG_ARG argument'''),
+    Config('early_load', 'false', r'''
+        whether this extension should be loaded at the beginning of
+        ::wiredtiger_open. Only applicable to extensions loaded via the
+        wiredtiger_open configurations string''',
+        type='boolean'),
     Config('entry', 'wiredtiger_extension_init', r'''
         the entry point of the extension, called to initialize the
         extension when it is loaded.  The signature of the function
