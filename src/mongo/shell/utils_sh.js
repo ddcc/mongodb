@@ -118,8 +118,10 @@ sh.moveChunk = function(fullName, find, to) {
 };
 
 sh.setBalancerState = function(onOrNot) {
-    sh._getConfigDB().settings.update(
-        {_id: "balancer"}, {$set: {stopped: onOrNot ? false : true}}, true);
+    return assert.writeOK(
+        sh._getConfigDB().settings.update({_id: 'balancer'},
+                                          {$set: {stopped: onOrNot ? false : true}},
+                                          {upsert: true, writeConcern: {w: 'majority'}}));
 };
 
 sh.getBalancerState = function(configDB) {
@@ -155,13 +157,15 @@ sh.getBalancerHost = function(configDB) {
 };
 
 sh.stopBalancer = function(timeout, interval) {
-    sh.setBalancerState(false);
+    var res = sh.setBalancerState(false);
     sh.waitForBalancer(false, timeout, interval);
+    return res;
 };
 
 sh.startBalancer = function(timeout, interval) {
-    sh.setBalancerState(true);
+    var res = sh.setBalancerState(true);
     sh.waitForBalancer(true, timeout, interval);
+    return res;
 };
 
 sh.waitForDLock = function(lockId, onOrNot, timeout, interval) {
@@ -303,7 +307,10 @@ sh.disableBalancing = function(coll) {
         sh._checkMongos();
     }
 
-    dbase.getSisterDB("config").collections.update({_id: coll + ""}, {$set: {"noBalance": true}});
+    return assert.writeOK(dbase.getSisterDB("config").collections.update(
+        {_id: coll + ""},
+        {$set: {"noBalance": true}},
+        {writeConcern: {w: 'majority', wtimeout: 60000}}));
 };
 
 sh.enableBalancing = function(coll) {
@@ -317,7 +324,10 @@ sh.enableBalancing = function(coll) {
         sh._checkMongos();
     }
 
-    dbase.getSisterDB("config").collections.update({_id: coll + ""}, {$set: {"noBalance": false}});
+    return assert.writeOK(dbase.getSisterDB("config").collections.update(
+        {_id: coll + ""},
+        {$set: {"noBalance": false}},
+        {writeConcern: {w: 'majority', wtimeout: 60000}}));
 };
 
 /*
@@ -369,19 +379,13 @@ sh._lastMigration = function(ns) {
         return null;
 };
 
-sh._checkLastError = function(mydb) {
-    var errObj = mydb.getLastErrorObj();
-    if (errObj.err)
-        throw _getErrorWithCode(errObj, "error: " + errObj.err);
-};
-
 sh.addShardTag = function(shard, tag) {
     var config = sh._getConfigDB();
     if (config.shards.findOne({_id: shard}) == null) {
         throw Error("can't find a shard with name: " + shard);
     }
-    config.shards.update({_id: shard}, {$addToSet: {tags: tag}});
-    sh._checkLastError(config);
+    return assert.writeOK(config.shards.update(
+        {_id: shard}, {$addToSet: {tags: tag}}, {writeConcern: {w: 'majority', wtimeout: 60000}}));
 };
 
 sh.removeShardTag = function(shard, tag) {
@@ -389,8 +393,8 @@ sh.removeShardTag = function(shard, tag) {
     if (config.shards.findOne({_id: shard}) == null) {
         throw Error("can't find a shard with name: " + shard);
     }
-    config.shards.update({_id: shard}, {$pull: {tags: tag}});
-    sh._checkLastError(config);
+    return assert.writeOK(config.shards.update(
+        {_id: shard}, {$pull: {tags: tag}}, {writeConcern: {w: 'majority', wtimeout: 60000}}));
 };
 
 sh.addTagRange = function(ns, min, max, tag) {
@@ -399,10 +403,10 @@ sh.addTagRange = function(ns, min, max, tag) {
     }
 
     var config = sh._getConfigDB();
-    config.tags.update({_id: {ns: ns, min: min}},
-                       {_id: {ns: ns, min: min}, ns: ns, min: min, max: max, tag: tag},
-                       true);
-    sh._checkLastError(config);
+    return assert.writeOK(
+        config.tags.update({_id: {ns: ns, min: min}},
+                           {_id: {ns: ns, min: min}, ns: ns, min: min, max: max, tag: tag},
+                           {upsert: true, writeConcern: {w: 'majority', wtimeout: 60000}}));
 };
 
 sh.removeTagRange = function(ns, min, max, tag) {
@@ -417,8 +421,8 @@ sh.removeTagRange = function(ns, min, max, tag) {
     }
     // max and tag criteria not really needed, but including them avoids potentially unexpected
     // behavior.
-    config.tags.remove({_id: {ns: ns, min: min}, max: max, tag: tag});
-    sh._checkLastError(config);
+    return assert.writeOK(config.tags.remove({_id: {ns: ns, min: min}, max: max, tag: tag},
+                                             {writeConcern: {w: 'majority', wtimeout: 60000}}));
 };
 
 sh.getBalancerLockDetails = function(configDB) {

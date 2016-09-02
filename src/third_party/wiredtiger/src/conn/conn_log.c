@@ -51,6 +51,25 @@ __logmgr_config(
 	WT_CONNECTION_IMPL *conn;
 	bool enabled;
 
+	/*
+	 * A note on reconfiguration: the standard "is this configuration string
+	 * allowed" checks should fail if reconfiguration has invalid strings,
+	 * for example, "log=(enabled)", or "statistics_log=(path=XXX)", because
+	 * the connection reconfiguration method doesn't allow those strings.
+	 * Additionally, the base configuration values during reconfiguration
+	 * are the currently configured values (so we don't revert to default
+	 * values when repeatedly reconfiguring), and configuration processing
+	 * of a currently set value should not change the currently set value.
+	 *
+	 * In this code path, log server reconfiguration does not stop/restart
+	 * the log server, so there's no point in re-evaluating configuration
+	 * strings that cannot be reconfigured, risking bugs in configuration
+	 * setup, and depending on evaluation of currently set values to always
+	 * result in the currently set value. Skip tests for any configuration
+	 * strings which don't make sense during reconfiguration, but don't
+	 * worry about error reporting because it should never happen.
+	 */
+
 	conn = S2C(session);
 
 	WT_RET(__wt_config_gets(session, cfg, "log.enabled", &cval));
@@ -62,6 +81,8 @@ __logmgr_config(
 	 *
 	 * If it is off and the user it turning it on, or it is on
 	 * and the user is turning it off, return an error.
+	 *
+	 * See above: should never happen.
 	 */
 	if (reconfig &&
 	    ((enabled && !FLD_ISSET(conn->log_flags, WT_CONN_LOG_ENABLED)) ||
@@ -83,6 +104,8 @@ __logmgr_config(
 	 * Setup a log path and compression even if logging is disabled in case
 	 * we are going to print a log.  Only do this on creation.  Once a
 	 * compressor or log path are set they cannot be changed.
+	 *
+	 * See above: should never happen.
 	 */
 	if (!reconfig) {
 		conn->log_compressor = NULL;
@@ -95,6 +118,7 @@ __logmgr_config(
 		WT_RET(__wt_strndup(
 		    session, cval.str, cval.len, &conn->log_path));
 	}
+
 	/* We are done if logging isn't enabled. */
 	if (!*runp)
 		return (0);
@@ -103,13 +127,14 @@ __logmgr_config(
 	if (cval.val != 0)
 		FLD_SET(conn->log_flags, WT_CONN_LOG_ARCHIVE);
 
+	/*
+	 * The file size cannot be reconfigured. The amount of memory allocated
+	 * to the log slots may be based on the log file size at creation and we
+	 * don't want to re-allocate that memory while running.
+	 *
+	 * See above: should never happen.
+	 */
 	if (!reconfig) {
-		/*
-		 * Ignore if the user tries to change the file size.  The
-		 * amount of memory allocated to the log slots may be based
-		 * on the log file size at creation and we don't want to
-		 * re-allocate that memory while running.
-		 */
 		WT_RET(__wt_config_gets(session, cfg, "log.file_max", &cval));
 		conn->log_file_max = (wt_off_t)cval.val;
 		WT_STAT_FAST_CONN_SET(session,
@@ -125,12 +150,17 @@ __logmgr_config(
 		conn->log_prealloc = 1;
 
 	/*
-	 * Note that it is meaningless to reconfigure this value during
-	 * runtime.  It only matters on create before recovery runs.
+	 * Note it's meaningless to reconfigure this value during runtime, it
+	 * only matters on create before recovery runs.
+	 *
+	 * See above: should never happen.
 	 */
-	WT_RET(__wt_config_gets_def(session, cfg, "log.recover", 0, &cval));
-	if (cval.len != 0  && WT_STRING_MATCH("error", cval.str, cval.len))
-		FLD_SET(conn->log_flags, WT_CONN_LOG_RECOVER_ERR);
+	if (!reconfig) {
+		WT_RET(__wt_config_gets_def(
+		    session, cfg, "log.recover", 0, &cval));
+		if (WT_STRING_MATCH("error", cval.str, cval.len))
+			FLD_SET(conn->log_flags, WT_CONN_LOG_RECOVER_ERR);
+	}
 
 	WT_RET(__wt_config_gets(session, cfg, "log.zero_fill", &cval));
 	if (cval.val != 0) {
@@ -178,6 +208,7 @@ __log_archive_once(WT_SESSION_IMPL *session, uint32_t backup_file)
 	conn = S2C(session);
 	log = conn->log;
 	logcount = 0;
+	locked = false;
 	logfiles = NULL;
 
 	/*
@@ -198,14 +229,14 @@ __log_archive_once(WT_SESSION_IMPL *session, uint32_t backup_file)
 	 * Main archive code.  Get the list of all log files and
 	 * remove any earlier than the minimum log number.
 	 */
-	WT_RET(__wt_dirlist(session, conn->log_path,
-	    WT_LOG_FILENAME, WT_DIRLIST_INCLUDE, &logfiles, &logcount));
+	WT_ERR(__wt_fs_directory_list(
+	    session, conn->log_path, WT_LOG_FILENAME, &logfiles, &logcount));
 
 	/*
 	 * We can only archive files if a hot backup is not in progress or
 	 * if we are the backup.
 	 */
-	WT_RET(__wt_readlock(session, conn->hot_backup_lock));
+	WT_ERR(__wt_readlock(session, conn->hot_backup_lock));
 	locked = true;
 	if (!conn->hot_backup || backup_file != 0) {
 		for (i = 0; i < logcount; i++) {
@@ -218,9 +249,6 @@ __log_archive_once(WT_SESSION_IMPL *session, uint32_t backup_file)
 	}
 	WT_ERR(__wt_readunlock(session, conn->hot_backup_lock));
 	locked = false;
-	__wt_log_files_free(session, logfiles, logcount);
-	logfiles = NULL;
-	logcount = 0;
 
 	/*
 	 * Indicate what is our new earliest LSN.  It is the start
@@ -232,8 +260,7 @@ __log_archive_once(WT_SESSION_IMPL *session, uint32_t backup_file)
 err:		__wt_err(session, ret, "log archive server error");
 	if (locked)
 		WT_TRET(__wt_readunlock(session, conn->hot_backup_lock));
-	if (logfiles != NULL)
-		__wt_log_files_free(session, logfiles, logcount);
+	WT_TRET(__wt_fs_directory_list_free(session, &logfiles, logcount));
 	return (ret);
 }
 
@@ -259,10 +286,9 @@ __log_prealloc_once(WT_SESSION_IMPL *session)
 	 * Allocate up to the maximum number, accounting for any existing
 	 * files that may not have been used yet.
 	 */
-	WT_ERR(__wt_dirlist(session, conn->log_path,
-	    WT_LOG_PREPNAME, WT_DIRLIST_INCLUDE, &recfiles, &reccount));
-	__wt_log_files_free(session, recfiles, reccount);
-	recfiles = NULL;
+	WT_ERR(__wt_fs_directory_list(
+	    session, conn->log_path, WT_LOG_PREPNAME, &recfiles, &reccount));
+
 	/*
 	 * Adjust the number of files to pre-allocate if we find that
 	 * the critical path had to allocate them since we last ran.
@@ -292,8 +318,7 @@ __log_prealloc_once(WT_SESSION_IMPL *session)
 
 	if (0)
 err:		__wt_err(session, ret, "log pre-alloc server error");
-	if (recfiles != NULL)
-		__wt_log_files_free(session, recfiles, reccount);
+	WT_TRET(__wt_fs_directory_list_free(session, &recfiles, reccount));
 	return (ret);
 }
 
@@ -314,11 +339,14 @@ __wt_log_truncate_files(
 
 	WT_UNUSED(cfg);
 	conn = S2C(session);
-	log = conn->log;
+	if (!FLD_ISSET(conn->log_flags, WT_CONN_LOG_ENABLED))
+		return (0);
 	if (F_ISSET(conn, WT_CONN_SERVER_RUN) &&
 	    FLD_ISSET(conn->log_flags, WT_CONN_LOG_ARCHIVE))
 		WT_RET_MSG(session, EINVAL,
 		    "Attempt to archive manually while a server is running");
+
+	log = conn->log;
 
 	backup_file = 0;
 	if (cursor != NULL)
@@ -327,6 +355,7 @@ __wt_log_truncate_files(
 	WT_RET(__wt_verbose(session, WT_VERB_LOG,
 	    "log_truncate_files: Archive once up to %" PRIu32,
 	    backup_file));
+
 	WT_RET(__wt_writelock(session, log->log_archive_lock));
 	locked = true;
 	WT_ERR(__log_archive_once(session, backup_file));
@@ -677,7 +706,6 @@ __log_wrlsn_server(void *arg)
 	log = conn->log;
 	yield = 0;
 	WT_INIT_LSN(&prev);
-	did_work = false;
 	while (F_ISSET(conn, WT_CONN_LOG_SERVER_RUN)) {
 		/*
 		 * Write out any log record buffers if anything was done
@@ -692,10 +720,8 @@ __log_wrlsn_server(void *arg)
 		else
 			WT_STAT_FAST_CONN_INCR(session, log_write_lsn_skip);
 		prev = log->alloc_lsn;
-		if (yield == 0)
-			did_work = true;
-		else
-			did_work = false;
+		did_work = yield == 0;
+
 		/*
 		 * If __wt_log_wrlsn did work we want to yield instead of sleep.
 		 */
@@ -865,9 +891,9 @@ __wt_logmgr_create(WT_SESSION_IMPL *session, const char *cfg[])
 	    "log write LSN"));
 	WT_RET(__wt_rwlock_alloc(session,
 	    &log->log_archive_lock, "log archive lock"));
-	if (FLD_ISSET(conn->direct_io, WT_FILE_TYPE_LOG))
-		log->allocsize =
-		    WT_MAX((uint32_t)conn->buffer_alignment, WT_LOG_ALIGN);
+	if (FLD_ISSET(conn->direct_io, WT_DIRECT_IO_LOG))
+		log->allocsize = (uint32_t)
+		    WT_MAX(conn->buffer_alignment, WT_LOG_ALIGN);
 	else
 		log->allocsize = WT_LOG_ALIGN;
 	WT_INIT_LSN(&log->alloc_lsn);

@@ -103,7 +103,6 @@ __clsm_enter_update(WT_CURSOR_LSM *clsm)
 	bool hard_limit, have_primary, ovfl;
 
 	lsm_tree = clsm->lsm_tree;
-	ovfl = false;
 	session = (WT_SESSION_IMPL *)clsm->iface.session;
 
 	if (clsm->nchunks == 0) {
@@ -220,13 +219,20 @@ __clsm_enter(WT_CURSOR_LSM *clsm, bool reset, bool update)
 			 * transaction ID in each chunk: any transaction ID
 			 * that overlaps with our snapshot is a potential
 			 * conflict.
+			 *
+			 * Note that the global snap_min is correct here: it
+			 * tracks concurrent transactions excluding special
+			 * transactions such as checkpoint (which we can't
+			 * conflict with because checkpoint only writes the
+			 * metadata, which is not an LSM tree).
 			 */
 			clsm->nupdates = 1;
 			if (txn->isolation == WT_ISO_SNAPSHOT &&
 			    F_ISSET(clsm, WT_CLSM_OPEN_SNAPSHOT)) {
 				WT_ASSERT(session,
 				    F_ISSET(txn, WT_TXN_HAS_SNAPSHOT));
-				snap_min = txn->snap_min;
+				snap_min =
+				    WT_SESSION_TXN_STATE(session)->snap_min;
 				for (switch_txnp =
 				    &clsm->switch_txn[clsm->nchunks - 2];
 				    clsm->nupdates < clsm->nchunks;
@@ -1155,7 +1161,6 @@ __clsm_search_near(WT_CURSOR *cursor, int *exactp)
 	closest = NULL;
 	clsm = (WT_CURSOR_LSM *)cursor;
 	exact = 0;
-	deleted = false;
 
 	CURSOR_API_CALL(cursor, session, search_near, NULL);
 	WT_CURSOR_NEEDKEY(cursor);
