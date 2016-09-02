@@ -1,3 +1,13 @@
+mongodb (1:3.2.9-1) experimental; urgency=medium
+
+  * New upstream release.
+  * Fix build with Boost 1.60 by backporting upstream commit 92c3f80f.
+  * Fix FTBFS in src/mongo/base/parse_number_test.cpp with GCC 6.1.
+  * Fix FTBFS with GCC 6.1 by ignoring overflow checks as upstream's test suite
+    explicitly triggers overflows.
+
+ -- Apollon Oikonomopoulos <apoikos@debian.org>  Fri, 02 Sep 2016 12:17:27 +0300
+
 mongodb (1:3.2.8-2) experimental; urgency=medium
 
   * Disable wiredtiger on 32-bit systems; Wiredtiger only supports 64-bit
