@@ -7,19 +7,24 @@ Description: Fix FTBFS with GCC6
 Last-Update: 2017-07-01
 Forwarded: no
 
---- a/SConstruct
-+++ b/SConstruct
-@@ -1433,6 +1433,7 @@
+Index: mongodb-3.2.9/SConstruct
+===================================================================
+--- mongodb-3.2.9.orig/SConstruct
++++ mongodb-3.2.9/SConstruct
+@@ -1433,6 +1433,8 @@ if env.TargetOSIs('posix'):
                           "-Wall",
                           "-Wsign-compare",
                           "-Wno-unknown-pragmas",
 +			 "-Wno-nonnull-compare",
++			 "-Wno-overflow",
                           "-Winvalid-pch"] )
      # env.Append( " -Wconversion" ) TODO: this doesn't really work yet
      if env.TargetOSIs('linux', 'osx', 'solaris'):
---- a/src/mongo/base/parse_number_test.cpp
-+++ b/src/mongo/base/parse_number_test.cpp
-@@ -294,7 +294,7 @@
+Index: mongodb-3.2.9/src/mongo/base/parse_number_test.cpp
+===================================================================
+--- mongodb-3.2.9.orig/src/mongo/base/parse_number_test.cpp
++++ mongodb-3.2.9/src/mongo/base/parse_number_test.cpp
+@@ -294,7 +294,7 @@ TEST(Double, TestParsingNormal) {
  
      ASSERT_PARSES(double, "0xff", 0xff);
      ASSERT_PARSES(double, "-0xff", -0xff);
