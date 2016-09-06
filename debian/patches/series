@@ -1,6 +1,6 @@
-0001-Create-kfreebsd-like-linux-in-most-respects.patch
-0002-kfreebsd-has-dev-urandom.patch
-0012-support-gnu.patch
+#0001-Create-kfreebsd-like-linux-in-most-respects.patch
+#0002-kfreebsd-has-dev-urandom.patch
+#0012-support-gnu.patch
 hardened-build.patch
 fix-gcc-6-ftbfs.patch
 fix-boost-1.60-build.patch
