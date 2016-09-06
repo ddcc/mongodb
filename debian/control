@@ -86,6 +86,7 @@ Architecture: amd64 i386 kfreebsd-amd64 kfreebsd-i386 hurd-any armhf arm64 ppc64
 Depends:
  ${misc:Depends},
  ${shlibs:Depends}
+Recommends: mongo-tools
 Replaces:
  mongodb (<= 1:1.4.2-2)
 Description: object/document-oriented database (client apps)
