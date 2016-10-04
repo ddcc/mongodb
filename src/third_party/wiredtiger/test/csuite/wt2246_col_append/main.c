@@ -111,7 +111,7 @@ main(int argc, char *argv[])
 	testutil_check(testutil_parse_opts(argc, argv, opts));
 	testutil_make_work_dir(opts->home);
 
-	snprintf(buf, sizeof(buf), 
+	snprintf(buf, sizeof(buf),
 	    "create,"
 	    "cache_size=%s,"
 	    "eviction=(threads_max=5),"
@@ -152,7 +152,5 @@ main(int argc, char *argv[])
 	    (ce - cs) / (double)CLOCKS_PER_SEC);
 
 	testutil_cleanup(opts);
-	/* NOTREACHED */
-
-	return (0);
+	return (EXIT_SUCCESS);
 }

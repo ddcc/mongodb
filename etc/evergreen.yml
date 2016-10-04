@@ -88,38 +88,12 @@ variables:
   - ubuntu1404
   - ubuntu1604
   - ubuntu1404-rocksdb
-  - ubuntu1410-fast-clang
   - debian71
   - debian81
   - solaris-64-bit
   - osx-107-ssl
   - osx-107
 
-
-- &packaging_variants
-  - enterprise-linux-64-amazon-ami
-  - enterprise-rhel-57-64-bit
-  - enterprise-rhel-62-64-bit
-  - enterprise-rhel-70-64-bit
-  - enterprise-rhel-71-ppc64le
-  - enterprise-suse11-64
-  - enterprise-suse12-64
-  - enterprise-ubuntu1204-64
-  - enterprise-ubuntu1404-64
-  - enterprise-ubuntu1604-64
-  - enterprise-debian71-64
-  - enterprise-debian81-64
-  - rhel55
-  - rhel62
-  - rhel70
-  - suse11
-  - suse12
-  - ubuntu1204
-  - ubuntu1404
-  - ubuntu1604
-  - amazon
-  - debian71
-  - debian81
 
 #######################################
 #            Functions                #
@@ -245,9 +219,12 @@ functions:
 
         . ./${set_tools_gopath|set_gopath.sh}
 
+        sed -i.bak "s/built-without-version-string/$(git describe)/" common/options/options.go
+        sed -i.bak "s/built-without-git-spec/$(git rev-parse HEAD)/" common/options/options.go
+
         for i in bsondump mongostat mongofiles mongoexport mongoimport mongorestore mongodump mongotop mongooplog; do
-             ${gorootvars} go build -ldflags "-X github.com/mongodb/mongo-tools/common/options.Gitspec $(git rev-parse HEAD) -X github.com/mongodb/mongo-tools/common/options.VersionStr $(git --git-dir ../.git describe)" ${tooltags|} -o "../src/mongo-tools/$i${exe|}" $i/main/$i.go
-             echo $i;
+             ${gorootvars} go build ${tooltags|} -o "../src/mongo-tools/$i${exe|}" $i/main/$i.go
+             "../src/mongo-tools/$i${exe|}" --version
         done
 
   "do setup" :
@@ -386,7 +363,7 @@ functions:
         set -o verbose
 
         rm -rf /data/install /data/multiversion
-        ${python|python} buildscripts/setup_multiversion_mongodb.py /data/install /data/multiversion ${multiversion_platform_arch|"Linux/x86_64"} "2.4" "2.6" "3.0" "3.2.1"
+        ${python|python} buildscripts/setup_multiversion_mongodb.py /data/install /data/multiversion "base" ${multiversion_platform_arch|"Linux/x86_64"} "2.4" "2.6" "3.0" "3.2.1"
 
   "download mongod for validation checking" :
     command: shell.exec
@@ -397,7 +374,16 @@ functions:
         set -o verbose
 
         rm -rf /data/install /data/multiversion
-        ${python|python} buildscripts/setup_multiversion_mongodb.py /data/install /data/multiversion ${multiversion_platform_arch|"Linux/x86_64"} "3.3.10"
+        ${python|python} buildscripts/setup_multiversion_mongodb.py /data/install /data/multiversion "base" ${multiversion_platform_arch|"Linux/x86_64"} "3.3.10"
+
+  "cleanup environment" :
+    command: shell.exec
+    params:
+      script: |
+        set -o errexit
+        set -o verbose
+
+        rm -rf src /data/db/* mongo-coredumps.tgz ~/.aws
 
 pre:
   - command: shell.track
@@ -412,7 +398,7 @@ pre:
         set -o errexit
         set -o verbose
 
-        rm -rf src /data/db/* mongo-coredumps.tgz
+  - func: "cleanup environment"
   - command: expansions.update
     params:
        updates:
@@ -478,8 +464,14 @@ post:
       optional: true
   - command: shell.exec
     params:
+      working_dir: src
       script: |
-        rm -rf ~/.aws
+        # removes files from the (local) scons cache when it's over a
+        # threshold, to the $prune_ratio percentage. Ideally override
+        # these default values in the distro config in evergreen.
+        if [ -d "${scons_cache_path}" ]; then
+            ${python|python} buildscripts/scons_cache_prune.py --cache-dir '${scons_cache_path}' --cache-size ${scons_cache_size|200} --prune-ratio ${scons_prune_ratio|0.8}
+        fi
   - command: shell.exec
     params:
       system_log: true
@@ -504,7 +496,7 @@ post:
         else
           echo "No OOM (Out of memory) killed processes detected"
         fi
-  - command: shell.cleanup
+  - func: "cleanup environment"
 
 timeout:
   - command: shell.exec
@@ -572,7 +564,7 @@ tasks:
           set -o verbose
 
           rm -rf ${install_directory|/data/mongo-install-directory}
-          ${scons|scons} ${compile_flags|} --use-new-tools all dist dist-debugsymbols distsrc-${ext|tgz} ${msi_target|} MONGO_VERSION=${version}
+          ${python|python} ./buildscripts/scons.py ${compile_flags|} --use-new-tools all dist dist-debugsymbols distsrc-${ext|tgz} ${msi_target|} MONGO_VERSION=${version}
 
           mv mongodb-src-*.${ext|tgz} distsrc.${ext|tgz}
           mv mongodb-*-debugsymbols.${ext|tgz} mongo-debugsymbols.tgz || true
@@ -697,7 +689,7 @@ tasks:
         script: |
           set -o errexit
           set -o verbose
-          ${scons|scons} ${compile_flags|} --stack-size=1024 lint
+          ${python|python} ./buildscripts/scons.py ${compile_flags|} --stack-size=1024 lint
 
 ## jstestfuzz mmapv1 ##
 - <<: *jstestfuzz_template
@@ -1551,22 +1543,6 @@ tasks:
       resmoke_args: --suites=concurrency_sharded_sccc --storageEngine=wiredTiger
 
 - <<: *task_template
-  name: concurrency_simultaneous
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --executor=concurrency jstests/concurrency/fsm_all_simultaneous.js --storageEngine=mmapv1
-
-- <<: *task_template
-  name: concurrency_simultaneous_WT
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --executor=concurrency jstests/concurrency/fsm_all_simultaneous.js --storageEngine=wiredTiger
-
-- <<: *task_template
   name: rlp
   commands:
   - func: "do setup"
@@ -1866,24 +1842,6 @@ tasks:
       resmoke_args: --suites=tool --storageEngine=wiredTiger
       run_multiple_jobs: true
 
-- <<: *task_template
-  name: jsDecimalCore
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --suites=decimal
-      run_multiple_jobs: true
-
-- <<: *task_template
-  name: jsDecimalCore_WT
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --suites=decimal --storageEngine=wiredTiger
-      run_multiple_jobs: true
-
 - name: push
   patchable: false
   depends_on:
@@ -1954,7 +1912,7 @@ tasks:
           notary-client.py --key-name "server-3.2" --auth-token-file ${workdir}/src/signing_auth_token --comment "Evergreen Automatic Signing ${revision} - ${build_variant} - ${branch_name}" --notary-url http://notary-service.build.10gen.cc:5000 --skip-missing mongodb-${push_name}-${push_arch}-${suffix}.${ext|tgz} mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz} mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}.${ext|tgz} mongodb-win32-${push_arch}-${suffix}.msi mongodb-src-${src_suffix}.${ext|tar.gz}
 
           if [ "${has_packages|}" = "true" ]; then
-             CURATOR_RELEASE="fe067ee52016852c049d61f9a08369d33b8e5da9"
+             CURATOR_RELEASE="bb867ba2f0aa10b5fd223b31ef99a054527a386c"
              curl -L -O http://boxes.10gen.com/build/curator/curator-dist-rhel70-$CURATOR_RELEASE.tar.gz
              tar -zxvf curator-dist-rhel70-$CURATOR_RELEASE.tar.gz
              ./curator repo --config ./etc/repo_config.yaml --distro ${packager_distro} --edition ${repo_edition} --version ${version} --arch ${packager_arch} --packages repo
@@ -2455,7 +2413,6 @@ buildvariants:
   - name: jstestfuzz_sharded_WT
   - name: mmap
   - name: mongosTest
-  - name: multiversion
   - name: noPassthrough
   - name: noPassthrough_WT
   - name: noPassthroughWithMongod
@@ -2474,8 +2431,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: read_concern_majority_passthrough_WT
   - name: replicasets
   - name: replicasets_WT
@@ -2486,7 +2441,6 @@ buildvariants:
   - name: replication_auth
   - name: sharding
   - name: sharding_legacy
-  - name: sharding_legacy_multiversion
   - name: sharding_WT
   - name: sharding_auth
   - name: sharding_csrs_upgrade
@@ -2535,8 +2489,6 @@ buildvariants:
   - name: concurrency_replication_WT
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: unittests
 
 - name: linux-64-debug
@@ -2617,12 +2569,6 @@ buildvariants:
   - name: concurrency_sharded_sccc_WT
     distros:
     - rhel55-build
-  - name: concurrency_simultaneous
-    distros:
-    - rhel55-build
-  - name: concurrency_simultaneous_WT
-    distros:
-    - rhel55-build
   - name: read_concern_majority_passthrough_WT
   - name: replicasets
   - name: replicasets_WT
@@ -2701,7 +2647,6 @@ buildvariants:
   - name: concurrency_replication
   - name: concurrency_sharded
   - name: concurrency_sharded_sccc
-  - name: concurrency_simultaneous
   - name: replicasets
   - name: replicasets_auth
   - name: replication
@@ -2759,7 +2704,6 @@ buildvariants:
   - name: concurrency_replication_WT
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous_WT
   - name: replicasets_WT
   - name: replication_WT
   - name: sharding_WT
@@ -2854,8 +2798,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: replicasets
   - name: replicasets_WT
   - name: replicasets_auth
@@ -2964,8 +2906,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: replicasets
   - name: replicasets_WT
   - name: replicasets_auth
@@ -3074,8 +3014,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: replicasets
   - name: replicasets_WT
   - name: replicasets_auth
@@ -3260,8 +3198,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: replicasets
   - name: replicasets_WT
   - name: replicasets_auth
@@ -3322,32 +3258,6 @@ buildvariants:
   - name: push
     distros:
     - rhel70
-
-- name: linux-64-decimal
-  display_name: Linux (Decimal Enabled)
-  modules:
-  - mongo-tools
-  run_on:
-  - rhel55-build
-  batchtime: 1440 # 1 day
-  expansions:
-    gorootvars: GOROOT=/opt/go PATH="/opt/go/bin:$PATH"
-    push_path: linux
-    push_bucket: downloads.mongodb.org
-    push_name: linux
-    push_arch: x86_64-decimal
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/bin/gcc CXX=/opt/mongodbtoolchain/bin/g++ --release --experimental-decimal-support=on
-    num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
-  tasks:
-  - name: compile
-    distros:
-    - rhel55-build
-  - name: dbtest
-  - name: dbtest_WT
-  - name: jsCore
-  - name: jsDecimalCore
-  - name: jsDecimalCore_WT
-  - name: unittests
 
 ###########################################
 #         Windows buildvariants           #
@@ -3429,8 +3339,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: replicasets
   - name: replicasets_WT
   - name: replication
@@ -3469,7 +3377,7 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: win32
     push_arch: x86_64-2008plus
-    multiversion_platform_arch: "win32/x86_64-2008plus"
+    multiversion_platform_arch: "Windows/x86_64-2008plus"
     msi_target: msi
     content_type: application/zip
     compile_flags: --release --win-version-min=ws08r2 -j$(grep -c ^processor /proc/cpuinfo) MONGO_DISTMOD=2008plus VARIANT_DIR=win32
@@ -3534,8 +3442,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: read_concern_majority_passthrough_WT
   - name: replicasets
   - name: replicasets_WT
@@ -3575,6 +3481,7 @@ buildvariants:
     push_name: win32-debug
     push_arch: x86_64-2008plus
     content_type: application/zip
+    multiversion_platform_arch: "Windows/x86_64-2008plus"
     num_jobs_available: 1
     compile_flags: --dbg=on --opt=on --win-version-min=ws08r2 -j$(grep -c ^processor /proc/cpuinfo) MONGO_DISTMOD=2008plus
     ext: zip
@@ -3603,6 +3510,8 @@ buildvariants:
   - name: jsCore_small_oplog_WT
   - name: jsCore_small_oplog_rs
   - name: jsCore_small_oplog_rs_WT
+  - name: jsCore_v33_validate
+  - name: jsCore_v33_validate_WT
   - name: mmap
   - name: mongosTest
   - name: noPassthrough
@@ -3639,12 +3548,6 @@ buildvariants:
     distros:
     - windows-64-vs2013-compile
   - name: concurrency_sharded_sccc_WT
-    distros:
-    - windows-64-vs2013-compile
-  - name: concurrency_simultaneous
-    distros:
-    - windows-64-vs2013-compile
-  - name: concurrency_simultaneous_WT
     distros:
     - windows-64-vs2013-compile
   - name: read_concern_majority_passthrough_WT
@@ -3755,7 +3658,6 @@ buildvariants:
   - name: concurrency_replication
   - name: concurrency_sharded
   - name: concurrency_sharded_sccc
-  - name: concurrency_simultaneous
   - name: jsCore
   - name: jsCore_auth
   - name: jsCore_small_oplog
@@ -3839,8 +3741,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: replicasets
   - name: replicasets_WT
   - name: replication
@@ -3862,7 +3762,7 @@ buildvariants:
   - name: tool_WT
   - name: unittests
   - name: ssl
-  - name: sslspecial
+  - name: sslSpecial
   - name: push
     distros:
     - rhel70
@@ -3972,8 +3872,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: replicasets
   - name: replicasets_WT
   - name: replication
@@ -4063,8 +3961,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: read_concern_majority_passthrough_WT
   - name: replicasets
   - name: replicasets_WT
@@ -4268,8 +4164,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: dbtest
   - name: dbtest_WT
   - name: disk
@@ -4467,8 +4361,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   # - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  # - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   # - name: dbtest
   - name: dbtest_WT
   # - name: disk
@@ -4620,7 +4512,6 @@ buildvariants:
   - name: jstestfuzz_sharded_WT
   - name: mmap
   - name: mongosTest
-  - name: multiversion
   - name: noPassthrough
   - name: noPassthrough_WT
   - name: noPassthroughWithMongod
@@ -4639,8 +4530,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: replicasets
   - name: replicasets_WT
   - name: replicasets_auth
@@ -4653,7 +4542,6 @@ buildvariants:
   - name: sharding_csrs_upgrade
   - name: sharding_csrs_upgrade_WT
   - name: sharding_csrs_upgrade_auth_WT
-  - name: sharding_legacy_multiversion
   - name: slow1
   - name: slow1_WT
   - name: slow2
@@ -4859,8 +4747,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: replicasets
   - name: replicasets_WT
   - name: replicasets_auth
@@ -5176,8 +5062,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: replicasets
   - name: replicasets_WT
   - name: replicasets_auth
@@ -5337,8 +5221,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: replicasets
   - name: replicasets_WT
   - name: replicasets_auth
@@ -5400,8 +5282,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: dbtest
   - name: dbtest_WT
   - name: disk
@@ -5636,8 +5516,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: replicasets
   - name: replicasets_WT
   - name: replicasets_auth
@@ -5750,8 +5628,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: replicasets
   - name: replicasets_WT
   - name: replicasets_auth
@@ -5823,7 +5699,6 @@ buildvariants:
   - name: concurrency_replication
   - name: concurrency_sharded
   - name: concurrency_sharded_sccc
-  - name: concurrency_simultaneous
   - name: dbtest
   - name: failpoints
   - name: failpoints_auth
@@ -5901,7 +5776,6 @@ buildvariants:
   # - name: concurrency_replication
   # - name: concurrency_sharded
   # - name: concurrency_sharded_sccc
-  # - name: concurrency_simultaneous
   - name: dbtest
   - name: failpoints
   - name: failpoints_auth
@@ -5998,7 +5872,6 @@ buildvariants:
   - name: concurrency_replication
   - name: concurrency_sharded
   - name: concurrency_sharded_sccc
-  - name: concurrency_simultaneous
   - name: replicasets
   - name: replicasets_auth
   - name: replication
@@ -6056,8 +5929,6 @@ buildvariants:
   - name: concurrency_sharded_WT
   - name: concurrency_sharded_sccc
   - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
   - name: dbtest
   - name: dbtest_WT
   - name: disk
@@ -6169,112 +6040,3 @@ buildvariants:
   - name: jstestfuzz_replication_WT
   - name: jstestfuzz_sharded_WT
   - name: unittests
-
-- name: ubuntu1410-fast-clang
-  display_name: ~ Clang/libc++ SSL Ubuntu 14.10
-  modules:
-  - mongo-tools
-  run_on:
-  - ubuntu1410-test
-  stepback: false
-  batchtime: 1440 # 1 day
-  expansions:
-    tooltags: "-tags 'ssl'"
-    compile_flags: CC=/usr/bin/clang CXX=/usr/bin/clang++ --libc++ --ssl -j$(grep -c ^processor /proc/cpuinfo) VARIANT_DIR=build MONGO_DISTMOD=ubuntu1410-clang
-    num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
-    push_path: linux
-    push_bucket: downloads.mongodb.org
-    push_name: linux
-    push_arch: x86_64-ubuntu1410-clang
-  tasks:
-  - name: compile
-    distros:
-    - ubuntu1410-build
-  - name: aggregation
-  - name: aggregation_WT
-  - name: aggregation_auth
-  - name: auth
-  - name: auth_WT
-  - name: dbtest
-  - name: dbtest_WT
-  - name: disk
-  - name: durability
-  - name: dur_jscore_passthrough
-  - name: failpoints
-  - name: failpoints_auth
-  - name: gle_auth
-  - name: gle_auth_WT
-  - name: gle_auth_write_cmd
-  - name: gle_auth_write_cmd_WT
-  - name: gle_auth_basics_passthrough
-  - name: gle_auth_basics_passthrough_WT
-  - name: gle_auth_basics_passthrough_write_cmd
-  - name: gle_auth_basics_passthrough_write_cmd_WT
-  - name: sharding_gle_auth_basics_passthrough
-  - name: sharding_gle_auth_basics_passthrough_WT
-  - name: sharding_gle_auth_basics_passthrough_write_cmd
-  - name: sharding_gle_auth_basics_passthrough_write_cmd_WT
-  - name: jsCore
-  - name: jsCore_WT
-  - name: jsCore_auth
-  - name: jsCore_compatibility
-  - name: jsCore_compatibility_WT
-  - name: jsCore_small_oplog
-  - name: jsCore_small_oplog_WT
-  - name: jsCore_small_oplog_rs
-  - name: jsCore_small_oplog_rs_WT
-  - name: jstestfuzz
-  - name: jstestfuzz_WT
-  - name: jstestfuzz_replication_WT
-  - name: jstestfuzz_sharded_WT
-  - name: mmap
-  - name: mongosTest
-  - name: multiversion
-  - name: noPassthrough
-  - name: noPassthrough_WT
-  - name: noPassthroughWithMongod
-  - name: noPassthroughWithMongod_WT
-  - name: bulk_gle_passthrough
-  - name: bulk_gle_passthrough_WT
-  - name: parallel
-  - name: parallel_WT
-  - name: parallel_compatibility
-  - name: parallel_compatibility_WT
-  - name: concurrency
-  - name: concurrency_WT
-  - name: concurrency_replication
-  - name: concurrency_replication_WT
-  - name: concurrency_sharded
-  - name: concurrency_sharded_WT
-  - name: concurrency_sharded_sccc
-  - name: concurrency_sharded_sccc_WT
-  - name: concurrency_simultaneous
-  - name: concurrency_simultaneous_WT
-  - name: replicasets
-  - name: replicasets_WT
-  - name: replicasets_auth
-  - name: replication
-  - name: replication_WT
-  - name: replication_auth
-  - name: sharding
-  - name: sharding_WT
-  - name: sharding_auth
-  - name: sharding_csrs_upgrade
-  - name: sharding_csrs_upgrade_WT
-  - name: sharding_csrs_upgrade_auth_WT
-  - name: sharding_legacy_multiversion
-  - name: slow1
-  - name: slow1_WT
-  - name: slow2
-  - name: slow2_WT
-  - name: sharded_collections_jscore_passthrough
-  - name: sharded_collections_jscore_passthrough_WT
-  - name: sharding_jscore_passthrough
-  - name: sharding_jscore_passthrough_WT
-  - name: sharding_jscore_passthrough_wire_ops_WT
-  - name: ssl
-  - name: sslSpecial
-  - name: tool
-  - name: tool_WT
-  - name: unittests
-  - name: push

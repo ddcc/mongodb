@@ -32,7 +32,7 @@
 
 import wiredtiger, wttest
 from wiredtiger import stat
-from wtscenario import multiply_scenarios, number_scenarios
+from wtscenario import make_scenarios
 
 # Test basic compression
 class test_compact02(wttest.WiredTigerTestCase):
@@ -57,8 +57,7 @@ class test_compact02(wttest.WiredTigerTestCase):
         ('64KB', dict(fileConfig='leaf_page_max=64KB')),
         ('128KB', dict(fileConfig='leaf_page_max=128KB')),
     ]
-    scenarios = \
-        number_scenarios(multiply_scenarios('.', types, cacheSize, fileConfig))
+    scenarios = make_scenarios(types, cacheSize, fileConfig)
 
     # We want about 22K records that total about 130Mb.  That is an average
     # of 6196 bytes per record.  Half the records should be smaller, about
@@ -97,7 +96,7 @@ class test_compact02(wttest.WiredTigerTestCase):
         self.home = '.'
         conn_params = 'create,' + \
             cacheSize + ',error_prefix="%s: ",' % self.shortid() + \
-            'statistics=(fast)'
+            'statistics=(fast),eviction_dirty_target=99,eviction_dirty_trigger=99'
         try:
             self.conn = wiredtiger.wiredtiger_open(self.home, conn_params)
         except wiredtiger.WiredTigerError as e:
@@ -147,7 +146,6 @@ class test_compact02(wttest.WiredTigerTestCase):
 
         # After compact, the file size should be less than half the full size.
         self.assertLess(sz, self.fullsize / 2)
-
 
 if __name__ == '__main__':
     wttest.run()

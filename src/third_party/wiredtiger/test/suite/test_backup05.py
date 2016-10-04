@@ -35,7 +35,6 @@
 
 import fnmatch, os, shutil, time
 from suite_subprocess import suite_subprocess
-from wtscenario import multiply_scenarios, number_scenarios, prune_scenarios
 from helper import copy_wiredtiger_home
 import wiredtiger, wttest
 
@@ -80,7 +79,6 @@ class test_backup05(wttest.WiredTigerTestCase, suite_subprocess):
         else:
             self.session.drop(self.emptyuri, None)
             self.session.create(self.emptyuri, self.create_params)
-
 
         # Open the new directory and verify
         conn = self.setUpConnectionOpen(newdir)

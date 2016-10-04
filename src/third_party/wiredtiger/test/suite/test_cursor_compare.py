@@ -29,7 +29,7 @@
 import wiredtiger, wttest, exceptions
 from helper import complex_populate, simple_populate, key_populate
 from helper import complex_populate_index_name
-from wtscenario import multiply_scenarios, number_scenarios
+from wtscenario import make_scenarios
 
 # Test cursor comparisons.
 class test_cursor_comparison(wttest.WiredTigerTestCase):
@@ -45,7 +45,7 @@ class test_cursor_comparison(wttest.WiredTigerTestCase):
         ('recno', dict(keyfmt='r')),
         ('string', dict(keyfmt='S'))
     ]
-    scenarios = number_scenarios(multiply_scenarios('.', types, keyfmt))
+    scenarios = make_scenarios(types, keyfmt)
 
     def test_cursor_comparison(self):
         uri = self.type + 'compare'
@@ -240,7 +240,6 @@ class test_cursor_comparison(wttest.WiredTigerTestCase):
         msg = '/must reference the same object/'
         self.assertRaisesWithMessage(
             wiredtiger.WiredTigerError, lambda: cX.equals(c1), msg)
-
 
 if __name__ == '__main__':
     wttest.run()

@@ -28,7 +28,7 @@
 
 import wiredtiger, wttest
 from helper import key_populate, complex_populate_lsm, simple_populate
-from wtscenario import check_scenarios
+from wtscenario import make_scenarios
 
 # test_checkpoint01.py
 #    Checkpoint tests
@@ -36,7 +36,7 @@ from wtscenario import check_scenarios
 # with a set of checkpoints, then confirm the checkpoint's values are correct,
 # including after other checkpoints are dropped.
 class test_checkpoint(wttest.WiredTigerTestCase):
-    scenarios = check_scenarios([
+    scenarios = make_scenarios([
         ('file', dict(uri='file:checkpoint',fmt='S')),
         ('table', dict(uri='table:checkpoint',fmt='S'))
     ])
@@ -136,10 +136,9 @@ class test_checkpoint(wttest.WiredTigerTestCase):
                 (self.checkpoints[checkpoint_name][0], 0)
         self.check()
 
-
 # Check some specific cursor checkpoint combinations.
 class test_checkpoint_cursor(wttest.WiredTigerTestCase):
-    scenarios = check_scenarios([
+    scenarios = make_scenarios([
         ('file', dict(uri='file:checkpoint',fmt='S')),
         ('table', dict(uri='table:checkpoint',fmt='S'))
     ])
@@ -202,10 +201,9 @@ class test_checkpoint_cursor(wttest.WiredTigerTestCase):
         self.session.checkpoint("drop=(checkpoint-2)")
         self.session.checkpoint("drop=(from=all)")
 
-
 # Check that you can checkpoint targets.
 class test_checkpoint_target(wttest.WiredTigerTestCase):
-    scenarios = check_scenarios([
+    scenarios = make_scenarios([
         ('file', dict(uri='file:checkpoint',fmt='S')),
         ('table', dict(uri='table:checkpoint',fmt='S'))
     ])
@@ -249,10 +247,9 @@ class test_checkpoint_target(wttest.WiredTigerTestCase):
         self.check(self.uri + '2', 'UPDATE')
         self.check(self.uri + '3', 'ORIGINAL')
 
-
 # Check that you can't write checkpoint cursors.
 class test_checkpoint_cursor_update(wttest.WiredTigerTestCase):
-    scenarios = check_scenarios([
+    scenarios = make_scenarios([
         ('file-r', dict(uri='file:checkpoint',fmt='r')),
         ('file-S', dict(uri='file:checkpoint',fmt='S')),
         ('table-r', dict(uri='table:checkpoint',fmt='r')),
@@ -274,10 +271,9 @@ class test_checkpoint_cursor_update(wttest.WiredTigerTestCase):
             lambda: cursor.update(), msg)
         cursor.close()
 
-
 # Check that WiredTigerCheckpoint works as a checkpoint specifier.
 class test_checkpoint_last(wttest.WiredTigerTestCase):
-    scenarios = check_scenarios([
+    scenarios = make_scenarios([
         ('file', dict(uri='file:checkpoint',fmt='S')),
         ('table', dict(uri='table:checkpoint',fmt='S'))
     ])
@@ -306,7 +302,6 @@ class test_checkpoint_last(wttest.WiredTigerTestCase):
             # Don't close the checkpoint cursor, we want it to remain open until
             # the test completes.
 
-
 # Check we can't use the reserved name as an application checkpoint name.
 class test_checkpoint_illegal_name(wttest.WiredTigerTestCase):
     def test_checkpoint_illegal_name(self):
@@ -331,7 +326,6 @@ class test_checkpoint_illegal_name(wttest.WiredTigerTestCase):
                 self.assertRaisesWithMessage(wiredtiger.WiredTigerError,
                     lambda: self.session.checkpoint(conf), msg)
 
-
 # Check we can't name checkpoints that include LSM tables.
 class test_checkpoint_lsm_name(wttest.WiredTigerTestCase):
     def test_checkpoint_lsm_name(self):
@@ -341,9 +335,8 @@ class test_checkpoint_lsm_name(wttest.WiredTigerTestCase):
         self.assertRaisesWithMessage(wiredtiger.WiredTigerError,
             lambda: self.session.checkpoint("name=ckpt"), msg)
 
-
 class test_checkpoint_empty(wttest.WiredTigerTestCase):
-    scenarios = check_scenarios([
+    scenarios = make_scenarios([
         ('file', dict(uri='file:checkpoint')),
         ('table', dict(uri='table:checkpoint')),
     ])
@@ -416,7 +409,6 @@ class test_checkpoint_empty(wttest.WiredTigerTestCase):
         cursor = self.session.open_cursor(
             self.uri, None, "checkpoint=WiredTigerCheckpoint")
         self.assertEquals(cursor.next(), wiredtiger.WT_NOTFOUND)
-
 
 if __name__ == '__main__':
     wttest.run()
