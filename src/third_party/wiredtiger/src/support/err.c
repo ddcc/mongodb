@@ -162,7 +162,6 @@ __wt_eventv(WT_SESSION_IMPL *session, bool msg_event, int error,
 	WT_SESSION *wt_session;
 	struct timespec ts;
 	size_t len, remain, wlen;
-	int prefix_cnt;
 	const char *err, *prefix;
 	char *end, *p, tid[128];
 
@@ -211,44 +210,32 @@ __wt_eventv(WT_SESSION_IMPL *session, bool msg_event, int error,
 	 * name, and the session's name.  Write them as a comma-separate list,
 	 * followed by a colon.
 	 */
-	prefix_cnt = 0;
-	if (__wt_epoch(session, &ts) == 0) {
-		__wt_thread_id(tid, sizeof(tid));
-		remain = WT_PTRDIFF(end, p);
-		wlen = (size_t)snprintf(p, remain,
-		    "[%" PRIuMAX ":%" PRIuMAX "][%s]",
-		    (uintmax_t)ts.tv_sec,
-		    (uintmax_t)ts.tv_nsec / WT_THOUSAND, tid);
-		p = wlen >= remain ? end : p + wlen;
-		prefix_cnt = 1;
-	}
+	__wt_epoch(session, &ts);
+	__wt_thread_id(tid, sizeof(tid));
+	remain = WT_PTRDIFF(end, p);
+	wlen = (size_t)snprintf(p, remain, "[%" PRIuMAX ":%" PRIuMAX "][%s]",
+	    (uintmax_t)ts.tv_sec, (uintmax_t)ts.tv_nsec / WT_THOUSAND, tid);
+	p = wlen >= remain ? end : p + wlen;
+
 	if ((prefix = S2C(session)->error_prefix) != NULL) {
 		remain = WT_PTRDIFF(end, p);
-		wlen = (size_t)snprintf(p, remain,
-		    "%s%s", prefix_cnt == 0 ? "" : ", ", prefix);
+		wlen = (size_t)snprintf(p, remain, ", %s", prefix);
 		p = wlen >= remain ? end : p + wlen;
-		prefix_cnt = 1;
 	}
 	prefix = session->dhandle == NULL ? NULL : session->dhandle->name;
 	if (prefix != NULL) {
 		remain = WT_PTRDIFF(end, p);
-		wlen = (size_t)snprintf(p, remain,
-		    "%s%s", prefix_cnt == 0 ? "" : ", ", prefix);
+		wlen = (size_t)snprintf(p, remain, ", %s", prefix);
 		p = wlen >= remain ? end : p + wlen;
-		prefix_cnt = 1;
 	}
 	if ((prefix = session->name) != NULL) {
 		remain = WT_PTRDIFF(end, p);
-		wlen = (size_t)snprintf(p, remain,
-		    "%s%s", prefix_cnt == 0 ? "" : ", ", prefix);
-		p = wlen >= remain ? end : p + wlen;
-		prefix_cnt = 1;
-	}
-	if (prefix_cnt != 0) {
-		remain = WT_PTRDIFF(end, p);
-		wlen = (size_t)snprintf(p, remain, ": ");
+		wlen = (size_t)snprintf(p, remain, ", %s", prefix);
 		p = wlen >= remain ? end : p + wlen;
 	}
+	remain = WT_PTRDIFF(end, p);
+	wlen = (size_t)snprintf(p, remain, ": ");
+	p = wlen >= remain ? end : p + wlen;
 
 	if (file_name != NULL) {
 		remain = WT_PTRDIFF(end, p);
@@ -574,4 +561,17 @@ __wt_bad_object_type(WT_SESSION_IMPL *session, const char *uri)
 		return (__wt_object_unsupported(session, uri));
 
 	WT_RET_MSG(session, ENOTSUP, "unknown object type: %s", uri);
+}
+
+/*
+ * __wt_unexpected_object_type --
+ *	Print a standard error message when given an unexpected object type.
+ */
+int
+__wt_unexpected_object_type(
+    WT_SESSION_IMPL *session, const char *uri, const char *expect)
+    WT_GCC_FUNC_ATTRIBUTE((cold))
+{
+	WT_RET_MSG(session,
+	    EINVAL, "uri %s doesn't match expected \"%s\"", uri, expect);
 }

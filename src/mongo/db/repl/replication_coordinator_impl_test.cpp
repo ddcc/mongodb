@@ -91,6 +91,10 @@ struct OpTimeWithTermZero {
         return OpTime(timestamp, 0);
     }
 
+    OpTime asOpTime() const {
+        return this->operator mongo::repl::OpTime();
+    }
+
     Timestamp timestamp;
 };
 
@@ -2423,9 +2427,10 @@ TEST_F(ReplCoordTest, IsMaster) {
 }
 
 TEST_F(ReplCoordTest, LogAMessageWhenShutDownBeforeReplicationStartUpFinished) {
+    OperationContextNoop txn;
     init();
     startCapturingLogMessages();
-    getReplCoord()->shutdown();
+    getReplCoord()->shutdown(&txn);
     stopCapturingLogMessages();
     ASSERT_EQUALS(1,
                   countLogLinesContaining("shutdown() called before startReplication() finished"));

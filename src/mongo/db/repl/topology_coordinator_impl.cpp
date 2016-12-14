@@ -48,8 +48,9 @@
 #include "mongo/db/repl/repl_set_request_votes_args.h"
 #include "mongo/db/repl/replication_executor.h"
 #include "mongo/db/repl/rslog.h"
-#include "mongo/s/catalog/catalog_manager.h"
+#include "mongo/db/server_parameters.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
+#include "mongo/s/catalog/catalog_manager.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
@@ -61,6 +62,10 @@ namespace repl {
 using std::vector;
 
 const Seconds TopologyCoordinatorImpl::VoteLease::leaseTime = Seconds(30);
+
+// Controls how caught up in replication a secondary with higher priority than the current primary
+// must be before it will call for a priority takeover election.
+MONGO_EXPORT_STARTUP_SERVER_PARAMETER(priorityTakeoverFreshnessWindowSeconds, int, 2);
 
 namespace {
 
@@ -1289,52 +1294,58 @@ HeartbeatResponseAction TopologyCoordinatorImpl::_updatePrimaryFromHBData(
         return HeartbeatResponseAction::makeNoAction();
     }
 
-    // At this point, there is no primary anywhere.  Check to see if we should become a
-    // candidate.
-    if (!checkShouldStandForElection(now, lastOpApplied)) {
+    // At this point, there is no primary anywhere.  Check to see if we should become a candidate.
+    const auto status = checkShouldStandForElection(now, lastOpApplied);
+    if (!status.isOK()) {
+        // NOTE: This log line is checked in unit test(s).
+        LOG(2) << "TopologyCoordinatorImpl::_updatePrimaryFromHBData - " << status.reason();
         return HeartbeatResponseAction::makeNoAction();
     }
-    fassert(28816, becomeCandidateIfElectable(now, lastOpApplied));
+    fassertStatusOK(28816, becomeCandidateIfElectable(now, lastOpApplied));
     return HeartbeatResponseAction::makeElectAction();
 }
 
-bool TopologyCoordinatorImpl::checkShouldStandForElection(Date_t now,
-                                                          const OpTime& lastOpApplied) const {
+Status TopologyCoordinatorImpl::checkShouldStandForElection(Date_t now,
+                                                            const OpTime& lastOpApplied) const {
     if (_currentPrimaryIndex != -1) {
-        return false;
+        return {ErrorCodes::NodeNotElectable, "Not standing for election since there is a Primary"};
     }
     invariant(_role != Role::leader);
 
     if (_role == Role::candidate) {
-        LOG(2) << "Not standing for election again; already candidate";
-        return false;
+        return {ErrorCodes::NodeNotElectable, "Not standing for election again; already candidate"};
     }
 
     const UnelectableReasonMask unelectableReason = _getMyUnelectableReason(now, lastOpApplied);
     if (NotCloseEnoughToLatestOptime & unelectableReason) {
-        LOG(2) << "Not standing for election because "
-               << _getUnelectableReasonString(unelectableReason) << "; my last optime is "
-               << lastOpApplied << " and the newest is " << _latestKnownOpTime(lastOpApplied);
-        return false;
+        return {ErrorCodes::NodeNotElectable,
+                str::stream() << "Not standing for election because "
+                              << _getUnelectableReasonString(unelectableReason)
+                              << "; my last optime is " << lastOpApplied.toString()
+                              << " and the newest is "
+                              << _latestKnownOpTime(lastOpApplied).toString()};
     }
     if (unelectableReason) {
-        LOG(2) << "Not standing for election because "
-               << _getUnelectableReasonString(unelectableReason);
-        return false;
+        return {ErrorCodes::NodeNotElectable,
+                str::stream() << "Not standing for election because "
+                              << _getUnelectableReasonString(unelectableReason)};
     }
     if (_electionSleepUntil > now) {
         if (_rsConfig.getProtocolVersion() == 1) {
-            LOG(2) << "Not standing for election before "
-                   << dateToISOStringLocal(_electionSleepUntil)
-                   << " because I stood up or learned about a new term too recently";
+            return {
+                ErrorCodes::NodeNotElectable,
+                str::stream() << "Not standing for election before "
+                              << dateToISOStringLocal(_electionSleepUntil)
+                              << " because I stood up or learned about a new term too recently"};
         } else {
-            LOG(2) << "Not standing for election before "
-                   << dateToISOStringLocal(_electionSleepUntil) << " because I stood too recently";
+            return {ErrorCodes::NodeNotElectable,
+                    str::stream() << "Not standing for election before "
+                                  << dateToISOStringLocal(_electionSleepUntil)
+                                  << " because I stood too recently"};
         }
-        return false;
     }
     // All checks passed. Start election proceedings.
-    return true;
+    return Status::OK();
 }
 
 bool TopologyCoordinatorImpl::_aMajoritySeemsToBeUp() const {
@@ -1355,6 +1366,34 @@ bool TopologyCoordinatorImpl::_isOpTimeCloseEnoughToLatestToElect(
     const OpTime latestKnownOpTime = _latestKnownOpTime(ourLastOpApplied);
     // Use addition instead of subtraction to avoid overflow.
     return otherOpTime.getSecs() + 10 >= (latestKnownOpTime.getSecs());
+}
+
+bool TopologyCoordinatorImpl::_amIFreshEnoughForPriorityTakeover(
+    const OpTime& ourLastOpApplied) const {
+    const OpTime latestKnownOpTime = _latestKnownOpTime(ourLastOpApplied);
+
+    // Rules are:
+    // - If the terms don't match, we don't call for priority takeover.
+    // - If our optime and the latest optime happen in different seconds, our optime must be within
+    // at least priorityTakeoverFreshnessWindowSeconds seconds of the latest optime.
+    // - If our optime and the latest optime happen in the same second, our optime must be within
+    // at least 1000 oplog entries of the latest optime (i.e. the increment portion of the timestamp
+    // must be within 1000).  This is to handle the case where a primary had its clock set far into
+    // the future, took some writes, then had its clock set back.  In that case the timestamp
+    // component of all future oplog entries generated will be the same, until real world time
+    // passes the timestamp component of the last oplog entry.
+
+    if (ourLastOpApplied.getTerm() != latestKnownOpTime.getTerm()) {
+        return false;
+    }
+
+    if (ourLastOpApplied.getTimestamp().getSecs() != latestKnownOpTime.getTimestamp().getSecs()) {
+        return ourLastOpApplied.getTimestamp().getSecs() + priorityTakeoverFreshnessWindowSeconds >=
+            latestKnownOpTime.getTimestamp().getSecs();
+    } else {
+        return ourLastOpApplied.getTimestamp().getInc() + 1000 >=
+            latestKnownOpTime.getTimestamp().getInc();
+    }
 }
 
 bool TopologyCoordinatorImpl::_iAmPrimary() const {
@@ -1958,8 +1997,8 @@ TopologyCoordinatorImpl::UnelectableReasonMask TopologyCoordinatorImpl::_getMyUn
         result |= NotSecondary;
     }
 
-    // Election rules only for protocol version 0.
     if (_rsConfig.getProtocolVersion() == 0) {
+        // Election rules only for protocol version 0.
         if (_voteLease.whoId != -1 &&
             _voteLease.whoId != _rsConfig.getMemberAt(_selfIndex).getId() &&
             _voteLease.when + VoteLease::leaseTime >= now) {
@@ -1967,6 +2006,13 @@ TopologyCoordinatorImpl::UnelectableReasonMask TopologyCoordinatorImpl::_getMyUn
         }
         if (!_isOpTimeCloseEnoughToLatestToElect(lastApplied, lastApplied)) {
             result |= NotCloseEnoughToLatestOptime;
+        }
+    } else {
+        // Election rules only for protocol version 1.
+        invariant(_rsConfig.getProtocolVersion() == 1);
+        bool isPriorityTakeover = _currentPrimaryIndex != -1;
+        if (isPriorityTakeover && !_amIFreshEnoughForPriorityTakeover(lastApplied)) {
+            result |= NotCloseEnoughToLatestForPriorityTakeover;
         }
     }
     return result;
@@ -2030,6 +2076,14 @@ std::string TopologyCoordinatorImpl::_getUnelectableReasonString(
         }
         hasWrittenToStream = true;
         ss << "member is more than 10 seconds behind the most up-to-date member";
+    }
+    if (ur & NotCloseEnoughToLatestForPriorityTakeover) {
+        if (hasWrittenToStream) {
+            ss << "; ";
+        }
+        hasWrittenToStream = true;
+        ss << "member is not caught up enough to the most up-to-date member to call for priority "
+              "takeover - must be within " << priorityTakeoverFreshnessWindowSeconds << " seconds";
     }
     if (ur & NotInitialized) {
         if (hasWrittenToStream) {
@@ -2432,29 +2486,27 @@ void TopologyCoordinatorImpl::setPrimaryIndex(long long primaryIndex) {
     _currentPrimaryIndex = primaryIndex;
 }
 
-bool TopologyCoordinatorImpl::becomeCandidateIfElectable(const Date_t now,
-                                                         const OpTime& lastOpApplied) {
+Status TopologyCoordinatorImpl::becomeCandidateIfElectable(const Date_t now,
+                                                           const OpTime& lastOpApplied) {
     if (_role == Role::leader) {
-        LOG(2) << "Not standing for election again; already primary";
-        return false;
+        return {ErrorCodes::NodeNotElectable, "Not standing for election again; already primary"};
     }
 
     if (_role == Role::candidate) {
-        LOG(2) << "Not standing for election again; already candidate";
-        return false;
+        return {ErrorCodes::NodeNotElectable, "Not standing for election again; already candidate"};
     }
 
     const UnelectableReasonMask unelectableReason = _getMyUnelectableReason(now, lastOpApplied);
     if (unelectableReason) {
-        LOG(2) << "Not standing for election because "
-               << _getUnelectableReasonString(unelectableReason);
-        return false;
+        return {ErrorCodes::NodeNotElectable,
+                str::stream() << "Not standing for election because "
+                              << _getUnelectableReasonString(unelectableReason)};
     }
 
     // All checks passed, become a candidate and start election proceedings.
     _role = Role::candidate;
 
-    return true;
+    return Status::OK();
 }
 
 void TopologyCoordinatorImpl::setStorageEngineSupportsReadCommitted(bool supported) {

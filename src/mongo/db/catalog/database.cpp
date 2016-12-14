@@ -386,10 +386,11 @@ Status Database::dropCollection(OperationContext* txn, StringData fullns) {
 
     Top::get(txn->getClient()->getServiceContext()).collectionDropped(fullns);
 
-    s = _dbEntry->dropCollection(txn, fullns);
-
-    // we want to do this always
+    // We want to destroy the Collection object before telling the StorageEngine to destroy the
+    // RecordStore.
     _clearCollectionCache(txn, fullns, "collection dropped");
+
+    s = _dbEntry->dropCollection(txn, fullns);
 
     if (!s.isOK())
         return s;
@@ -505,12 +506,10 @@ Collection* Database::createCollection(OperationContext* txn,
 
     audit::logCreateCollection(&cc(), ns);
 
-    txn->recoveryUnit()->registerChange(new AddCollectionChange(txn, this, ns));
-
     Status status = _dbEntry->createCollection(txn, ns, options, true /*allocateDefaultSpace*/);
     massertNoTraceStatusOK(status);
 
-
+    txn->recoveryUnit()->registerChange(new AddCollectionChange(txn, this, ns));
     Collection* collection = _getOrCreateCollectionInstance(txn, ns);
     invariant(collection);
     _collections[ns] = collection;

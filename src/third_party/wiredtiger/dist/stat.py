@@ -42,8 +42,11 @@ compare_srcfile(tmp_file, '../src/include/stat.h')
 def print_defines_one(capname, base, stats):
     for v, l in enumerate(stats, base):
         desc = l.desc
-        if 'all_only' in l.flags:
-            desc += ', only reported if statistics=all is set'
+        if 'cache_walk' in l.flags:
+            desc += \
+                ', only reported if cache_walk or all statistics are enabled'
+        if 'tree_walk' in l.flags:
+            desc += ', only reported if tree_walk or all statistics are enabled'
         if len(textwrap.wrap(desc, 70)) > 1:
             f.write('/*!\n')
             f.write(' * %s\n' % '\n * '.join(textwrap.wrap(desc, 70)))
@@ -135,15 +138,27 @@ __wt_stat_''' + name + '_init_single(WT_' + name.upper() + '''_STATS *stats)
 
     if handle != None:
         f.write('''
-void
-__wt_stat_''' + name + '_init(' + handle + ''' *handle)
+int
+__wt_stat_''' + name + '''_init(
+    WT_SESSION_IMPL *session, ''' + handle + ''' *handle)
 {
 \tint i;
+
+\tWT_RET(__wt_calloc(session, (size_t)WT_COUNTER_SLOTS,
+\t    sizeof(*handle->stat_array), &handle->stat_array));
 
 \tfor (i = 0; i < WT_COUNTER_SLOTS; ++i) {
 \t\thandle->stats[i] = &handle->stat_array[i];
 \t\t__wt_stat_''' + name + '''_init_single(handle->stats[i]);
 \t}
+\treturn (0);
+}
+
+void
+__wt_stat_''' + name + '''_discard(
+    WT_SESSION_IMPL *session, ''' + handle + ''' *handle)
+{
+\t__wt_free(session, handle->stat_array);
 }
 ''')
 

@@ -422,6 +422,26 @@ var ReplSetTest = function(opts) {
     };
 
     /**
+     * Blocks until the specified node says it's syncing from the given upstream node.
+     */
+    this.awaitSyncSource = function(node, upstreamNode, timeout) {
+        print("Waiting for node " + node.name + " to start syncing from " + upstreamNode.name);
+        var status = null;
+        assert.soonNoExcept(
+            function() {
+                status = node.getDB("admin").runCommand({replSetGetStatus: 1});
+                for (var j = 0; j < status.members.length; j++) {
+                    if (status.members[j].self) {
+                        return status.members[j].syncingTo === upstreamNode.host;
+                    }
+                }
+                return false;
+            },
+            "Awaiting node " + node + " syncing from " + upstreamNode + ": " + tojson(status),
+            timeout);
+    };
+
+    /**
      * Blocks until all nodes agree on who the primary is.
      */
     this.awaitNodesAgreeOnPrimary = function(timeout) {
@@ -916,6 +936,12 @@ var ReplSetTest = function(opts) {
         this.nodes[n].nodeId = n;
 
         printjson(this.nodes);
+
+        // Clean up after noReplSet to ensure it doesn't effect future restarts.
+        if (options.noReplSet) {
+            this.nodes[n].fullOptions.replSet = defaults.replSet;
+            delete this.nodes[n].fullOptions.noReplSet;
+        }
 
         wait = wait || false;
         if (!wait.toFixed) {

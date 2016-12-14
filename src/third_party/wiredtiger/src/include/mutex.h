@@ -43,7 +43,7 @@ typedef union {				/* Read/write lock */
 		uint16_t writers;	/* Now serving for writers */
 		uint16_t readers;	/* Now serving for readers */
 		uint16_t next;		/* Next available ticket number */
-		uint16_t __notused;	/* Padding */
+		uint16_t writers_active;/* Count of active writers */
 	} s;
 } wt_rwlock_t;
 
@@ -74,6 +74,16 @@ struct __wt_rwlock {
 
 struct WT_COMPILER_TYPE_ALIGN(WT_CACHE_LINE_ALIGNMENT) __wt_spinlock {
 	volatile int lock;
+
+	/*
+	 * We track acquisitions and time spent waiting for some locks. For
+	 * performance reasons and to make it possible to write generic code
+	 * that tracks statistics for different locks, we store the offset
+	 * of the statistics fields to be updated during lock acquisition.
+	 */
+	int16_t stat_count_off;		/* acquisitions offset */
+	int16_t stat_app_usecs_off;	/* waiting application threads offset */
+	int16_t stat_int_usecs_off;	/* waiting server threads offset */
 };
 
 #elif SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX ||\
@@ -83,7 +93,17 @@ struct WT_COMPILER_TYPE_ALIGN(WT_CACHE_LINE_ALIGNMENT) __wt_spinlock {
 struct WT_COMPILER_TYPE_ALIGN(WT_CACHE_LINE_ALIGNMENT) __wt_spinlock {
 	wt_mutex_t lock;
 
-	const char *name;		/* Statistics: mutex name */
+	const char *name;		/* Mutex name */
+
+	/*
+	 * We track acquisitions and time spent waiting for some locks. For
+	 * performance reasons and to make it possible to write generic code
+	 * that tracks statistics for different locks, we store the offset
+	 * of the statistics fields to be updated during lock acquisition.
+	 */
+	int16_t stat_count_off;		/* acquisitions offset */
+	int16_t stat_app_usecs_off;	/* waiting application threads offset */
+	int16_t stat_int_usecs_off;	/* waiting server threads offset */
 
 	int8_t initialized;		/* Lock initialized, for cleanup */
 };

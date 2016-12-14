@@ -68,9 +68,10 @@ __wt_session_copy_values(WT_SESSION_IMPL *session)
 			 * unless the cursor is reading from a checkpoint.
 			 */
 			WT_TXN_STATE *txn_state = WT_SESSION_TXN_STATE(session);
-			WT_ASSERT(session, txn_state->snap_min != WT_TXN_NONE ||
-			   (WT_PREFIX_MATCH(cursor->uri, "file:") &&
-			   F_ISSET((WT_CURSOR_BTREE *)cursor, WT_CBT_NO_TXN)));
+			WT_ASSERT(session,
+			    txn_state->pinned_id != WT_TXN_NONE ||
+			    (WT_PREFIX_MATCH(cursor->uri, "file:") &&
+			    F_ISSET((WT_CURSOR_BTREE *)cursor, WT_CBT_NO_TXN)));
 #endif
 
 			F_CLR(cursor, WT_CURSTD_VALUE_INT);
@@ -919,8 +920,7 @@ __session_join(WT_SESSION *wt_session, WT_CURSOR *join_cursor,
 		    "table for join cursor does not match table for "
 		    "ref_cursor");
 	if (F_ISSET(ref_cursor, WT_CURSTD_JOINED))
-		WT_ERR_MSG(session, EINVAL,
-		    "cursor already used in a join");
+		WT_ERR_MSG(session, EINVAL, "cursor already used in a join");
 
 	/* "ge" is the default */
 	range = WT_CURJOIN_END_GT | WT_CURJOIN_END_EQ;
@@ -936,7 +936,9 @@ __session_join(WT_SESSION *wt_session, WT_CURSOR *join_cursor,
 		else if (WT_STRING_MATCH("eq", cval.str, cval.len))
 			range = WT_CURJOIN_END_EQ;
 		else if (!WT_STRING_MATCH("ge", cval.str, cval.len))
-			WT_ERR(EINVAL);
+			WT_ERR_MSG(session, EINVAL,
+			    "compare=%.*s not supported",
+			    (int)cval.len, cval.str);
 	}
 	WT_ERR(__wt_config_gets(session, cfg, "count", &cval));
 	if (cval.len != 0)
@@ -947,12 +949,13 @@ __session_join(WT_SESSION *wt_session, WT_CURSOR *join_cursor,
 		if (WT_STRING_MATCH("bloom", cval.str, cval.len))
 			LF_SET(WT_CURJOIN_ENTRY_BLOOM);
 		else if (!WT_STRING_MATCH("default", cval.str, cval.len))
-			WT_ERR(EINVAL);
+			WT_ERR_MSG(session, EINVAL,
+			    "strategy=%.*s not supported",
+			    (int)cval.len, cval.str);
 	}
 	WT_ERR(__wt_config_gets(session, cfg, "bloom_bit_count", &cval));
 	if ((uint64_t)cval.val > UINT32_MAX)
-		WT_ERR_MSG(session, EINVAL,
-		    "bloom_bit_count: value too large");
+		WT_ERR_MSG(session, EINVAL, "bloom_bit_count: value too large");
 	bloom_bit_count = (uint32_t)cval.val;
 	WT_ERR(__wt_config_gets(session, cfg, "bloom_hash_count", &cval));
 	if ((uint64_t)cval.val > UINT32_MAX)
@@ -962,6 +965,10 @@ __session_join(WT_SESSION *wt_session, WT_CURSOR *join_cursor,
 	if (LF_ISSET(WT_CURJOIN_ENTRY_BLOOM) && count == 0)
 		WT_ERR_MSG(session, EINVAL,
 		    "count must be nonzero when strategy=bloom");
+	WT_ERR(__wt_config_gets_def(
+	    session, cfg, "bloom_false_positives", 0, &cval));
+	if (cval.val != 0)
+		LF_SET(WT_CURJOIN_ENTRY_FALSE_POSITIVES);
 
 	WT_ERR(__wt_config_gets(session, cfg, "operation", &cval));
 	if (cval.len != 0 && WT_STRING_MATCH("or", cval.str, cval.len))
@@ -1006,7 +1013,9 @@ __session_salvage(WT_SESSION *wt_session, const char *uri, const char *config)
 	SESSION_API_CALL(session, salvage, config, cfg);
 
 	if (F_ISSET(S2C(session), WT_CONN_IN_MEMORY))
-		WT_ERR(ENOTSUP);
+		WT_ERR_MSG(session, ENOTSUP,
+		    "WT_SESSION.salvage not supported for in-memory "
+		    "configurations");
 
 	/* Block out checkpoints to avoid spurious EBUSY errors. */
 	WT_WITH_CHECKPOINT_LOCK(session, ret,
@@ -1310,7 +1319,9 @@ __session_verify(WT_SESSION *wt_session, const char *uri, const char *config)
 	SESSION_API_CALL(session, verify, config, cfg);
 
 	if (F_ISSET(S2C(session), WT_CONN_IN_MEMORY))
-		WT_ERR(ENOTSUP);
+		WT_ERR_MSG(session, ENOTSUP,
+		    "WT_SESSION.verify not supported for in-memory "
+		    "configurations");
 
 	/* Block out checkpoints to avoid spurious EBUSY errors. */
 	WT_WITH_CHECKPOINT_LOCK(session, ret,
@@ -1417,10 +1428,10 @@ __session_transaction_pinned_range(WT_SESSION *wt_session, uint64_t *prange)
 
 	/* Assign pinned to the lesser of id or snap_min */
 	if (txn_state->id != WT_TXN_NONE &&
-	    WT_TXNID_LT(txn_state->id, txn_state->snap_min))
+	    WT_TXNID_LT(txn_state->id, txn_state->pinned_id))
 		pinned = txn_state->id;
 	else
-		pinned = txn_state->snap_min;
+		pinned = txn_state->pinned_id;
 
 	if (pinned == WT_TXN_NONE)
 		*prange = 0;
@@ -1494,14 +1505,14 @@ __session_transaction_sync(WT_SESSION *wt_session, const char *config)
 	if (timeout_ms == 0)
 		WT_ERR(ETIMEDOUT);
 
-	WT_ERR(__wt_epoch(session, &start));
+	__wt_epoch(session, &start);
 	/*
 	 * Keep checking the LSNs until we find it is stable or we reach
 	 * our timeout.
 	 */
 	while (__wt_log_cmp(&session->bg_sync_lsn, &log->sync_lsn) > 0) {
 		__wt_cond_signal(session, conn->log_file_cond);
-		WT_ERR(__wt_epoch(session, &now));
+		__wt_epoch(session, &now);
 		waited_ms = WT_TIMEDIFF_MS(now, start);
 		if (forever || waited_ms < timeout_ms)
 			/*
@@ -1555,7 +1566,9 @@ __session_checkpoint(WT_SESSION *wt_session, const char *config)
 	SESSION_API_CALL(session, checkpoint, config, cfg);
 
 	if (F_ISSET(S2C(session), WT_CONN_IN_MEMORY))
-		WT_ERR(ENOTSUP);
+		WT_ERR_MSG(session, ENOTSUP,
+		    "WT_SESSION.checkpoint not supported for in-memory "
+		    "configurations");
 
 	/*
 	 * Checkpoints require a snapshot to write a transactionally consistent
@@ -1756,10 +1769,12 @@ __open_session(WT_CONNECTION_IMPL *conn,
 	if (i >= conn->session_cnt)	/* Defend against off-by-one errors. */
 		conn->session_cnt = i + 1;
 
-	session_ret->id = i;
 	session_ret->iface =
 	    F_ISSET(conn, WT_CONN_READONLY) ? stds_readonly : stds;
 	session_ret->iface.connection = &conn->iface;
+
+	session_ret->name = NULL;
+	session_ret->id = i;
 
 	WT_ERR(__wt_cond_alloc(session, "session", false, &session_ret->cond));
 
@@ -1776,10 +1791,10 @@ __open_session(WT_CONNECTION_IMPL *conn,
 	 * Allocate the table hash array as well.
 	 */
 	if (session_ret->dhhash == NULL)
-		WT_ERR(__wt_calloc(session_ret, WT_HASH_ARRAY_SIZE,
+		WT_ERR(__wt_calloc(session, WT_HASH_ARRAY_SIZE,
 		    sizeof(struct __dhandles_hash), &session_ret->dhhash));
 	if (session_ret->tablehash == NULL)
-		WT_ERR(__wt_calloc(session_ret, WT_HASH_ARRAY_SIZE,
+		WT_ERR(__wt_calloc(session, WT_HASH_ARRAY_SIZE,
 		    sizeof(struct __tables_hash), &session_ret->tablehash));
 	for (i = 0; i < WT_HASH_ARRAY_SIZE; i++) {
 		TAILQ_INIT(&session_ret->dhhash[i]);
@@ -1788,7 +1803,7 @@ __open_session(WT_CONNECTION_IMPL *conn,
 
 	/* Initialize transaction support: default to read-committed. */
 	session_ret->isolation = WT_ISO_READ_COMMITTED;
-	WT_ERR(__wt_txn_init(session_ret));
+	WT_ERR(__wt_txn_init(session, session_ret));
 
 	/*
 	 * The session's hazard pointer memory isn't discarded during normal
@@ -1807,6 +1822,9 @@ __open_session(WT_CONNECTION_IMPL *conn,
 	 */
 	session_ret->hazard_size = 0;
 
+	/* Cache the offset of this session's statistics bucket. */
+	session_ret->stat_bucket = WT_STATS_SLOT_ID(session);
+
 	/*
 	 * Configuration: currently, the configuration for open_session is the
 	 * same as session.reconfigure, so use that function.
@@ -1814,8 +1832,6 @@ __open_session(WT_CONNECTION_IMPL *conn,
 	if (config != NULL)
 		WT_ERR(
 		    __session_reconfigure((WT_SESSION *)session_ret, config));
-
-	session_ret->name = NULL;
 
 	/*
 	 * Publish: make the entry visible to server threads.  There must be a

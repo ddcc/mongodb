@@ -166,9 +166,11 @@ private:
     State _state;
 };
 
-Milliseconds const ConnectionPool::kDefaultRefreshTimeout = Seconds(20);
-Milliseconds const ConnectionPool::kDefaultRefreshRequirement = Seconds(60);
-Milliseconds const ConnectionPool::kDefaultHostTimeout = Minutes(5);
+const Milliseconds ConnectionPool::kDefaultHostTimeout = Minutes(5);
+size_t const ConnectionPool::kDefaultMaxConns = std::numeric_limits<size_t>::max();
+size_t const ConnectionPool::kDefaultMinConns = 1;
+const Milliseconds ConnectionPool::kDefaultRefreshRequirement = Minutes(1);
+const Milliseconds ConnectionPool::kDefaultRefreshTimeout = Seconds(20);
 
 const Status ConnectionPool::kConnectionStateUnknown =
     Status(ErrorCodes::InternalError, "Connection is in an unknown state");
@@ -495,8 +497,15 @@ void ConnectionPool::SpecificPool::spawnConnections(stdx::unique_lock<stdx::mute
 
     // While all of our inflight connections are less than our target
     while (_readyPool.size() + _processingPool.size() + _checkedOutPool.size() < target()) {
-        // make a new connection and put it in processing
-        auto handle = _parent->_factory->makeConnection(hostAndPort, _generation);
+        std::unique_ptr<ConnectionPool::ConnectionInterface> handle;
+        try {
+            // make a new connection and put it in processing
+            handle = _parent->_factory->makeConnection(hostAndPort, _generation);
+        } catch (std::system_error& e) {
+            severe() << "Failed to construct a new connection object: " << e.what();
+            fassertFailed(40336);
+        }
+
         auto connPtr = handle.get();
         _processingPool[connPtr] = std::move(handle);
 

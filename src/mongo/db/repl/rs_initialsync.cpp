@@ -79,8 +79,8 @@ MONGO_FP_DECLARE(failInitSyncWithBufferedEntriesLeft);
 void truncateAndResetOplog(OperationContext* txn,
                            ReplicationCoordinator* replCoord,
                            BackgroundSync* bgsync) {
-    // Clear minvalid
-    setMinValid(txn, OpTime(), DurableRequirement::None);
+    // Add field to minvalid document to tell us to restart initial sync if we crash
+    setInitialSyncFlag(txn);
 
     AutoGetDb autoDb(txn, "local", MODE_X);
     massert(28585, "no local database found", autoDb.getDb());
@@ -317,7 +317,7 @@ Status _initialSync() {
     while (r.getHost().empty()) {
         // We must prime the sync source selector so that it considers all candidates regardless
         // of oplog position, by passing in null OpTime as the last op fetched time.
-        r.connectToSyncSource(&txn, OpTime(), replCoord);
+        r.connectToSyncSource(&txn, OpTime(), OpTime(), replCoord);
         if (r.getHost().empty()) {
             std::string msg =
                 "no valid sync sources found in current replset to do an initial sync";
@@ -340,9 +340,6 @@ Status _initialSync() {
         sleepsecs(15);
         return Status(ErrorCodes::InitialSyncFailure, msg);
     }
-
-    // Add field to minvalid document to tell us to restart initial sync if we crash
-    setInitialSyncFlag(&txn);
 
     log() << "initial sync drop all databases";
     dropAllDatabasesExceptLocal(&txn);
@@ -457,19 +454,10 @@ Status _initialSync() {
 
     log() << "initial sync finishing up";
 
-    {
-        ScopedTransaction scopedXact(&txn, MODE_IX);
-        AutoGetDb autodb(&txn, "local", MODE_X);
-        OpTime lastOpTimeWritten(getGlobalReplicationCoordinator()->getMyLastAppliedOpTime());
-        log() << "set minValid=" << lastOpTimeWritten;
-
-        // Initial sync is now complete.  Flag this by setting minValid to the last thing we synced.
-        setMinValid(&txn, lastOpTimeWritten, DurableRequirement::None);
-        BackgroundSync::get()->setInitialSyncRequestedFlag(false);
-    }
-
+    // Initial sync is now complete.
     // Clear the initial sync flag -- cannot be done under a db lock, or recursive.
     clearInitialSyncFlag(&txn);
+    BackgroundSync::get()->setInitialSyncRequestedFlag(false);
 
     // Clear maint. mode.
     while (replCoord->getMaintenanceMode()) {
