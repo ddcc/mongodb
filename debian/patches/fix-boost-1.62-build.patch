@@ -1,0 +1,17 @@
+Origin: http://cvsweb.netbsd.org/bsdweb.cgi/pkgsrc/databases/mongodb/patches/patch-src_mongo_db_fts_unicode_string.cpp?rev=1.1&content-type=text/x-cvsweb-markup
+Description: Fix FTBFS with boost 1.62
+Last-Update: 2016-12-14
+Forwarded: no
+Index: mongodb-3.2.11/src/mongo/db/fts/unicode/string.cpp
+===================================================================
+--- mongodb-3.2.11.orig/src/mongo/db/fts/unicode/string.cpp
++++ mongodb-3.2.11/src/mongo/db/fts/unicode/string.cpp
+@@ -274,7 +274,7 @@ bool String::substrMatch(const std::stri
+ 
+     // Case sensitive and diacritic sensitive.
+     return boost::algorithm::boyer_moore_search(
+-               haystack.begin(), haystack.end(), needle.begin(), needle.end()) != haystack.end();
++               haystack.begin(), haystack.end(), needle.begin(), needle.end()) != std::make_pair(haystack.end(), haystack.end());
+ }
+ 
+ }  // namespace unicode
