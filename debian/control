@@ -1,8 +1,9 @@
 Source: mongodb
 Section: database
 Priority: optional
-Maintainer: Laszlo Boszormenyi (GCS) <gcs@debian.org>
-Uploaders: Jérémy Lal <kapouer@melix.org>,
+Maintainer: Debian MongoDB Maintainers <pkg-mongodb-maintainers@lists.alioth.debian.org>
+Uploaders: Laszlo Boszormenyi (GCS) <gcs@debian.org>,
+           Jérémy Lal <kapouer@melix.org>,
            Apollon Oikonomopoulos <apoikos@debian.org>
 Build-Depends:
  debhelper (>= 9),
@@ -28,8 +29,8 @@ Build-Depends:
  tzdata,
  valgrind
 Standards-Version: 3.9.8
-Vcs-Git: https://anonscm.debian.org/git/collab-maint/mongodb.git
-Vcs-Browser: https://anonscm.debian.org/cgit/collab-maint/mongodb.git/
+Vcs-Git: https://anonscm.debian.org/git/pkg-mongodb/mongodb.git
+Vcs-Browser: https://anonscm.debian.org/cgit/pkg-mongodb/mongodb.git/
 Homepage: https://www.mongodb.org
 
 Package: mongodb
