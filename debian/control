@@ -20,7 +20,7 @@ Build-Depends:
  libreadline-dev,
  libsnappy-dev,
  libstemmer-dev,
- libssl-dev,
+ libssl1.0-dev,
  zlib1g-dev,
  python-pymongo,
  python,
