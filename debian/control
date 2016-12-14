@@ -59,7 +59,8 @@ Package: mongodb-server
 Architecture: amd64 i386 armhf arm64 ppc64el
 Depends:
  mongodb-clients,
- adduser,
+ adduser, 
+ lsb-base (>= 3.0-6),
  ${misc:Depends},
  ${shlibs:Depends}
 Replaces:
