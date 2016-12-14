@@ -47,15 +47,14 @@ override_dh_auto_clean:
 	rm -rf $(CURDIR)/debian/tmp-test/
 	rm -rf $(CURDIR)/.scons/
 	rm -rf $(CURDIR)/build/
-	rm -f $(CURDIR)/failfile.smoke $(CURDIR)/smoke-last.json
 
 override_dh_auto_build:
 	scons $(COMMON_OPTIONS) core tools
 
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
 override_dh_auto_test:
-	scons $(COMMON_OPTIONS) dbtest unittests integration_tests
-	python ./buildscripts/smoke.py --smoke-db-prefix="$(CURDIR)/debian/tmp-test"
+	scons $(COMMON_OPTIONS) dbtest unittests
+	python ./buildscripts/resmoke.py --dbpathPrefix="$(CURDIR)/debian/tmp-test" --suites=dbtest,unittests
 .PHONY: override_dh_auto_test
 endif
 

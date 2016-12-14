@@ -24,6 +24,8 @@ Build-Depends:
  libssl1.0-dev,
  zlib1g-dev,
  python-pymongo,
+ python-subprocess32,
+ python-yaml,
  python,
  scons,
  tzdata,
