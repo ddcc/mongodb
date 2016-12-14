@@ -1,2 +1,2 @@
-Tests: mongod mongo-client
-Depends: mongodb-server, mongodb-clients, nmap, netcat
+Tests: mongod basic
+Depends: mongodb-server, mongodb-clients

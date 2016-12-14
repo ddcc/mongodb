@@ -1,0 +1,29 @@
+#!/bin/bash
+
+set -e
+
+TIMEOUT=120
+
+echo -n "Waiting for mongod to start: "
+count=0
+
+while ! echo 'db.version()' | mongo --quiet >/dev/null; do
+    echo -n "."
+    count=$((count+1))
+    if test $count -gt $TIMEOUT; then
+        echo "    mongod failed to start?"
+        pgrep mongod
+        exit 1
+    fi
+    sleep 1
+done
+
+for testfile in jstests/core/basic*.js; do
+    echo
+    echo " -> Running $testfile"
+    mongo --verbose "$testfile" 2>&1
+done
+
+echo
+echo "=================="
+echo "OK"
