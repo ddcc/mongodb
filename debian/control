@@ -25,6 +25,7 @@ Build-Depends:
  python-pymongo,
  python,
  scons,
+ tzdata,
  valgrind
 Standards-Version: 3.9.8
 Vcs-Git: https://anonscm.debian.org/git/collab-maint/mongodb.git
