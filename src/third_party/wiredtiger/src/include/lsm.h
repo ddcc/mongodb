@@ -31,6 +31,17 @@ struct __wt_lsm_worker_args {
 };
 
 /*
+ * WT_LSM_CURSOR_CHUNK --
+ *	Iterator struct containing all the LSM cursor access points for a chunk.
+ */
+struct __wt_lsm_cursor_chunk {
+	WT_BLOOM *bloom;		/* Bloom filter handle for each chunk.*/
+	WT_CURSOR *cursor;		/* Cursor handle for each chunk. */
+	uint64_t count;			/* Number of items in chunk */
+	uint64_t switch_txn;		/* Switch txn for each chunk */
+};
+
+/*
  * WT_CURSOR_LSM --
  *	An LSM cursor.
  */
@@ -43,17 +54,12 @@ struct __wt_cursor_lsm {
 	u_int nchunks;			/* Number of chunks in the cursor */
 	u_int nupdates;			/* Updates needed (including
 					   snapshot isolation checks). */
-	WT_BLOOM **blooms;		/* Bloom filter handles. */
-	size_t bloom_alloc;
-
-	WT_CURSOR **cursors;		/* Cursor handles. */
-	size_t cursor_alloc;
-
-	WT_CURSOR *current;     	/* The current cursor for iteration */
+	WT_CURSOR *current;		/* The current cursor for iteration */
 	WT_LSM_CHUNK *primary_chunk;	/* The current primary chunk */
 
-	uint64_t *switch_txn;		/* Switch txn for each chunk */
-	size_t txnid_alloc;
+	WT_LSM_CURSOR_CHUNK **chunks;	/* Array of LSM cursor units */
+	size_t chunks_alloc;		/* Current size iterators array */
+	size_t chunks_count;		/* Current number of iterators */
 
 	u_int update_count;		/* Updates performed. */
 
@@ -228,11 +234,11 @@ struct __wt_lsm_tree {
 	 * area, copying them into place when a statistics cursor is created.
 	 */
 #define	WT_LSM_TREE_STAT_INCR(session, fld) do {			\
-	if (FLD_ISSET(S2C(session)->stat_flags, WT_CONN_STAT_FAST))	\
+	if (WT_STAT_ENABLED(session))	\
 		++(fld);						\
 } while (0)
 #define	WT_LSM_TREE_STAT_INCRV(session, fld, v) do {			\
-	if (FLD_ISSET(S2C(session)->stat_flags, WT_CONN_STAT_FAST))	\
+	if (WT_STAT_ENABLED(session))	\
 		(fld) += (int64_t)(v);					\
 } while (0)
 	int64_t bloom_false_positive;

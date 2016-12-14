@@ -37,10 +37,13 @@ flags = {
         'READ_WONT_NEED',
     ],
     'rec_write' : [
-        'EVICT_IN_MEMORY',
-        'EVICT_LOOKASIDE',
-        'EVICT_UPDATE_RESTORE',
+        'CHECKPOINTING',
         'EVICTING',
+        'EVICT_IN_MEMORY',
+        'EVICT_INMEM_SPLIT',
+        'EVICT_LOOKASIDE',
+        'EVICT_SCRUB',
+        'EVICT_UPDATE_RESTORE',
         'VISIBILITY_ERR',
     ],
     'txn_log_checkpoint' : [
@@ -77,6 +80,7 @@ flags = {
         'VERB_SHARED_CACHE',
         'VERB_SPLIT',
         'VERB_TEMPORARY',
+        'VERB_THREAD_GROUP',
         'VERB_TRANSACTION',
         'VERB_VERIFY',
         'VERB_VERSION',
@@ -128,6 +132,16 @@ flags = {
         'SESSION_NO_SCHEMA_LOCK',
         'SESSION_QUIET_CORRUPT_FILE',
         'SESSION_SERVER_ASYNC',
+    ],
+    'stat' : [
+        'STAT_CLEAR',
+        'STAT_JSON',
+        'STAT_ON_CLOSE',
+        'STAT_TYPE_ALL',
+        'STAT_TYPE_CACHE_WALK',
+        'STAT_TYPE_FAST',
+        'STAT_TYPE_SIZE',
+        'STAT_TYPE_TREE_WALK',
     ],
 }
 

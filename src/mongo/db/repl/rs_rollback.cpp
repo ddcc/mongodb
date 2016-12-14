@@ -62,6 +62,7 @@
 #include "mongo/db/repl/roll_back_local_operations.h"
 #include "mongo/db/repl/rollback_source.h"
 #include "mongo/db/repl/rslog.h"
+#include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 
 /* Scenarios
@@ -115,6 +116,10 @@ using std::string;
 using std::pair;
 
 namespace repl {
+
+// Failpoint which causes rollback to hang before finishing.
+MONGO_FP_DECLARE(rollbackHangBeforeFinish);
+
 namespace {
 
 class RSFatalException : public std::exception {
@@ -159,7 +164,7 @@ struct FixUpInfo {
     set<string> collectionsToResyncData;
     set<string> collectionsToResyncMetadata;
 
-    Timestamp commonPoint;
+    OpTime commonPoint;
     RecordId commonPointOurDiskloc;
 
     int rbid;  // remote server's current rollback sequence #
@@ -391,9 +396,12 @@ void syncFixUp(OperationContext* txn,
 
     // we have items we are writing that aren't from a point-in-time.  thus best not to come
     // online until we get to that point in freshness.
+    // TODO this is still wrong because we don't record that we are in rollback, and we can't really
+    // recover.
     OpTime minValid = fassertStatusOK(28774, OpTime::parseFromOplogEntry(newMinValid));
     log() << "minvalid=" << minValid;
-    setMinValid(txn, {OpTime{}, minValid});
+    setAppliedThrough(txn, {});  // Use top of oplog.
+    setMinValid(txn, minValid);
 
     // any full collection resyncs required?
     if (!fixUpInfo.collectionsToResyncData.empty() ||
@@ -497,8 +505,8 @@ void syncFixUp(OperationContext* txn,
             } else {
                 OpTime minValid = fassertStatusOK(28775, OpTime::parseFromOplogEntry(newMinValid));
                 log() << "minvalid=" << minValid;
-                const OpTime start{fixUpInfo.commonPoint, OpTime::kUninitializedTerm};
-                setMinValid(txn, {start, minValid});
+                setMinValid(txn, minValid);
+                setAppliedThrough(txn, fixUpInfo.commonPoint);
             }
         } catch (const DBException& e) {
             err = "can't get/set minvalid: ";
@@ -768,7 +776,7 @@ void syncFixUp(OperationContext* txn,
     log() << "rollback 6";
 
     // clean up oplog
-    LOG(2) << "rollback truncate oplog after " << fixUpInfo.commonPoint.toStringPretty();
+    LOG(2) << "rollback truncate oplog after " << fixUpInfo.commonPoint;
     {
         const NamespaceString oplogNss(rsOplogName);
         ScopedTransaction transaction(txn, MODE_IX);
@@ -882,6 +890,15 @@ Status _syncRollback(OperationContext* txn,
         throw;
     }
     replCoord->incrementRollbackID();
+
+    if (MONGO_FAIL_POINT(rollbackHangBeforeFinish)) {
+        // This log output is used in js tests so please leave it.
+        log() << "rollback - rollbackHangBeforeFinish fail point "
+                 "enabled. Blocking until fail point is disabled.";
+        while (MONGO_FAIL_POINT(rollbackHangBeforeFinish)) {
+            mongo::sleepsecs(1);
+        }
+    }
 
     // Success; leave "ROLLBACK" state intact until applier thread has reloaded the new minValid.
     // Otherwise, the applier could transition the node to SECONDARY with an out-of-date minValid.

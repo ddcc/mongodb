@@ -422,6 +422,70 @@ var ReplSetTest = function(opts) {
     };
 
     /**
+     * Blocks until the specified node says it's syncing from the given upstream node.
+     */
+    this.awaitSyncSource = function(node, upstreamNode, timeout) {
+        print("Waiting for node " + node.name + " to start syncing from " + upstreamNode.name);
+        var status = null;
+        assert.soonNoExcept(
+            function() {
+                status = node.getDB("admin").runCommand({replSetGetStatus: 1});
+                for (var j = 0; j < status.members.length; j++) {
+                    if (status.members[j].self) {
+                        return status.members[j].syncingTo === upstreamNode.host;
+                    }
+                }
+                return false;
+            },
+            "Awaiting node " + node + " syncing from " + upstreamNode + ": " + tojson(status),
+            timeout);
+    };
+
+    /**
+     * Blocks until all nodes agree on who the primary is.
+     */
+    this.awaitNodesAgreeOnPrimary = function(timeout) {
+        timeout = timeout || 60000;
+
+        assert.soon(function() {
+            try {
+                var primary = -1;
+
+                for (var i = 0; i < self.nodes.length; i++) {
+                    var replSetGetStatus =
+                        self.nodes[i].getDB("admin").runCommand({replSetGetStatus: 1});
+                    var nodesPrimary = -1;
+                    for (var j = 0; j < replSetGetStatus.members.length; j++) {
+                        if (replSetGetStatus.members[j].state === ReplSetTest.State.PRIMARY) {
+                            // Node sees two primaries.
+                            if (nodesPrimary !== -1) {
+                                return false;
+                            }
+                            nodesPrimary = j;
+                        }
+                    }
+                    // Node doesn't see a primary.
+                    if (nodesPrimary < 0) {
+                        return false;
+                    }
+
+                    if (primary < 0) {
+                        // If we haven't seen a primary yet, set it to this.
+                        primary = nodesPrimary;
+                    } else if (primary !== nodesPrimary) {
+                        return false;
+                    }
+                }
+
+                return true;
+            } catch (e) {
+                print("caught exception " + e);
+                return false;
+            }
+        }, "Awaiting nodes to agree on primary", timeout);
+    };
+
+    /**
      * Blocking call, which will wait for a primary to be elected for some pre-defined timeout and
      * if primary is available will return a connection to it. Otherwise throws an exception.
      */
@@ -872,6 +936,12 @@ var ReplSetTest = function(opts) {
         this.nodes[n].nodeId = n;
 
         printjson(this.nodes);
+
+        // Clean up after noReplSet to ensure it doesn't effect future restarts.
+        if (options.noReplSet) {
+            this.nodes[n].fullOptions.replSet = defaults.replSet;
+            delete this.nodes[n].fullOptions.noReplSet;
+        }
 
         wait = wait || false;
         if (!wait.toFixed) {

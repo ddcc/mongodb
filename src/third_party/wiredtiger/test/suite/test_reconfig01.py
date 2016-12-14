@@ -28,7 +28,7 @@
 
 import time
 import wiredtiger, wttest
-from helper import simple_populate
+from wtdataset import SimpleDataSet
 
 # test_reconfig01.py
 #    Smoke-test the connection reconfiguration operations.
@@ -70,7 +70,7 @@ class test_reconfig01(wttest.WiredTigerTestCase):
         # Take all the defaults.
         uri = "lsm:test_reconfig"
         nrecs = 10
-        simple_populate(self, uri, 'key_format=S', nrecs)
+        SimpleDataSet(self, uri, nrecs).populate()
         # Sleep to make sure all threads are started.
         time.sleep(2)
         # Now that an LSM tree exists, reconfigure LSM manager threads.
@@ -78,7 +78,7 @@ class test_reconfig01(wttest.WiredTigerTestCase):
         self.conn.reconfigure("lsm_manager=(worker_thread_max=10)")
         # Generate some work
         nrecs = 20
-        simple_populate(self, uri, 'key_format=S', nrecs)
+        SimpleDataSet(self, uri, nrecs).populate()
         # Now reconfigure fewer threads.
         self.conn.reconfigure("lsm_manager=(worker_thread_max=3)")
 
@@ -92,8 +92,6 @@ class test_reconfig01(wttest.WiredTigerTestCase):
         self.conn.reconfigure("checkpoint=(wait=5)")
         self.conn.reconfigure("checkpoint=(log_size=0)")
         self.conn.reconfigure("checkpoint=(log_size=1M)")
-        self.conn.reconfigure("checkpoint=(wait=0,name=hi)")
-        self.conn.reconfigure("checkpoint=(wait=5,name=hi)")
 
     # Statistics logging: reconfigure the things we can reconfigure.
     def test_reconfig_statistics_log_ok(self):

@@ -20,6 +20,7 @@
         ],
     });
     replTest.waitForState(nodes[0], ReplSetTest.State.PRIMARY, 60 * 1000);
+    replTest.awaitNodesAgreeOnPrimary();
     var primary = replTest.getPrimary();
     replTest.awaitReplication();
 
@@ -47,7 +48,7 @@
         });
 
     // write that should reach all nodes
-    var timeout = 15 * 1000;
+    var timeout = 60 * 1000;
     var options = {
         writeConcern: {w: numNodes, wtimeout: timeout}
     };
