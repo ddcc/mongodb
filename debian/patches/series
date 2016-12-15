@@ -5,3 +5,4 @@ hardened-build.patch
 fix-gcc-6-ftbfs.patch
 fix-boost-1.60-build.patch
 fix-boost-1.62-build.patch
+CVE-2016-6494.patch
