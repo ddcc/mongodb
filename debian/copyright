@@ -130,7 +130,6 @@ License: GPL-2-or-3
 Files:
  src/third_party/wiredtiger/bench/wtperf/config.c
  src/third_party/wiredtiger/bench/wtperf/config_opt.h
- src/third_party/wiredtiger/bench/wtperf/doxy.c
  src/third_party/wiredtiger/bench/wtperf/misc.c
  src/third_party/wiredtiger/bench/wtperf/runners/get_ckpt.py
  src/third_party/wiredtiger/bench/wtperf/track.c
@@ -160,7 +159,6 @@ Files:
  src/third_party/wiredtiger/lang/python/wiredtiger/fpacking.py
  src/third_party/wiredtiger/lang/python/wiredtiger/intpacking.py
  src/third_party/wiredtiger/lang/python/wiredtiger/packing.py
- src/third_party/wiredtiger/src/support/cksum.c
  src/third_party/wiredtiger/src/support/hash_fnv.c
  src/third_party/wiredtiger/src/support/pow.c
  src/third_party/wiredtiger/src/support/rand.c
