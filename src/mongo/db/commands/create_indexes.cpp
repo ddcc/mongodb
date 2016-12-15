@@ -28,207 +28,303 @@
 *    it in the license file.
 */
 
+#include "mongo/platform/basic.h"
+
+#include <string>
+#include <vector>
+
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/catalog/index_create.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/curop.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/operation_context_impl.h"
+#include "mongo/db/op_observer.h"
 #include "mongo/db/ops/insert.h"
-#include "mongo/db/repl/oplog.h"
-#include "mongo/s/d_logic.h"
+#include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/s/collection_metadata.h"
+#include "mongo/db/s/sharding_state.h"
 #include "mongo/s/shard_key_pattern.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 
-    /**
-     * { createIndexes : "bar", indexes : [ { ns : "test.bar", key : { x : 1 }, name: "x_1" } ] }
-     */
-    class CmdCreateIndex : public Command {
-    public:
-        CmdCreateIndex() : Command( "createIndexes" ){}
+using std::string;
 
-        virtual LockType locktype() const { return NONE; }
-        virtual bool logTheOp() { return false; }
-        virtual bool slaveOk() const { return false; } // TODO: this could be made true...
+/**
+ * { createIndexes : "bar", indexes : [ { ns : "test.bar", key : { x : 1 }, name: "x_1" } ] }
+ */
+class CmdCreateIndex : public Command {
+public:
+    CmdCreateIndex() : Command("createIndexes") {}
 
-        virtual Status checkAuthForCommand(ClientBasic* client,
-                                           const std::string& dbname,
-                                           const BSONObj& cmdObj) {
-            ActionSet actions;
-            actions.addAction(ActionType::createIndex);
-            Privilege p(parseResourcePattern(dbname, cmdObj), actions);
-            if ( client->getAuthorizationSession()->isAuthorizedForPrivilege(p) )
-                return Status::OK();
-            return Status(ErrorCodes::Unauthorized, "Unauthorized");
+    virtual bool isWriteCommandForConfigServer() const {
+        return false;
+    }
+    virtual bool slaveOk() const {
+        return false;
+    }  // TODO: this could be made true...
+
+    virtual Status checkAuthForCommand(ClientBasic* client,
+                                       const std::string& dbname,
+                                       const BSONObj& cmdObj) {
+        ActionSet actions;
+        actions.addAction(ActionType::createIndex);
+        Privilege p(parseResourcePattern(dbname, cmdObj), actions);
+        if (AuthorizationSession::get(client)->isAuthorizedForPrivilege(p))
+            return Status::OK();
+        return Status(ErrorCodes::Unauthorized, "Unauthorized");
+    }
+
+
+    BSONObj _addNsToSpec(const NamespaceString& ns, const BSONObj& obj) {
+        BSONObjBuilder b;
+        b.append("ns", ns.ns());
+        b.appendElements(obj);
+        return b.obj();
+    }
+
+    virtual bool run(OperationContext* txn,
+                     const string& dbname,
+                     BSONObj& cmdObj,
+                     int options,
+                     string& errmsg,
+                     BSONObjBuilder& result) {
+        // ---  parse
+
+        NamespaceString ns(dbname, cmdObj[name].String());
+        Status status = userAllowedWriteNS(ns);
+        if (!status.isOK())
+            return appendCommandStatus(result, status);
+
+        if (cmdObj["indexes"].type() != Array) {
+            errmsg = "indexes has to be an array";
+            result.append("cmdObj", cmdObj);
+            return false;
         }
 
-
-        BSONObj _addNsToSpec( const NamespaceString& ns, const BSONObj& obj ) {
-            BSONObjBuilder b;
-            b.append( "ns", ns );
-            b.appendElements( obj );
-            return b.obj();
+        std::vector<BSONObj> specs;
+        {
+            BSONObjIterator i(cmdObj["indexes"].Obj());
+            while (i.more()) {
+                BSONElement e = i.next();
+                if (e.type() != Object) {
+                    errmsg = "everything in indexes has to be an Object";
+                    result.append("cmdObj", cmdObj);
+                    return false;
+                }
+                specs.push_back(e.Obj());
+            }
         }
 
-        virtual bool run( const string& dbname, BSONObj& cmdObj, int options,
-                          string& errmsg, BSONObjBuilder& result,
-                          bool fromRepl = false ) {
+        if (specs.size() == 0) {
+            errmsg = "no indexes to add";
+            return false;
+        }
 
-            // ---  parse
+        // check specs
+        for (size_t i = 0; i < specs.size(); i++) {
+            BSONObj spec = specs[i];
+            if (spec["ns"].eoo()) {
+                spec = _addNsToSpec(ns, spec);
+                specs[i] = spec;
+            }
 
-            NamespaceString ns( dbname, cmdObj[name].String() );
-            Status status = userAllowedWriteNS( ns );
-            if ( !status.isOK() )
-                return appendCommandStatus( result, status );
-
-            if ( cmdObj["indexes"].type() != Array ) {
-                errmsg = "indexes has to be an array";
-                result.append( "cmdObj", cmdObj );
+            if (spec["ns"].type() != String) {
+                errmsg = "spec has no ns";
+                result.append("spec", spec);
                 return false;
             }
-
-            std::vector<BSONObj> specs;
-            {
-                BSONObjIterator i( cmdObj["indexes"].Obj() );
-                while ( i.more() ) {
-                    BSONElement e = i.next();
-                    if ( e.type() != Object ) {
-                        errmsg = "everything in indexes has to be an Object";
-                        result.append( "cmdObj", cmdObj );
-                        return false;
-                    }
-                    specs.push_back( e.Obj() );
-                }
-            }
-
-            if ( specs.size() == 0 ) {
-                errmsg = "no indexes to add";
+            if (ns != spec["ns"].String()) {
+                errmsg = "namespace mismatch";
+                result.append("spec", spec);
                 return false;
             }
+        }
 
-            // check specs
-            for ( size_t i = 0; i < specs.size(); i++ ) {
-                BSONObj spec = specs[i];
-                if ( spec["ns"].eoo() ) {
-                    spec = _addNsToSpec( ns, spec );
-                    specs[i] = spec;
-                }
+        // now we know we have to create index(es)
+        // Note: createIndexes command does not currently respect shard versioning.
+        ScopedTransaction transaction(txn, MODE_IX);
+        Lock::DBLock dbLock(txn->lockState(), ns.db(), MODE_X);
+        if (!repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(ns)) {
+            return appendCommandStatus(
+                result,
+                Status(ErrorCodes::NotMaster,
+                       str::stream() << "Not primary while creating indexes in " << ns.ns()));
+        }
 
-                if ( spec["ns"].type() != String ) {
-                    errmsg = "spec has no ns";
-                    result.append( "spec", spec );
-                    return false;
-                }
-                if ( ns != spec["ns"].String() ) {
-                    errmsg = "namespace mismatch";
-                    result.append( "spec", spec );
-                    return false;
-                }
+        Database* db = dbHolder().get(txn, ns.db());
+        if (!db) {
+            db = dbHolder().openDb(txn, ns.db());
+        }
+
+        Collection* collection = db->getCollection(ns.ns());
+        result.appendBool("createdCollectionAutomatically", collection == NULL);
+        if (!collection) {
+            MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
+                WriteUnitOfWork wunit(txn);
+                collection = db->createCollection(txn, ns.ns(), CollectionOptions());
+                invariant(collection);
+                wunit.commit();
             }
+            MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "createIndexes", ns.ns());
+        }
 
+        const int numIndexesBefore = collection->getIndexCatalog()->numIndexesTotal(txn);
+        result.append("numIndexesBefore", numIndexesBefore);
 
-            {
-                // We first take a read lock to see if we need to do anything
-                // as many calls are ensureIndex (and hence no-ops), this is good so its a shared
-                // lock for common calls. We only take write lock if needed.
-                Client::ReadContext readContext( ns );
-                const Collection* collection = readContext.ctx().db()->getCollection( ns.ns() );
-                if ( collection ) {
-                    for ( size_t i = 0; i < specs.size(); i++ ) {
-                        BSONObj spec = specs[i];
-                        StatusWith<BSONObj> statusWithSpec =
-                            collection->getIndexCatalog()->prepareSpecForCreate( spec );
-                        status = statusWithSpec.getStatus();
-                        if ( status.code() == ErrorCodes::IndexAlreadyExists ) {
-                            specs.erase( specs.begin() + i );
-                            i--;
-                            continue;
-                        }
-                        if ( !status.isOK() )
-                            return appendCommandStatus( result, status );
-                    }
+        auto client = txn->getClient();
+        ScopeGuard lastOpSetterGuard =
+            MakeObjGuard(repl::ReplClientInfo::forClient(client),
+                         &repl::ReplClientInfo::setLastOpToSystemLastOpTime,
+                         txn);
 
-                    if ( specs.size() == 0 ) {
-                        result.append( "numIndexesBefore",
-                                       collection->getIndexCatalog()->numIndexesTotal() );
-                        result.append( "note", "all indexes already exist" );
-                        return true;
-                    }
+        MultiIndexBlock indexer(txn, collection);
+        indexer.allowBackgroundBuilding();
+        indexer.allowInterruption();
 
-                    // need to create index
-                }
-            }
+        const size_t origSpecsSize = specs.size();
+        indexer.removeExistingIndexes(&specs);
 
-            // now we know we have to create index(es)
-            Client::WriteContext writeContext( ns.ns() );
-            Database* db = writeContext.ctx().db();
-
-            Collection* collection = db->getCollection( ns.ns() );
-            result.appendBool( "createdCollectionAutomatically", collection == NULL );
-            if ( !collection ) {
-                collection = db->createCollection( ns.ns() );
-                invariant( collection );
-            }
-
-            result.append( "numIndexesBefore", collection->getIndexCatalog()->numIndexesTotal() );
-
-            for ( size_t i = 0; i < specs.size(); i++ ) {
-                BSONObj spec = specs[i];
-
-                if ( spec["unique"].trueValue() ) {
-                    status = checkUniqueIndexConstraints( ns.ns(), spec["key"].Obj() );
-
-                    if ( !status.isOK() ) {
-                        appendCommandStatus( result, status );
-                        return false;
-                    }
-                }
-
-                status = collection->getIndexCatalog()->createIndex( spec, true );
-                if ( status.code() == ErrorCodes::IndexAlreadyExists ) {
-                    if ( !result.hasField( "note" ) )
-                        result.append( "note", "index already exists" );
-                    continue;
-                }
-
-                if ( !status.isOK() ) {
-                    appendCommandStatus( result, status );
-                    return false;
-                }
-
-                if ( !fromRepl ) {
-                    std::string systemIndexes = ns.getSystemIndexesCollection();
-                    logOp( "i", systemIndexes.c_str(), spec );
-                }
-            }
-
-            result.append( "numIndexesAfter", collection->getIndexCatalog()->numIndexesTotal() );
-
+        if (specs.size() == 0) {
+            result.append("numIndexesAfter", numIndexesBefore);
+            result.append("note", "all indexes already exist");
             return true;
         }
 
-    private:
-        static Status checkUniqueIndexConstraints(const StringData& ns,
-                                                  const BSONObj& newIdxKey) {
-            Lock::assertWriteLocked( ns );
-
-            if ( shardingState.enabled() ) {
-                CollectionMetadataPtr metadata(
-                        shardingState.getCollectionMetadata( ns.toString() ));
-
-                if ( metadata ) {
-                    BSONObj shardKey(metadata->getKeyPattern());
-                    if ( !isUniqueIndexCompatible( shardKey, newIdxKey )) {
-                        return Status(ErrorCodes::CannotCreateIndex,
-                                str::stream() << "cannot create unique index over " << newIdxKey
-                                              << " with shard key pattern " << shardKey);
-                    }
-                }
-            }
-
-            return Status::OK();
+        if (specs.size() != origSpecsSize) {
+            result.append("note", "index already exists");
         }
 
-    } cmdCreateIndex;
+        for (size_t i = 0; i < specs.size(); i++) {
+            const BSONObj& spec = specs[i];
+            if (spec["unique"].trueValue()) {
+                status = checkUniqueIndexConstraints(txn, ns.ns(), spec["key"].Obj());
 
+                if (!status.isOK()) {
+                    return appendCommandStatus(result, status);
+                }
+            }
+            if (spec["v"].isNumber() && spec["v"].numberInt() == 0) {
+                return appendCommandStatus(
+                    result,
+                    Status(ErrorCodes::CannotCreateIndex,
+                           str::stream() << "illegal index specification: " << spec << ". "
+                                         << "The option v:0 cannot be passed explicitly"));
+            }
+        }
+
+        MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
+            uassertStatusOK(indexer.init(specs));
+        }
+        MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "createIndexes", ns.ns());
+
+        // If we're a background index, replace exclusive db lock with an intent lock, so that
+        // other readers and writers can proceed during this phase.
+        if (indexer.getBuildInBackground()) {
+            txn->recoveryUnit()->abandonSnapshot();
+            dbLock.relockWithMode(MODE_IX);
+            if (!repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(ns)) {
+                return appendCommandStatus(
+                    result,
+                    Status(ErrorCodes::NotMaster,
+                           str::stream() << "Not primary while creating background indexes in "
+                                         << ns.ns()));
+            }
+        }
+
+        try {
+            Lock::CollectionLock colLock(txn->lockState(), ns.ns(), MODE_IX);
+            uassertStatusOK(indexer.insertAllDocumentsInCollection());
+        } catch (const DBException& e) {
+            invariant(e.getCode() != ErrorCodes::WriteConflict);
+            // Must have exclusive DB lock before we clean up the index build via the
+            // destructor of 'indexer'.
+            if (indexer.getBuildInBackground()) {
+                try {
+                    // This function cannot throw today, but we will preemptively prepare for
+                    // that day, to avoid data corruption due to lack of index cleanup.
+                    txn->recoveryUnit()->abandonSnapshot();
+                    dbLock.relockWithMode(MODE_X);
+                    if (!repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(ns)) {
+                        return appendCommandStatus(
+                            result,
+                            Status(ErrorCodes::NotMaster,
+                                   str::stream()
+                                       << "Not primary while creating background indexes in "
+                                       << ns.ns() << ": cleaning up index build failure due to "
+                                       << e.toString()));
+                    }
+                } catch (...) {
+                    std::terminate();
+                }
+            }
+            throw;
+        }
+        // Need to return db lock back to exclusive, to complete the index build.
+        if (indexer.getBuildInBackground()) {
+            txn->recoveryUnit()->abandonSnapshot();
+            dbLock.relockWithMode(MODE_X);
+            uassert(ErrorCodes::NotMaster,
+                    str::stream() << "Not primary while completing index build in " << dbname,
+                    repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(ns));
+
+            Database* db = dbHolder().get(txn, ns.db());
+            uassert(28551, "database dropped during index build", db);
+            uassert(28552, "collection dropped during index build", db->getCollection(ns.ns()));
+        }
+
+        MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
+            WriteUnitOfWork wunit(txn);
+
+            indexer.commit();
+
+            for (size_t i = 0; i < specs.size(); i++) {
+                std::string systemIndexes = ns.getSystemIndexesCollection();
+                getGlobalServiceContext()->getOpObserver()->onCreateIndex(
+                    txn, systemIndexes, specs[i]);
+            }
+
+            wunit.commit();
+        }
+        MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "createIndexes", ns.ns());
+
+        result.append("numIndexesAfter", collection->getIndexCatalog()->numIndexesTotal(txn));
+
+        lastOpSetterGuard.Dismiss();
+
+        return true;
+    }
+
+private:
+    static Status checkUniqueIndexConstraints(OperationContext* txn,
+                                              StringData ns,
+                                              const BSONObj& newIdxKey) {
+        invariant(txn->lockState()->isCollectionLockedForMode(ns, MODE_X));
+
+        ShardingState* const shardingState = ShardingState::get(txn);
+
+        if (shardingState->enabled()) {
+            std::shared_ptr<CollectionMetadata> metadata(
+                shardingState->getCollectionMetadata(ns.toString()));
+            if (metadata) {
+                ShardKeyPattern shardKeyPattern(metadata->getKeyPattern());
+                if (!shardKeyPattern.isUniqueIndexCompatible(newIdxKey)) {
+                    return Status(ErrorCodes::CannotCreateIndex,
+                                  str::stream() << "cannot create unique index over " << newIdxKey
+                                                << " with shard key pattern "
+                                                << shardKeyPattern.toBSON());
+                }
+            }
+        }
+
+        return Status::OK();
+    }
+} cmdCreateIndex;
 }

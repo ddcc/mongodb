@@ -29,6 +29,8 @@
 
 #include "mongo/db/ops/modifier_inc.h"
 
+#include <cstdint>
+
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/mutable/algorithm.h"
@@ -37,251 +39,363 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
 #include "mongo/db/ops/log_builder.h"
-#include "mongo/platform/cstdint.h"
+#include "mongo/platform/decimal128.h"
 #include "mongo/unittest/unittest.h"
 
 namespace {
 
-    using mongo::BSONObj;
-    using mongo::LogBuilder;
-    using mongo::ModifierInc;
-    using mongo::ModifierInterface;
-    using mongo::NumberInt;
-    using mongo::Status;
-    using mongo::StringData;
-    using mongo::fromjson;
-    using mongo::mutablebson::ConstElement;
-    using mongo::mutablebson::Document;
-    using mongo::mutablebson::Element;
-    using mongo::mutablebson::countChildren;
+using mongo::BSONObj;
+using mongo::Decimal128;
+using mongo::LogBuilder;
+using mongo::ModifierInc;
+using mongo::ModifierInterface;
+using mongo::NumberInt;
+using mongo::Status;
+using mongo::StringData;
+using mongo::fromjson;
+using mongo::mutablebson::ConstElement;
+using mongo::mutablebson::Document;
+using mongo::mutablebson::Element;
+using mongo::mutablebson::countChildren;
 
-    /** Helper to build and manipulate a $inc mod. */
-    class Mod {
-    public:
-
-        explicit Mod(BSONObj modObj)
-            : _modObj(modObj)
-            , _mod(mongoutils::str::equals(modObj.firstElement().fieldName(), "$mul") ?
-                   ModifierInc::MODE_MUL : ModifierInc::MODE_INC) {
-            const StringData& modName = modObj.firstElement().fieldName();
-            ASSERT_OK(_mod.init(_modObj[modName].embeddedObject().firstElement(),
-                                ModifierInterface::Options::normal()));
-        }
-
-        Status prepare(Element root,
-                       const StringData& matchedField,
-                       ModifierInterface::ExecInfo* execInfo) {
-            return _mod.prepare(root, matchedField, execInfo);
-        }
-
-        Status apply() const {
-            return _mod.apply();
-        }
-
-        Status log(LogBuilder* logBuilder) const {
-            return _mod.log(logBuilder);
-        }
-
-        ModifierInc& mod() { return _mod; }
-
-    private:
-        BSONObj _modObj;
-        ModifierInc _mod;
-    };
-
-    TEST(Init, FailToInitWithInvalidValue) {
-        BSONObj modObj;
-        ModifierInc mod;
-
-        // String is an invalid increment argument
-        modObj = fromjson("{ $inc : { a : '' } }");
-        ASSERT_NOT_OK(mod.init(modObj["$inc"].embeddedObject().firstElement(),
-                               ModifierInterface::Options::normal()));
-
-        // Object is an invalid increment argument
-        modObj = fromjson("{ $inc : { a : {} } }");
-        ASSERT_NOT_OK(mod.init(modObj["$inc"].embeddedObject().firstElement(),
-                               ModifierInterface::Options::normal()));
-
-        // Array is an invalid increment argument
-        modObj = fromjson("{ $inc : { a : [] } }");
-        ASSERT_NOT_OK(mod.init(modObj["$inc"].embeddedObject().firstElement(),
-                               ModifierInterface::Options::normal()));
+/** Helper to build and manipulate a $inc mod. */
+class Mod {
+public:
+    explicit Mod(BSONObj modObj)
+        : _modObj(modObj),
+          _mod(mongoutils::str::equals(modObj.firstElement().fieldName(), "$mul")
+                   ? ModifierInc::MODE_MUL
+                   : ModifierInc::MODE_INC) {
+        StringData modName = modObj.firstElement().fieldName();
+        ASSERT_OK(_mod.init(_modObj[modName].embeddedObject().firstElement(),
+                            ModifierInterface::Options::normal()));
     }
 
-    TEST(Init, InitParsesNumberInt) {
-        Mod incMod(BSON("$inc" << BSON("a" << static_cast<int>(1))));
+    Status prepare(Element root, StringData matchedField, ModifierInterface::ExecInfo* execInfo) {
+        return _mod.prepare(root, matchedField, execInfo);
     }
 
-    TEST(Init, InitParsesNumberLong) {
-        Mod incMod(BSON("$inc" << BSON("a" << static_cast<long long>(1))));
+    Status apply() const {
+        return _mod.apply();
     }
 
-    TEST(Init, InitParsesNumberDouble) {
-        Mod incMod(BSON("$inc" << BSON("a" << 1.0)));
+    Status log(LogBuilder* logBuilder) const {
+        return _mod.log(logBuilder);
     }
 
-    TEST(SimpleMod, PrepareSimpleOK) {
-        Document doc(fromjson("{ a : 1 }"));
-        Mod incMod(fromjson("{ $inc: { a : 1 }}"));
-
-        ModifierInterface::ExecInfo execInfo;
-
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-
-        ASSERT_EQUALS(execInfo.fieldRef[0]->dottedField(), "a");
-        ASSERT_TRUE(doc.isInPlaceModeEnabled());
-        ASSERT_FALSE(execInfo.noOp);
+    ModifierInc& mod() {
+        return _mod;
     }
 
-    TEST(SimpleMod, PrepareSimpleNonNumericObject) {
-        Document doc(fromjson("{ a : {} }"));
-        Mod incMod(fromjson("{ $inc: { a : 1 }}"));
+private:
+    BSONObj _modObj;
+    ModifierInc _mod;
+};
 
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_NOT_OK(incMod.prepare(doc.root(), "", &execInfo));
+TEST(Init, FailToInitWithInvalidValue) {
+    BSONObj modObj;
+    ModifierInc mod;
+
+    // String is an invalid increment argument
+    modObj = fromjson("{ $inc : { a : '' } }");
+    ASSERT_NOT_OK(mod.init(modObj["$inc"].embeddedObject().firstElement(),
+                           ModifierInterface::Options::normal()));
+
+    // Object is an invalid increment argument
+    modObj = fromjson("{ $inc : { a : {} } }");
+    ASSERT_NOT_OK(mod.init(modObj["$inc"].embeddedObject().firstElement(),
+                           ModifierInterface::Options::normal()));
+
+    // Array is an invalid increment argument
+    modObj = fromjson("{ $inc : { a : [] } }");
+    ASSERT_NOT_OK(mod.init(modObj["$inc"].embeddedObject().firstElement(),
+                           ModifierInterface::Options::normal()));
+}
+
+TEST(Init, InitParsesNumberInt) {
+    Mod incMod(BSON("$inc" << BSON("a" << static_cast<int>(1))));
+}
+
+TEST(Init, InitParsesNumberLong) {
+    Mod incMod(BSON("$inc" << BSON("a" << static_cast<long long>(1))));
+}
+
+TEST(Init, InitParsesNumberDouble) {
+    Mod incMod(BSON("$inc" << BSON("a" << 1.0)));
+}
+
+TEST(Init, InitParsesNumberDecimal) {
+    if (mongo::Decimal128::enabled) {
+        Mod incMod(BSON("$inc" << BSON("a" << Decimal128(1.0))));
     }
+}
 
-    TEST(SimpleMod, PrepareSimpleNonNumericArray) {
+TEST(SimpleMod, PrepareSimpleOK) {
+    Document doc(fromjson("{ a : 1 }"));
+    Mod incMod(fromjson("{ $inc: { a : 1 }}"));
 
-        Document doc(fromjson("{ a : [] }"));
-        Mod incMod(fromjson("{ $inc: { a : 1 }}"));
+    ModifierInterface::ExecInfo execInfo;
 
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_NOT_OK(incMod.prepare(doc.root(), "", &execInfo));
-    }
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
 
-    TEST(SimpleMod, PrepareSimpleNonNumericString) {
-        Document doc(fromjson("{ a : '' }"));
-        Mod incMod(fromjson("{ $inc: { a : 1 }}"));
+    ASSERT_EQUALS(execInfo.fieldRef[0]->dottedField(), "a");
+    ASSERT_TRUE(doc.isInPlaceModeEnabled());
+    ASSERT_FALSE(execInfo.noOp);
+}
 
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_NOT_OK(incMod.prepare(doc.root(), "", &execInfo));
-    }
+TEST(SimpleMod, PrepareSimpleNonNumericObject) {
+    Document doc(fromjson("{ a : {} }"));
+    Mod incMod(fromjson("{ $inc: { a : 1 }}"));
 
-    TEST(SimpleMod, ApplyAndLogEmptyDocument) {
-        Document doc(fromjson("{}"));
-        Mod incMod(fromjson("{ $inc: { a : 1 }}"));
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_NOT_OK(incMod.prepare(doc.root(), "", &execInfo));
+}
 
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
+TEST(SimpleMod, PrepareSimpleNonNumericArray) {
+    Document doc(fromjson("{ a : [] }"));
+    Mod incMod(fromjson("{ $inc: { a : 1 }}"));
 
-        ASSERT_OK(incMod.apply());
-        ASSERT_FALSE(doc.isInPlaceModeEnabled());
-        ASSERT_EQUALS(fromjson("{ a : 1 }"), doc);
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_NOT_OK(incMod.prepare(doc.root(), "", &execInfo));
+}
 
-        Document logDoc;
-        LogBuilder logBuilder(logDoc.root());
-        ASSERT_OK(incMod.log(&logBuilder));
-        ASSERT_EQUALS(fromjson("{ $set : { a : 1 } }"), logDoc);
-    }
+TEST(SimpleMod, PrepareSimpleNonNumericString) {
+    Document doc(fromjson("{ a : '' }"));
+    Mod incMod(fromjson("{ $inc: { a : 1 }}"));
 
-    TEST(SimpleMod, LogWithoutApplyEmptyDocument) {
-        Document doc(fromjson("{}"));
-        Mod incMod(fromjson("{ $inc: { a : 1 }}"));
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_NOT_OK(incMod.prepare(doc.root(), "", &execInfo));
+}
 
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
+TEST(SimpleMod, ApplyAndLogEmptyDocument) {
+    Document doc(fromjson("{}"));
+    Mod incMod(fromjson("{ $inc: { a : 1 }}"));
 
-        Document logDoc;
-        LogBuilder logBuilder(logDoc.root());
-        ASSERT_OK(incMod.log(&logBuilder));
-        ASSERT_EQUALS(fromjson("{ $set : { a : 1 } }"), logDoc);
-    }
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
 
-    TEST(SimpleMod, ApplyAndLogSimpleDocument) {
-        Document doc(fromjson("{ a : 2 }"));
-        Mod incMod(fromjson("{ $inc: { a : 1 }}"));
+    ASSERT_OK(incMod.apply());
+    ASSERT_FALSE(doc.isInPlaceModeEnabled());
+    ASSERT_EQUALS(fromjson("{ a : 1 }"), doc);
 
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
+    Document logDoc;
+    LogBuilder logBuilder(logDoc.root());
+    ASSERT_OK(incMod.log(&logBuilder));
+    ASSERT_EQUALS(fromjson("{ $set : { a : 1 } }"), logDoc);
+}
 
-        ASSERT_OK(incMod.apply());
-        ASSERT_TRUE(doc.isInPlaceModeEnabled());
-        ASSERT_EQUALS(fromjson("{ a : 3 }"), doc);
+TEST(SimpleMod, LogWithoutApplyEmptyDocument) {
+    Document doc(fromjson("{}"));
+    Mod incMod(fromjson("{ $inc: { a : 1 }}"));
 
-        Document logDoc;
-        LogBuilder logBuilder(logDoc.root());
-        ASSERT_OK(incMod.log(&logBuilder));
-        ASSERT_EQUALS(fromjson("{ $set : { a : 3 } }"), logDoc);
-    }
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
 
-    TEST(DottedMod, ApplyAndLogSimpleDocument) {
-        Document doc(fromjson("{ a : { b : 2 } }"));
-        Mod incMod(fromjson("{ $inc: { 'a.b' : 1 } }"));
+    Document logDoc;
+    LogBuilder logBuilder(logDoc.root());
+    ASSERT_OK(incMod.log(&logBuilder));
+    ASSERT_EQUALS(fromjson("{ $set : { a : 1 } }"), logDoc);
+}
 
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
+TEST(SimpleMod, ApplyAndLogSimpleDocument) {
+    Document doc(fromjson("{ a : 2 }"));
+    Mod incMod(fromjson("{ $inc: { a : 1 }}"));
 
-        ASSERT_OK(incMod.apply());
-        ASSERT_TRUE(doc.isInPlaceModeEnabled());
-        ASSERT_EQUALS(fromjson("{ a : { b : 3 } }"), doc);
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
 
-        Document logDoc;
-        LogBuilder logBuilder(logDoc.root());
-        ASSERT_OK(incMod.log(&logBuilder));
-        ASSERT_EQUALS(fromjson("{ $set : { 'a.b' : 3 } }"), logDoc);
-    }
+    ASSERT_OK(incMod.apply());
+    ASSERT_TRUE(doc.isInPlaceModeEnabled());
+    ASSERT_EQUALS(fromjson("{ a : 3 }"), doc);
 
-    TEST(InPlace, IntToInt) {
-        Document doc(BSON("a" << static_cast<int>(1)));
-        Mod incMod(BSON("$inc" << BSON("a" << static_cast<int>(1))));
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
-    }
+    Document logDoc;
+    LogBuilder logBuilder(logDoc.root());
+    ASSERT_OK(incMod.log(&logBuilder));
+    ASSERT_EQUALS(fromjson("{ $set : { a : 3 } }"), logDoc);
+}
 
-    TEST(InPlace, LongToLong) {
-        Document doc(BSON("a" << static_cast<long long>(1)));
-        Mod incMod(BSON("$inc" << BSON("a" << static_cast<long long>(1))));
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
-    }
+TEST(DottedMod, ApplyAndLogSimpleDocument) {
+    Document doc(fromjson("{ a : { b : 2 } }"));
+    Mod incMod(fromjson("{ $inc: { 'a.b' : 1 } }"));
 
-    TEST(InPlace, DoubleToDouble) {
-        Document doc(BSON("a" << 1.0));
-        Mod incMod(BSON("$inc" << BSON("a" << 1.0 )));
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
-    }
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
 
-    TEST(NoOp, Int) {
-        Document doc(BSON("a" << static_cast<int>(1)));
-        Mod incMod(BSON("$inc" << BSON("a" << static_cast<int>(0))));
+    ASSERT_OK(incMod.apply());
+    ASSERT_TRUE(doc.isInPlaceModeEnabled());
+    ASSERT_EQUALS(fromjson("{ a : { b : 3 } }"), doc);
+
+    Document logDoc;
+    LogBuilder logBuilder(logDoc.root());
+    ASSERT_OK(incMod.log(&logBuilder));
+    ASSERT_EQUALS(fromjson("{ $set : { 'a.b' : 3 } }"), logDoc);
+}
+
+TEST(InPlace, IntToInt) {
+    Document doc(BSON("a" << static_cast<int>(1)));
+    Mod incMod(BSON("$inc" << BSON("a" << static_cast<int>(1))));
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
+}
+
+TEST(InPlace, LongToLong) {
+    Document doc(BSON("a" << static_cast<long long>(1)));
+    Mod incMod(BSON("$inc" << BSON("a" << static_cast<long long>(1))));
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
+}
+
+TEST(InPlace, DoubleToDouble) {
+    Document doc(BSON("a" << 1.0));
+    Mod incMod(BSON("$inc" << BSON("a" << 1.0)));
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
+}
+
+TEST(NoOp, Int) {
+    Document doc(BSON("a" << static_cast<int>(1)));
+    Mod incMod(BSON("$inc" << BSON("a" << static_cast<int>(0))));
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_TRUE(execInfo.noOp);
+}
+
+TEST(NoOp, Long) {
+    Document doc(BSON("a" << static_cast<long long>(1)));
+    Mod incMod(BSON("$inc" << BSON("a" << static_cast<long long>(0))));
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_TRUE(execInfo.noOp);
+}
+
+TEST(NoOp, Double) {
+    Document doc(BSON("a" << 1.0));
+    Mod incMod(BSON("$inc" << BSON("a" << 0.0)));
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_TRUE(execInfo.noOp);
+}
+
+TEST(NoOp, Decimal) {
+    if (mongo::Decimal128::enabled) {
+        Document doc(BSON("a" << Decimal128("1.0")));
+        Mod incMod(BSON("$inc" << BSON("a" << Decimal128("0.0"))));
         ModifierInterface::ExecInfo execInfo;
         ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
         ASSERT_TRUE(execInfo.noOp);
     }
+}
 
-    TEST(NoOp, Long) {
-        Document doc(BSON("a" << static_cast<long long>(1)));
-        Mod incMod(BSON("$inc" << BSON("a" << static_cast<long long>(0))));
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_TRUE(execInfo.noOp);
-    }
+TEST(Upcasting, UpcastIntToLong) {
+    // Checks that $inc : NumberLong(0) turns a NumberInt into a NumberLong and logs it
+    // correctly.
+    Document doc(BSON("a" << static_cast<int>(1)));
+    ASSERT_EQUALS(mongo::NumberInt, doc.root()["a"].getType());
 
-    TEST(NoOp, Double) {
-        Document doc(BSON("a" << 1.0));
-        Mod incMod(BSON("$inc" << BSON("a" << 0.0)));
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_TRUE(execInfo.noOp);
-    }
+    Mod incMod(BSON("$inc" << BSON("a" << static_cast<long long>(0))));
 
-    TEST(Upcasting, UpcastIntToLong) {
-        // Checks that $inc : NumberLong(0) turns a NumberInt into a NumberLong and logs it
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
+
+    ASSERT_OK(incMod.apply());
+    ASSERT_FALSE(doc.isInPlaceModeEnabled());
+    ASSERT_EQUALS(fromjson("{ a : 1 }"), doc);
+    ASSERT_EQUALS(mongo::NumberLong, doc.root()["a"].getType());
+
+    Document logDoc;
+    LogBuilder logBuilder(logDoc.root());
+    ASSERT_OK(incMod.log(&logBuilder));
+    ASSERT_EQUALS(fromjson("{ $set : { a : 1 } }"), logDoc);
+    ASSERT_EQUALS(mongo::NumberLong, logDoc.root()["$set"]["a"].getType());
+}
+
+TEST(Upcasting, UpcastIntToDouble) {
+    // Checks that $inc : 0.0 turns a NumberInt into a NumberDouble and logs it
+    // correctly.
+    Document doc(BSON("a" << static_cast<int>(1)));
+    ASSERT_EQUALS(mongo::NumberInt, doc.root()["a"].getType());
+
+    Mod incMod(fromjson("{ $inc : { a : 0.0 } }"));
+
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
+
+    ASSERT_OK(incMod.apply());
+    ASSERT_FALSE(doc.isInPlaceModeEnabled());
+    ASSERT_EQUALS(fromjson("{ a : 1.0 }"), doc);
+    ASSERT_EQUALS(mongo::NumberDouble, doc.root()["a"].getType());
+
+    Document logDoc;
+    LogBuilder logBuilder(logDoc.root());
+    ASSERT_OK(incMod.log(&logBuilder));
+    ASSERT_EQUALS(fromjson("{ $set : { a : 1.0 } }"), logDoc);
+    ASSERT_EQUALS(mongo::NumberDouble, logDoc.root()["$set"]["a"].getType());
+}
+
+TEST(Upcasting, UpcastLongToDouble) {
+    // Checks that $inc : 0.0 turns a NumberLong into a NumberDouble and logs it
+    // correctly.
+    Document doc(BSON("a" << static_cast<long long>(1)));
+    ASSERT_EQUALS(mongo::NumberLong, doc.root()["a"].getType());
+
+    Mod incMod(fromjson("{ $inc : { a : 0.0 } }"));
+
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
+
+    ASSERT_OK(incMod.apply());
+    ASSERT_TRUE(doc.isInPlaceModeEnabled());
+    ASSERT_EQUALS(fromjson("{ a : 1.0 }"), doc);
+    ASSERT_EQUALS(mongo::NumberDouble, doc.root()["a"].getType());
+
+    Document logDoc;
+    LogBuilder logBuilder(logDoc.root());
+    ASSERT_OK(incMod.log(&logBuilder));
+    ASSERT_EQUALS(fromjson("{ $set : { a : 1.0 } }"), logDoc);
+    ASSERT_EQUALS(mongo::NumberDouble, logDoc.root()["$set"]["a"].getType());
+}
+
+TEST(Upcasting, DoublesStayDoubles) {
+    // Checks that $inc : 0 doesn't change a NumberDouble away from double
+    Document doc(fromjson("{ a : 1.0 }"));
+    ASSERT_EQUALS(mongo::NumberDouble, doc.root()["a"].getType());
+
+    Mod incMod(fromjson("{ $inc : { a : 1 } }"));
+
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
+
+    ASSERT_OK(incMod.apply());
+    ASSERT_TRUE(doc.isInPlaceModeEnabled());
+    ASSERT_EQUALS(fromjson("{ a : 2.0 }"), doc);
+    ASSERT_EQUALS(mongo::NumberDouble, doc.root()["a"].getType());
+
+    Document logDoc;
+    LogBuilder logBuilder(logDoc.root());
+    ASSERT_OK(incMod.log(&logBuilder));
+    ASSERT_EQUALS(fromjson("{ $set : { a : 2.0 } }"), logDoc);
+    ASSERT_EQUALS(mongo::NumberDouble, logDoc.root()["$set"]["a"].getType());
+}
+
+TEST(Upcasting, UpcastIntToDecimal) {
+    if (mongo::Decimal128::enabled) {
+        // Checks that $inc : NumberDecimal(0) turns a NumberInt into a NumberDecimal and logs it
         // correctly.
         Document doc(BSON("a" << static_cast<int>(1)));
         ASSERT_EQUALS(mongo::NumberInt, doc.root()["a"].getType());
 
-        Mod incMod(BSON("$inc" << BSON("a" << static_cast<long long>(0))));
+        Mod incMod(fromjson("{ $inc : { a : NumberDecimal(\"0\") }}"));
 
         ModifierInterface::ExecInfo execInfo;
         ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
@@ -289,23 +403,51 @@ namespace {
 
         ASSERT_OK(incMod.apply());
         ASSERT_FALSE(doc.isInPlaceModeEnabled());
-        ASSERT_EQUALS(fromjson("{ a : 1 }"), doc);
+        ASSERT_EQUALS(fromjson("{ a : NumberDecimal(\"1.0\") }"), doc);
+        ASSERT_EQUALS(mongo::NumberDecimal, doc.root()["a"].getType());
+
+        Document logDoc;
+        LogBuilder logBuilder(logDoc.root());
+        ASSERT_OK(incMod.log(&logBuilder));
+        ASSERT_EQUALS(fromjson("{ $set : { a : NumberDecimal(\"1.0\") }}"), logDoc);
+        ASSERT_EQUALS(mongo::NumberDecimal, logDoc.root()["$set"]["a"].getType());
+    }
+}
+
+TEST(Upcasting, UpcastLongToDecimal) {
+    if (mongo::Decimal128::enabled) {
+        // Checks that $inc : NumberDecimal(0) turns a NumberLong into a NumberDecimal and logs it
+        // correctly.
+        Document doc(BSON("a" << static_cast<long long>(1)));
         ASSERT_EQUALS(mongo::NumberLong, doc.root()["a"].getType());
 
+        Mod incMod(fromjson("{ $inc : { a : NumberDecimal(\"0\") }}"));
+
+        ModifierInterface::ExecInfo execInfo;
+        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+        ASSERT_FALSE(execInfo.noOp);
+
+        ASSERT_OK(incMod.apply());
+        ASSERT_FALSE(doc.isInPlaceModeEnabled());
+        ASSERT_EQUALS(fromjson("{ a : NumberDecimal(\"1.0\") }"), doc);
+        ASSERT_EQUALS(mongo::NumberDecimal, doc.root()["a"].getType());
+
         Document logDoc;
         LogBuilder logBuilder(logDoc.root());
         ASSERT_OK(incMod.log(&logBuilder));
-        ASSERT_EQUALS(fromjson("{ $set : { a : 1 } }"), logDoc);
-        ASSERT_EQUALS(mongo::NumberLong, logDoc.root()["$set"]["a"].getType());
+        ASSERT_EQUALS(fromjson("{ $set : { a : NumberDecimal(\"1.0\") }}"), logDoc);
+        ASSERT_EQUALS(mongo::NumberDecimal, logDoc.root()["$set"]["a"].getType());
     }
+}
 
-    TEST(Upcasting, UpcastIntToDouble) {
-        // Checks that $inc : 0.0 turns a NumberInt into a NumberDouble and logs it
+TEST(Upcasting, UpcastDoubleToDecimal) {
+    if (mongo::Decimal128::enabled) {
+        // Checks that $inc : NumberDecimal(0) turns a double into a NumberDecimal and logs it
         // correctly.
-        Document doc(BSON("a" << static_cast<int>(1)));
-        ASSERT_EQUALS(mongo::NumberInt, doc.root()["a"].getType());
+        Document doc(BSON("a" << static_cast<double>(1.0)));
+        ASSERT_EQUALS(mongo::NumberDouble, doc.root()["a"].getType());
 
-        Mod incMod(fromjson("{ $inc : { a : 0.0 } }"));
+        Mod incMod(fromjson("{ $inc : { a : NumberDecimal(\"0\") }}"));
 
         ModifierInterface::ExecInfo execInfo;
         ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
@@ -313,46 +455,25 @@ namespace {
 
         ASSERT_OK(incMod.apply());
         ASSERT_FALSE(doc.isInPlaceModeEnabled());
-        ASSERT_EQUALS(fromjson("{ a : 1.0 }"), doc);
-        ASSERT_EQUALS(mongo::NumberDouble, doc.root()["a"].getType());
+        ASSERT_EQUALS(fromjson("{ a : NumberDecimal(\"1.0\") }"), doc);
+        ASSERT_EQUALS(mongo::NumberDecimal, doc.root()["a"].getType());
 
         Document logDoc;
         LogBuilder logBuilder(logDoc.root());
         ASSERT_OK(incMod.log(&logBuilder));
-        ASSERT_EQUALS(fromjson("{ $set : { a : 1.0 } }"), logDoc);
-        ASSERT_EQUALS(mongo::NumberDouble, logDoc.root()["$set"]["a"].getType());
+        ASSERT_EQUALS(fromjson("{ $set : { a : NumberDecimal(\"1.0\") }}"), logDoc);
+        ASSERT_EQUALS(mongo::NumberDecimal, logDoc.root()["$set"]["a"].getType());
     }
+}
 
-    TEST(Upcasting, UpcastLongToDouble) {
-        // Checks that $inc : 0.0 turns a NumberLong into a NumberDouble and logs it
+TEST(Upcasting, DecimalsStayDecimals) {
+    if (mongo::Decimal128::enabled) {
+        // Checks that $inc : NumberDecimal(1) keeps a NumberDecimal as a NumberDecimal and logs it
         // correctly.
-        Document doc(BSON("a" << static_cast<long long>(1)));
-        ASSERT_EQUALS(mongo::NumberLong, doc.root()["a"].getType());
+        Document doc(BSON("a" << mongo::Decimal128("1.0")));
+        ASSERT_EQUALS(mongo::NumberDecimal, doc.root()["a"].getType());
 
-        Mod incMod(fromjson("{ $inc : { a : 0.0 } }"));
-
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
-
-        ASSERT_OK(incMod.apply());
-        ASSERT_TRUE(doc.isInPlaceModeEnabled());
-        ASSERT_EQUALS(fromjson("{ a : 1.0 }"), doc);
-        ASSERT_EQUALS(mongo::NumberDouble, doc.root()["a"].getType());
-
-        Document logDoc;
-        LogBuilder logBuilder(logDoc.root());
-        ASSERT_OK(incMod.log(&logBuilder));
-        ASSERT_EQUALS(fromjson("{ $set : { a : 1.0 } }"), logDoc);
-        ASSERT_EQUALS(mongo::NumberDouble, logDoc.root()["$set"]["a"].getType());
-    }
-
-    TEST(Upcasting, DoublesStayDoubles) {
-        // Checks that $inc : 0 doesn't change a NumberDouble away from double
-        Document doc(fromjson("{ a : 1.0 }"));
-        ASSERT_EQUALS(mongo::NumberDouble, doc.root()["a"].getType());
-
-        Mod incMod(fromjson("{ $inc : { a : 1 } }"));
+        Mod incMod(fromjson("{ $inc : { a : NumberDecimal(\"1\") }}"));
 
         ModifierInterface::ExecInfo execInfo;
         ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
@@ -360,165 +481,165 @@ namespace {
 
         ASSERT_OK(incMod.apply());
         ASSERT_TRUE(doc.isInPlaceModeEnabled());
-        ASSERT_EQUALS(fromjson("{ a : 2.0 }"), doc);
-        ASSERT_EQUALS(mongo::NumberDouble, doc.root()["a"].getType());
+        ASSERT_EQUALS(fromjson("{ a : NumberDecimal(\"2.0\") }"), doc);
+        ASSERT_EQUALS(mongo::NumberDecimal, doc.root()["a"].getType());
 
         Document logDoc;
         LogBuilder logBuilder(logDoc.root());
         ASSERT_OK(incMod.log(&logBuilder));
-        ASSERT_EQUALS(fromjson("{ $set : { a : 2.0 } }"), logDoc);
-        ASSERT_EQUALS(mongo::NumberDouble, logDoc.root()["$set"]["a"].getType());
+        ASSERT_EQUALS(fromjson("{ $set : { a : NumberDecimal(\"2.0\") }}"), logDoc);
+        ASSERT_EQUALS(mongo::NumberDecimal, logDoc.root()["$set"]["a"].getType());
     }
+}
 
-    // The only interesting overflow cases are int->long via increment: we never overflow to
-    // double, and we never decrease precision on decrement.
+// The only interesting overflow cases are int->long via increment: we never overflow to
+// double, and we never decrease precision on decrement.
+TEST(Spilling, OverflowIntToLong) {
+    const int initial_value = std::numeric_limits<int32_t>::max();
 
-    TEST(Spilling, OverflowIntToLong) {
-        const int initial_value = std::numeric_limits<int32_t>::max();
+    Document doc(BSON("a" << static_cast<int>(initial_value)));
+    ASSERT_EQUALS(mongo::NumberInt, doc.root()["a"].getType());
 
-        Document doc(BSON("a" << static_cast<int>(initial_value)));
-        ASSERT_EQUALS(mongo::NumberInt, doc.root()["a"].getType());
+    Mod incMod(fromjson("{ $inc : { a : 1 } }"));
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
 
-        Mod incMod(fromjson("{ $inc : { a : 1 } }"));
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
+    const long long target_value = static_cast<long long>(initial_value) + 1;
 
-        const long long target_value = static_cast<long long>(initial_value) + 1;
+    ASSERT_OK(incMod.apply());
+    ASSERT_FALSE(doc.isInPlaceModeEnabled());
+    ASSERT_EQUALS(BSON("a" << target_value), doc);
+}
 
-        ASSERT_OK(incMod.apply());
-        ASSERT_FALSE(doc.isInPlaceModeEnabled());
-        ASSERT_EQUALS(BSON("a" << target_value), doc);
-    }
+TEST(Spilling, UnderflowIntToLong) {
+    const int initial_value = std::numeric_limits<int32_t>::min();
 
-    TEST(Spilling, UnderflowIntToLong) {
-        const int initial_value = std::numeric_limits<int32_t>::min();
+    Document doc(BSON("a" << static_cast<int>(initial_value)));
+    ASSERT_EQUALS(mongo::NumberInt, doc.root()["a"].getType());
 
-        Document doc(BSON("a" << static_cast<int>(initial_value)));
-        ASSERT_EQUALS(mongo::NumberInt, doc.root()["a"].getType());
+    Mod incMod(fromjson("{ $inc : { a : -1 } }"));
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
 
-        Mod incMod(fromjson("{ $inc : { a : -1 } }"));
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
+    const long long target_value = static_cast<long long>(initial_value) - 1;
 
-        const long long target_value = static_cast<long long>(initial_value) - 1;
+    ASSERT_OK(incMod.apply());
+    ASSERT_FALSE(doc.isInPlaceModeEnabled());
+    ASSERT_EQUALS(BSON("a" << target_value), doc);
+}
 
-        ASSERT_OK(incMod.apply());
-        ASSERT_FALSE(doc.isInPlaceModeEnabled());
-        ASSERT_EQUALS(BSON("a" << target_value), doc);
-    }
+TEST(Lifecycle, IncModCanBeReused) {
+    Document doc1(fromjson("{ a : 1 }"));
+    Document doc2(fromjson("{ a : 1 }"));
 
-    TEST(Lifecycle, IncModCanBeReused) {
-        Document doc1(fromjson("{ a : 1 }"));
-        Document doc2(fromjson("{ a : 1 }"));
+    Mod incMod(fromjson("{ $inc: { a : 1 }}"));
 
-        Mod incMod(fromjson("{ $inc: { a : 1 }}"));
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc1.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
 
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc1.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
+    ASSERT_OK(incMod.apply());
+    ASSERT_TRUE(doc1.isInPlaceModeEnabled());
+    ASSERT_EQUALS(fromjson("{ a : 2 }"), doc1);
 
-        ASSERT_OK(incMod.apply());
-        ASSERT_TRUE(doc1.isInPlaceModeEnabled());
-        ASSERT_EQUALS(fromjson("{ a : 2 }"), doc1);
+    ASSERT_OK(incMod.prepare(doc2.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
 
-        ASSERT_OK(incMod.prepare(doc2.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
+    ASSERT_OK(incMod.apply());
+    ASSERT_TRUE(doc2.isInPlaceModeEnabled());
+    ASSERT_EQUALS(fromjson("{ a : 2 }"), doc2);
+}
 
-        ASSERT_OK(incMod.apply());
-        ASSERT_TRUE(doc2.isInPlaceModeEnabled());
-        ASSERT_EQUALS(fromjson("{ a : 2 }"), doc2);
-    }
+// Given the current implementation of $mul, we really only need one test for
+// $mul. However, in the future, we should probably write additional ones, or, perhaps find
+// a way to run all the obove tests in both modes.
+TEST(Multiplication, ApplyAndLogSimpleDocument) {
+    Document doc(fromjson("{ a : { b : 2 } }"));
+    Mod incMod(fromjson("{ $mul: { 'a.b' : 3 } }"));
 
-    // Given the current implementation of $mul, we really only need one test for
-    // $mul. However, in the future, we should probably write additional ones, or, perhaps find
-    // a way to run all the obove tests in both modes.
-    TEST(Multiplication, ApplyAndLogSimpleDocument) {
-        Document doc(fromjson("{ a : { b : 2 } }"));
-        Mod incMod(fromjson("{ $mul: { 'a.b' : 3 } }"));
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
 
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
+    ASSERT_OK(incMod.apply());
+    ASSERT_TRUE(doc.isInPlaceModeEnabled());
+    ASSERT_EQUALS(fromjson("{ a : { b : 6 } }"), doc);
 
-        ASSERT_OK(incMod.apply());
-        ASSERT_TRUE(doc.isInPlaceModeEnabled());
-        ASSERT_EQUALS(fromjson("{ a : { b : 6 } }"), doc);
+    Document logDoc;
+    LogBuilder logBuilder(logDoc.root());
+    ASSERT_OK(incMod.log(&logBuilder));
+    ASSERT_EQUALS(fromjson("{ $set : { 'a.b' : 6 } }"), logDoc);
+}
 
-        Document logDoc;
-        LogBuilder logBuilder(logDoc.root());
-        ASSERT_OK(incMod.log(&logBuilder));
-        ASSERT_EQUALS(fromjson("{ $set : { 'a.b' : 6 } }"), logDoc);
-    }
+TEST(Multiplication, ApplyAndLogMissingElement) {
+    Document doc(fromjson("{ a : 0 }"));
+    Mod incMod(fromjson("{ $mul : { b : 3 } }"));
 
-    TEST(Multiplication, ApplyAndLogMissingElement) {
-        Document doc(fromjson("{ a : 0 }"));
-        Mod incMod(fromjson("{ $mul : { b : 3 } }"));
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
 
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
+    ASSERT_OK(incMod.apply());
+    ASSERT_FALSE(doc.isInPlaceModeEnabled());
+    ASSERT_EQUALS(fromjson("{ a : 0, b : 0 }"), doc);
 
-        ASSERT_OK(incMod.apply());
-        ASSERT_FALSE(doc.isInPlaceModeEnabled());
-        ASSERT_EQUALS(fromjson("{ a : 0, b : 0 }"), doc);
+    Document logDoc;
+    LogBuilder logBuilder(logDoc.root());
+    ASSERT_OK(incMod.log(&logBuilder));
+    ASSERT_EQUALS(fromjson("{ $set : { b : 0 } }"), logDoc);
+}
 
-        Document logDoc;
-        LogBuilder logBuilder(logDoc.root());
-        ASSERT_OK(incMod.log(&logBuilder));
-        ASSERT_EQUALS(fromjson("{ $set : { b : 0 } }"), logDoc);
-    }
+TEST(Multiplication, ApplyMissingElementInt) {
+    const int int_zero = 0;
+    const int int_three = 3;
 
-    TEST(Multiplication, ApplyMissingElementInt) {
-        const int int_zero = 0;
-        const int int_three = 3;
+    Document doc(BSON("a" << int_zero));
+    Mod incMod(BSON("$mul" << BSON("b" << int_three)));
 
-        Document doc(BSON("a" << int_zero));
-        Mod incMod(BSON("$mul" << BSON("b" << int_three)));
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
 
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
+    ASSERT_OK(incMod.apply());
+    ASSERT_FALSE(doc.isInPlaceModeEnabled());
+    ASSERT_EQUALS(BSON("a" << int_zero << "b" << int_zero), doc);
+    ASSERT_EQUALS(mongo::NumberInt, doc.root().rightChild().getType());
+}
 
-        ASSERT_OK(incMod.apply());
-        ASSERT_FALSE(doc.isInPlaceModeEnabled());
-        ASSERT_EQUALS(BSON("a" << int_zero << "b" << int_zero), doc);
-        ASSERT_EQUALS(mongo::NumberInt, doc.root().rightChild().getType());
-    }
+TEST(Multiplication, ApplyMissingElementLongLong) {
+    const long long ll_zero = 0;
+    const long long ll_three = 3;
 
-    TEST(Multiplication, ApplyMissingElementLongLong) {
-        const long long ll_zero = 0;
-        const long long ll_three = 3;
+    Document doc(BSON("a" << ll_zero));
+    Mod incMod(BSON("$mul" << BSON("b" << ll_three)));
 
-        Document doc(BSON("a" << ll_zero));
-        Mod incMod(BSON("$mul" << BSON("b" << ll_three)));
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
 
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
+    ASSERT_OK(incMod.apply());
+    ASSERT_FALSE(doc.isInPlaceModeEnabled());
+    ASSERT_EQUALS(BSON("a" << ll_zero << "b" << ll_zero), doc);
+    ASSERT_EQUALS(mongo::NumberLong, doc.root().rightChild().getType());
+}
 
-        ASSERT_OK(incMod.apply());
-        ASSERT_FALSE(doc.isInPlaceModeEnabled());
-        ASSERT_EQUALS(BSON("a" << ll_zero << "b" << ll_zero), doc);
-        ASSERT_EQUALS(mongo::NumberLong, doc.root().rightChild().getType());
-    }
+TEST(Multiplication, ApplyMissingElementDouble) {
+    const double double_zero = 0;
+    const double double_three = 3;
 
-    TEST(Multiplication, ApplyMissingElementDouble) {
-        const double double_zero = 0;
-        const double double_three = 3;
+    Document doc(BSON("a" << double_zero));
+    Mod incMod(BSON("$mul" << BSON("b" << double_three)));
 
-        Document doc(BSON("a" << double_zero));
-        Mod incMod(BSON("$mul" << BSON("b" << double_three)));
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
+    ASSERT_FALSE(execInfo.noOp);
 
-        ModifierInterface::ExecInfo execInfo;
-        ASSERT_OK(incMod.prepare(doc.root(), "", &execInfo));
-        ASSERT_FALSE(execInfo.noOp);
+    ASSERT_OK(incMod.apply());
+    ASSERT_FALSE(doc.isInPlaceModeEnabled());
+    ASSERT_EQUALS(BSON("a" << double_zero << "b" << 0), doc);
+    ASSERT_EQUALS(mongo::NumberDouble, doc.root().rightChild().getType());
+}
 
-        ASSERT_OK(incMod.apply());
-        ASSERT_FALSE(doc.isInPlaceModeEnabled());
-        ASSERT_EQUALS(BSON("a" << double_zero << "b" << 0), doc);
-        ASSERT_EQUALS(mongo::NumberDouble, doc.root().rightChild().getType());
-    }
-
-} // namespace
+}  // namespace

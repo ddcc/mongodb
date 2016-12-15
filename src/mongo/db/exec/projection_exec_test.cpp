@@ -42,178 +42,288 @@ using namespace mongo;
 
 namespace {
 
-    using std::auto_ptr;
+using std::unique_ptr;
 
-    /**
-     * Utility function to create MatchExpression
-     */
-    MatchExpression* parseMatchExpression(const BSONObj& obj) {
-        StatusWithMatchExpression status = MatchExpressionParser::parse(obj);
-        ASSERT_TRUE(status.isOK());
-        MatchExpression* expr(status.getValue());
-        return expr;
+/**
+ * Utility function to create MatchExpression
+ */
+unique_ptr<MatchExpression> parseMatchExpression(const BSONObj& obj) {
+    StatusWithMatchExpression status = MatchExpressionParser::parse(obj);
+    ASSERT_TRUE(status.isOK());
+    return std::move(status.getValue());
+}
+
+//
+// transform tests
+//
+
+/**
+ * test function to verify results of transform()
+ * on a working set member.
+ *
+ * specStr - projection specification
+ * queryStr - query
+ * objStr - object to run projection on
+ * data - computed data. Owned by working set member created in this function if not null.
+ * expectedStatusOK - expected status of transformation
+ * expectedObjStr - expected object after successful projection.
+ *                  Ignored if expectedStatusOK is false.
+ */
+
+void testTransform(const char* specStr,
+                   const char* queryStr,
+                   const char* objStr,
+                   WorkingSetComputedData* data,
+                   bool expectedStatusOK,
+                   const char* expectedObjStr) {
+    // Create projection exec object.
+    BSONObj spec = fromjson(specStr);
+    BSONObj query = fromjson(queryStr);
+    unique_ptr<MatchExpression> queryExpression = parseMatchExpression(query);
+    ProjectionExec exec(spec, queryExpression.get());
+
+    // Create working set member.
+    WorkingSetMember wsm;
+    wsm.obj = Snapshotted<BSONObj>(SnapshotId(), fromjson(objStr));
+    if (data) {
+        wsm.addComputed(data);
     }
+    wsm.transitionToOwnedObj();
 
-    //
-    // transform tests
-    //
+    // Transform object
+    Status status = exec.transform(&wsm);
 
-    /**
-     * test function to verify results of transform()
-     * on a working set member.
-     *
-     * specStr - projection specification
-     * queryStr - query
-     * objStr - object to run projection on
-     * data - computed data. Owned by working set member created in this function if not null.
-     * expectedStatusOK - expected status of transformation
-     * expectedObjStr - expected object after successful projection.
-     *                  Ignored if expectedStatusOK is false.
-     */
-
-    void testTransform(const char* specStr, const char* queryStr, const char* objStr,
-                       WorkingSetComputedData* data,
-                       bool expectedStatusOK, const char* expectedObjStr) {
-        // Create projection exec object.
-        BSONObj spec = fromjson(specStr);
-        BSONObj query = fromjson(queryStr);
-        auto_ptr<MatchExpression> queryExpression(parseMatchExpression(query));
-        ProjectionExec exec(spec, queryExpression.get());
-
-        // Create working set member.
-        WorkingSetMember wsm;
-        wsm.state = WorkingSetMember::OWNED_OBJ;
-        wsm.obj = fromjson(objStr);
-        if (data) {
-            wsm.addComputed(data);
-        }
-
-        // Transform object
-        Status status = exec.transform(&wsm);
-
-        // There are fewer checks to perform if we are expected a failed status.
-        if (!expectedStatusOK) {
-            if (status.isOK()) {
-                mongoutils::str::stream ss;
-                ss << "expected transform() to fail but got success instead."
-                   << "\nprojection spec: " << specStr
-                   << "\nquery: " << queryStr
-                   << "\nobject before projection: " << objStr;
-                FAIL(ss);
-            }
-            return;
-        }
-
-        // If we are expecting a successful transformation but got a failed status instead,
-        // print out status message in assertion message.
-        if (!status.isOK()) {
+    // There are fewer checks to perform if we are expected a failed status.
+    if (!expectedStatusOK) {
+        if (status.isOK()) {
             mongoutils::str::stream ss;
-            ss << "transform() test failed: unexpected failed status: " << status.toString()
-               << "\nprojection spec: " << specStr
-               << "\nquery: " << queryStr
-               << "\nobject before projection: " << objStr
-               << "\nexpected object after projection: " << expectedObjStr;
+            ss << "expected transform() to fail but got success instead."
+               << "\nprojection spec: " << specStr << "\nquery: " << queryStr
+               << "\nobject before projection: " << objStr;
             FAIL(ss);
         }
-
-        // Finally, we compare the projected object.
-        const BSONObj& obj = wsm.obj;
-        BSONObj expectedObj = fromjson(expectedObjStr);
-        if (obj != expectedObj) {
-            mongoutils::str::stream ss;
-            ss << "transform() test failed: unexpected projected object."
-               << "\nprojection spec: " << specStr
-               << "\nquery: " << queryStr
-               << "\nobject before projection: " << objStr
-               << "\nexpected object after projection: " << expectedObjStr
-               << "\nactual object after projection: " << obj.toString();
-            FAIL(ss);
-        }
+        return;
     }
 
-    /**
-     * testTransform without computed data argument.
-     */
-    void testTransform(const char* specStr, const char* queryStr, const char* objStr,
-                       bool expectedStatusOK, const char* expectedObjStr) {
-        testTransform(specStr, queryStr, objStr, NULL, expectedStatusOK, expectedObjStr);
+    // If we are expecting a successful transformation but got a failed status instead,
+    // print out status message in assertion message.
+    if (!status.isOK()) {
+        mongoutils::str::stream ss;
+        ss << "transform() test failed: unexpected failed status: " << status.toString()
+           << "\nprojection spec: " << specStr << "\nquery: " << queryStr
+           << "\nobject before projection: " << objStr
+           << "\nexpected object after projection: " << expectedObjStr;
+        FAIL(ss);
     }
 
-    //
-    // position $
-    //
-
-    TEST(ProjectionExecTest, TransformPositionalDollar) {
-        // Valid position $ projections.
-        testTransform("{'a.$': 1}", "{a: 10}", "{a: [10, 20, 30]}", true, "{a: [10]}");
-        testTransform("{'a.$': 1}", "{a: 20}", "{a: [10, 20, 30]}", true, "{a: [20]}");
-        testTransform("{'a.$': 1}", "{a: 30}", "{a: [10, 20, 30]}", true, "{a: [30]}");
-        testTransform("{'a.$': 1}", "{a: {$gt: 4}}", "{a: [5]}", true, "{a: [5]}");
-
-        // Invalid position $ projections.
-        testTransform("{'a.$': 1}", "{a: {$size: 1}}", "{a: [5]}", false, "");
+    // Finally, we compare the projected object.
+    const BSONObj& obj = wsm.obj.value();
+    BSONObj expectedObj = fromjson(expectedObjStr);
+    if (obj != expectedObj) {
+        mongoutils::str::stream ss;
+        ss << "transform() test failed: unexpected projected object."
+           << "\nprojection spec: " << specStr << "\nquery: " << queryStr
+           << "\nobject before projection: " << objStr
+           << "\nexpected object after projection: " << expectedObjStr
+           << "\nactual object after projection: " << obj.toString();
+        FAIL(ss);
     }
+}
 
-    //
-    // $elemMatch
-    //
+/**
+ * testTransform without computed data argument.
+ */
+void testTransform(const char* specStr,
+                   const char* queryStr,
+                   const char* objStr,
+                   bool expectedStatusOK,
+                   const char* expectedObjStr) {
+    testTransform(specStr, queryStr, objStr, NULL, expectedStatusOK, expectedObjStr);
+}
 
-    TEST(ProjectionExecTest, TransformElemMatch) {
-        const char* s = "{a: [{x: 1, y: 10}, {x: 1, y: 20}, {x: 2, y: 10}]}";
+/**
+ * Test function to verify the results of projecting the $meta sortKey while under a covered
+ * projection. In particular, it tests that ProjectionExec can take a WorkingSetMember in
+ * LOC_AND_IDX state and use the sortKey along with the index data to generate the final output
+ * document. For SERVER-20117.
+ *
+ * sortKey - The sort key in BSONObj form.
+ * projSpec - The JSON representation of the proj spec BSONObj.
+ * ikd - The data stored in the index.
+ *
+ * Returns the BSON representation of the actual output, to be checked against the expected output.
+ */
+BSONObj transformMetaSortKeyCovered(const BSONObj& sortKey,
+                                    const char* projSpec,
+                                    const IndexKeyDatum& ikd) {
+    WorkingSet ws;
+    WorkingSetID wsid = ws.allocate();
+    WorkingSetMember* wsm = ws.get(wsid);
+    wsm->keyData.push_back(ikd);
+    wsm->addComputed(new SortKeyComputedData(sortKey));
+    ws.transitionToLocAndIdx(wsid);
 
-        // Valid $elemMatch projections.
-        testTransform("{a: {$elemMatch: {x: 1}}}", "{}", s, true, "{a: [{x: 1, y: 10}]}");
-        testTransform("{a: {$elemMatch: {x: 1, y: 20}}}", "{}", s, true, "{a: [{x: 1, y: 20}]}");
-        testTransform("{a: {$elemMatch: {x: 2}}}", "{}", s, true, "{a: [{x: 2, y: 10}]}");
-        testTransform("{a: {$elemMatch: {x: 3}}}", "{}", s, true, "{}");
+    ProjectionExec projExec(fromjson(projSpec), nullptr);
+    ASSERT_OK(projExec.transform(wsm));
 
-        // $elemMatch on unknown field z
-        testTransform("{a: {$elemMatch: {z: 1}}}", "{}", s, true, "{}");
-    }
+    return wsm->obj.value();
+}
 
-    //
-    // $slice
-    //
+//
+// position $
+//
 
-    TEST(ProjectionExecTest, TransformSliceCount) {
-        // Valid $slice projections using format {$slice: count}.
-        testTransform("{a: {$slice: -10}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4, 6, 8]}");
-        testTransform("{a: {$slice: -3}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4, 6, 8]}");
-        testTransform("{a: {$slice: -1}}", "{}", "{a: [4, 6, 8]}", true, "{a: [8]}");
-        testTransform("{a: {$slice: 0}}", "{}", "{a: [4, 6, 8]}", true, "{a: []}");
-        testTransform("{a: {$slice: 1}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4]}");
-        testTransform("{a: {$slice: 3}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4, 6, 8]}");
-        testTransform("{a: {$slice: 10}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4, 6, 8]}");
-    }
+TEST(ProjectionExecTest, TransformPositionalDollar) {
+    // Valid position $ projections.
+    testTransform("{'a.$': 1}", "{a: 10}", "{a: [10, 20, 30]}", true, "{a: [10]}");
+    testTransform("{'a.$': 1}", "{a: 20}", "{a: [10, 20, 30]}", true, "{a: [20]}");
+    testTransform("{'a.$': 1}", "{a: 30}", "{a: [10, 20, 30]}", true, "{a: [30]}");
+    testTransform("{'a.$': 1}", "{a: {$gt: 4}}", "{a: [5]}", true, "{a: [5]}");
 
-    TEST(ProjectionExecTest, TransformSliceSkipLimit) {
-        // Valid $slice projections using format {$slice: [skip, limit]}.
-        // Non-positive limits are rejected at the query parser and therefore not handled by
-        // the projection execution stage. In fact, it will abort on an invalid limit.
-        testTransform("{a: {$slice: [-10, 10]}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4, 6, 8]}");
-        testTransform("{a: {$slice: [-3, 5]}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4, 6, 8]}");
-        testTransform("{a: {$slice: [-1, 1]}}", "{}", "{a: [4, 6, 8]}", true, "{a: [8]}");
-        testTransform("{a: {$slice: [0, 2]}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4, 6]}");
-        testTransform("{a: {$slice: [0, 1]}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4]}");
-        testTransform("{a: {$slice: [1, 1]}}", "{}", "{a: [4, 6, 8]}", true, "{a: [6]}");
-        testTransform("{a: {$slice: [3, 5]}}", "{}", "{a: [4, 6, 8]}", true, "{a: []}");
-        testTransform("{a: {$slice: [10, 10]}}", "{}", "{a: [4, 6, 8]}", true, "{a: []}");
-    }
+    // Invalid position $ projections.
+    testTransform("{'a.$': 1}", "{a: {$size: 1}}", "{a: [5]}", false, "");
+}
 
-    //
-    // $meta
-    // $meta projections add computed values to the projected object.
-    //
+//
+// $elemMatch
+//
 
-    TEST(ProjectionExecTest, TransformMetaTextScore) {
-        // Query {} is ignored.
-        testTransform("{b: {$meta: 'textScore'}}", "{}", "{a: 'hello'}",
-                      new mongo::TextScoreComputedData(100),
-                      true, "{a: 'hello', b: 100}");
-        // Projected meta field should overwrite existing field.
-        testTransform("{b: {$meta: 'textScore'}}", "{}", "{a: 'hello', b: -1}",
-                      new mongo::TextScoreComputedData(100),
-                      true, "{a: 'hello', b: 100}");
-    }
+TEST(ProjectionExecTest, TransformElemMatch) {
+    const char* s = "{a: [{x: 1, y: 10}, {x: 1, y: 20}, {x: 2, y: 10}]}";
+
+    // Valid $elemMatch projections.
+    testTransform("{a: {$elemMatch: {x: 1}}}", "{}", s, true, "{a: [{x: 1, y: 10}]}");
+    testTransform("{a: {$elemMatch: {x: 1, y: 20}}}", "{}", s, true, "{a: [{x: 1, y: 20}]}");
+    testTransform("{a: {$elemMatch: {x: 2}}}", "{}", s, true, "{a: [{x: 2, y: 10}]}");
+    testTransform("{a: {$elemMatch: {x: 3}}}", "{}", s, true, "{}");
+
+    // $elemMatch on unknown field z
+    testTransform("{a: {$elemMatch: {z: 1}}}", "{}", s, true, "{}");
+}
+
+//
+// $slice
+//
+
+TEST(ProjectionExecTest, TransformSliceCount) {
+    // Valid $slice projections using format {$slice: count}.
+    testTransform("{a: {$slice: -10}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4, 6, 8]}");
+    testTransform("{a: {$slice: -3}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4, 6, 8]}");
+    testTransform("{a: {$slice: -1}}", "{}", "{a: [4, 6, 8]}", true, "{a: [8]}");
+    testTransform("{a: {$slice: 0}}", "{}", "{a: [4, 6, 8]}", true, "{a: []}");
+    testTransform("{a: {$slice: 1}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4]}");
+    testTransform("{a: {$slice: 3}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4, 6, 8]}");
+    testTransform("{a: {$slice: 10}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4, 6, 8]}");
+}
+
+TEST(ProjectionExecTest, TransformSliceSkipLimit) {
+    // Valid $slice projections using format {$slice: [skip, limit]}.
+    // Non-positive limits are rejected at the query parser and therefore not handled by
+    // the projection execution stage. In fact, it will abort on an invalid limit.
+    testTransform("{a: {$slice: [-10, 10]}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4, 6, 8]}");
+    testTransform("{a: {$slice: [-3, 5]}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4, 6, 8]}");
+    testTransform("{a: {$slice: [-1, 1]}}", "{}", "{a: [4, 6, 8]}", true, "{a: [8]}");
+    testTransform("{a: {$slice: [0, 2]}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4, 6]}");
+    testTransform("{a: {$slice: [0, 1]}}", "{}", "{a: [4, 6, 8]}", true, "{a: [4]}");
+    testTransform("{a: {$slice: [1, 1]}}", "{}", "{a: [4, 6, 8]}", true, "{a: [6]}");
+    testTransform("{a: {$slice: [3, 5]}}", "{}", "{a: [4, 6, 8]}", true, "{a: []}");
+    testTransform("{a: {$slice: [10, 10]}}", "{}", "{a: [4, 6, 8]}", true, "{a: []}");
+}
+
+//
+// $meta
+// $meta projections add computed values to the projected object.
+//
+
+TEST(ProjectionExecTest, TransformMetaTextScore) {
+    // Query {} is ignored.
+    testTransform("{b: {$meta: 'textScore'}}",
+                  "{}",
+                  "{a: 'hello'}",
+                  new mongo::TextScoreComputedData(100),
+                  true,
+                  "{a: 'hello', b: 100}");
+    // Projected meta field should overwrite existing field.
+    testTransform("{b: {$meta: 'textScore'}}",
+                  "{}",
+                  "{a: 'hello', b: -1}",
+                  new mongo::TextScoreComputedData(100),
+                  true,
+                  "{a: 'hello', b: 100}");
+}
+
+TEST(ProjectionExecTest, TransformMetaSortKey) {
+    testTransform("{b: {$meta: 'sortKey'}}",
+                  "{}",
+                  "{a: 'hello'}",
+                  new mongo::SortKeyComputedData(BSON("" << 99)),
+                  true,
+                  "{a: 'hello', b: {'': 99}}");
+
+    // Projected meta field should overwrite existing field.
+    testTransform("{a: {$meta: 'sortKey'}}",
+                  "{}",
+                  "{a: 'hello'}",
+                  new mongo::SortKeyComputedData(BSON("" << 99)),
+                  true,
+                  "{a: {'': 99}}");
+}
+
+TEST(ProjectionExecTest, TransformMetaSortKeyCoveredNormal) {
+    BSONObj actualOut =
+        transformMetaSortKeyCovered(BSON("" << 5),
+                                    "{_id: 0, a: 1, b: {$meta: 'sortKey'}}",
+                                    IndexKeyDatum(BSON("a" << 1), BSON("" << 5), nullptr));
+    BSONObj expectedOut = BSON("a" << 5 << "b" << BSON("" << 5));
+    ASSERT_EQ(actualOut, expectedOut);
+}
+
+TEST(ProjectionExecTest, TransformMetaSortKeyCoveredOverwrite) {
+    BSONObj actualOut =
+        transformMetaSortKeyCovered(BSON("" << 5),
+                                    "{_id: 0, a: 1, a: {$meta: 'sortKey'}}",
+                                    IndexKeyDatum(BSON("a" << 1), BSON("" << 5), nullptr));
+    BSONObj expectedOut = BSON("a" << BSON("" << 5));
+    ASSERT_EQ(actualOut, expectedOut);
+}
+
+TEST(ProjectionExecTest, TransformMetaSortKeyCoveredAdditionalData) {
+    BSONObj actualOut = transformMetaSortKeyCovered(
+        BSON("" << 5),
+        "{_id: 0, a: 1, b: {$meta: 'sortKey'}, c: 1}",
+        IndexKeyDatum(BSON("a" << 1 << "c" << 1), BSON("" << 5 << "" << 6), nullptr));
+    BSONObj expectedOut = BSON("a" << 5 << "c" << 6 << "b" << BSON("" << 5));
+    ASSERT_EQ(actualOut, expectedOut);
+}
+
+TEST(ProjectionExecTest, TransformMetaSortKeyCoveredCompound) {
+    BSONObj actualOut = transformMetaSortKeyCovered(
+        BSON("" << 5 << "" << 6),
+        "{_id: 0, a: 1, b: {$meta: 'sortKey'}}",
+        IndexKeyDatum(BSON("a" << 1 << "c" << 1), BSON("" << 5 << "" << 6), nullptr));
+    BSONObj expectedOut = BSON("a" << 5 << "b" << BSON("" << 5 << "" << 6));
+    ASSERT_EQ(actualOut, expectedOut);
+}
+
+TEST(ProjectionExecTest, TransformMetaSortKeyCoveredCompound2) {
+    BSONObj actualOut = transformMetaSortKeyCovered(
+        BSON("" << 5 << "" << 6),
+        "{_id: 0, a: 1, c: 1, b: {$meta: 'sortKey'}}",
+        IndexKeyDatum(
+            BSON("a" << 1 << "b" << 1 << "c" << 1), BSON("" << 5 << "" << 6 << "" << 4), nullptr));
+    BSONObj expectedOut = BSON("a" << 5 << "c" << 4 << "b" << BSON("" << 5 << "" << 6));
+    ASSERT_EQ(actualOut, expectedOut);
+}
+
+TEST(ProjectionExecTest, TransformMetaSortKeyCoveredCompound3) {
+    BSONObj actualOut = transformMetaSortKeyCovered(
+        BSON("" << 6 << "" << 4),
+        "{_id: 0, c: 1, d: 1, b: {$meta: 'sortKey'}}",
+        IndexKeyDatum(BSON("a" << 1 << "b" << 1 << "c" << 1 << "d" << 1),
+                      BSON("" << 5 << "" << 6 << "" << 4 << "" << 9000),
+                      nullptr));
+    BSONObj expectedOut = BSON("c" << 4 << "d" << 9000 << "b" << BSON("" << 6 << "" << 4));
+    ASSERT_EQ(actualOut, expectedOut);
+}
 
 }  // namespace

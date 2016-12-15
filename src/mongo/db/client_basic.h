@@ -28,58 +28,65 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
+#include <memory>
 
+#include "mongo/base/disallow_copying.h"
+#include "mongo/util/decorable.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/message_port.h"
 
 namespace mongo {
 
-    class AuthenticationInfo;
-    class AuthenticationSession;
-    class AuthorizationSession;
+class ServiceContext;
+
+/**
+ * this is the base class for Client and ClientInfo
+ * Client is for mongod
+ * ClientInfo is for mongos
+ * They should converge slowly
+ * The idea is this has the basic api so that not all code has to be duplicated
+ */
+class ClientBasic : public Decorable<ClientBasic> {
+    MONGO_DISALLOW_COPYING(ClientBasic);
+
+public:
+    bool getIsLocalHostConnection() {
+        if (!hasRemote()) {
+            return false;
+        }
+        return getRemote().isLocalHost();
+    }
+
+    bool hasRemote() const {
+        return _messagingPort;
+    }
+    HostAndPort getRemote() const {
+        verify(_messagingPort);
+        return _messagingPort->remote();
+    }
 
     /**
-     * this is the base class for Client and ClientInfo
-     * Client is for mongod
-     * ClientInfo is for mongos
-     * They should converge slowly
-     * The idea is this has the basic api so that not all code has to be duplicated
+     * Returns the ServiceContext that owns this client session context.
      */
-    class ClientBasic : boost::noncopyable {
-    public:
-        virtual ~ClientBasic();
-        AuthenticationSession* getAuthenticationSession();
-        void resetAuthenticationSession(AuthenticationSession* newSession);
-        void swapAuthenticationSession(boost::scoped_ptr<AuthenticationSession>& other);
+    ServiceContext* getServiceContext() const {
+        return _serviceContext;
+    }
 
-        bool hasAuthorizationSession() const;
-        AuthorizationSession* getAuthorizationSession() const;
-        void setAuthorizationSession(AuthorizationSession* authorizationSession);
+    /**
+     * Returns the AbstractMessagePort to which this client session is bound, if any.
+     */
+    AbstractMessagingPort* port() const {
+        return _messagingPort;
+    }
 
-        bool getIsLocalHostConnection() {
-            if (!hasRemote()) {
-                return false;
-            }
-            return getRemote().isLocalHost();
-        }
+    static ClientBasic* getCurrent();
 
-        virtual bool hasRemote() const { return _messagingPort; }
-        virtual HostAndPort getRemote() const {
-            verify( _messagingPort );
-            return _messagingPort->remote();
-        }
-        AbstractMessagingPort * port() const { return _messagingPort; }
+protected:
+    ClientBasic(ServiceContext* serviceContext, AbstractMessagingPort* messagingPort);
+    ~ClientBasic();
 
-        static ClientBasic* getCurrent();
-        static bool hasCurrent();
-
-    protected:
-        ClientBasic(AbstractMessagingPort* messagingPort);
-
-    private:
-        boost::scoped_ptr<AuthenticationSession> _authenticationSession;
-        boost::scoped_ptr<AuthorizationSession> _authorizationSession;
-        AbstractMessagingPort* const _messagingPort;
-    };
+private:
+    ServiceContext* const _serviceContext;
+    AbstractMessagingPort* const _messagingPort;
+};
 }

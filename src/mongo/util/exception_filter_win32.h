@@ -30,6 +30,8 @@
 
 namespace mongo {
 
-    void setWindowsUnhandledExceptionFilter();
+void setWindowsUnhandledExceptionFilter();
 
-} // namespace mongo
+void doMinidump();
+
+}  // namespace mongo

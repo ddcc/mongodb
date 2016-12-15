@@ -29,8 +29,8 @@
 #pragma once
 
 /*
- * This file's purpose is to confine the suppression of the Clang warning for mismatched-tags (struct vs class)
- * in only the s2.h file
+ * This file's purpose is to confine the suppression of the Clang warning for
+ * mismatched-tags (struct vs class) in only the s2.h file
  */
 
 #ifdef __clang__
@@ -42,4 +42,3 @@
 #ifdef __clang__
 #pragma GCC diagnostic pop
 #endif
-

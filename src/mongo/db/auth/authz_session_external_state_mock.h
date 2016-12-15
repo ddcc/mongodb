@@ -35,28 +35,45 @@
 
 namespace mongo {
 
-    /**
-     * Mock of the AuthzSessionExternalState class used only for testing.
-     */
-    class AuthzSessionExternalStateMock : public AuthzSessionExternalState {
-        MONGO_DISALLOW_COPYING(AuthzSessionExternalStateMock);
+/**
+ * Mock of the AuthzSessionExternalState class used only for testing.
+ */
+class AuthzSessionExternalStateMock : public AuthzSessionExternalState {
+    MONGO_DISALLOW_COPYING(AuthzSessionExternalStateMock);
 
-    public:
-        AuthzSessionExternalStateMock(AuthorizationManager* authzManager) :
-            AuthzSessionExternalState(authzManager), _returnValue(false) {}
+public:
+    AuthzSessionExternalStateMock(AuthorizationManager* authzManager)
+        : AuthzSessionExternalState(authzManager),
+          _ignoreAuthChecksReturnValue(false),
+          _allowLocalhostReturnValue(false),
+          _serverIsArbiterReturnValue(false) {}
 
-        virtual bool shouldIgnoreAuthChecks() const {
-            return _returnValue;
-        }
+    virtual bool shouldIgnoreAuthChecks() const {
+        return _ignoreAuthChecksReturnValue;
+    }
 
-        void setReturnValueForShouldIgnoreAuthChecks(bool returnValue) {
-            _returnValue = returnValue;
-        }
+    virtual bool shouldAllowLocalhost() const {
+        return _allowLocalhostReturnValue;
+    }
 
-        virtual void startRequest() {}
+    virtual bool serverIsArbiter() const {
+        return _serverIsArbiterReturnValue;
+    }
 
-    private:
-        bool _returnValue;
-    };
+    void setReturnValueForShouldIgnoreAuthChecks(bool returnValue) {
+        _ignoreAuthChecksReturnValue = returnValue;
+    }
 
-} // namespace mongo
+    void setReturnValueForShouldAllowLocalhost(bool returnValue) {
+        _allowLocalhostReturnValue = returnValue;
+    }
+
+    virtual void startRequest(OperationContext* txn) {}
+
+private:
+    bool _ignoreAuthChecksReturnValue;
+    bool _allowLocalhostReturnValue;
+    bool _serverIsArbiterReturnValue;
+};
+
+}  // namespace mongo

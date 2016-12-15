@@ -1,18 +1,28 @@
-// parallel.h
-
 /*    Copyright 2009 10gen Inc.
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *    This program is free software: you can redistribute it and/or  modify
+ *    it under the terms of the GNU Affero General Public License, version 3,
+ *    as published by the Free Software Foundation.
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *    You should have received a copy of the GNU Affero General Public License
+ *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 /**
@@ -21,349 +31,237 @@
 
 #pragma once
 
-#include "mongo/client/export_macros.h"
-#include "mongo/db/dbmessage.h"
-#include "mongo/db/matcher.h"
+
 #include "mongo/db/namespace_string.h"
-#include "mongo/s/shard.h"
-#include "mongo/s/stale_exception.h"  // for StaleConfigException
-#include "mongo/util/concurrency/mvar.h"
+#include "mongo/s/client/shard.h"
+#include "mongo/s/client/shard_connection.h"
 
 namespace mongo {
 
-    /**
-     * holder for a server address and a query to run
-     */
-    class MONGO_CLIENT_API ServerAndQuery {
-    public:
-        ServerAndQuery( const string& server , BSONObj extra = BSONObj() , BSONObj orderObject = BSONObj() ) :
-            _server( server ) , _extra( extra.getOwned() ) , _orderObject( orderObject.getOwned() ) {
-        }
+class DBClientCursorHolder;
+class OperationContext;
+class StaleConfigException;
+class ParallelConnectionMetadata;
 
-        bool operator<( const ServerAndQuery& other ) const {
-            if ( ! _orderObject.isEmpty() )
-                return _orderObject.woCompare( other._orderObject ) < 0;
 
-            if ( _server < other._server )
-                return true;
-            if ( other._server > _server )
-                return false;
-            return _extra.woCompare( other._extra ) < 0;
-        }
+class CommandInfo {
+public:
+    std::string versionedNS;
+    BSONObj cmdFilter;
 
-        string toString() const {
-            StringBuilder ss;
-            ss << "server:" << _server << " _extra:" << _extra.toString() << " _orderObject:" << _orderObject.toString();
-            return ss.str();
-        }
+    CommandInfo() {}
+    CommandInfo(const std::string& vns, const BSONObj& filter)
+        : versionedNS(vns), cmdFilter(filter) {}
 
-        operator string() const {
-            return toString();
-        }
+    bool isEmpty() {
+        return versionedNS.size() == 0;
+    }
 
-        string _server;
-        BSONObj _extra;
-        BSONObj _orderObject;
-    };
+    std::string toString() const {
+        return str::stream() << "CInfo " << BSON("v_ns" << versionedNS << "filter" << cmdFilter);
+    }
+};
 
-    class ParallelConnectionMetadata;
-    class FilteringClientCursor;
+class DBClientCursor;
+typedef std::shared_ptr<DBClientCursor> DBClientCursorPtr;
 
-    class MONGO_CLIENT_API CommandInfo {
-    public:
-        string versionedNS;
-        BSONObj cmdFilter;
+class ParallelConnectionState {
+public:
+    ParallelConnectionState() : count(0), done(false) {}
 
-        CommandInfo() {}
-        CommandInfo( const string& vns, const BSONObj& filter ) : versionedNS( vns ), cmdFilter( filter ) {}
+    // Please do not reorder. cursor destructor can use conn.
+    // On a related note, never attempt to cleanup these pointers manually.
+    ShardConnectionPtr conn;
+    DBClientCursorPtr cursor;
 
-        bool isEmpty(){
-            return versionedNS.size() == 0;
-        }
+    // Version information
+    ChunkManagerPtr manager;
+    std::shared_ptr<Shard> primary;
 
-        string toString() const {
-            return str::stream() << "CInfo " << BSON( "v_ns" << versionedNS << "filter" << cmdFilter );
-        }
-    };
+    // Cursor status information
+    long long count;
+    bool done;
 
-    typedef shared_ptr<ShardConnection> ShardConnectionPtr;
+    BSONObj toBSON() const;
 
-    class DBClientCursor;
-    typedef shared_ptr<DBClientCursor> DBClientCursorPtr;
+    std::string toString() const {
+        return str::stream() << "PCState : " << toBSON();
+    }
+};
 
-    class MONGO_CLIENT_API ParallelConnectionState {
-    public:
+typedef ParallelConnectionState PCState;
+typedef std::shared_ptr<PCState> PCStatePtr;
 
-        ParallelConnectionState() :
-            count( 0 ), done( false ) { }
+class ParallelConnectionMetadata {
+public:
+    ParallelConnectionMetadata()
+        : retryNext(false), initialized(false), finished(false), completed(false), errored(false) {}
 
-        // Please do not reorder. cursor destructor can use conn.
-        // On a related note, never attempt to cleanup these pointers manually.
-        ShardConnectionPtr conn;
-        DBClientCursorPtr cursor;
+    ~ParallelConnectionMetadata() {
+        cleanup(true);
+    }
 
-        // Version information
-        ChunkManagerPtr manager;
-        ShardPtr primary;
+    void cleanup(bool full = true);
 
-        // Cursor status information
-        long long count;
-        bool done;
+    PCStatePtr pcState;
 
-        BSONObj toBSON() const;
+    bool retryNext;
 
-        string toString() const {
-            return str::stream() << "PCState : " << toBSON();
-        }
-    };
+    bool initialized;
+    bool finished;
+    bool completed;
 
-    typedef ParallelConnectionState PCState;
-    typedef shared_ptr<PCState> PCStatePtr;
+    bool errored;
 
-    class MONGO_CLIENT_API ParallelConnectionMetadata {
-    public:
+    BSONObj toBSON() const;
 
-        ParallelConnectionMetadata() :
-            retryNext( false ), initialized( false ), finished( false ), completed( false ), errored( false ) { }
+    std::string toString() const {
+        return str::stream() << "PCMData : " << toBSON();
+    }
+};
 
-        ~ParallelConnectionMetadata(){
-            cleanup( true );
-        }
+typedef ParallelConnectionMetadata PCMData;
+typedef std::shared_ptr<PCMData> PCMDataPtr;
 
-        void cleanup( bool full = true );
+/**
+ * Runs a query in parallel across N servers, enforcing compatible chunk versions for queries
+ * across all shards.
+ *
+ * If CommandInfo is provided, the ParallelCursor does not use the direct .$cmd namespace in the
+ * query spec, but instead enforces versions across another namespace specified by CommandInfo.
+ * This is to support commands like:
+ * db.runCommand({ fileMD5 : "<coll name>" })
+ *
+ * There is a deprecated legacy mode as well which effectively does a merge-sort across a number
+ * of servers, but does not correctly enforce versioning (used only in mapreduce).
+ */
+class ParallelSortClusteredCursor {
+public:
+    ParallelSortClusteredCursor(const QuerySpec& qSpec, const CommandInfo& cInfo = CommandInfo());
 
-        PCStatePtr pcState;
+    // DEPRECATED legacy constructor for pure mergesort functionality - do not use
+    ParallelSortClusteredCursor(const std::set<std::string>& servers,
+                                const std::string& ns,
+                                const Query& q,
+                                int options = 0,
+                                const BSONObj& fields = BSONObj());
 
-        bool retryNext;
+    ~ParallelSortClusteredCursor();
 
-        bool initialized;
-        bool finished;
-        bool completed;
+    /** call before using */
+    void init(OperationContext* txn);
 
-        bool errored;
-
-        BSONObj toBSON() const;
-
-        string toString() const {
-            return str::stream() << "PCMData : " << toBSON();
-        }
-    };
-
-    typedef ParallelConnectionMetadata PCMData;
-    typedef shared_ptr<PCMData> PCMDataPtr;
+    bool more();
+    BSONObj next();
 
     /**
-     * Runs a query in parallel across N servers, enforcing compatible chunk versions for queries
-     * across all shards.
-     *
-     * If CommandInfo is provided, the ParallelCursor does not use the direct .$cmd namespace in the
-     * query spec, but instead enforces versions across another namespace specified by CommandInfo.
-     * This is to support commands like:
-     * db.runCommand({ fileMD5 : "<coll name>" })
-     *
-     * There is a deprecated legacy mode as well which effectively does a merge-sort across a number
-     * of servers, but does not correctly enforce versioning (used only in mapreduce).
+     * Returns the set of shards with open cursors.
      */
-    class MONGO_CLIENT_API ParallelSortClusteredCursor {
-    public:
+    void getQueryShardIds(std::set<ShardId>& shardIds);
 
-        ParallelSortClusteredCursor( const QuerySpec& qSpec, const CommandInfo& cInfo = CommandInfo() );
+    DBClientCursorPtr getShardCursor(const ShardId& shardId);
 
-        // DEPRECATED legacy constructor for pure mergesort functionality - do not use
-        ParallelSortClusteredCursor( const set<ServerAndQuery>& servers , const string& ns ,
-                                     const Query& q , int options=0, const BSONObj& fields=BSONObj() );
+private:
+    void fullInit(OperationContext* txn);
+    void startInit(OperationContext* txn);
+    void finishInit(OperationContext* txn);
 
-        ~ParallelSortClusteredCursor();
+    bool isCommand() {
+        return NamespaceString(_qSpec.ns()).isCommand();
+    }
 
-        std::string getNS();
+    void _finishCons();
 
-        /** call before using */
-        void init();
+    void _markStaleNS(const NamespaceString& staleNS,
+                      const StaleConfigException& e,
+                      bool& forceReload,
+                      bool& fullReload);
+    void _handleStaleNS(OperationContext* txn,
+                        const NamespaceString& staleNS,
+                        bool forceReload,
+                        bool fullReload);
 
-        bool more();
-        BSONObj next();
-        string type() const { return "ParallelSort"; }
+    bool _didInit;
+    bool _done;
 
-        void fullInit();
-        void startInit();
-        void finishInit();
+    QuerySpec _qSpec;
+    CommandInfo _cInfo;
 
-        bool isCommand(){ return NamespaceString( _qSpec.ns() ).isCommand(); }
-        bool isExplain(){ return _qSpec.isExplain(); }
-        bool isVersioned(){ return _qShards.size() == 0; }
+    // Count round-trips req'd for namespaces and total
+    std::map<std::string, int> _staleNSMap;
 
-        /**
-         * Sets the batch size on all underlying cursors to 'newBatchSize'.
-         */
-        void setBatchSize(int newBatchSize);
+    int _totalTries;
+    bool _cmChangeAttempted;
 
-        bool isSharded();
-        ShardPtr getPrimary();
-        void getQueryShards( set<Shard>& shards );
-        ChunkManagerPtr getChunkManager( const Shard& shard );
-        DBClientCursorPtr getShardCursor( const Shard& shard );
+    std::map<ShardId, PCMData> _cursorMap;
 
-        BSONObj toBSON() const;
-        string toString() const;
+    // LEGACY BELOW
+    int _numServers;
+    int _lastFrom;
+    std::set<std::string> _servers;
+    BSONObj _sortKey;
 
-        void explain(BSONObjBuilder& b);
-
-    private:
-        void _finishCons();
-
-        void _explain( map< string,list<BSONObj> >& out );
-
-        void _markStaleNS( const NamespaceString& staleNS, const StaleConfigException& e, bool& forceReload, bool& fullReload );
-        void _handleStaleNS( const NamespaceString& staleNS, bool forceReload, bool fullReload );
-
-        bool _didInit;
-        bool _done;
-
-        set<Shard> _qShards;
-        QuerySpec _qSpec;
-        CommandInfo _cInfo;
-
-        // Count round-trips req'd for namespaces and total
-        map<string,int> _staleNSMap;
-        int _totalTries;
-
-        map<Shard,PCMData> _cursorMap;
-
-        // LEGACY BELOW
-        int _numServers;
-        int _lastFrom;
-        set<ServerAndQuery> _servers;
-        BSONObj _sortKey;
-
-        FilteringClientCursor * _cursors;
-        int _needToSkip;
-
-        /**
-         * Setups the shard version of the connection. When using a replica
-         * set connection and the primary cannot be reached, the version
-         * will not be set if the slaveOk flag is set.
-         */
-        void setupVersionAndHandleSlaveOk( PCStatePtr state /* in & out */,
-                           const Shard& shard,
-                           ShardPtr primary /* in */,
-                           const NamespaceString& ns,
-                           const std::string& vinfo,
-                           ChunkManagerPtr manager /* in */ );
-
-        // LEGACY init - Needed for map reduce
-        void _oldInit();
-
-        // LEGACY - Needed ONLY for _oldInit
-        string _ns;
-        BSONObj _query;
-        int _options;
-        BSONObj _fields;
-        int _batchSize;
-    };
-
-
-    // TODO:  We probably don't really need this as a separate class.
-    class MONGO_CLIENT_API FilteringClientCursor {
-    public:
-        FilteringClientCursor( const BSONObj filter = BSONObj() );
-        FilteringClientCursor( DBClientCursor* cursor , const BSONObj filter = BSONObj() );
-        FilteringClientCursor( auto_ptr<DBClientCursor> cursor , const BSONObj filter = BSONObj() );
-        ~FilteringClientCursor();
-
-        void reset( auto_ptr<DBClientCursor> cursor );
-        void reset( DBClientCursor* cursor, ParallelConnectionMetadata* _pcmData = NULL );
-
-        bool more();
-        BSONObj next();
-
-        BSONObj peek();
-
-        void setBatchSize(int newBatchSize) { _cursor->setBatchSize(newBatchSize); }
-
-        DBClientCursor* raw() { return _cursor.get(); }
-        ParallelConnectionMetadata* rawMData(){ return _pcmData; }
-
-        // Required for new PCursor
-        void release(){
-            _cursor.release();
-            _pcmData = NULL;
-        }
-
-    private:
-        void _advance();
-
-        Matcher _matcher;
-        auto_ptr<DBClientCursor> _cursor;
-        ParallelConnectionMetadata* _pcmData;
-
-        BSONObj _next;
-        bool _done;
-    };
+    DBClientCursorHolder* _cursors;
+    int _needToSkip;
 
     /**
-     * Generally clients should be using Strategy::commandOp() wherever possible - the Future API
-     * does not handle versioning.
-     *
-     * tools for doing asynchronous operations
-     * right now uses underlying sync network ops and uses another thread
-     * should be changed to use non-blocking io
+     * Setups the shard version of the connection. When using a replica
+     * set connection and the primary cannot be reached, the version
+     * will not be set if the slaveOk flag is set.
      */
-    class MONGO_CLIENT_API Future {
-    public:
-        class CommandResult {
-        public:
+    void setupVersionAndHandleSlaveOk(OperationContext* txn,
+                                      PCStatePtr state /* in & out */,
+                                      const ShardId& shardId,
+                                      std::shared_ptr<Shard> primary /* in */,
+                                      const NamespaceString& ns,
+                                      const std::string& vinfo,
+                                      ChunkManagerPtr manager /* in */);
 
-            string getServer() const { return _server; }
+    // LEGACY init - Needed for map reduce
+    void _oldInit();
 
-            bool isDone() const { return _done; }
-
-            bool ok() const {
-                verify( _done );
-                return _ok;
-            }
-
-            BSONObj result() const {
-                verify( _done );
-                return _res;
-            }
-
-            /**
-               blocks until command is done
-               returns ok()
-             */
-            bool join( int maxRetries = 1 );
-
-        private:
-
-            CommandResult( const string& server , const string& db , const BSONObj& cmd , int options , DBClientBase * conn );
-            void init();
-
-            string _server;
-            string _db;
-            int _options;
-            BSONObj _cmd;
-            DBClientBase * _conn;
-            scoped_ptr<ScopedDbConnection> _connHolder; // used if not provided a connection
-
-            scoped_ptr<DBClientCursor> _cursor;
-
-            BSONObj _res;
-            bool _ok;
-            bool _done;
-
-            friend class Future;
-        };
+    // LEGACY - Needed ONLY for _oldInit
+    std::string _ns;
+    BSONObj _query;
+    int _options;
+    BSONObj _fields;
+    int _batchSize;
+};
 
 
-        /**
-         * @param server server name
-         * @param db db name
-         * @param cmd cmd to exec
-         * @param conn optional connection to use.  will use standard pooled if non-specified
-         */
-        static shared_ptr<CommandResult> spawnCommand( const string& server , const string& db , const BSONObj& cmd , int options , DBClientBase * conn = 0 );
-    };
+/**
+ * Helper class to manage ownership of opened cursors while merging results.
+ *
+ * TODO:  Choose one set of ownership semantics so that this isn't needed - merge sort via
+ * mapreduce is the main issue since it has no metadata and this holder owns the cursors.
+ */
+class DBClientCursorHolder {
+public:
+    DBClientCursorHolder() {}
+    ~DBClientCursorHolder() {}
 
+    void reset(DBClientCursor* cursor, ParallelConnectionMetadata* pcmData) {
+        _cursor.reset(cursor);
+        _pcmData.reset(pcmData);
+    }
 
-}
+    DBClientCursor* get() {
+        return _cursor.get();
+    }
+    ParallelConnectionMetadata* getMData() {
+        return _pcmData.get();
+    }
 
+    void release() {
+        _cursor.release();
+        _pcmData.release();
+    }
+
+private:
+    std::unique_ptr<DBClientCursor> _cursor;
+    std::unique_ptr<ParallelConnectionMetadata> _pcmData;
+};
+
+void throwCursorStale(DBClientCursor* cursor);
+
+}  // namespace mongo

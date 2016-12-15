@@ -26,50 +26,47 @@
  *    it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/conn_pool_options.h"
 
 #include "mongo/base/init.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/client/connpool.h"
-#include "mongo/s/shard.h"
+#include "mongo/client/global_conn_pool.h"
+#include "mongo/db/server_parameters.h"
+#include "mongo/s/client/shard_connection.h"
 
 namespace mongo {
 
-    int ConnPoolOptions::maxConnsPerHost(200);
-    int ConnPoolOptions::maxShardedConnsPerHost(200);
+int ConnPoolOptions::maxConnsPerHost(200);
+int ConnPoolOptions::maxShardedConnsPerHost(200);
 
-    namespace {
+namespace {
 
-        ExportedServerParameter<int> //
-        maxConnsPerHostParameter(ServerParameterSet::getGlobal(),
-                                 "connPoolMaxConnsPerHost",
-                                 &ConnPoolOptions::maxConnsPerHost,
-                                 true,
-                                 false /* can't change at runtime */);
+ExportedServerParameter<int, ServerParameterType::kStartupOnly>  //
+    maxConnsPerHostParameter(ServerParameterSet::getGlobal(),
+                             "connPoolMaxConnsPerHost",
+                             &ConnPoolOptions::maxConnsPerHost);
 
-        ExportedServerParameter<int> //
-        maxShardedConnsPerHostParameter(ServerParameterSet::getGlobal(),
-                                        "connPoolMaxShardedConnsPerHost",
-                                        &ConnPoolOptions::maxShardedConnsPerHost,
-                                        true,
-                                        false /* can't change at runtime */);
+ExportedServerParameter<int, ServerParameterType::kStartupOnly>  //
+    maxShardedConnsPerHostParameter(ServerParameterSet::getGlobal(),
+                                    "connPoolMaxShardedConnsPerHost",
+                                    &ConnPoolOptions::maxShardedConnsPerHost);
 
-        MONGO_INITIALIZER(InitializeConnectionPools)(InitializerContext* context) {
+MONGO_INITIALIZER(InitializeConnectionPools)(InitializerContext* context) {
+    // Initialize the sharded and unsharded outgoing connection pools
+    // NOTES:
+    // - All mongods and mongoses have both pools
+    // - The connection hooks for sharding are added on startup (mongos) or on first sharded
+    //   operation (mongod)
 
-            // Initialize the sharded and unsharded outgoing connection pools
-            // NOTES:
-            // - All mongods and mongoses have both pools
-            // - The connection hooks for sharding are added on startup (mongos) or on first sharded
-            //   operation (mongod)
+    globalConnPool.setName("connection pool");
+    globalConnPool.setMaxPoolSize(ConnPoolOptions::maxConnsPerHost);
 
-            pool.setName("connection pool");
-            pool.setMaxPoolSize(ConnPoolOptions::maxConnsPerHost);
+    shardConnectionPool.setName("sharded connection pool");
+    shardConnectionPool.setMaxPoolSize(ConnPoolOptions::maxShardedConnsPerHost);
 
-            shardConnectionPool.setName("sharded connection pool");
-            shardConnectionPool.setMaxPoolSize(ConnPoolOptions::maxShardedConnsPerHost);
-
-            return Status::OK();
-        }
-    }
-
+    return Status::OK();
+}
+}
 }

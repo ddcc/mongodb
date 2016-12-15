@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2013-2014 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -28,63 +28,79 @@
 
 #pragma once
 
-#include "mongo/db/diskloc.h"
+#include <memory>
+
 #include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/matcher/expression.h"
-#include "mongo/db/structure/collection_iterator.h"
+#include "mongo/db/record_id.h"
 
 namespace mongo {
 
-    class WorkingSet;
+class SeekableRecordCursor;
+class WorkingSet;
+class OperationContext;
 
+/**
+ * Scans over a collection, starting at the RecordId provided in params and continuing until
+ * there are no more records in the collection.
+ *
+ * Preconditions: Valid RecordId.
+ */
+class CollectionScan final : public PlanStage {
+public:
+    CollectionScan(OperationContext* txn,
+                   const CollectionScanParams& params,
+                   WorkingSet* workingSet,
+                   const MatchExpression* filter);
+
+    StageState work(WorkingSetID* out) final;
+    bool isEOF() final;
+
+    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
+    void doSaveState() final;
+    void doRestoreState() final;
+    void doDetachFromOperationContext() final;
+    void doReattachToOperationContext() final;
+
+    StageType stageType() const final {
+        return STAGE_COLLSCAN;
+    }
+
+    std::unique_ptr<PlanStageStats> getStats() final;
+
+    const SpecificStats* getSpecificStats() const final;
+
+    static const char* kStageType;
+
+private:
     /**
-     * Scans over a collection, starting at the DiskLoc provided in params and continuing until
-     * there are no more records in the collection.
-     *
-     * Preconditions: Valid DiskLoc.
+     * If the member (with id memberID) passes our filter, set *out to memberID and return that
+     * ADVANCED.  Otherwise, free memberID and return NEED_TIME.
      */
-    class CollectionScan : public PlanStage {
-    public:
-        CollectionScan(const CollectionScanParams& params,
-                       WorkingSet* workingSet,
-                       const MatchExpression* filter);
+    StageState returnIfMatches(WorkingSetMember* member, WorkingSetID memberID, WorkingSetID* out);
 
-        virtual StageState work(WorkingSetID* out);
-        virtual bool isEOF();
+    // WorkingSet is not owned by us.
+    WorkingSet* _workingSet;
 
-        virtual void invalidate(const DiskLoc& dl, InvalidationType type);
-        virtual void prepareToYield();
-        virtual void recoverFromYield();
+    // The filter is not owned by us.
+    const MatchExpression* _filter;
 
-        virtual PlanStageStats* getStats();
+    std::unique_ptr<SeekableRecordCursor> _cursor;
 
-    private:
-        /**
-         * Returns true if the record 'loc' references is in memory, false otherwise.
-         */
-        static bool diskLocInMemory(DiskLoc loc);
+    CollectionScanParams _params;
 
-        // WorkingSet is not owned by us.
-        WorkingSet* _workingSet;
+    bool _isDead;
 
-        // The filter is not owned by us.
-        const MatchExpression* _filter;
+    RecordId _lastSeenId;  // Null if nothing has been returned from _cursor yet.
 
-        scoped_ptr<CollectionIterator> _iter;
+    // We allocate a working set member with this id on construction of the stage. It gets used for
+    // all fetch requests. This should only be used for passing up the Fetcher for a NEED_YIELD, and
+    // should remain in the INVALID state.
+    const WorkingSetID _wsidForFetch;
 
-        CollectionScanParams _params;
-
-        bool _isDead;
-
-        // If we want to return a DiskLoc and it points at something that's not in memory, we return
-        // a a "please page this in" result.  We allocate one WSM for this purpose at construction
-        // and reuse it for any future fetch requests, changing the DiskLoc as appropriate.
-        WorkingSetID _wsidForFetch;
-
-        // Stats
-        CommonStats _commonStats;
-        CollectionScanStats _specificStats;
-    };
+    // Stats
+    CollectionScanStats _specificStats;
+};
 
 }  // namespace mongo

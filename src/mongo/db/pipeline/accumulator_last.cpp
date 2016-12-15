@@ -26,37 +26,41 @@
  * it in the license file.
  */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/value.h"
 
 namespace mongo {
 
-    void AccumulatorLast::processInternal(const Value& input, bool merging) {
-        /* always remember the last value seen */
-        _last = input;
-        _memUsageBytes = sizeof(*this) + _last.getApproximateSize() - sizeof(Value);
-    }
+using boost::intrusive_ptr;
 
-    Value AccumulatorLast::getValue(bool toBeMerged) const {
-        return _last;
-    }
+REGISTER_ACCUMULATOR(last, AccumulatorLast::create);
 
-    AccumulatorLast::AccumulatorLast() {
-        _memUsageBytes = sizeof(*this);
-    }
+const char* AccumulatorLast::getOpName() const {
+    return "$last";
+}
 
-    void AccumulatorLast::reset() {
-        _memUsageBytes = sizeof(*this);
-        _last = Value();
-    }
+void AccumulatorLast::processInternal(const Value& input, bool merging) {
+    /* always remember the last value seen */
+    _last = input;
+    _memUsageBytes = sizeof(*this) + _last.getApproximateSize() - sizeof(Value);
+}
 
-    intrusive_ptr<Accumulator> AccumulatorLast::create() {
-        return new AccumulatorLast();
-    }
+Value AccumulatorLast::getValue(bool toBeMerged) const {
+    return _last;
+}
 
-    const char *AccumulatorLast::getOpName() const {
-        return "$last";
-    }
+AccumulatorLast::AccumulatorLast() {
+    _memUsageBytes = sizeof(*this);
+}
+
+void AccumulatorLast::reset() {
+    _memUsageBytes = sizeof(*this);
+    _last = Value();
+}
+
+intrusive_ptr<Accumulator> AccumulatorLast::create() {
+    return new AccumulatorLast();
+}
 }

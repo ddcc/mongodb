@@ -1,73 +1,39 @@
+// Ensure that multi-update operations yield regularly.
+(function() {
+    'use strict';
 
-load( "jstests/libs/slow_weekly_util.js" );
-var testServer = new SlowWeeklyMongod( "update_yield1" );
-var db = testServer.getDB( "test" );
-testServer.getDB("admin").runCommand( {setParameter:1, ttlMonitorEnabled : false} );
+    var explain;
+    var yieldCount;
 
-var t = db.update_yield1;
-t.drop();
+    const nDocsToInsert = 300;
+    const worksPerYield = 50;
 
-var N = 640000;
-var i = 0;
+    // Start a mongod that will yield every 50 work cycles.
+    // clang-format off
+    var mongod = MongoRunner.runMongod({
+        setParameter: `internalQueryExecYieldIterations=${worksPerYield}`
+    });
+    // clang-format on
+    assert.neq(null, mongod, 'mongod was unable to start up');
 
-while ( true ){
-    var fill = function() {
-        for ( ; i<N; i++ ){
-            t.insert( { _id : i , n : 1 } );
-        }
-    };
+    var coll = mongod.getDB('test').update_yield1;
+    coll.drop();
 
-    var timeUpdate = function() {
-        return Date.timeFunc(
-            function(){
-                t.update( {} , { $inc : { n : 1 } } , false , true );
-                var r = db.getLastErrorObj();
-            }
-        );
-    };
-
-    fill();
-    timeUpdate();
-    timeUpdate();
-    var time = timeUpdate();
-    print( N + "\t" + time );
-    if ( time > 8000 )
-        break;
-
-    N *= 2;
-}
-
-function haveInProgressUpdate() {
-    var ops = db.currentOp();
-    printjson(ops);
-    return ops.inprog.some(
-        function(elt) {
-            return elt.op == "update";
-        });
-}
-
-// --- test 1
-
-var join = startParallelShell( "db.update_yield1.update( {} , { $inc : { n : 1 } } , false , true ); db.getLastError()" );
-assert.soon(haveInProgressUpdate, "never doing update");
-
-var num = 0;
-var start = new Date();
-while ( ( (new Date()).getTime() - start ) < ( time * 2 ) ){
-    var me = Date.timeFunc( function(){ t.findOne(); } );
-    if (me > 50) print("time: " + me);
-
-    if ( num++ == 0 ){
-        var x = db.currentOp();
-        assert.eq( 1 , x.inprog.length , "nothing in prog" );
+    for (var i = 0; i < nDocsToInsert; i++) {
+        assert.writeOK(coll.insert({_id: i}));
     }
 
-    assert.gt( time / 3 , me );
-}
+    // A multi-update doing a collection scan should yield about nDocsToInsert / worksPerYield
+    // times.
+    explain = coll.explain('executionStats').update({}, {$inc: {counter: 1}}, {multi: true});
+    assert.commandWorked(explain);
+    yieldCount = explain.executionStats.executionStages.saveState;
+    assert.gt(yieldCount, (nDocsToInsert / worksPerYield) - 2);
 
-join();
-
-x = db.currentOp();
-assert.eq( 0 , x.inprog.length , "weird 2" );
-
-testServer.stop();
+    // A multi-update shouldn't yield if it has $isolated.
+    explain = coll.explain('executionStats')
+                  .update({$isolated: true}, {$inc: {counter: 1}}, {multi: true});
+    assert.commandWorked(explain);
+    yieldCount = explain.executionStats.executionStages.saveState;
+    assert.eq(yieldCount, 0, 'yielded during $isolated multi-update');
+})();

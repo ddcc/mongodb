@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2008-2013 10gen Inc.
+ *    Copyright (C) 2008-2014 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -26,22 +26,24 @@
  *    it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include <vector>
 
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/curop.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/curop.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/index/haystack_access_method.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/index_access_method.h"
+#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/structure/catalog/namespace_details-inl.h"
-#include "mongo/db/pdfile.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/commands.h"
+#include "mongo/db/query/find_common.h"
 
 /**
  * Examines all documents in a given radius of a given point.
@@ -53,68 +55,89 @@
  */
 namespace mongo {
 
-    class GeoHaystackSearchCommand : public Command {
-    public:
-        GeoHaystackSearchCommand() : Command("geoSearch") {}
+using std::string;
+using std::vector;
 
-        virtual LockType locktype() const { return READ; }
-        bool slaveOk() const { return true; }
-        bool slaveOverrideOk() const { return true; }
+class GeoHaystackSearchCommand : public Command {
+public:
+    GeoHaystackSearchCommand() : Command("geoSearch") {}
 
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {
-            ActionSet actions;
-            actions.addAction(ActionType::find);
-            out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
+    virtual bool isWriteCommandForConfigServer() const {
+        return false;
+    }
+    bool slaveOk() const {
+        return true;
+    }
+    bool slaveOverrideOk() const {
+        return true;
+    }
+    bool supportsReadConcern() const final {
+        return true;
+    }
+
+    std::size_t reserveBytesForReply() const override {
+        return FindCommon::kInitReplyBufferSize;
+    }
+
+    virtual void addRequiredPrivileges(const std::string& dbname,
+                                       const BSONObj& cmdObj,
+                                       std::vector<Privilege>* out) {
+        ActionSet actions;
+        actions.addAction(ActionType::find);
+        out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
+    }
+
+    bool run(OperationContext* txn,
+             const string& dbname,
+             BSONObj& cmdObj,
+             int,
+             string& errmsg,
+             BSONObjBuilder& result) {
+        const std::string ns = parseNsCollectionRequired(dbname, cmdObj);
+
+        AutoGetCollectionForRead ctx(txn, ns);
+
+        Collection* collection = ctx.getCollection();
+        if (!collection) {
+            errmsg = "can't find ns";
+            return false;
         }
 
-        bool run(const string& dbname, BSONObj& cmdObj, int,
-                 string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            string ns = dbname + "." + cmdObj.firstElement().valuestr();
-
-            Database* db = cc().database();
-            if ( !db ) {
-                errmsg = "can't find ns";
-                return false;
-            }
-
-            Collection* collection = db->getCollection( ns );
-            if ( !collection ) {
-                errmsg = "can't find ns";
-                return false;
-            }
-
-            vector<IndexDescriptor*> idxs;
-            collection->getIndexCatalog()->findIndexByType(IndexNames::GEO_HAYSTACK, idxs);
-            if (idxs.size() == 0) {
-                errmsg = "no geoSearch index";
-                return false;
-            }
-            if (idxs.size() > 1) {
-                errmsg = "more than 1 geosearch index";
-                return false;
-            }
-
-            BSONElement nearElt = cmdObj["near"];
-            BSONElement maxDistance = cmdObj["maxDistance"];
-            BSONElement search = cmdObj["search"];
-
-            uassert(13318, "near needs to be an array", nearElt.isABSONObj());
-            uassert(13319, "maxDistance needs a number", maxDistance.isNumber());
-            uassert(13320, "search needs to be an object", search.type() == Object);
-
-            unsigned limit = 50;
-            if (cmdObj["limit"].isNumber())
-                limit = static_cast<unsigned>(cmdObj["limit"].numberInt());
-
-            IndexDescriptor* desc = idxs[0];
-            HaystackAccessMethod* ham =
-                static_cast<HaystackAccessMethod*>( collection->getIndexCatalog()->getIndex(desc) );
-            ham->searchCommand(nearElt.Obj(), maxDistance.numberDouble(), search.Obj(),
-                               &result, limit);
-            return 1;
+        vector<IndexDescriptor*> idxs;
+        collection->getIndexCatalog()->findIndexByType(txn, IndexNames::GEO_HAYSTACK, idxs);
+        if (idxs.size() == 0) {
+            errmsg = "no geoSearch index";
+            return false;
         }
-    } nameSearchCommand;
+        if (idxs.size() > 1) {
+            errmsg = "more than 1 geosearch index";
+            return false;
+        }
+
+        BSONElement nearElt = cmdObj["near"];
+        BSONElement maxDistance = cmdObj["maxDistance"];
+        BSONElement search = cmdObj["search"];
+
+        uassert(13318, "near needs to be an array", nearElt.isABSONObj());
+        uassert(13319, "maxDistance needs a number", maxDistance.isNumber());
+        uassert(13320, "search needs to be an object", search.type() == Object);
+
+        unsigned limit = 50;
+        if (cmdObj["limit"].isNumber())
+            limit = static_cast<unsigned>(cmdObj["limit"].numberInt());
+
+        IndexDescriptor* desc = idxs[0];
+        HaystackAccessMethod* ham =
+            static_cast<HaystackAccessMethod*>(collection->getIndexCatalog()->getIndex(desc));
+        ham->searchCommand(txn,
+                           collection,
+                           nearElt.Obj(),
+                           maxDistance.numberDouble(),
+                           search.Obj(),
+                           &result,
+                           limit);
+        return 1;
+    }
+} nameSearchCommand;
 
 }  // namespace mongo

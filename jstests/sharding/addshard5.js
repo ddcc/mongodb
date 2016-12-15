@@ -1,63 +1,58 @@
-//
 // Tests that dropping and re-adding a shard with the same name to a cluster doesn't mess up
 // migrations
-//
 
-var st = new ShardingTest({ shards : 3, mongos : 1, other : { separateConfig : true } })
-st.stopBalancer()
+(function() {
 
-var mongos = st.s
-var admin = mongos.getDB( "admin" )
-var config = mongos.getDB( "config" )
-var coll = mongos.getCollection( "foo.bar" )
+    'use strict';
 
-// Get all the shard info and connections
-var shards = []
-config.shards.find().sort({ _id : 1 }).forEach( function( doc ){ 
-    shards.push( Object.merge( doc, { conn : new Mongo( doc.host ) } ) )
-})
+    var st = new ShardingTest({shards: 2, mongos: 1});
 
-//
-// Remove the last shard so we can use it later
-//
+    var mongos = st.s;
+    var admin = mongos.getDB('admin');
+    var config = mongos.getDB('config');
+    var coll = mongos.getCollection('foo.bar');
 
-// Drain & remove
-printjson( admin.runCommand({ removeShard : shards[2]._id }) )
-printjson( admin.runCommand({ removeShard : shards[2]._id }) )
+    // Get all the shard info and connections
+    var shards = [];
+    config.shards.find().sort({_id: 1}).forEach(function(doc) {
+        shards.push(Object.merge(doc, {conn: new Mongo(doc.host)}));
+    });
 
-// Shard collection
-printjson( admin.runCommand({ enableSharding : coll.getDB() + "" }) )
-// Just to be sure what primary we start from
-printjson( admin.runCommand({ movePrimary : coll.getDB() + "", to : shards[0]._id }) )
-printjson( admin.runCommand({ shardCollection : coll + "", key : { _id : 1 } }) )
+    // Shard collection
+    assert.commandWorked(mongos.adminCommand({enableSharding: coll.getDB() + ''}));
 
-// Insert one document
-coll.insert({ hello : "world" })
-assert.eq( null, coll.getDB().getLastError() )
+    // Just to be sure what primary we start from
+    st.ensurePrimaryShard(coll.getDB().getName(), shards[0]._id);
+    assert.commandWorked(mongos.adminCommand({shardCollection: coll + '', key: {_id: 1}}));
 
-// Migrate the collection to and from shard2 so shard1 loads the shard2 host
-printjson( admin.runCommand({ moveChunk : coll + "", find : { _id : 0 }, to : shards[1]._id, _waitForDelete : true }) )
-printjson( admin.runCommand({ moveChunk : coll + "", find : { _id : 0 }, to : shards[0]._id, _waitForDelete : true }) )
+    // Insert one document
+    assert.writeOK(coll.insert({hello: 'world'}));
 
-//
-// Drop and re-add shard with last shard's host
-//
+    // Migrate the collection to and from shard1 so shard0 loads the shard1 host
+    assert.commandWorked(mongos.adminCommand(
+        {moveChunk: coll + '', find: {_id: 0}, to: shards[1]._id, _waitForDelete: true}));
+    assert.commandWorked(mongos.adminCommand(
+        {moveChunk: coll + '', find: {_id: 0}, to: shards[0]._id, _waitForDelete: true}));
 
-printjson( admin.runCommand({ removeShard : shards[1]._id }) )
-printjson( admin.runCommand({ removeShard : shards[1]._id }) )
-printjson( admin.runCommand({ addShard : shards[2].host, name : shards[1]._id }) )
+    // Drop and re-add shard with the same name but a new host.
+    assert.commandWorked(mongos.adminCommand({removeShard: shards[1]._id}));
+    assert.commandWorked(mongos.adminCommand({removeShard: shards[1]._id}));
 
-jsTest.log( "Shard was dropped and re-added with same name..." )
-st.printShardingStatus()
+    var shard2 = MongoRunner.runMongod({});
+    assert.commandWorked(mongos.adminCommand({addShard: shard2.host, name: shards[1]._id}));
 
-shards[0].conn.getDB( "admin" ).runCommand({ setParameter : 1, traceExceptions : true })
-shards[2].conn.getDB( "admin" ).runCommand({ setParameter : 1, traceExceptions : true })
+    jsTest.log('Shard was dropped and re-added with same name...');
+    st.printShardingStatus();
 
-// Try a migration
-printjson( admin.runCommand({ moveChunk : coll + "", find : { _id : 0 }, to : shards[1]._id }) )
+    shards[0].conn.getDB('admin').runCommand({setParameter: 1, traceExceptions: true});
+    shard2.getDB('admin').runCommand({setParameter: 1, traceExceptions: true});
 
-assert.neq( null, shards[2].conn.getCollection( coll + "" ).findOne() )
+    // Try a migration
+    assert.commandWorked(
+        mongos.adminCommand({moveChunk: coll + '', find: {_id: 0}, to: shards[1]._id}));
 
-st.stop()
+    assert.eq('world', shard2.getCollection(coll + '').findOne().hello);
 
+    st.stop();
 
+})();

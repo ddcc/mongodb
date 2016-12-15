@@ -1,6 +1,6 @@
 %define name    mongodb
-%define version 2.6.12
-%define release %mkrel 1
+%define version %{dynamic_version}
+%define release %{dynamic_release}
 
 Name:    %{name}
 Version: %{version}

@@ -1,47 +1,46 @@
-// Check functioning of --quotaFiles parameter, including with respect to SERVER-3293 ('local' database).
-
-port = allocatePorts( 1 )[ 0 ];
+// Check functioning of --quotaFiles parameter, including with respect to SERVER-3293 ('local'
+// database).
 
 baseName = "jstests_disk_quota";
-dbpath = MongoRunner.dataPath + baseName;
 
-m = startMongod( "--port", port, "--dbpath", MongoRunner.dataPath + baseName, "--quotaFiles", "2", "--smallfiles" );
-db = m.getDB( baseName );
+var m = MongoRunner.runMongod({quotaFiles: 2, smallfiles: ""});
+db = m.getDB(baseName);
 
-big = new Array( 10000 ).toString();
+big = new Array(10000).toString();
 
 // Insert documents until quota is exhausted.
-while( !db.getLastError() ) {
-    db[ baseName ].save( {b:big} );
+var coll = db[baseName];
+var res = coll.insert({b: big});
+while (!res.hasWriteError()) {
+    res = coll.insert({b: big});
 }
-printjson( db.getLastError() );
 
 dotTwoDataFile = baseName + ".2";
-files = listFiles( dbpath );
-for( i in files ) {
-    // Since only one data file is allowed, a .0 file is expected and a .1 file may be preallocated (SERVER-3410) but no .2 file is expected.
-    assert.neq( dotTwoDataFile, files[ i ].baseName );
+files = listFiles(m.dbpath);
+for (i in files) {
+    // Since only one data file is allowed, a .0 file is expected and a .1 file may be preallocated
+    // (SERVER-3410) but no .2 file is expected.
+    assert.neq(dotTwoDataFile, files[i].baseName);
 }
 
 dotTwoDataFile = "local" + ".2";
 // Check that quota does not apply to local db, and a .2 file can be created.
-l = m.getDB( "local" )[ baseName ];
-for( i = 0; i < 10000; ++i ) {
-    l.save( {b:big} );
-    assert( !db.getLastError() );
+l = m.getDB("local")[baseName];
+for (i = 0; i < 10000; ++i) {
+    assert.writeOK(l.insert({b: big}));
     dotTwoFound = false;
-    if ( i % 100 != 0 ) {
+    if (i % 100 != 0) {
         continue;
     }
-    files = listFiles( dbpath );
-    for( f in files ) {
-     	if ( files[ f ].baseName == dotTwoDataFile ) {
-         	dotTwoFound = true;
+    files = listFiles(m.dbpath);
+    for (f in files) {
+        if (files[f].baseName == dotTwoDataFile) {
+            dotTwoFound = true;
         }
     }
-    if ( dotTwoFound ) {
-     	break;   
+    if (dotTwoFound) {
+        break;
     }
 }
 
-assert( dotTwoFound );
+assert(dotTwoFound);

@@ -1,77 +1,84 @@
 /*    Copyright 2009 10gen Inc.
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *    This program is free software: you can redistribute it and/or  modify
+ *    it under the terms of the GNU Affero General Public License, version 3,
+ *    as published by the Free Software Foundation.
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *    You should have received a copy of the GNU Affero General Public License
+ *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/platform/compiler.h"
 #include "mongo/util/concurrency/thread_name.h"
 
 #include <boost/thread/tss.hpp>
 
+#include "mongo/base/init.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/util/mongoutils/str.h"
+
 namespace mongo {
 
+using std::string;
+
 namespace {
-    boost::thread_specific_ptr<std::string> _threadName;
 
-#if defined(_WIN32)
+boost::thread_specific_ptr<std::string> threadName;
+AtomicInt64 nextUnnamedThreadId{1};
 
-#define MS_VC_EXCEPTION 0x406D1388
-#pragma pack(push,8)
-    typedef struct tagTHREADNAME_INFO {
-        DWORD dwType; // Must be 0x1000.
-        LPCSTR szName; // Pointer to name (in user addr space).
-        DWORD dwThreadID; // Thread ID (-1=caller thread).
-        DWORD dwFlags; // Reserved for future use, must be zero.
-    } THREADNAME_INFO;
-#pragma pack(pop)
-
-    void setWinThreadName(const char *name) {
-        /* is the sleep here necessary???
-           Sleep(10);
-           */
-        THREADNAME_INFO info;
-        info.dwType = 0x1000;
-        info.szName = name;
-        info.dwThreadID = -1;
-        info.dwFlags = 0;
-        __try {
-            RaiseException( MS_VC_EXCEPTION, 0, sizeof(info)/sizeof(ULONG_PTR), (ULONG_PTR*)&info );
-        }
-        __except(EXCEPTION_EXECUTE_HANDLER) {
-        }
-    }
-#endif
+// It is unsafe to access threadName before its dynamic initialization has completed. Use
+// the execution of mongo initializers (which only happens once we have entered main, and
+// therefore after dynamic initialization is complete) to signal that it is safe to use
+// 'threadName'.
+bool mongoInitializersHaveRun{};
+MONGO_INITIALIZER(ThreadNameInitializer)(InitializerContext*) {
+    mongoInitializersHaveRun = true;
+    // The global initializers should only ever be run from main, so setting thread name
+    // here makes sense.
+    setThreadName("main");
+    return Status::OK();
+}
 
 }  // namespace
 
-    void setThreadName(StringData name) {
-        _threadName.reset(new string(name.rawData(), name.size()));
+void setThreadName(StringData name) {
+    invariant(mongoInitializersHaveRun);
+    threadName.reset(new string(name.toString()));
+}
 
-#if defined( DEBUG ) && defined( _WIN32 )
-        // naming might be expensive so don't do "conn*" over and over
-        setWinThreadName(_threadName.get()->c_str());
-#endif
-
+const string& getThreadName() {
+    if (MONGO_unlikely(!mongoInitializersHaveRun)) {
+        // 'getThreadName' has been called before dynamic initialization for this
+        // translation unit has completed, so return a fallback value rather than accessing
+        // the 'threadName' variable, which requires dynamic initialization. We assume that
+        // we are in the 'main' thread.
+        static const std::string kFallback = "main";
+        return kFallback;
     }
 
-    const std::string& getThreadName() {
-        std::string* s;
-        while (!(s = _threadName.get())) {
-            setThreadName("");
-        }
-        return *s;
+    std::string* s;
+    while (!(s = threadName.get())) {
+        setThreadName(std::string(str::stream() << "thread" << nextUnnamedThreadId.fetchAndAdd(1)));
     }
+    return *s;
+}
 
 }  // namespace mongo

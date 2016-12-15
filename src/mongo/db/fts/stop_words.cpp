@@ -36,49 +36,40 @@
 #include "mongo/base/init.h"
 #include "mongo/util/string_map.h"
 
-
-
 namespace mongo {
 
-    namespace fts {
+namespace fts {
 
-        void loadStopWordMap( StringMap< std::set< std::string > >* m );
+void loadStopWordMap(StringMap<std::set<std::string>>* m);
 
-        namespace {
-            StringMap<StopWords*> STOP_WORDS;
-            StopWords* empty = NULL;
-        }
-
-
-        StopWords::StopWords(){
-        }
-
-        StopWords::StopWords( const std::set<std::string>& words ) {
-            for ( std::set<std::string>::const_iterator i = words.begin(); i != words.end(); ++i )
-                _words.insert( *i );
-        }
-
-        const StopWords* StopWords::getStopWords( const FTSLanguage& language ) {
-            StringMap<StopWords*>::const_iterator i = STOP_WORDS.find( language.str() );
-            if ( i == STOP_WORDS.end() )
-                return empty;
-            return i->second;
-        }
+namespace {
+StringMap<std::shared_ptr<StopWords>> StopWordsMap;
+StopWords empty;
+}
 
 
-        MONGO_INITIALIZER(StopWords)(InitializerContext* context) {
-            empty = new StopWords();
+StopWords::StopWords() {}
 
-            StringMap< std::set< std::string > > raw;
-            loadStopWordMap( &raw );
-            for ( StringMap< std::set< std::string > >::const_iterator i = raw.begin();
-                  i != raw.end();
-                  ++i ) {
-                STOP_WORDS[i->first] = new StopWords( i->second );
-            }
-            return Status::OK();
-        }
+StopWords::StopWords(const std::set<std::string>& words) {
+    for (std::set<std::string>::const_iterator i = words.begin(); i != words.end(); ++i)
+        _words[*i] = true;
+}
 
+const StopWords* StopWords::getStopWords(const FTSLanguage* language) {
+    auto i = StopWordsMap.find(language->str());
+    if (i == StopWordsMap.end())
+        return &empty;
+    return i->second.get();
+}
+
+
+MONGO_INITIALIZER(StopWords)(InitializerContext* context) {
+    StringMap<std::set<std::string>> raw;
+    loadStopWordMap(&raw);
+    for (StringMap<std::set<std::string>>::const_iterator i = raw.begin(); i != raw.end(); ++i) {
+        StopWordsMap[i->first].reset(new StopWords(i->second));
     }
-
+    return Status::OK();
+}
+}
 }

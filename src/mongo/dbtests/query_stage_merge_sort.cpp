@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2013-2014 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -27,17 +27,19 @@
  */
 
 #include "mongo/client/dbclientcursor.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/db_raii.h"
+#include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/fetch.h"
 #include "mongo/db/exec/index_scan.h"
-#include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/merge_sort.h"
-#include "mongo/db/instance.h"
+#include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/json.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/query/plan_executor.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/structure/collection_iterator.h"
 #include "mongo/dbtests/dbtests.h"
+#include "mongo/stdx/memory.h"
 
 /**
  * This file tests db/exec/merge_sort.cpp
@@ -45,498 +47,554 @@
 
 namespace QueryStageMergeSortTests {
 
-    class QueryStageMergeSortTestBase {
-    public:
-        QueryStageMergeSortTestBase() { }
+using std::set;
+using std::string;
+using std::unique_ptr;
+using stdx::make_unique;
 
-        virtual ~QueryStageMergeSortTestBase() {
-            Client::WriteContext ctx(ns());
-            _client.dropCollection(ns());
+class QueryStageMergeSortTestBase {
+public:
+    QueryStageMergeSortTestBase() : _client(&_txn) {}
+
+    virtual ~QueryStageMergeSortTestBase() {
+        OldClientWriteContext ctx(&_txn, ns());
+        _client.dropCollection(ns());
+    }
+
+    void addIndex(const BSONObj& obj) {
+        ASSERT_OK(dbtests::createIndex(&_txn, ns(), obj));
+    }
+
+    IndexDescriptor* getIndex(const BSONObj& obj, Collection* coll) {
+        return coll->getIndexCatalog()->findIndexByKeyPattern(&_txn, obj);
+    }
+
+    void insert(const BSONObj& obj) {
+        _client.insert(ns(), obj);
+    }
+
+    void remove(const BSONObj& obj) {
+        _client.remove(ns(), obj);
+    }
+
+    void getLocs(set<RecordId>* out, Collection* coll) {
+        auto cursor = coll->getCursor(&_txn);
+        while (auto record = cursor->next()) {
+            out->insert(record->id);
+        }
+    }
+
+    BSONObj objWithMinKey(int start) {
+        BSONObjBuilder startKeyBob;
+        startKeyBob.append("", start);
+        startKeyBob.appendMinKey("");
+        return startKeyBob.obj();
+    }
+
+    BSONObj objWithMaxKey(int start) {
+        BSONObjBuilder endKeyBob;
+        endKeyBob.append("", start);
+        endKeyBob.appendMaxKey("");
+        return endKeyBob.obj();
+    }
+
+    static const char* ns() {
+        return "unittests.QueryStageMergeSort";
+    }
+
+protected:
+    OperationContextImpl _txn;
+
+private:
+    DBDirectClient _client;
+};
+
+// SERVER-1205:
+// find($or[{a:1}, {b:1}]).sort({c:1}) with indices {a:1, c:1} and {b:1, c:1}.
+class QueryStageMergeSortPrefixIndex : public QueryStageMergeSortTestBase {
+public:
+    void run() {
+        OldClientWriteContext ctx(&_txn, ns());
+        Database* db = ctx.db();
+        Collection* coll = db->getCollection(ns());
+        if (!coll) {
+            WriteUnitOfWork wuow(&_txn);
+            coll = db->createCollection(&_txn, ns());
+            wuow.commit();
         }
 
-        void addIndex(const BSONObj& obj) {
-            _client.ensureIndex(ns(), obj);
+        const int N = 50;
+
+        for (int i = 0; i < N; ++i) {
+            insert(BSON("a" << 1 << "c" << i));
+            insert(BSON("b" << 1 << "c" << i));
         }
 
-        IndexDescriptor* getIndex(const BSONObj& obj, Collection* coll) {
-            return coll->getIndexCatalog()->findIndexByKeyPattern( obj );
+        BSONObj firstIndex = BSON("a" << 1 << "c" << 1);
+        BSONObj secondIndex = BSON("b" << 1 << "c" << 1);
+
+        addIndex(firstIndex);
+        addIndex(secondIndex);
+
+        unique_ptr<WorkingSet> ws = make_unique<WorkingSet>();
+        // Sort by c:1
+        MergeSortStageParams msparams;
+        msparams.pattern = BSON("c" << 1);
+        MergeSortStage* ms = new MergeSortStage(&_txn, msparams, ws.get(), coll);
+
+        // a:1
+        IndexScanParams params;
+        params.descriptor = getIndex(firstIndex, coll);
+        params.bounds.isSimpleRange = true;
+        params.bounds.startKey = objWithMinKey(1);
+        params.bounds.endKey = objWithMaxKey(1);
+        params.bounds.endKeyInclusive = true;
+        params.direction = 1;
+        ms->addChild(new IndexScan(&_txn, params, ws.get(), NULL));
+
+        // b:1
+        params.descriptor = getIndex(secondIndex, coll);
+        ms->addChild(new IndexScan(&_txn, params, ws.get(), NULL));
+
+        unique_ptr<FetchStage> fetchStage =
+            make_unique<FetchStage>(&_txn, ws.get(), ms, nullptr, coll);
+        // Must fetch if we want to easily pull out an obj.
+        auto statusWithPlanExecutor = PlanExecutor::make(
+            &_txn, std::move(ws), std::move(fetchStage), coll, PlanExecutor::YIELD_MANUAL);
+        ASSERT_OK(statusWithPlanExecutor.getStatus());
+        unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
+
+        for (int i = 0; i < N; ++i) {
+            BSONObj first, second;
+            ASSERT_EQUALS(PlanExecutor::ADVANCED, exec->getNext(&first, NULL));
+            first = first.getOwned();
+            ASSERT_EQUALS(PlanExecutor::ADVANCED, exec->getNext(&second, NULL));
+            ASSERT_EQUALS(first["c"].numberInt(), second["c"].numberInt());
+            ASSERT_EQUALS(i, first["c"].numberInt());
+            ASSERT((first.hasField("a") && second.hasField("b")) ||
+                   (first.hasField("b") && second.hasField("a")));
         }
 
-        void insert(const BSONObj& obj) {
-            _client.insert(ns(), obj);
+        // Should be done now.
+        BSONObj foo;
+        ASSERT_NOT_EQUALS(PlanExecutor::ADVANCED, exec->getNext(&foo, NULL));
+    }
+};
+
+// Each inserted document appears in both indices but is deduped and returned properly/sorted.
+class QueryStageMergeSortDups : public QueryStageMergeSortTestBase {
+public:
+    void run() {
+        OldClientWriteContext ctx(&_txn, ns());
+        Database* db = ctx.db();
+        Collection* coll = db->getCollection(ns());
+        if (!coll) {
+            WriteUnitOfWork wuow(&_txn);
+            coll = db->createCollection(&_txn, ns());
+            wuow.commit();
         }
 
-        void remove(const BSONObj& obj) {
-            _client.remove(ns(), obj);
+        const int N = 50;
+
+        for (int i = 0; i < N; ++i) {
+            insert(BSON("a" << 1 << "b" << 1 << "c" << i));
+            insert(BSON("a" << 1 << "b" << 1 << "c" << i));
         }
 
-        void getLocs(set<DiskLoc>* out, Collection* coll) {
-            CollectionIterator* it = coll->getIterator(DiskLoc(), false,
-                                                       CollectionScanParams::FORWARD);
-            while (!it->isEOF()) {
-                DiskLoc nextLoc = it->getNext();
-                out->insert(nextLoc);
-            }
-            delete it;
+        BSONObj firstIndex = BSON("a" << 1 << "c" << 1);
+        BSONObj secondIndex = BSON("b" << 1 << "c" << 1);
+
+        addIndex(firstIndex);
+        addIndex(secondIndex);
+
+        unique_ptr<WorkingSet> ws = make_unique<WorkingSet>();
+        // Sort by c:1
+        MergeSortStageParams msparams;
+        msparams.pattern = BSON("c" << 1);
+        MergeSortStage* ms = new MergeSortStage(&_txn, msparams, ws.get(), coll);
+
+        // a:1
+        IndexScanParams params;
+        params.descriptor = getIndex(firstIndex, coll);
+        params.bounds.isSimpleRange = true;
+        params.bounds.startKey = objWithMinKey(1);
+        params.bounds.endKey = objWithMaxKey(1);
+        params.bounds.endKeyInclusive = true;
+        params.direction = 1;
+        ms->addChild(new IndexScan(&_txn, params, ws.get(), NULL));
+
+        // b:1
+        params.descriptor = getIndex(secondIndex, coll);
+        ms->addChild(new IndexScan(&_txn, params, ws.get(), NULL));
+        unique_ptr<FetchStage> fetchStage =
+            make_unique<FetchStage>(&_txn, ws.get(), ms, nullptr, coll);
+
+        auto statusWithPlanExecutor = PlanExecutor::make(
+            &_txn, std::move(ws), std::move(fetchStage), coll, PlanExecutor::YIELD_MANUAL);
+        ASSERT_OK(statusWithPlanExecutor.getStatus());
+        unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
+
+        for (int i = 0; i < N; ++i) {
+            BSONObj first, second;
+            ASSERT_EQUALS(PlanExecutor::ADVANCED, exec->getNext(&first, NULL));
+            first = first.getOwned();
+            ASSERT_EQUALS(PlanExecutor::ADVANCED, exec->getNext(&second, NULL));
+            ASSERT_EQUALS(first["c"].numberInt(), second["c"].numberInt());
+            ASSERT_EQUALS(i, first["c"].numberInt());
+            ASSERT((first.hasField("a") && second.hasField("b")) ||
+                   (first.hasField("b") && second.hasField("a")));
         }
 
-        BSONObj objWithMinKey(int start) {
-            BSONObjBuilder startKeyBob;
-            startKeyBob.append("", start);
-            startKeyBob.appendMinKey("");
-            return startKeyBob.obj();
+        // Should be done now.
+        BSONObj foo;
+        ASSERT_EQUALS(PlanExecutor::IS_EOF, exec->getNext(&foo, NULL));
+    }
+};
+
+// Each inserted document appears in both indices, no deduping, get each result twice.
+class QueryStageMergeSortDupsNoDedup : public QueryStageMergeSortTestBase {
+public:
+    void run() {
+        OldClientWriteContext ctx(&_txn, ns());
+        Database* db = ctx.db();
+        Collection* coll = db->getCollection(ns());
+        if (!coll) {
+            WriteUnitOfWork wuow(&_txn);
+            coll = db->createCollection(&_txn, ns());
+            wuow.commit();
         }
 
-        BSONObj objWithMaxKey(int start) {
-            BSONObjBuilder endKeyBob;
-            endKeyBob.append("", start);
-            endKeyBob.appendMaxKey("");
-            return endKeyBob.obj();
+        const int N = 50;
+
+        for (int i = 0; i < N; ++i) {
+            insert(BSON("a" << 1 << "b" << 1 << "c" << i));
         }
 
-        static const char* ns() { return "unittests.QueryStageMergeSort"; }
-    private:
-        static DBDirectClient _client;
-    };
+        BSONObj firstIndex = BSON("a" << 1 << "c" << 1);
+        BSONObj secondIndex = BSON("b" << 1 << "c" << 1);
 
-    DBDirectClient QueryStageMergeSortTestBase::_client;
+        addIndex(firstIndex);
+        addIndex(secondIndex);
 
-    // SERVER-1205:
-    // find($or[{a:1}, {b:1}]).sort({c:1}) with indices {a:1, c:1} and {b:1, c:1}.
-    class QueryStageMergeSortPrefixIndex : public QueryStageMergeSortTestBase {
-    public:
-        void run() {
-            Client::WriteContext ctx(ns());
-            Database* db = ctx.ctx().db();
-            Collection* coll = db->getCollection(ns());
-            if (!coll) {
-                coll = db->createCollection(ns());
-            }
+        unique_ptr<WorkingSet> ws = make_unique<WorkingSet>();
+        // Sort by c:1
+        MergeSortStageParams msparams;
+        msparams.dedup = false;
+        msparams.pattern = BSON("c" << 1);
+        MergeSortStage* ms = new MergeSortStage(&_txn, msparams, ws.get(), coll);
 
-            const int N = 50;
+        // a:1
+        IndexScanParams params;
+        params.descriptor = getIndex(firstIndex, coll);
+        params.bounds.isSimpleRange = true;
+        params.bounds.startKey = objWithMinKey(1);
+        params.bounds.endKey = objWithMaxKey(1);
+        params.bounds.endKeyInclusive = true;
+        params.direction = 1;
+        ms->addChild(new IndexScan(&_txn, params, ws.get(), NULL));
 
-            for (int i = 0; i < N; ++i) {
-                insert(BSON("a" << 1 << "c" << i));
-                insert(BSON("b" << 1 << "c" << i));
-            }
+        // b:1
+        params.descriptor = getIndex(secondIndex, coll);
+        ms->addChild(new IndexScan(&_txn, params, ws.get(), NULL));
+        unique_ptr<FetchStage> fetchStage =
+            make_unique<FetchStage>(&_txn, ws.get(), ms, nullptr, coll);
 
-            BSONObj firstIndex = BSON("a" << 1 << "c" << 1);
-            BSONObj secondIndex = BSON("b" << 1 << "c" << 1);
+        auto statusWithPlanExecutor = PlanExecutor::make(
+            &_txn, std::move(ws), std::move(fetchStage), coll, PlanExecutor::YIELD_MANUAL);
+        ASSERT_OK(statusWithPlanExecutor.getStatus());
+        unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
 
-            addIndex(firstIndex);
-            addIndex(secondIndex);
-
-            WorkingSet* ws = new WorkingSet();
-            // Sort by c:1
-            MergeSortStageParams msparams;
-            msparams.pattern = BSON("c" << 1);
-            MergeSortStage* ms = new MergeSortStage(msparams, ws);
-
-            // a:1
-            IndexScanParams params;
-            params.descriptor = getIndex(firstIndex, coll);
-            params.bounds.isSimpleRange = true;
-            params.bounds.startKey = objWithMinKey(1);
-            params.bounds.endKey = objWithMaxKey(1);
-            params.bounds.endKeyInclusive = true;
-            params.direction = 1;
-            ms->addChild(new IndexScan(params, ws, NULL));
-
-            // b:1
-            params.descriptor = getIndex(secondIndex, coll);
-            ms->addChild(new IndexScan(params, ws, NULL));
-
-            // Must fetch if we want to easily pull out an obj.
-            PlanExecutor runner(ws, new FetchStage(ws, ms, NULL));
-
-            for (int i = 0; i < N; ++i) {
-                BSONObj first, second;
-                ASSERT_EQUALS(Runner::RUNNER_ADVANCED, runner.getNext(&first, NULL));
-                ASSERT_EQUALS(Runner::RUNNER_ADVANCED, runner.getNext(&second, NULL));
-                ASSERT_EQUALS(first["c"].numberInt(), second["c"].numberInt());
-                ASSERT_EQUALS(i, first["c"].numberInt());
-                ASSERT((first.hasField("a") && second.hasField("b"))
-                       || (first.hasField("b") && second.hasField("a")));
-            }
-
-            // Should be done now.
-            BSONObj foo;
-            ASSERT_NOT_EQUALS(Runner::RUNNER_ADVANCED, runner.getNext(&foo, NULL));
+        for (int i = 0; i < N; ++i) {
+            BSONObj first, second;
+            // We inserted N objects but we get 2 * N from the runner because of dups.
+            ASSERT_EQUALS(PlanExecutor::ADVANCED, exec->getNext(&first, NULL));
+            first = first.getOwned();
+            ASSERT_EQUALS(PlanExecutor::ADVANCED, exec->getNext(&second, NULL));
+            ASSERT_EQUALS(first["c"].numberInt(), second["c"].numberInt());
+            ASSERT_EQUALS(i, first["c"].numberInt());
+            ASSERT((first.hasField("a") && second.hasField("b")) ||
+                   (first.hasField("b") && second.hasField("a")));
         }
-    };
 
-    // Each inserted document appears in both indices but is deduped and returned properly/sorted.
-    class QueryStageMergeSortDups : public QueryStageMergeSortTestBase {
-    public:
-        void run() {
-            Client::WriteContext ctx(ns());
-            Database* db = ctx.ctx().db();
-            Collection* coll = db->getCollection(ns());
-            if (!coll) {
-                coll = db->createCollection(ns());
-            }
+        // Should be done now.
+        BSONObj foo;
+        ASSERT_EQUALS(PlanExecutor::IS_EOF, exec->getNext(&foo, NULL));
+    }
+};
 
-            const int N = 50;
-
-            for (int i = 0; i < N; ++i) {
-                insert(BSON("a" << 1 << "b" << 1 << "c" << i));
-                insert(BSON("a" << 1 << "b" << 1 << "c" << i));
-            }
-
-            BSONObj firstIndex = BSON("a" << 1 << "c" << 1);
-            BSONObj secondIndex = BSON("b" << 1 << "c" << 1);
-
-            addIndex(firstIndex);
-            addIndex(secondIndex);
-
-            WorkingSet* ws = new WorkingSet();
-            // Sort by c:1
-            MergeSortStageParams msparams;
-            msparams.pattern = BSON("c" << 1);
-            MergeSortStage* ms = new MergeSortStage(msparams, ws);
-
-            // a:1
-            IndexScanParams params;
-            params.descriptor = getIndex(firstIndex, coll);
-            params.bounds.isSimpleRange = true;
-            params.bounds.startKey = objWithMinKey(1);
-            params.bounds.endKey = objWithMaxKey(1);
-            params.bounds.endKeyInclusive = true;
-            params.direction = 1;
-            ms->addChild(new IndexScan(params, ws, NULL));
-
-            // b:1
-            params.descriptor = getIndex(secondIndex, coll);
-            ms->addChild(new IndexScan(params, ws, NULL));
-
-            PlanExecutor runner(ws, new FetchStage(ws, ms, NULL));
-
-            for (int i = 0; i < N; ++i) {
-                BSONObj first, second;
-                ASSERT_EQUALS(Runner::RUNNER_ADVANCED, runner.getNext(&first, NULL));
-                ASSERT_EQUALS(Runner::RUNNER_ADVANCED, runner.getNext(&second, NULL));
-                ASSERT_EQUALS(first["c"].numberInt(), second["c"].numberInt());
-                ASSERT_EQUALS(i, first["c"].numberInt());
-                ASSERT((first.hasField("a") && second.hasField("b"))
-                       || (first.hasField("b") && second.hasField("a")));
-            }
-
-            // Should be done now.
-            BSONObj foo;
-            ASSERT_EQUALS(Runner::RUNNER_EOF, runner.getNext(&foo, NULL));
+// Decreasing indices merged ok.  Basically the test above but decreasing.
+class QueryStageMergeSortPrefixIndexReverse : public QueryStageMergeSortTestBase {
+public:
+    void run() {
+        OldClientWriteContext ctx(&_txn, ns());
+        Database* db = ctx.db();
+        Collection* coll = db->getCollection(ns());
+        if (!coll) {
+            WriteUnitOfWork wuow(&_txn);
+            coll = db->createCollection(&_txn, ns());
+            wuow.commit();
         }
-    };
 
-    // Each inserted document appears in both indices, no deduping, get each result twice.
-    class QueryStageMergeSortDupsNoDedup : public QueryStageMergeSortTestBase {
-    public:
-        void run() {
-            Client::WriteContext ctx(ns());
-            Database* db = ctx.ctx().db();
-            Collection* coll = db->getCollection(ns());
-            if (!coll) {
-                coll = db->createCollection(ns());
-            }
+        const int N = 50;
 
-            const int N = 50;
-
-            for (int i = 0; i < N; ++i) {
-                insert(BSON("a" << 1 << "b" << 1 << "c" << i));
-            }
-
-            BSONObj firstIndex = BSON("a" << 1 << "c" << 1);
-            BSONObj secondIndex = BSON("b" << 1 << "c" << 1);
-
-            addIndex(firstIndex);
-            addIndex(secondIndex);
-
-            WorkingSet* ws = new WorkingSet();
-            // Sort by c:1
-            MergeSortStageParams msparams;
-            msparams.dedup = false;
-            msparams.pattern = BSON("c" << 1);
-            MergeSortStage* ms = new MergeSortStage(msparams, ws);
-
-            // a:1
-            IndexScanParams params;
-            params.descriptor = getIndex(firstIndex, coll);
-            params.bounds.isSimpleRange = true;
-            params.bounds.startKey = objWithMinKey(1);
-            params.bounds.endKey = objWithMaxKey(1);
-            params.bounds.endKeyInclusive = true;
-            params.direction = 1;
-            ms->addChild(new IndexScan(params, ws, NULL));
-
-            // b:1
-            params.descriptor = getIndex(secondIndex, coll);
-            ms->addChild(new IndexScan(params, ws, NULL));
-
-            PlanExecutor runner(ws, new FetchStage(ws, ms, NULL));
-
-            for (int i = 0; i < N; ++i) {
-                BSONObj first, second;
-                // We inserted N objects but we get 2 * N from the runner because of dups.
-                ASSERT_EQUALS(Runner::RUNNER_ADVANCED, runner.getNext(&first, NULL));
-                ASSERT_EQUALS(Runner::RUNNER_ADVANCED, runner.getNext(&second, NULL));
-                ASSERT_EQUALS(first["c"].numberInt(), second["c"].numberInt());
-                ASSERT_EQUALS(i, first["c"].numberInt());
-                ASSERT((first.hasField("a") && second.hasField("b"))
-                       || (first.hasField("b") && second.hasField("a")));
-            }
-
-            // Should be done now.
-            BSONObj foo;
-            ASSERT_EQUALS(Runner::RUNNER_EOF, runner.getNext(&foo, NULL));
+        for (int i = 0; i < N; ++i) {
+            // We insert a:1 c:i for i=0..49 but in reverse order for the heck of it.
+            insert(BSON("a" << 1 << "c" << N - i - 1));
+            insert(BSON("b" << 1 << "c" << i));
         }
-    };
 
-    // Decreasing indices merged ok.  Basically the test above but decreasing.
-    class QueryStageMergeSortPrefixIndexReverse : public QueryStageMergeSortTestBase {
-    public:
-        void run() {
-            Client::WriteContext ctx(ns());
-            Database* db = ctx.ctx().db();
-            Collection* coll = db->getCollection(ns());
-            if (!coll) {
-                coll = db->createCollection(ns());
-            }
+        BSONObj firstIndex = BSON("a" << 1 << "c" << -1);
+        BSONObj secondIndex = BSON("b" << 1 << "c" << -1);
 
-            const int N = 50;
+        addIndex(firstIndex);
+        addIndex(secondIndex);
 
-            for (int i = 0; i < N; ++i) {
-                // We insert a:1 c:i for i=0..49 but in reverse order for the heck of it.
-                insert(BSON("a" << 1 << "c" << N - i - 1));
-                insert(BSON("b" << 1 << "c" << i));
-            }
+        unique_ptr<WorkingSet> ws = make_unique<WorkingSet>();
+        // Sort by c:-1
+        MergeSortStageParams msparams;
+        msparams.pattern = BSON("c" << -1);
+        MergeSortStage* ms = new MergeSortStage(&_txn, msparams, ws.get(), coll);
 
-            BSONObj firstIndex = BSON("a" << 1 << "c" << -1);
-            BSONObj secondIndex = BSON("b" << 1 << "c" << -1);
+        // a:1
+        IndexScanParams params;
+        params.descriptor = getIndex(firstIndex, coll);
+        params.bounds.isSimpleRange = true;
+        params.bounds.startKey = objWithMaxKey(1);
+        params.bounds.endKey = objWithMinKey(1);
+        params.bounds.endKeyInclusive = true;
+        // This is the direction along the index.
+        params.direction = 1;
+        ms->addChild(new IndexScan(&_txn, params, ws.get(), NULL));
 
-            addIndex(firstIndex);
-            addIndex(secondIndex);
+        // b:1
+        params.descriptor = getIndex(secondIndex, coll);
+        ms->addChild(new IndexScan(&_txn, params, ws.get(), NULL));
+        unique_ptr<FetchStage> fetchStage =
+            make_unique<FetchStage>(&_txn, ws.get(), ms, nullptr, coll);
 
-            WorkingSet* ws = new WorkingSet();
-            // Sort by c:-1
-            MergeSortStageParams msparams;
-            msparams.pattern = BSON("c" << -1);
-            MergeSortStage* ms = new MergeSortStage(msparams, ws);
+        auto statusWithPlanExecutor = PlanExecutor::make(
+            &_txn, std::move(ws), std::move(fetchStage), coll, PlanExecutor::YIELD_MANUAL);
+        ASSERT_OK(statusWithPlanExecutor.getStatus());
+        unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
 
-            // a:1
-            IndexScanParams params;
-            params.descriptor = getIndex(firstIndex, coll);
-            params.bounds.isSimpleRange = true;
-            params.bounds.startKey = objWithMaxKey(1);
-            params.bounds.endKey = objWithMinKey(1);
-            params.bounds.endKeyInclusive = true;
-            // This is the direction along the index.
-            params.direction = 1;
-            ms->addChild(new IndexScan(params, ws, NULL));
-
-            // b:1
-            params.descriptor = getIndex(secondIndex, coll);
-            ms->addChild(new IndexScan(params, ws, NULL));
-
-            PlanExecutor runner(ws, new FetchStage(ws, ms, NULL));
-
-            for (int i = 0; i < N; ++i) {
-                BSONObj first, second;
-                ASSERT_EQUALS(Runner::RUNNER_ADVANCED, runner.getNext(&first, NULL));
-                ASSERT_EQUALS(Runner::RUNNER_ADVANCED, runner.getNext(&second, NULL));
-                ASSERT_EQUALS(first["c"].numberInt(), second["c"].numberInt());
-                ASSERT_EQUALS(N - i - 1, first["c"].numberInt());
-                ASSERT((first.hasField("a") && second.hasField("b"))
-                       || (first.hasField("b") && second.hasField("a")));
-            }
-
-            // Should be done now.
-            BSONObj foo;
-            ASSERT_EQUALS(Runner::RUNNER_EOF, runner.getNext(&foo, NULL));
+        for (int i = 0; i < N; ++i) {
+            BSONObj first, second;
+            ASSERT_EQUALS(PlanExecutor::ADVANCED, exec->getNext(&first, NULL));
+            first = first.getOwned();
+            ASSERT_EQUALS(PlanExecutor::ADVANCED, exec->getNext(&second, NULL));
+            ASSERT_EQUALS(first["c"].numberInt(), second["c"].numberInt());
+            ASSERT_EQUALS(N - i - 1, first["c"].numberInt());
+            ASSERT((first.hasField("a") && second.hasField("b")) ||
+                   (first.hasField("b") && second.hasField("a")));
         }
-    };
 
-    // One stage EOF immediately
-    class QueryStageMergeSortOneStageEOF : public QueryStageMergeSortTestBase {
-    public:
-        void run() {
-            Client::WriteContext ctx(ns());
-            Database* db = ctx.ctx().db();
-            Collection* coll = db->getCollection(ns());
-            if (!coll) {
-                coll = db->createCollection(ns());
-            }
+        // Should be done now.
+        BSONObj foo;
+        ASSERT_EQUALS(PlanExecutor::IS_EOF, exec->getNext(&foo, NULL));
+    }
+};
 
-            const int N = 50;
-
-            for (int i = 0; i < N; ++i) {
-                insert(BSON("a" << 1 << "c" << i));
-                insert(BSON("b" << 1 << "c" << i));
-            }
-
-            BSONObj firstIndex = BSON("a" << 1 << "c" << 1);
-            BSONObj secondIndex = BSON("b" << 1 << "c" << 1);
-
-            addIndex(firstIndex);
-            addIndex(secondIndex);
-
-            WorkingSet* ws = new WorkingSet();
-            // Sort by c:1
-            MergeSortStageParams msparams;
-            msparams.pattern = BSON("c" << 1);
-            MergeSortStage* ms = new MergeSortStage(msparams, ws);
-
-            // a:1
-            IndexScanParams params;
-            params.descriptor = getIndex(firstIndex, coll);
-            params.bounds.isSimpleRange = true;
-            params.bounds.startKey = objWithMinKey(1);
-            params.bounds.endKey = objWithMaxKey(1);
-            params.bounds.endKeyInclusive = true;
-            params.direction = 1;
-            ms->addChild(new IndexScan(params, ws, NULL));
-
-            // b:51 (EOF)
-            params.descriptor = getIndex(secondIndex, coll);
-            params.bounds.startKey = BSON("" << 51 << "" << MinKey);
-            params.bounds.endKey = BSON("" << 51 << "" << MaxKey);
-            ms->addChild(new IndexScan(params, ws, NULL));
-
-            PlanExecutor runner(ws, new FetchStage(ws, ms, NULL));
-
-            // Only getting results from the a:1 index scan.
-            for (int i = 0; i < N; ++i) {
-                BSONObj obj;
-                ASSERT_EQUALS(Runner::RUNNER_ADVANCED, runner.getNext(&obj, NULL));
-                ASSERT_EQUALS(i, obj["c"].numberInt());
-                ASSERT_EQUALS(1, obj["a"].numberInt());
-            }
-
-            // Should be done now.
-            BSONObj foo;
-            ASSERT_EQUALS(Runner::RUNNER_EOF, runner.getNext(&foo, NULL));
+// One stage EOF immediately
+class QueryStageMergeSortOneStageEOF : public QueryStageMergeSortTestBase {
+public:
+    void run() {
+        OldClientWriteContext ctx(&_txn, ns());
+        Database* db = ctx.db();
+        Collection* coll = db->getCollection(ns());
+        if (!coll) {
+            WriteUnitOfWork wuow(&_txn);
+            coll = db->createCollection(&_txn, ns());
+            wuow.commit();
         }
-    };
 
-    // N stages each have 1 result
-    class QueryStageMergeSortManyShort : public QueryStageMergeSortTestBase {
-    public:
-        void run() {
-            Client::WriteContext ctx(ns());
-            Database* db = ctx.ctx().db();
-            Collection* coll = db->getCollection(ns());
-            if (!coll) {
-                coll = db->createCollection(ns());
-            }
+        const int N = 50;
 
-            WorkingSet* ws = new WorkingSet();
-            // Sort by foo:1
-            MergeSortStageParams msparams;
-            msparams.pattern = BSON("foo" << 1);
-            MergeSortStage* ms = new MergeSortStage(msparams, ws);
-
-            IndexScanParams params;
-            params.bounds.isSimpleRange = true;
-            params.bounds.startKey = objWithMinKey(1);
-            params.bounds.endKey = objWithMaxKey(1);
-            params.bounds.endKeyInclusive = true;
-            params.direction = 1;
-
-            int numIndices = 20;
-            for (int i = 0; i < numIndices; ++i) {
-                // 'a', 'b', ...
-                string index(1, 'a' + i);
-                insert(BSON(index << 1 << "foo" << i));
-
-                BSONObj indexSpec = BSON(index << 1 << "foo" << 1);
-                addIndex(indexSpec);
-                params.descriptor = getIndex(indexSpec, coll);
-                ms->addChild(new IndexScan(params, ws, NULL));
-            }
-
-            PlanExecutor runner(ws, new FetchStage(ws, ms, NULL));
-
-            for (int i = 0; i < numIndices; ++i) {
-                BSONObj obj;
-                ASSERT_EQUALS(Runner::RUNNER_ADVANCED, runner.getNext(&obj, NULL));
-                ASSERT_EQUALS(i, obj["foo"].numberInt());
-                string index(1, 'a' + i);
-                ASSERT_EQUALS(1, obj[index].numberInt());
-            }
-
-            // Should be done now.
-            BSONObj foo;
-            ASSERT_EQUALS(Runner::RUNNER_EOF, runner.getNext(&foo, NULL));
+        for (int i = 0; i < N; ++i) {
+            insert(BSON("a" << 1 << "c" << i));
+            insert(BSON("b" << 1 << "c" << i));
         }
-    };
 
-    // Invalidation mid-run
-    class QueryStageMergeSortInvalidation : public QueryStageMergeSortTestBase {
-    public:
-        void run() {
-            Client::WriteContext ctx(ns());
-            Database* db = ctx.ctx().db();
-            Collection* coll = db->getCollection(ns());
-            if (!coll) {
-                coll = db->createCollection(ns());
+        BSONObj firstIndex = BSON("a" << 1 << "c" << 1);
+        BSONObj secondIndex = BSON("b" << 1 << "c" << 1);
+
+        addIndex(firstIndex);
+        addIndex(secondIndex);
+
+        unique_ptr<WorkingSet> ws = make_unique<WorkingSet>();
+        // Sort by c:1
+        MergeSortStageParams msparams;
+        msparams.pattern = BSON("c" << 1);
+        MergeSortStage* ms = new MergeSortStage(&_txn, msparams, ws.get(), coll);
+
+        // a:1
+        IndexScanParams params;
+        params.descriptor = getIndex(firstIndex, coll);
+        params.bounds.isSimpleRange = true;
+        params.bounds.startKey = objWithMinKey(1);
+        params.bounds.endKey = objWithMaxKey(1);
+        params.bounds.endKeyInclusive = true;
+        params.direction = 1;
+        ms->addChild(new IndexScan(&_txn, params, ws.get(), NULL));
+
+        // b:51 (EOF)
+        params.descriptor = getIndex(secondIndex, coll);
+        params.bounds.startKey = BSON("" << 51 << "" << MinKey);
+        params.bounds.endKey = BSON("" << 51 << "" << MaxKey);
+        ms->addChild(new IndexScan(&_txn, params, ws.get(), NULL));
+        unique_ptr<FetchStage> fetchStage =
+            make_unique<FetchStage>(&_txn, ws.get(), ms, nullptr, coll);
+
+        auto statusWithPlanExecutor = PlanExecutor::make(
+            &_txn, std::move(ws), std::move(fetchStage), coll, PlanExecutor::YIELD_MANUAL);
+        ASSERT_OK(statusWithPlanExecutor.getStatus());
+        unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
+
+        // Only getting results from the a:1 index scan.
+        for (int i = 0; i < N; ++i) {
+            BSONObj obj;
+            ASSERT_EQUALS(PlanExecutor::ADVANCED, exec->getNext(&obj, NULL));
+            ASSERT_EQUALS(i, obj["c"].numberInt());
+            ASSERT_EQUALS(1, obj["a"].numberInt());
+        }
+
+        // Should be done now.
+        BSONObj foo;
+        ASSERT_EQUALS(PlanExecutor::IS_EOF, exec->getNext(&foo, NULL));
+    }
+};
+
+// N stages each have 1 result
+class QueryStageMergeSortManyShort : public QueryStageMergeSortTestBase {
+public:
+    void run() {
+        OldClientWriteContext ctx(&_txn, ns());
+        Database* db = ctx.db();
+        Collection* coll = db->getCollection(ns());
+        if (!coll) {
+            WriteUnitOfWork wuow(&_txn);
+            coll = db->createCollection(&_txn, ns());
+            wuow.commit();
+        }
+
+        unique_ptr<WorkingSet> ws = make_unique<WorkingSet>();
+        // Sort by foo:1
+        MergeSortStageParams msparams;
+        msparams.pattern = BSON("foo" << 1);
+        MergeSortStage* ms = new MergeSortStage(&_txn, msparams, ws.get(), coll);
+
+        IndexScanParams params;
+        params.bounds.isSimpleRange = true;
+        params.bounds.startKey = objWithMinKey(1);
+        params.bounds.endKey = objWithMaxKey(1);
+        params.bounds.endKeyInclusive = true;
+        params.direction = 1;
+
+        int numIndices = 20;
+        for (int i = 0; i < numIndices; ++i) {
+            // 'a', 'b', ...
+            string index(1, 'a' + i);
+            insert(BSON(index << 1 << "foo" << i));
+
+            BSONObj indexSpec = BSON(index << 1 << "foo" << 1);
+            addIndex(indexSpec);
+            params.descriptor = getIndex(indexSpec, coll);
+            ms->addChild(new IndexScan(&_txn, params, ws.get(), NULL));
+        }
+        unique_ptr<FetchStage> fetchStage =
+            make_unique<FetchStage>(&_txn, ws.get(), ms, nullptr, coll);
+
+        auto statusWithPlanExecutor = PlanExecutor::make(
+            &_txn, std::move(ws), std::move(fetchStage), coll, PlanExecutor::YIELD_MANUAL);
+        ASSERT_OK(statusWithPlanExecutor.getStatus());
+        unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
+
+        for (int i = 0; i < numIndices; ++i) {
+            BSONObj obj;
+            ASSERT_EQUALS(PlanExecutor::ADVANCED, exec->getNext(&obj, NULL));
+            ASSERT_EQUALS(i, obj["foo"].numberInt());
+            string index(1, 'a' + i);
+            ASSERT_EQUALS(1, obj[index].numberInt());
+        }
+
+        // Should be done now.
+        BSONObj foo;
+        ASSERT_EQUALS(PlanExecutor::IS_EOF, exec->getNext(&foo, NULL));
+    }
+};
+
+// Invalidation mid-run
+class QueryStageMergeSortInvalidation : public QueryStageMergeSortTestBase {
+public:
+    void run() {
+        OldClientWriteContext ctx(&_txn, ns());
+        Database* db = ctx.db();
+        Collection* coll = db->getCollection(ns());
+        if (!coll) {
+            WriteUnitOfWork wuow(&_txn);
+            coll = db->createCollection(&_txn, ns());
+            wuow.commit();
+        }
+
+        WorkingSet ws;
+        // Sort by foo:1
+        MergeSortStageParams msparams;
+        msparams.pattern = BSON("foo" << 1);
+        auto ms = make_unique<MergeSortStage>(&_txn, msparams, &ws, coll);
+
+        IndexScanParams params;
+        params.bounds.isSimpleRange = true;
+        params.bounds.startKey = objWithMinKey(1);
+        params.bounds.endKey = objWithMaxKey(1);
+        params.bounds.endKeyInclusive = true;
+        params.direction = 1;
+
+        // Index 'a'+i has foo equal to 'i'.
+
+        int numIndices = 20;
+        for (int i = 0; i < numIndices; ++i) {
+            // 'a', 'b', ...
+            string index(1, 'a' + i);
+            insert(BSON(index << 1 << "foo" << i));
+
+            BSONObj indexSpec = BSON(index << 1 << "foo" << 1);
+            addIndex(indexSpec);
+            params.descriptor = getIndex(indexSpec, coll);
+            ms->addChild(new IndexScan(&_txn, params, &ws, NULL));
+        }
+
+        set<RecordId> locs;
+        getLocs(&locs, coll);
+
+        set<RecordId>::iterator it = locs.begin();
+
+        // Get 10 results.  Should be getting results in order of 'locs'.
+        int count = 0;
+        while (!ms->isEOF() && count < 10) {
+            WorkingSetID id = WorkingSet::INVALID_ID;
+            PlanStage::StageState status = ms->work(&id);
+            if (PlanStage::ADVANCED != status) {
+                continue;
             }
 
-            WorkingSet ws;
-            // Sort by foo:1
-            MergeSortStageParams msparams;
-            msparams.pattern = BSON("foo" << 1);
-            auto_ptr<MergeSortStage> ms(new MergeSortStage(msparams, &ws));
+            WorkingSetMember* member = ws.get(id);
+            ASSERT_EQUALS(member->loc, *it);
+            BSONElement elt;
+            string index(1, 'a' + count);
+            ASSERT(member->getFieldDotted(index, &elt));
+            ASSERT_EQUALS(1, elt.numberInt());
+            ASSERT(member->getFieldDotted("foo", &elt));
+            ASSERT_EQUALS(count, elt.numberInt());
+            ++count;
+            ++it;
+        }
 
-            IndexScanParams params;
-            params.bounds.isSimpleRange = true;
-            params.bounds.startKey = objWithMinKey(1);
-            params.bounds.endKey = objWithMaxKey(1);
-            params.bounds.endKeyInclusive = true;
-            params.direction = 1;
+        // Invalidate locs[11].  Should force a fetch.  We don't get it back.
+        ms->saveState();
+        ms->invalidate(&_txn, *it, INVALIDATION_DELETION);
+        ms->restoreState();
 
-            // Index 'a'+i has foo equal to 'i'.
-
-            int numIndices = 20;
-            for (int i = 0; i < numIndices; ++i) {
-                // 'a', 'b', ...
-                string index(1, 'a' + i);
-                insert(BSON(index << 1 << "foo" << i));
-
-                BSONObj indexSpec = BSON(index << 1 << "foo" << 1);
-                addIndex(indexSpec);
-                params.descriptor = getIndex(indexSpec, coll);
-                ms->addChild(new IndexScan(params, &ws, NULL));
-            }
-
-            set<DiskLoc> locs;
-            getLocs(&locs, coll);
-
-            set<DiskLoc>::iterator it = locs.begin();
-
-            // Get 10 results.  Should be getting results in order of 'locs'.
-            int count = 0;
-            while (!ms->isEOF() && count < 10) {
-                WorkingSetID id = WorkingSet::INVALID_ID;
-                PlanStage::StageState status = ms->work(&id);
-                if (PlanStage::ADVANCED != status) { continue; }
-
-                WorkingSetMember* member = ws.get(id);
-                ASSERT_EQUALS(member->loc, *it);
-                BSONElement elt;
-                string index(1, 'a' + count);
-                ASSERT(member->getFieldDotted(index, &elt));
-                ASSERT_EQUALS(1, elt.numberInt());
-                ASSERT(member->getFieldDotted("foo", &elt));
-                ASSERT_EQUALS(count, elt.numberInt());
-                ++count;
-                ++it;
-            }
-
-            // Invalidate locs[11].  Should force a fetch.  We don't get it back.
-            ms->prepareToYield();
-            ms->invalidate(*it, INVALIDATION_DELETION);
-            ms->recoverFromYield();
-
-            // Make sure locs[11] was fetched for us.
-            {
+        // Make sure locs[11] was fetched for us.
+        {
             // TODO: If we have "return upon invalidation" ever triggerable, do the following test.
             /*
                 WorkingSetID id = WorkingSet::INVALID_ID;
@@ -556,44 +614,47 @@ namespace QueryStageMergeSortTests {
                 ASSERT_EQUALS(count, elt.numberInt());
             */
 
-                ++it;
-                ++count;
+            ++it;
+            ++count;
+        }
+
+        // And get the rest.
+        while (!ms->isEOF()) {
+            WorkingSetID id = WorkingSet::INVALID_ID;
+            PlanStage::StageState status = ms->work(&id);
+            if (PlanStage::ADVANCED != status) {
+                continue;
             }
 
-            // And get the rest.
-            while (!ms->isEOF()) {
-                WorkingSetID id = WorkingSet::INVALID_ID;
-                PlanStage::StageState status = ms->work(&id);
-                if (PlanStage::ADVANCED != status) { continue; }
-
-                WorkingSetMember* member = ws.get(id);
-                ASSERT_EQUALS(member->loc, *it);
-                BSONElement elt;
-                string index(1, 'a' + count);
-                ASSERT_TRUE(member->getFieldDotted(index, &elt));
-                ASSERT_EQUALS(1, elt.numberInt());
-                ASSERT(member->getFieldDotted("foo", &elt));
-                ASSERT_EQUALS(count, elt.numberInt());
-                ++count;
-                ++it;
-            }
+            WorkingSetMember* member = ws.get(id);
+            ASSERT_EQUALS(member->loc, *it);
+            BSONElement elt;
+            string index(1, 'a' + count);
+            ASSERT_TRUE(member->getFieldDotted(index, &elt));
+            ASSERT_EQUALS(1, elt.numberInt());
+            ASSERT(member->getFieldDotted("foo", &elt));
+            ASSERT_EQUALS(count, elt.numberInt());
+            ++count;
+            ++it;
         }
-    };
+    }
+};
 
-    class All : public Suite {
-    public:
-        All() : Suite( "query_stage_merge_sort_test" ) { }
+class All : public Suite {
+public:
+    All() : Suite("query_stage_merge_sort_test") {}
 
-        void setupTests() {
-            add<QueryStageMergeSortPrefixIndex>();
-            add<QueryStageMergeSortDups>();
-            add<QueryStageMergeSortDupsNoDedup>();
-            add<QueryStageMergeSortPrefixIndexReverse>();
-            add<QueryStageMergeSortOneStageEOF>();
-            add<QueryStageMergeSortManyShort>();
-            add<QueryStageMergeSortInvalidation>();
-        }
-    }  queryStageMergeSortTest;
+    void setupTests() {
+        add<QueryStageMergeSortPrefixIndex>();
+        add<QueryStageMergeSortDups>();
+        add<QueryStageMergeSortDupsNoDedup>();
+        add<QueryStageMergeSortPrefixIndexReverse>();
+        add<QueryStageMergeSortOneStageEOF>();
+        add<QueryStageMergeSortManyShort>();
+        add<QueryStageMergeSortInvalidation>();
+    }
+};
+
+SuiteInstance<All> queryStageMergeSortTest;
 
 }  // namespace
-

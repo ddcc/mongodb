@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2013 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -29,155 +29,225 @@
 #include "mongo/db/exec/working_set.h"
 
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/record_fetcher.h"
 
 namespace mongo {
 
-    WorkingSet::MemberHolder::MemberHolder() : member(NULL) { }
-    WorkingSet::MemberHolder::~MemberHolder() {}
+using std::string;
 
-    WorkingSet::WorkingSet() : _freeList(INVALID_ID) { }
+WorkingSet::MemberHolder::MemberHolder() : member(NULL) {}
+WorkingSet::MemberHolder::~MemberHolder() {}
 
-    WorkingSet::~WorkingSet() {
-        for (size_t i = 0; i < _data.size(); i++) {
-            delete _data[i].member;
-        }
+WorkingSet::WorkingSet() : _freeList(INVALID_ID) {}
+
+WorkingSet::~WorkingSet() {
+    for (size_t i = 0; i < _data.size(); i++) {
+        delete _data[i].member;
     }
+}
 
-    WorkingSetID WorkingSet::allocate() {
-        if (_freeList == INVALID_ID) {
-            // The free list is empty so we need to make a single new WSM to return. This relies on
-            // vector::resize being amortized O(1) for efficient allocation. Note that the free list
-            // remains empty until something is returned by a call to free().
-            WorkingSetID id = _data.size();
-            _data.resize(_data.size() + 1);
-            _data.back().nextFreeOrSelf = id;
-            _data.back().member = new WorkingSetMember();
-            return id;
-        }
-
-        // Pop the head off the free list and return it.
-        WorkingSetID id = _freeList;
-        _freeList = _data[id].nextFreeOrSelf;
-        _data[id].nextFreeOrSelf = id; // set to self to mark as in-use
+WorkingSetID WorkingSet::allocate() {
+    if (_freeList == INVALID_ID) {
+        // The free list is empty so we need to make a single new WSM to return. This relies on
+        // vector::resize being amortized O(1) for efficient allocation. Note that the free list
+        // remains empty until something is returned by a call to free().
+        WorkingSetID id = _data.size();
+        _data.resize(_data.size() + 1);
+        _data.back().nextFreeOrSelf = id;
+        _data.back().member = new WorkingSetMember();
         return id;
     }
 
-    void WorkingSet::free(const WorkingSetID& i) {
-        MemberHolder& holder = _data[i];
-        verify(i < _data.size()); // ID has been allocated.
-        verify(holder.nextFreeOrSelf == i); // ID currently in use.
+    // Pop the head off the free list and return it.
+    WorkingSetID id = _freeList;
+    _freeList = _data[id].nextFreeOrSelf;
+    _data[id].nextFreeOrSelf = id;  // set to self to mark as in-use
+    return id;
+}
 
-        // Free resources and push this WSM to the head of the freelist.
-        holder.member->clear();
-        holder.nextFreeOrSelf = _freeList;
-        _freeList = i;
+void WorkingSet::free(WorkingSetID i) {
+    MemberHolder& holder = _data[i];
+    verify(i < _data.size());            // ID has been allocated.
+    verify(holder.nextFreeOrSelf == i);  // ID currently in use.
+
+    // Free resources and push this WSM to the head of the freelist.
+    holder.member->clear();
+    holder.nextFreeOrSelf = _freeList;
+    _freeList = i;
+}
+
+void WorkingSet::flagForReview(WorkingSetID i) {
+    WorkingSetMember* member = get(i);
+    verify(WorkingSetMember::OWNED_OBJ == member->_state);
+    _flagged.insert(i);
+}
+
+const unordered_set<WorkingSetID>& WorkingSet::getFlagged() const {
+    return _flagged;
+}
+
+bool WorkingSet::isFlagged(WorkingSetID id) const {
+    invariant(id < _data.size());
+    return _flagged.end() != _flagged.find(id);
+}
+
+void WorkingSet::clear() {
+    for (size_t i = 0; i < _data.size(); i++) {
+        delete _data[i].member;
+    }
+    _data.clear();
+
+    // Since working set is now empty, the free list pointer should
+    // point to nothing.
+    _freeList = INVALID_ID;
+
+    _flagged.clear();
+    _yieldSensitiveIds.clear();
+}
+
+void WorkingSet::transitionToLocAndIdx(WorkingSetID id) {
+    WorkingSetMember* member = get(id);
+    member->_state = WorkingSetMember::LOC_AND_IDX;
+    _yieldSensitiveIds.push_back(id);
+}
+
+void WorkingSet::transitionToLocAndObj(WorkingSetID id) {
+    WorkingSetMember* member = get(id);
+    member->_state = WorkingSetMember::LOC_AND_OBJ;
+}
+
+void WorkingSet::transitionToOwnedObj(WorkingSetID id) {
+    WorkingSetMember* member = get(id);
+    member->transitionToOwnedObj();
+}
+
+std::vector<WorkingSetID> WorkingSet::getAndClearYieldSensitiveIds() {
+    std::vector<WorkingSetID> out;
+    // Clear '_yieldSensitiveIds' by swapping it into the set to be returned.
+    _yieldSensitiveIds.swap(out);
+    return out;
+}
+
+//
+// WorkingSetMember
+//
+
+WorkingSetMember::WorkingSetMember() {}
+
+WorkingSetMember::~WorkingSetMember() {}
+
+void WorkingSetMember::clear() {
+    for (size_t i = 0; i < WSM_COMPUTED_NUM_TYPES; i++) {
+        _computed[i].reset();
     }
 
-    void WorkingSet::flagForReview(const WorkingSetID& i) {
-        WorkingSetMember* member = get(i);
-        verify(WorkingSetMember::OWNED_OBJ == member->state);
-        _flagged.insert(i);
+    keyData.clear();
+    obj.reset();
+    _state = WorkingSetMember::INVALID;
+}
+
+WorkingSetMember::MemberState WorkingSetMember::getState() const {
+    return _state;
+}
+
+void WorkingSetMember::transitionToOwnedObj() {
+    invariant(obj.value().isOwned());
+    _state = OWNED_OBJ;
+}
+
+
+bool WorkingSetMember::hasLoc() const {
+    return _state == LOC_AND_IDX || _state == LOC_AND_OBJ;
+}
+
+bool WorkingSetMember::hasObj() const {
+    return _state == OWNED_OBJ || _state == LOC_AND_OBJ;
+}
+
+bool WorkingSetMember::hasOwnedObj() const {
+    return _state == OWNED_OBJ || (_state == LOC_AND_OBJ && obj.value().isOwned());
+}
+
+void WorkingSetMember::makeObjOwnedIfNeeded() {
+    if (supportsDocLocking() && _state == LOC_AND_OBJ && !obj.value().isOwned()) {
+        obj.setValue(obj.value().getOwned());
+    }
+}
+
+bool WorkingSetMember::hasComputed(const WorkingSetComputedDataType type) const {
+    return _computed[type].get();
+}
+
+const WorkingSetComputedData* WorkingSetMember::getComputed(
+    const WorkingSetComputedDataType type) const {
+    verify(_computed[type]);
+    return _computed[type].get();
+}
+
+void WorkingSetMember::addComputed(WorkingSetComputedData* data) {
+    verify(!hasComputed(data->type()));
+    _computed[data->type()].reset(data);
+}
+
+void WorkingSetMember::setFetcher(RecordFetcher* fetcher) {
+    _fetcher.reset(fetcher);
+}
+
+RecordFetcher* WorkingSetMember::releaseFetcher() {
+    return _fetcher.release();
+}
+
+bool WorkingSetMember::hasFetcher() const {
+    return NULL != _fetcher.get();
+}
+
+bool WorkingSetMember::getFieldDotted(const string& field, BSONElement* out) const {
+    // If our state is such that we have an object, use it.
+    if (hasObj()) {
+        *out = obj.value().getFieldDotted(field);
+        return true;
     }
 
-    const unordered_set<WorkingSetID>& WorkingSet::getFlagged() const {
-        return _flagged;
-    }
+    // Our state should be such that we have index data/are covered.
+    for (size_t i = 0; i < keyData.size(); ++i) {
+        BSONObjIterator keyPatternIt(keyData[i].indexKeyPattern);
+        BSONObjIterator keyDataIt(keyData[i].keyData);
 
-    bool WorkingSet::isFlagged(WorkingSetID id) const {
-        invariant(id < _data.size());
-        return _flagged.end() != _flagged.find(id);
-    }
+        while (keyPatternIt.more()) {
+            BSONElement keyPatternElt = keyPatternIt.next();
+            verify(keyDataIt.more());
+            BSONElement keyDataElt = keyDataIt.next();
 
-    WorkingSetMember::WorkingSetMember() : state(WorkingSetMember::INVALID) { }
-
-    WorkingSetMember::~WorkingSetMember() { }
-
-    void WorkingSetMember::clear() {
-        for (size_t i = 0; i < WSM_COMPUTED_NUM_TYPES; i++) {
-            _computed[i].reset();
-        }
-
-        keyData.clear();
-        obj = BSONObj();
-        state = WorkingSetMember::INVALID;
-    }
-
-    bool WorkingSetMember::hasLoc() const {
-        return state == LOC_AND_IDX || state == LOC_AND_UNOWNED_OBJ;
-    }
-
-    bool WorkingSetMember::hasObj() const {
-        return hasOwnedObj() || hasUnownedObj();
-    }
-
-    bool WorkingSetMember::hasOwnedObj() const {
-        return state == OWNED_OBJ;
-    }
-
-    bool WorkingSetMember::hasUnownedObj() const {
-        return state == LOC_AND_UNOWNED_OBJ;
-    }
-
-    bool WorkingSetMember::hasComputed(const WorkingSetComputedDataType type) const {
-        return _computed[type];
-    }
-
-    const WorkingSetComputedData* WorkingSetMember::getComputed(const WorkingSetComputedDataType type) const {
-        verify(_computed[type]);
-        return _computed[type].get();
-    }
-
-    void WorkingSetMember::addComputed(WorkingSetComputedData* data) {
-        verify(!hasComputed(data->type()));
-        _computed[data->type()].reset(data);
-    }
-
-    bool WorkingSetMember::getFieldDotted(const string& field, BSONElement* out) const {
-        // If our state is such that we have an object, use it.
-        if (hasObj()) {
-            *out = obj.getFieldDotted(field);
-            return true;
-        }
-
-        // Our state should be such that we have index data/are covered.
-        for (size_t i = 0; i < keyData.size(); ++i) {
-            BSONObjIterator keyPatternIt(keyData[i].indexKeyPattern);
-            BSONObjIterator keyDataIt(keyData[i].keyData);
-
-            while (keyPatternIt.more()) {
-                BSONElement keyPatternElt = keyPatternIt.next();
-                verify(keyDataIt.more());
-                BSONElement keyDataElt = keyDataIt.next();
-
-                if (field == keyPatternElt.fieldName()) {
-                    *out = keyDataElt;
-                    return true;
-                }
+            if (field == keyPatternElt.fieldName()) {
+                *out = keyDataElt;
+                return true;
             }
         }
-
-        return false;
     }
 
-    size_t WorkingSetMember::getMemUsage() const {
-        size_t memUsage = 0;
+    return false;
+}
 
-        if (hasLoc()) {
-            memUsage += sizeof(DiskLoc);
-        }
+size_t WorkingSetMember::getMemUsage() const {
+    size_t memUsage = 0;
 
-        // XXX: Unowned objects count towards current size.
-        //      See SERVER-12579
-        if (hasObj()) {
-            memUsage += obj.objsize();
-        }
-
-        for (size_t i = 0; i < keyData.size(); ++i) {
-            const IndexKeyDatum& keyDatum = keyData[i];
-            memUsage += keyDatum.keyData.objsize();
-        }
-
-        return memUsage;
+    if (hasLoc()) {
+        memUsage += sizeof(RecordId);
     }
+
+    // XXX: Unowned objects count towards current size.
+    //      See SERVER-12579
+    if (hasObj()) {
+        memUsage += obj.value().objsize();
+    }
+
+    for (size_t i = 0; i < keyData.size(); ++i) {
+        const IndexKeyDatum& keyDatum = keyData[i];
+        memUsage += keyDatum.keyData.objsize();
+    }
+
+    return memUsage;
+}
 
 }  // namespace mongo

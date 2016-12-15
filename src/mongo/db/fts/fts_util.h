@@ -32,99 +32,20 @@
 
 #include <string>
 
-#include "mongo/db/hasher.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/storage/record.h"
-#include "mongo/util/unordered_fast_key_table.h"
 
 namespace mongo {
 
-    namespace fts {
+namespace fts {
 
-        extern const std::string WILDCARD;
-        extern const std::string INDEX_NAME;
+extern const std::string WILDCARD;
+extern const std::string INDEX_NAME;
 
-        enum TextIndexVersion {
-            TEXT_INDEX_VERSION_1 = 1, // Legacy index format.  Deprecated.
-            TEXT_INDEX_VERSION_2 = 2 // Current index format.
-        };
-
-
-        /**
-         * destructive!
-         */
-        inline void makeLower( std::string* s ) {
-            std::string::size_type sz = s->size();
-            for ( std::string::size_type i = 0; i < sz; i++ )
-                (*s)[i] = (char)tolower( (int)(*s)[i] );
-        }
-
-        /*
-         * ScoredLocation stores the total score for a document (record *) wrt a search
-         *
-         */
-        struct ScoredLocation {
-            ScoredLocation( Record* r, double sc )
-                : rec(r), score(sc) {
-            }
-
-            Record* rec;
-            double score;
-
-            bool operator<( const ScoredLocation& other ) const {
-                if ( other.score < score )
-                    return true;
-                if ( other.score > score )
-                    return false;
-                return rec < other.rec;
-            }
-        };
-
-        // scored location comparison is done based on score
-        class ScoredLocationComp {
-        public:
-            bool operator() (const ScoredLocation& lhs, const ScoredLocation& rhs) const {
-                return (lhs.score > rhs.score);
-            }
-        };
-
-        struct _be_hash {
-            size_t operator()( const BSONElement& e ) const {
-                return static_cast<size_t>( BSONElementHasher::hash64( e, 17 ) );
-            }
-        };
-
-        struct _be_equals {
-            bool operator()( const BSONElement& a, const BSONElement& b ) const {
-                return a == b;
-            }
-        };
-
-        struct _be_convert {
-            BSONElement operator()( const BSONObj& o ) const {
-                const BSONElement& x = o.firstElement();
-                BSONElement y( x.rawdata() );
-                return y;
-            }
-        };
-
-        struct _be_convert_other {
-            BSONObj operator()( const BSONElement& e ) const {
-                return e.wrap();
-            }
-        };
-
-        template< typename V >
-        class BSONElementMap : public UnorderedFastKeyTable<BSONElement,
-                                                            BSONObj,
-                                                            V,
-                                                            _be_hash,
-                                                            _be_equals,
-                                                            _be_convert,
-                                                            _be_convert_other > {
-        };
-
-
-    }
+enum TextIndexVersion {
+    TEXT_INDEX_VERSION_INVALID = 0,  // Invalid value.
+    TEXT_INDEX_VERSION_1 = 1,        // Legacy index format.  Deprecated.
+    TEXT_INDEX_VERSION_2 = 2,        // Index format with ASCII support and murmur hashing.
+    TEXT_INDEX_VERSION_3 = 3,        // Current index format with basic Unicode support.
+};
 }
-
+}

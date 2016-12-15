@@ -28,42 +28,46 @@
 
 #pragma once
 
-#include "mongo/db/diskloc.h"
+
 #include "mongo/db/jsobj.h"
 #include "mongo/db/exec/plan_stage.h"
+#include "mongo/db/record_id.h"
 
 namespace mongo {
 
-    /**
-     * This stage implements limit functionality.  It only returns 'limit' results before EOF.
-     *
-     * Sort has a baked-in limit, as it can optimize the sort if it has a limit.
-     *
-     * Preconditions: None.
-     */
-    class LimitStage : public PlanStage {
-    public:
-        LimitStage(int limit, WorkingSet* ws, PlanStage* child);
-        virtual ~LimitStage();
+/**
+ * This stage implements limit functionality.  It only returns 'limit' results before EOF.
+ *
+ * Sort has a baked-in limit, as it can optimize the sort if it has a limit.
+ *
+ * Preconditions: None.
+ */
+class LimitStage final : public PlanStage {
+public:
+    LimitStage(OperationContext* opCtx, long long limit, WorkingSet* ws, PlanStage* child);
+    ~LimitStage();
 
-        virtual bool isEOF();
-        virtual StageState work(WorkingSetID* out);
+    bool isEOF() final;
+    StageState work(WorkingSetID* out) final;
 
-        virtual void prepareToYield();
-        virtual void recoverFromYield();
-        virtual void invalidate(const DiskLoc& dl, InvalidationType type);
+    StageType stageType() const final {
+        return STAGE_LIMIT;
+    }
 
-        virtual PlanStageStats* getStats();
+    std::unique_ptr<PlanStageStats> getStats() final;
 
-    private:
-        WorkingSet* _ws;
-        scoped_ptr<PlanStage> _child;
+    const SpecificStats* getSpecificStats() const final;
 
-        // We only return this many results.
-        int _numToReturn;
+    static const char* kStageType;
 
-        // Stats
-        CommonStats _commonStats;
-    };
+private:
+    WorkingSet* _ws;
+
+    // We only return this many results.
+    long long _numToReturn;
+
+    // Stats
+    LimitStats _specificStats;
+};
 
 }  // namespace mongo

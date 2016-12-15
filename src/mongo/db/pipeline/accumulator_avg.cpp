@@ -26,69 +26,69 @@
  * it in the license file.
  */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/document.h"
+#include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/value.h"
 
 namespace mongo {
 
-namespace {
-    const char subTotalName[] = "subTotal";
-    const char countName[] = "count";
+using boost::intrusive_ptr;
+
+REGISTER_ACCUMULATOR(avg, AccumulatorAvg::create);
+REGISTER_EXPRESSION(avg, ExpressionFromAccumulator<AccumulatorAvg>::parse);
+
+const char* AccumulatorAvg::getOpName() const {
+    return "$avg";
 }
 
-    void AccumulatorAvg::processInternal(const Value& input, bool merging) {
-        if (!merging) {
-            // non numeric types have no impact on average
-            if (!input.numeric())
-                return;
+namespace {
+const char subTotalName[] = "subTotal";
+const char countName[] = "count";
+}
 
-            _total += input.getDouble();
-            _count += 1;
-        }
-        else {
-            // We expect an object that contains both a subtotal and a count.
-            // This is what getValue(true) produced below.
-            verify(input.getType() == Object);
-            _total += input[subTotalName].getDouble();
-            _count += input[countName].getLong();
-        }
+void AccumulatorAvg::processInternal(const Value& input, bool merging) {
+    if (!merging) {
+        // non numeric types have no impact on average
+        if (!input.numeric())
+            return;
+
+        _total += input.getDouble();
+        _count += 1;
+    } else {
+        // We expect an object that contains both a subtotal and a count.
+        // This is what getValue(true) produced below.
+        verify(input.getType() == Object);
+        _total += input[subTotalName].getDouble();
+        _count += input[countName].getLong();
     }
+}
 
-    intrusive_ptr<Accumulator> AccumulatorAvg::create() {
-        return new AccumulatorAvg();
+intrusive_ptr<Accumulator> AccumulatorAvg::create() {
+    return new AccumulatorAvg();
+}
+
+Value AccumulatorAvg::getValue(bool toBeMerged) const {
+    if (!toBeMerged) {
+        if (_count == 0)
+            return Value(BSONNULL);
+
+        return Value(_total / static_cast<double>(_count));
+    } else {
+        return Value(DOC(subTotalName << _total << countName << _count));
     }
+}
 
-    Value AccumulatorAvg::getValue(bool toBeMerged) const {
-        if (!toBeMerged) {
-            if (_count == 0)
-                return Value(0.0);
+AccumulatorAvg::AccumulatorAvg() : _total(0), _count(0) {
+    // This is a fixed size Accumulator so we never need to update this
+    _memUsageBytes = sizeof(*this);
+}
 
-            return Value(_total / static_cast<double>(_count));
-        }
-        else {
-            return Value(DOC(subTotalName << _total
-                          << countName << _count));
-        }
-    }
-
-    AccumulatorAvg::AccumulatorAvg()
-        : _total(0)
-        , _count(0)
-    {
-        // This is a fixed size Accumulator so we never need to update this
-        _memUsageBytes = sizeof(*this);
-    }
-
-    void AccumulatorAvg::reset() {
-        _total = 0;
-        _count = 0;
-    }
-
-    const char *AccumulatorAvg::getOpName() const {
-        return "$avg";
-    }
+void AccumulatorAvg::reset() {
+    _total = 0;
+    _count = 0;
+}
 }

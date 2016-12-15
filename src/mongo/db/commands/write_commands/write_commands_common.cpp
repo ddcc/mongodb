@@ -36,64 +36,61 @@
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
+#include "mongo/db/catalog/document_validation.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
 namespace auth {
 
-    using std::string;
-    using std::vector;
+using std::string;
+using std::vector;
 
-    Status checkAuthForWriteCommand( AuthorizationSession* authzSession,
-                                     BatchedCommandRequest::BatchType cmdType,
-                                     const NamespaceString& cmdNSS,
-                                     const BSONObj& cmdObj ) {
+Status checkAuthForWriteCommand(AuthorizationSession* authzSession,
+                                BatchedCommandRequest::BatchType cmdType,
+                                const NamespaceString& cmdNSS,
+                                const BSONObj& cmdObj) {
+    vector<Privilege> privileges;
+    ActionSet actionsOnCommandNSS;
 
-        vector<Privilege> privileges;
-
-        if ( cmdType == BatchedCommandRequest::BatchType_Insert ) {
-
-            if ( !cmdNSS.isSystemDotIndexes() ) {
-                privileges.push_back( Privilege( ResourcePattern::forExactNamespace( cmdNSS ),
-                                                 ActionType::insert ) );
-            }
-            else {
-                // Special-case indexes until we have a command
-                string nsToIndex, errMsg;
-                if ( !BatchedCommandRequest::getIndexedNS( cmdObj, &nsToIndex, &errMsg ) ) {
-                    return Status( ErrorCodes::FailedToParse, errMsg );
-                }
-
-                NamespaceString nssToIndex( nsToIndex );
-                privileges.push_back( Privilege( ResourcePattern::forExactNamespace( nssToIndex ),
-                                                 ActionType::createIndex ) );
-            }
-        }
-        else if ( cmdType == BatchedCommandRequest::BatchType_Update ) {
-
-            ActionSet actions;
-            actions.addAction( ActionType::update );
-
-            // Upsert also requires insert privs
-            if ( BatchedCommandRequest::containsUpserts( cmdObj ) ) {
-                actions.addAction( ActionType::insert );
-            }
-
-            privileges.push_back( Privilege( ResourcePattern::forExactNamespace( cmdNSS ),
-                                             actions ) );
-
-        }
-        else {
-            fassert( 17251, cmdType == BatchedCommandRequest::BatchType_Delete );
-            privileges.push_back( Privilege( ResourcePattern::forExactNamespace( cmdNSS ),
-                                             ActionType::remove ) );
-        }
-
-        if ( authzSession->isAuthorizedForPrivileges( privileges ) )
-            return Status::OK();
-
-        return Status( ErrorCodes::Unauthorized, "unauthorized" );
+    if (shouldBypassDocumentValidationForCommand(cmdObj)) {
+        actionsOnCommandNSS.addAction(ActionType::bypassDocumentValidation);
     }
 
+    if (cmdType == BatchedCommandRequest::BatchType_Insert) {
+        if (!cmdNSS.isSystemDotIndexes()) {
+            actionsOnCommandNSS.addAction(ActionType::insert);
+        } else {
+            // Special-case indexes until we have a command
+            string nsToIndex, errMsg;
+            if (!BatchedCommandRequest::getIndexedNS(cmdObj, &nsToIndex, &errMsg)) {
+                return Status(ErrorCodes::FailedToParse, errMsg);
+            }
+
+            NamespaceString nssToIndex(nsToIndex);
+            privileges.push_back(
+                Privilege(ResourcePattern::forExactNamespace(nssToIndex), ActionType::createIndex));
+        }
+    } else if (cmdType == BatchedCommandRequest::BatchType_Update) {
+        actionsOnCommandNSS.addAction(ActionType::update);
+
+        // Upsert also requires insert privs
+        if (BatchedCommandRequest::containsUpserts(cmdObj)) {
+            actionsOnCommandNSS.addAction(ActionType::insert);
+        }
+    } else {
+        fassert(17251, cmdType == BatchedCommandRequest::BatchType_Delete);
+        actionsOnCommandNSS.addAction(ActionType::remove);
+    }
+
+
+    if (!actionsOnCommandNSS.empty()) {
+        privileges.emplace_back(ResourcePattern::forExactNamespace(cmdNSS), actionsOnCommandNSS);
+    }
+
+    if (authzSession->isAuthorizedForPrivileges(privileges))
+        return Status::OK();
+
+    return Status(ErrorCodes::Unauthorized, "unauthorized");
+}
 }
 }

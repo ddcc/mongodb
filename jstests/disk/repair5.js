@@ -1,51 +1,57 @@
 // SERVER-2351 Test killop with repair command.
+(function() {
+    'use strict';
+    var baseName = "jstests_disk_repair5";
 
-var baseName = "jstests_disk_repair5";
+    var dbpath = MongoRunner.dataPath + baseName + "/";
+    var repairpath = dbpath + "repairDir/";
 
-port = allocatePorts( 1 )[ 0 ];
-dbpath = MongoRunner.dataPath + baseName + "/";
-repairpath = dbpath + "repairDir/"
+    resetDbpath(dbpath);
+    resetDbpath(repairpath);
 
-resetDbpath( dbpath );
-resetDbpath( repairpath );
+    var m = MongoRunner.runMongod({
+        dbpath: dbpath,
+        repairpath: repairpath,
+        restart: true,
+        cleanData: false
+    });  // So that the repair dir won't get removed
 
-m = startMongodTest(port,
-                    baseName + "/",
-                    true,
-                    {repairpath : repairpath, nohttpinterface : "", bind_ip : "127.0.0.1"});
+    var dbTest = m.getDB(baseName);
 
-db = m.getDB( baseName );
+    // Insert a lot of data so repair runs a long time
+    var bulk = dbTest[baseName].initializeUnorderedBulkOp();
+    var big = new Array(5000).toString();
+    for (var i = 0; i < 20000; ++i) {
+        bulk.insert({i: i, b: big});
+    }
+    assert.writeOK(bulk.execute());
 
-big = new Array( 5000 ).toString();
-for( i = 0; i < 20000; ++i ) {
-	db[ baseName ].save( {i:i,b:big} );
-}
+    function killRepair() {
+        while (1) {
+            var p = db.currentOp().inprog;
+            for (var i in p) {
+                var o = p[i];
+                printjson(o);
 
-function killRepair() {
-    while( 1 ) {
-     	p = db.currentOp().inprog;
-        for( var i in p ) {
-            var o = p[ i ];
-            printjson( o );
-            // Find the active 'repairDatabase' op and kill it.
-            if ( o.active && o.query && o.query.repairDatabase ) {
-             	db.killOp( o.opid );
-                return;
+                // Find the active 'repairDatabase' op and kill it.
+                if (o.active && o.query && o.query.repairDatabase) {
+                    db.killOp(o.opid);
+                    return;
+                }
             }
         }
     }
-}
 
-s = startParallelShell( killRepair.toString() + "; killRepair();" );
+    var s = startParallelShell(killRepair.toString() + "; killRepair();", m.port);
+    sleep(100);  // make sure shell is actually running, lame
 
-sleep(100); // make sure shell is actually running, lame
+    // Repair should fail due to killOp.
+    assert.commandFailed(dbTest.runCommand({repairDatabase: 1, backupOriginalFiles: true}));
 
-// Repair should fail due to killOp.
-assert.commandFailed( db.runCommand( {repairDatabase:1, backupOriginalFiles:true} ) );
+    s();
 
-s();
+    assert.eq(20000, dbTest[baseName].find().itcount());
+    assert(dbTest[baseName].validate().valid);
 
-assert.eq( 20000, db[ baseName ].find().itcount() );
-assert( db[ baseName ].validate().valid );
-
-stopMongod( port )
+    MongoRunner.stopMongod(m);
+})();

@@ -38,13 +38,12 @@
 
 namespace mongo {
 
-    AuthzSessionExternalStateMongos::AuthzSessionExternalStateMongos(
-            AuthorizationManager* authzManager) :
-                    AuthzSessionExternalStateServerCommon(authzManager) {}
-    AuthzSessionExternalStateMongos::~AuthzSessionExternalStateMongos() {}
+AuthzSessionExternalStateMongos::AuthzSessionExternalStateMongos(AuthorizationManager* authzManager)
+    : AuthzSessionExternalStateServerCommon(authzManager) {}
+AuthzSessionExternalStateMongos::~AuthzSessionExternalStateMongos() {}
 
-    void AuthzSessionExternalStateMongos::startRequest() {
-        _checkShouldAllowLocalhost();
-    }
+void AuthzSessionExternalStateMongos::startRequest(OperationContext* txn) {
+    _checkShouldAllowLocalhost(txn);
+}
 
-} // namespace mongo
+}  // namespace mongo

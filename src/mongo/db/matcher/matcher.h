@@ -30,35 +30,41 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/matcher/expression.h"
+#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/match_details.h"
+
 
 namespace mongo {
 
-    /**
-     * Matcher is a simple wrapper around a BSONObj and the MatchExpression created from it.
-     */
-    class Matcher2 {
-        MONGO_DISALLOW_COPYING( Matcher2 );
+/**
+ * Matcher is a simple wrapper around a BSONObj and the MatchExpression created from it.
+ */
+class Matcher {
+    MONGO_DISALLOW_COPYING(Matcher);
 
-    public:
-        explicit Matcher2( const BSONObj& pattern, bool nested=false /* do not use */ );
+public:
+    explicit Matcher(const BSONObj& pattern,
+                     const ExtensionsCallback& extensionsCallback = ExtensionsCallback());
 
-        bool matches(const BSONObj& doc, MatchDetails* details = NULL ) const;
+    bool matches(const BSONObj& doc, MatchDetails* details = NULL) const;
 
-        const BSONObj* getQuery() const { return &_pattern; };
-
-        std::string toString() const { return _pattern.toString(); }
-
-    private:
-        BSONObj _pattern;
-
-        boost::scoped_ptr<MatchExpression> _expression;
+    const BSONObj* getQuery() const {
+        return &_pattern;
     };
+
+    std::string toString() const {
+        return _pattern.toString();
+    }
+
+private:
+    BSONObj _pattern;
+
+    std::unique_ptr<MatchExpression> _expression;
+};
 
 }  // namespace mongo

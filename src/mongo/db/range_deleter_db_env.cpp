@@ -26,159 +26,105 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kSharding
+
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/range_deleter_db_env.h"
 
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/repl/rs.h"
-#include "mongo/db/repl/write_concern.h"
-#include "mongo/s/d_logic.h"
+#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/s/operation_shard_version.h"
+#include "mongo/db/write_concern_options.h"
+#include "mongo/s/d_state.h"
+#include "mongo/util/log.h"
 
 namespace mongo {
 
-    void RangeDeleterDBEnv::initThread() {
-        if ( currentClient.get() == NULL )
-            Client::initThread( "RangeDeleter" );
+using std::string;
+
+/**
+ * Outline of the delete process:
+ * 1. Initialize the client for this thread if there is no client. This is for the worker
+ *    threads that are attached to any of the threads servicing client requests.
+ * 2. Grant this thread authorization to perform deletes.
+ * 3. Temporarily enable mode to bypass shard version checks. TODO: Replace this hack.
+ * 4. Setup callback to save deletes to moveChunk directory (only if moveParanoia is true).
+ * 5. Delete range.
+ * 6. Wait until the majority of the secondaries catch up.
+ */
+bool RangeDeleterDBEnv::deleteRange(OperationContext* txn,
+                                    const RangeDeleteEntry& taskDetails,
+                                    long long int* deletedDocs,
+                                    std::string* errMsg) {
+    const string ns(taskDetails.options.range.ns);
+    const BSONObj inclusiveLower(taskDetails.options.range.minKey);
+    const BSONObj exclusiveUpper(taskDetails.options.range.maxKey);
+    const BSONObj keyPattern(taskDetails.options.range.keyPattern);
+    const WriteConcernOptions writeConcern(taskDetails.options.writeConcern);
+    const bool fromMigrate = taskDetails.options.fromMigrate;
+    const bool onlyRemoveOrphans = taskDetails.options.onlyRemoveOrphanedDocs;
+
+    Client::initThreadIfNotAlready("RangeDeleter");
+
+    *deletedDocs = 0;
+    OperationShardVersion::IgnoreVersioningBlock forceVersion(txn, NamespaceString(ns));
+
+    Helpers::RemoveSaver removeSaver("moveChunk", ns, taskDetails.options.removeSaverReason);
+    Helpers::RemoveSaver* removeSaverPtr = NULL;
+    if (serverGlobalParams.moveParanoia && !taskDetails.options.removeSaverReason.empty()) {
+        removeSaverPtr = &removeSaver;
     }
 
-    /**
-     * Outline of the delete process:
-     * 1. Initialize the client for this thread if there is no client. This is for the worker
-     *    threads that are attached to any of the threads servicing client requests.
-     * 2. Grant this thread authorization to perform deletes.
-     * 3. Temporarily enable mode to bypass shard version checks. TODO: Replace this hack.
-     * 4. Setup callback to save deletes to moveChunk directory (only if moveParanoia is true).
-     * 5. Delete range.
-     * 6. Wait until the majority of the secondaries catch up.
-     */
-    bool RangeDeleterDBEnv::deleteRange(const StringData& ns,
-                                        const BSONObj& inclusiveLower,
-                                        const BSONObj& exclusiveUpper,
-                                        const BSONObj& keyPattern,
-                                        bool secondaryThrottle,
-                                        std::string* errMsg) {
-        const bool initiallyHaveClient = haveClient();
+    // log the opId so the user can use it to cancel the delete using killOp.
+    unsigned int opId = txn->getOpID();
+    log() << "Deleter starting delete for: " << ns << " from " << inclusiveLower << " -> "
+          << exclusiveUpper << ", with opId: " << opId;
 
-        if (!initiallyHaveClient) {
-            Client::initThread("RangeDeleter");
+    try {
+        *deletedDocs =
+            Helpers::removeRange(txn,
+                                 KeyRange(ns, inclusiveLower, exclusiveUpper, keyPattern),
+                                 false, /*maxInclusive*/
+                                 writeConcern,
+                                 removeSaverPtr,
+                                 fromMigrate,
+                                 onlyRemoveOrphans);
+
+        if (*deletedDocs < 0) {
+            *errMsg = "collection or index dropped before data could be cleaned";
+            warning() << *errMsg;
+
+            return false;
         }
 
-        ShardForceVersionOkModeBlock forceVersion;
-        {
-            Helpers::RemoveSaver removeSaver("moveChunk", ns.toString(), "post-cleanup");
+        log() << "rangeDeleter deleted " << *deletedDocs << " documents for " << ns << " from "
+              << inclusiveLower << " -> " << exclusiveUpper;
+    } catch (const DBException& ex) {
+        *errMsg = str::stream() << "Error encountered while deleting range: "
+                                << "ns" << ns << " from " << inclusiveLower << " -> "
+                                << exclusiveUpper << ", cause by:" << causedBy(ex);
 
-            // log the opId so the user can use it to cancel the delete using killOp.
-            unsigned int opId = cc().curop()->opNum();
-            log() << "Deleter starting delete for: " << ns
-                  << " from " << inclusiveLower
-                  << " -> " << exclusiveUpper
-                  << ", with opId: " << opId
-                  << endl;
-
-            try {
-                long long numDeleted =
-                        Helpers::removeRange(KeyRange(ns.toString(),
-                                                      inclusiveLower,
-                                                      exclusiveUpper,
-                                                      keyPattern),
-                                             false, /*maxInclusive*/
-                                             replSet? secondaryThrottle : false,
-                                             serverGlobalParams.moveParanoia ? &removeSaver : NULL,
-                                             true, /*fromMigrate*/
-                                             true); /*onlyRemoveOrphans*/
-
-                if (numDeleted < 0) {
-                    *errMsg = "collection or index dropped before data could be cleaned";
-                    warning() << *errMsg << endl;
-
-                    if (!initiallyHaveClient) {
-                        // unregister self from list of curret ops.
-                        cc().shutdown();
-                    }
-
-                    return false;
-                }
-
-                log() << "rangeDeleter deleted " << numDeleted
-                      << " documents for " << ns
-                      << " from " << inclusiveLower
-                      << " -> " << exclusiveUpper
-                      << endl;
-            }
-            catch (const DBException& ex) {
-                *errMsg = str::stream() << "Error encountered while deleting range: "
-                                        << "ns" << ns
-                                        << " from " << inclusiveLower
-                                        << " -> " << exclusiveUpper
-                                        << ", cause by:" << causedBy(ex);
-
-                if (!initiallyHaveClient) {
-                    // unregister self from list of curret ops.
-                    cc().shutdown();
-                }
-
-                return false;
-            }
-        }
-
-        if (replSet) {
-            Timer elapsedTime;
-            ReplTime lastOpApplied = cc().getLastOp().asDate();
-            try {
-                while (!opReplicatedEnough(lastOpApplied,
-                                           BSON("w" << "majority").firstElement())) {
-                    if (elapsedTime.seconds() >= 3600) {
-                        *errMsg = str::stream() << "rangeDeleter timed out after "
-                                                << elapsedTime.seconds() << " seconds while "
-                                                << "waiting for deletions to be replicated "
-                                                << "to majority nodes";
-
-                        if (!initiallyHaveClient) {
-                            // unregister self from list of curret ops.
-                            cc().shutdown();
-                        }
-
-                        return false;
-                    }
-
-                    sleepsecs(1);
-                }
-
-                LOG(elapsedTime.seconds() < 30 ? 1 : 0)
-                    << "rangeDeleter took " << elapsedTime.seconds() << " seconds "
-                    << " waiting for deletes to be replicated to majority nodes" << endl;
-            }
-            catch (const DBException& excep) {
-                *errMsg = str::stream() << "rangeDeleter encountered an exception while "
-                        << "waiting for deletes to replicated: " << excep.toString();
-
-                if (!initiallyHaveClient) {
-                    // unregister self from list of curret ops.
-                    cc().shutdown();
-                }
-
-                return false;
-            }
-        }
-
-        if (!initiallyHaveClient) {
-            // unregister self from list of curret ops.
-            cc().shutdown();
-        }
-
-        return true;
+        return false;
     }
 
-    void RangeDeleterDBEnv::getCursorIds(const StringData& ns,
-                                         std::set<CursorId>* openCursors) {
-        Client::ReadContext ctx(ns.toString());
-        Collection* collection = ctx.ctx().db()->getCollection( ns );
-        if ( !collection )
-            return;
-
-        collection->cursorCache()->getCursorIds( openCursors );
-    }
+    return true;
 }
+
+void RangeDeleterDBEnv::getCursorIds(OperationContext* txn,
+                                     StringData ns,
+                                     std::set<CursorId>* openCursors) {
+    AutoGetCollection autoColl(txn, NamespaceString(ns), MODE_IS);
+    if (!autoColl.getCollection())
+        return;
+
+    autoColl.getCollection()->getCursorManager()->getCursorIds(openCursors);
+}
+
+}  // namespace mongo

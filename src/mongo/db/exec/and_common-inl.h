@@ -26,70 +26,78 @@
  *    it in the license file.
  */
 
+#include "mongo/db/exec/working_set.h"
+
 namespace mongo {
 
-    class AndCommon {
-    public:
-        /**
-         * If src has any data dest doesn't, add that data to dest.
-         */
-        static void mergeFrom(WorkingSetMember* dest, const WorkingSetMember& src) {
-            verify(dest->hasLoc());
-            verify(src.hasLoc());
-            verify(dest->loc == src.loc);
+class AndCommon {
+public:
+    /**
+     * If 'src' has any data that the member in 'workingSet' keyed by 'destId' doesn't, add that
+     * data to 'destId's WSM.
+     */
+    static void mergeFrom(WorkingSet* workingSet,
+                          WorkingSetID destId,
+                          const WorkingSetMember& src) {
+        WorkingSetMember* dest = workingSet->get(destId);
 
-            // Merge computed data.
-            typedef WorkingSetComputedDataType WSCD;
-            for (WSCD i = WSCD(0); i < WSM_COMPUTED_NUM_TYPES; i = WSCD(i + 1)) {
-                if (!dest->hasComputed(i) && src.hasComputed(i)) {
-                    dest->addComputed(src.getComputed(i)->clone());
-                }
-            }
+        // Both 'src' and 'dest' must have a RecordId (and they must be the same RecordId), as
+        // we should have just matched them according to this RecordId while doing an
+        // intersection.
+        verify(dest->hasLoc());
+        verify(src.hasLoc());
+        verify(dest->loc == src.loc);
 
-            if (dest->hasObj()) {
-                // The merged WSM that we're creating already has the full document, so there's
-                // nothing left to do.
-                return;
-            }
-
-            if (src.hasObj()) {
-                // 'src' has the full document but 'dest' doesn't so we need to copy it over.
-                //
-                // The source diskloc must be in the "diskloc and unowned object" state rather than
-                // the "owned object" state. This is because we've just intersected according to
-                // diskloc. Since we merge based on finding working set members with matching
-                // disklocs, we shouldn't have a WSM that is missing the diskloc.
-                invariant(WorkingSetMember::LOC_AND_UNOWNED_OBJ == src.state);
-
-                // Copy the object to 'dest'.
-                dest->obj = src.obj;
-
-                // We have an object so we don't need key data.
-                dest->keyData.clear();
-
-                // 'dest' should be LOC_AND_UNOWNED_OBJ
-                dest->state = src.state;
-
-                // Now 'dest' has the full object. No more work to do.
-                return;
-            }
-
-            // If we're here, then both WSMs getting merged contain index keys. We need
-            // to merge the key data.
-            //
-            // This is N^2 but N is probably pretty small.  Easy enough to revisit.
-            for (size_t i = 0; i < src.keyData.size(); ++i) {
-                bool found = false;
-                for (size_t j = 0; j < dest->keyData.size(); ++j) {
-                    if (dest->keyData[j].indexKeyPattern == src.keyData[i].indexKeyPattern) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) { dest->keyData.push_back(src.keyData[i]); }
+        // Merge computed data.
+        typedef WorkingSetComputedDataType WSCD;
+        for (WSCD i = WSCD(0); i < WSM_COMPUTED_NUM_TYPES; i = WSCD(i + 1)) {
+            if (!dest->hasComputed(i) && src.hasComputed(i)) {
+                dest->addComputed(src.getComputed(i)->clone());
             }
         }
-    };
+
+        if (dest->hasObj()) {
+            // The merged WSM that we're creating already has the full document, so there's
+            // nothing left to do.
+            return;
+        }
+
+        if (src.hasObj()) {
+            invariant(src.getState() == WorkingSetMember::LOC_AND_OBJ);
+
+            // 'src' has the full document but 'dest' doesn't so we need to copy it over.
+            dest->obj = src.obj;
+            dest->makeObjOwnedIfNeeded();
+
+            // We have an object so we don't need key data.
+            dest->keyData.clear();
+
+            workingSet->transitionToLocAndObj(destId);
+
+            // Now 'dest' has the full object. No more work to do.
+            return;
+        }
+
+        // If we're here, then both WSMs getting merged contain index keys. We need
+        // to merge the key data.
+        //
+        // This is N^2 but N is probably pretty small.  Easy enough to revisit.
+        for (size_t i = 0; i < src.keyData.size(); ++i) {
+            bool found = false;
+            for (size_t j = 0; j < dest->keyData.size(); ++j) {
+                if (dest->keyData[j].indexKeyPattern == src.keyData[i].indexKeyPattern) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                dest->keyData.push_back(src.keyData[i]);
+            }
+        }
+
+        if (src.isSuspicious)
+            dest->isSuspicious = true;
+    }
+};
 
 }  // namespace mongo
-

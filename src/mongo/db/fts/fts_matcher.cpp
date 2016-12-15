@@ -28,107 +28,154 @@
 *    it in the license file.
 */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/fts/fts_matcher.h"
+#include "mongo/db/fts/fts_phrase_matcher.h"
+#include "mongo/db/fts/fts_tokenizer.h"
 #include "mongo/db/fts/fts_element_iterator.h"
-#include "mongo/platform/strcasestr.h"
 
 namespace mongo {
 
-    namespace fts {
+namespace fts {
 
-        FTSMatcher::FTSMatcher( const FTSQuery& query, const FTSSpec& spec )
-            : _query( query ),
-              _spec( spec ) {
-        }
+using std::string;
 
-        /*
-         * Checks if the obj contains any of the negTerms, if so returns true, otherwise false
-         * @param obj, object to be checked
-         */
-        bool FTSMatcher::hasNegativeTerm(const BSONObj& obj ) const {
-            // called during search. deals with the case in which we have a term
-            // flagged for exclusion, i.e. "hello -world" we want to remove all
-            // results that include "world"
+FTSMatcher::FTSMatcher(const FTSQueryImpl& query, const FTSSpec& spec)
+    : _query(query), _spec(spec) {}
 
-            if ( _query.getNegatedTerms().size() == 0 ) {
-                return false;
-            }
-
-            FTSElementIterator it( _spec, obj);
-
-            while ( it.more() ) {
-                FTSIteratorValue val = it.next();
-                if (_hasNegativeTerm_string( val._language, val._text )) {
-                    return true;
-                }
-            }
-
+bool FTSMatcher::matches(const BSONObj& obj) const {
+    if (canSkipPositiveTermCheck()) {
+        // We can assume that 'obj' has at least one positive term, and dassert as a sanity
+        // check.
+        dassert(hasPositiveTerm(obj));
+    } else {
+        if (!hasPositiveTerm(obj)) {
             return false;
-        }
-
-        /*
-         * Checks if any of the negTerms is in the tokenized string
-         * @param raw, the raw string to be tokenized
-         */
-        bool FTSMatcher::_hasNegativeTerm_string( const FTSLanguage* language,
-                                                  const string& raw ) const {
-
-            Tokenizer i( *language, raw );
-            Stemmer stemmer( *language );
-            while ( i.more() ) {
-                Token t = i.next();
-                if ( t.type != Token::TEXT )
-                    continue;
-                string word = stemmer.stem( tolowerString( t.data ) );
-                if ( _query.getNegatedTerms().count( word ) > 0 )
-                    return true;
-            }
-            return false;
-        }
-
-        bool FTSMatcher::phrasesMatch( const BSONObj& obj ) const {
-            for (unsigned i = 0; i < _query.getPhr().size(); i++ ) {
-                if ( !phraseMatch( _query.getPhr()[i], obj ) ) {
-                    return false;
-                }
-            }
-
-            for (unsigned i = 0; i < _query.getNegatedPhr().size(); i++ ) {
-                if ( phraseMatch( _query.getNegatedPhr()[i], obj ) ) {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        /**
-         * Checks if phrase is exactly matched in obj, returns true if so, false otherwise
-         * @param phrase, the string to be matched
-         * @param obj, document in the collection to match against
-         */
-        bool FTSMatcher::phraseMatch( const string& phrase, const BSONObj& obj ) const {
-            FTSElementIterator it( _spec, obj);
-
-            while ( it.more() ) {
-                FTSIteratorValue val = it.next();
-                if (_phraseMatches( phrase, val._text )) {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-        /*
-         * Looks for phrase in a raw string
-         * @param phrase, phrase to match
-         * @param haystack, raw string to be parsed
-         */
-        bool FTSMatcher::_phraseMatches( const string& phrase, const string& haystack ) const {
-            return strcasestr( haystack.c_str(), phrase.c_str() ) > 0;
         }
     }
+
+    if (hasNegativeTerm(obj)) {
+        return false;
+    }
+
+    if (!positivePhrasesMatch(obj)) {
+        return false;
+    }
+
+    return negativePhrasesMatch(obj);
+}
+
+bool FTSMatcher::hasPositiveTerm(const BSONObj& obj) const {
+    FTSElementIterator it(_spec, obj);
+
+    while (it.more()) {
+        FTSIteratorValue val = it.next();
+        if (_hasPositiveTerm_string(val._language, val._text)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool FTSMatcher::_hasPositiveTerm_string(const FTSLanguage* language, const string& raw) const {
+    std::unique_ptr<FTSTokenizer> tokenizer(language->createTokenizer());
+    tokenizer->reset(raw.c_str(), _getTokenizerOptions());
+
+    while (tokenizer->moveNext()) {
+        string word = tokenizer->get().toString();
+        if (_query.getPositiveTerms().count(word) > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool FTSMatcher::hasNegativeTerm(const BSONObj& obj) const {
+    if (_query.getNegatedTerms().size() == 0) {
+        return false;
+    }
+
+    FTSElementIterator it(_spec, obj);
+
+    while (it.more()) {
+        FTSIteratorValue val = it.next();
+        if (_hasNegativeTerm_string(val._language, val._text)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool FTSMatcher::_hasNegativeTerm_string(const FTSLanguage* language, const string& raw) const {
+    std::unique_ptr<FTSTokenizer> tokenizer(language->createTokenizer());
+    tokenizer->reset(raw.c_str(), _getTokenizerOptions());
+
+    while (tokenizer->moveNext()) {
+        string word = tokenizer->get().toString();
+        if (_query.getNegatedTerms().count(word) > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool FTSMatcher::positivePhrasesMatch(const BSONObj& obj) const {
+    for (size_t i = 0; i < _query.getPositivePhr().size(); i++) {
+        if (!_phraseMatch(_query.getPositivePhr()[i], obj)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool FTSMatcher::negativePhrasesMatch(const BSONObj& obj) const {
+    for (size_t i = 0; i < _query.getNegatedPhr().size(); i++) {
+        if (_phraseMatch(_query.getNegatedPhr()[i], obj)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool FTSMatcher::_phraseMatch(const string& phrase, const BSONObj& obj) const {
+    FTSElementIterator it(_spec, obj);
+
+    while (it.more()) {
+        FTSIteratorValue val = it.next();
+
+        FTSPhraseMatcher::Options matcherOptions = FTSPhraseMatcher::kNone;
+
+        if (_query.getCaseSensitive()) {
+            matcherOptions |= FTSPhraseMatcher::kCaseSensitive;
+        }
+        if (_query.getDiacriticSensitive()) {
+            matcherOptions |= FTSPhraseMatcher::kDiacriticSensitive;
+        }
+
+        if (val._language->getPhraseMatcher().phraseMatches(phrase, val._text, matcherOptions)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+FTSTokenizer::Options FTSMatcher::_getTokenizerOptions() const {
+    FTSTokenizer::Options tokenizerOptions = FTSTokenizer::kNone;
+
+    if (_query.getCaseSensitive()) {
+        tokenizerOptions |= FTSTokenizer::kGenerateCaseSensitiveTokens;
+    }
+    if (_query.getDiacriticSensitive()) {
+        tokenizerOptions |= FTSTokenizer::kGenerateDiacriticSensitiveTokens;
+    }
+
+    return tokenizerOptions;
+}
+}
 }

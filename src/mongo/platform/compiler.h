@@ -1,17 +1,29 @@
 /*
  * Copyright 2012 10gen Inc.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ *    This program is free software: you can redistribute it and/or  modify
+ *    it under the terms of the GNU Affero General Public License, version 3,
+ *    as published by the Free Software Foundation.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU Affero General Public License for more details.
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ *    You should have received a copy of the GNU Affero General Public License
+ *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 #pragma once
@@ -83,12 +95,13 @@
  *       class MONGO_COMPILER_API_EXPORT ExportedType { ... };
  *       MONGO_COMPILER_API_EXPORT SomeType exportedFunction(...);
  *
- *   NOTE: Rather than using this macro directly, one typically declares another macro named for the
- *   library, which is conditionally defined to either MONGO_COMIPLER_API_EXPORT or
- *   MONGO_COMPILER_API_IMPORT based on whether the compiler is currently building the library or
- *   building an object that depends on the library, respectively.  For example, MONGO_CLIENT_API
- *   might be defined to MONGO_COMPILER_API_EXPORT when building the MongoDB shared library, and to
- *   MONGO_COMPILER_API_IMPORT when building an application that links against the shared library.
+ *   NOTE: Rather than using this macro directly, one typically declares another macro named
+ *   for the library, which is conditionally defined to either MONGO_COMIPLER_API_EXPORT or
+ *   MONGO_COMPILER_API_IMPORT based on whether the compiler is currently building the library
+ *   or building an object that depends on the library, respectively.  For example,
+ *   MONGO_FOO_API might be defined to MONGO_COMPILER_API_EXPORT when building the MongoDB
+ *   libfoo shared library, and to MONGO_COMPILER_API_IMPORT when building an application that
+ *   links against that shared library.
  *
  *
  * MONGO_COMPILER_API_IMPORT
@@ -105,6 +118,12 @@
  *    shared libraries.
  *
  *    Same correct/incorrect usage as for MONGO_COMPILER_API_EXPORT.
+ *
+ *
+ * MONGO_COMPILER_ALWAYS_INLINE
+ *
+ *    Overrides compiler heuristics to force that a particular function should always
+ *    be inlined.
  */
 
 #if defined(_MSC_VER)

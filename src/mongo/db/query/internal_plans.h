@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2013-2014 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -28,91 +28,92 @@
 
 #pragma once
 
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/client.h"
-#include "mongo/db/exec/collection_scan.h"
-#include "mongo/db/exec/fetch.h"
-#include "mongo/db/exec/index_scan.h"
-#include "mongo/db/query/eof_runner.h"
-#include "mongo/db/query/internal_runner.h"
+#include "mongo/base/string_data.h"
+#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/record_id.h"
 
 namespace mongo {
 
-    /**
-     * The internal planner is a one-stop shop for "off-the-shelf" plans.  Most internal procedures
-     * that do not require advanced queries could be served by plans already in here.
-     */
-    class InternalPlanner {
-    public:
-        enum Direction {
-            FORWARD = 1,
-            BACKWARD = -1,
-        };
+class BSONObj;
+class Collection;
+class IndexDescriptor;
+class OperationContext;
+class PlanStage;
+class WorkingSet;
+struct DeleteStageParams;
 
-        enum IndexScanOptions {
-            // The client is interested in the default outputs of an index scan: BSONObj of the key,
-            // DiskLoc of the record that's indexed.  The client does its own fetching if required.
-            IXSCAN_DEFAULT = 0,
-
-            // The client wants the fetched object and the DiskLoc that refers to it.  Delegating
-            // the fetch to the runner allows fetching outside of a lock.
-            IXSCAN_FETCH = 1,
-        };
-
-        /**
-         * Return a collection scan.  Caller owns pointer.
-         */
-        static Runner* collectionScan(const StringData& ns, // TODO: make this a Collection*
-                                      const Direction direction = FORWARD,
-                                      const DiskLoc startLoc = DiskLoc()) {
-            Collection* collection = cc().database()->getCollection(ns);
-            if (NULL == collection) { return new EOFRunner(NULL, ns.toString()); }
-
-            CollectionScanParams params;
-            params.ns = ns.toString();
-            params.start = startLoc;
-
-            if (FORWARD == direction) {
-                params.direction = CollectionScanParams::FORWARD;
-            }
-            else {
-                params.direction = CollectionScanParams::BACKWARD;
-            }
-
-            WorkingSet* ws = new WorkingSet();
-            CollectionScan* cs = new CollectionScan(params, ws, NULL);
-            return new InternalRunner(collection, cs, ws);
-        }
-
-        /**
-         * Return an index scan.  Caller owns returned pointer.
-         */
-        static Runner* indexScan(const Collection* collection,
-                                 const IndexDescriptor* descriptor,
-                                 const BSONObj& startKey, const BSONObj& endKey,
-                                 bool endKeyInclusive, Direction direction = FORWARD,
-                                 int options = 0) {
-            invariant(collection);
-            invariant(descriptor);
-
-            IndexScanParams params;
-            params.descriptor = descriptor;
-            params.direction = direction;
-            params.bounds.isSimpleRange = true;
-            params.bounds.startKey = startKey;
-            params.bounds.endKey = endKey;
-            params.bounds.endKeyInclusive = endKeyInclusive;
-
-            WorkingSet* ws = new WorkingSet();
-            IndexScan* ix = new IndexScan(params, ws, NULL);
-
-            if (IXSCAN_FETCH & options) {
-                return new InternalRunner(collection, new FetchStage(ws, ix, NULL), ws);
-            }
-            else {
-                return new InternalRunner(collection, ix, ws);
-            }
-        }
+/**
+ * The internal planner is a one-stop shop for "off-the-shelf" plans.  Most internal procedures
+ * that do not require advanced queries could be served by plans already in here.
+ */
+class InternalPlanner {
+public:
+    enum Direction {
+        FORWARD = 1,
+        BACKWARD = -1,
     };
+
+    enum IndexScanOptions {
+        // The client is interested in the default outputs of an index scan: BSONObj of the key,
+        // RecordId of the record that's indexed.  The client does its own fetching if required.
+        IXSCAN_DEFAULT = 0,
+
+        // The client wants the fetched object and the RecordId that refers to it.  Delegating
+        // the fetch to the runner allows fetching outside of a lock.
+        IXSCAN_FETCH = 1,
+    };
+
+    /**
+     * Returns a collection scan.  Caller owns pointer.
+     */
+    static std::unique_ptr<PlanExecutor> collectionScan(OperationContext* txn,
+                                                        StringData ns,
+                                                        Collection* collection,
+                                                        PlanExecutor::YieldPolicy yieldPolicy,
+                                                        const Direction direction = FORWARD,
+                                                        const RecordId startLoc = RecordId());
+
+    /**
+     * Returns an index scan.  Caller owns returned pointer.
+     */
+    static std::unique_ptr<PlanExecutor> indexScan(OperationContext* txn,
+                                                   const Collection* collection,
+                                                   const IndexDescriptor* descriptor,
+                                                   const BSONObj& startKey,
+                                                   const BSONObj& endKey,
+                                                   bool endKeyInclusive,
+                                                   PlanExecutor::YieldPolicy yieldPolicy,
+                                                   Direction direction = FORWARD,
+                                                   int options = IXSCAN_DEFAULT);
+
+    /**
+     * Returns an IXSCAN => FETCH => DELETE plan.
+     */
+    static std::unique_ptr<PlanExecutor> deleteWithIndexScan(OperationContext* txn,
+                                                             Collection* collection,
+                                                             const DeleteStageParams& params,
+                                                             const IndexDescriptor* descriptor,
+                                                             const BSONObj& startKey,
+                                                             const BSONObj& endKey,
+                                                             bool endKeyInclusive,
+                                                             PlanExecutor::YieldPolicy yieldPolicy,
+                                                             Direction direction = FORWARD);
+
+private:
+    /**
+     * Returns a plan stage that is either an index scan or an index scan with a fetch stage.
+     *
+     * Used as a helper for indexScan() and deleteWithIndexScan().
+     */
+    static std::unique_ptr<PlanStage> _indexScan(OperationContext* txn,
+                                                 WorkingSet* ws,
+                                                 const Collection* collection,
+                                                 const IndexDescriptor* descriptor,
+                                                 const BSONObj& startKey,
+                                                 const BSONObj& endKey,
+                                                 bool endKeyInclusive,
+                                                 Direction direction = FORWARD,
+                                                 int options = IXSCAN_DEFAULT);
+};
 
 }  // namespace mongo

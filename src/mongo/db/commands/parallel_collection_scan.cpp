@@ -28,227 +28,139 @@
 *    it in the license file.
 */
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
-#include "mongo/db/client.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/db_raii.h"
+#include "mongo/db/exec/multi_iterator.h"
+#include "mongo/db/query/cursor_response.h"
+#include "mongo/db/service_context.h"
+#include "mongo/stdx/memory.h"
+#include "mongo/base/checked_cast.h"
 
 namespace mongo {
 
+using std::unique_ptr;
+using std::string;
+using stdx::make_unique;
 
-    class ParallelCollectionScanCmd : public Command {
-    public:
+class ParallelCollectionScanCmd : public Command {
+public:
+    struct ExtentInfo {
+        ExtentInfo(RecordId dl, size_t s) : diskLoc(dl), size(s) {}
+        RecordId diskLoc;
+        size_t size;
+    };
 
-        struct ExtentInfo {
-            ExtentInfo( DiskLoc dl, size_t s )
-                : diskLoc(dl), size(s) {
-            }
-            DiskLoc diskLoc;
-            size_t size;
-        };
+    // ------------------------------------------------
 
-        class ExtentRunner : public Runner {
-        public:
-            ExtentRunner( const StringData& ns,
-                          Database* db,
-                          Collection* collection,
-                          const vector<ExtentInfo>& extents )
-                : _ns( ns.toString() ),
-                  _collection( collection ),
-                  _extents( extents ),
-                  _extentManager( db->getExtentManager() ) {
+    ParallelCollectionScanCmd() : Command("parallelCollectionScan") {}
 
-                invariant( _extents.size() > 0 );
+    virtual bool isWriteCommandForConfigServer() const {
+        return false;
+    }
+    virtual bool slaveOk() const {
+        return true;
+    }
 
-                _currentExtent = 0;
-                _currentRecord = _getExtent( _currentExtent )->firstRecord;
-                if ( _currentRecord.isNull() )
-                    _advance();
-            }
-            ~ExtentRunner() {
-            }
+    bool supportsReadConcern() const final {
+        return true;
+    }
 
-            virtual RunnerState getNext(BSONObj* objOut, DiskLoc* dlOut) {
-                if ( _collection == NULL )
-                    return RUNNER_DEAD;
-                if ( _currentRecord.isNull() )
-                    return RUNNER_EOF;
+    virtual Status checkAuthForCommand(ClientBasic* client,
+                                       const std::string& dbname,
+                                       const BSONObj& cmdObj) {
+        ActionSet actions;
+        actions.addAction(ActionType::find);
+        Privilege p(parseResourcePattern(dbname, cmdObj), actions);
+        if (AuthorizationSession::get(client)->isAuthorizedForPrivilege(p))
+            return Status::OK();
+        return Status(ErrorCodes::Unauthorized, "Unauthorized");
+    }
 
-                if ( objOut )
-                    *objOut = _collection->docFor( _currentRecord );
-                if ( dlOut )
-                    *dlOut = _currentRecord;
-                _advance();
-                return RUNNER_ADVANCED;
-            }
+    virtual bool run(OperationContext* txn,
+                     const string& dbname,
+                     BSONObj& cmdObj,
+                     int options,
+                     string& errmsg,
+                     BSONObjBuilder& result) {
+        NamespaceString ns(dbname, cmdObj[name].String());
 
-            virtual bool isEOF() {
-                return _collection == NULL || _currentRecord.isNull();
-            }
-            virtual void kill() {
-                _collection = NULL;
-            }
-            virtual void setYieldPolicy(YieldPolicy policy) {
-                invariant( false );
-            }
-            virtual void saveState() {}
-            virtual bool restoreState() { return true;}
-            virtual const string& ns() { return _ns; }
-            virtual void invalidate(const DiskLoc& dl, InvalidationType type) {
-                switch ( type ) {
-                case INVALIDATION_DELETION:
-                    if ( dl == _currentRecord )
-                        _advance();
-                    break;
-                case INVALIDATION_MUTATION:
-                    // no-op
-                    break;
-                }
-            }
-            virtual const Collection* collection() {
-                return _collection;
-            }
-            virtual Status getInfo(TypeExplain** explain, PlanInfo** planInfo) const {
-                return Status( ErrorCodes::InternalError, "no" );
-            }
-        private:
+        AutoGetCollectionForRead ctx(txn, ns.ns());
 
-            /**
-             * @return if more data
-             */
-            bool _advance() {
+        Collection* collection = ctx.getCollection();
+        if (!collection)
+            return appendCommandStatus(result,
+                                       Status(ErrorCodes::NamespaceNotFound,
+                                              str::stream() << "ns does not exist: " << ns.ns()));
 
-                while ( _currentRecord.isNull() ) {
-                    // need to move to next extent
-                    if ( _currentExtent + 1 >= _extents.size() )
-                        return false;
-                    _currentExtent++;
-                    _currentRecord = _getExtent( _currentExtent )->firstRecord;
-                    if ( !_currentRecord.isNull() )
-                        return true;
-                    // if we're here, the extent was empty, keep looking
-                }
+        size_t numCursors = static_cast<size_t>(cmdObj["numCursors"].numberInt());
 
-                // we're in an extent, advance
-                _currentRecord = _extentManager.getNextRecordInExtent( _currentRecord );
-                if ( _currentRecord.isNull() ) {
-                    // finished this extent, need to move to the next one
-                    return _advance();
-                }
-                return true;
-            }
+        if (numCursors == 0 || numCursors > 10000)
+            return appendCommandStatus(result,
+                                       Status(ErrorCodes::BadValue,
+                                              str::stream()
+                                                  << "numCursors has to be between 1 and 10000"
+                                                  << " was: " << numCursors));
 
-            Extent* _getExtent( size_t offset ) {
-                DiskLoc dl = _extents[offset].diskLoc;
-                return _extentManager.getExtent( dl );
-            }
-
-            string _ns;
-            Collection* _collection;
-            vector<ExtentInfo> _extents;
-            ExtentManager& _extentManager;
-
-            size_t _currentExtent;
-            DiskLoc _currentRecord;
-        };
-
-        // ------------------------------------------------
-
-        ParallelCollectionScanCmd() : Command( "parallelCollectionScan" ){}
-
-        virtual LockType locktype() const { return READ; }
-        virtual bool logTheOp() { return false; }
-        virtual bool slaveOk() const { return true; }
-
-        virtual Status checkAuthForCommand(ClientBasic* client,
-                                           const std::string& dbname,
-                                           const BSONObj& cmdObj) {
-            ActionSet actions;
-            actions.addAction(ActionType::find);
-            Privilege p(parseResourcePattern(dbname, cmdObj), actions);
-            if ( client->getAuthorizationSession()->isAuthorizedForPrivilege(p) )
-                return Status::OK();
-            return Status(ErrorCodes::Unauthorized, "Unauthorized");
+        auto iterators = collection->getManyCursors(txn);
+        if (iterators.size() < numCursors) {
+            numCursors = iterators.size();
         }
 
-        virtual bool run( const string& dbname, BSONObj& cmdObj, int options,
-                          string& errmsg, BSONObjBuilder& result,
-                          bool fromRepl = false ) {
+        std::vector<std::unique_ptr<PlanExecutor>> execs;
+        for (size_t i = 0; i < numCursors; i++) {
+            unique_ptr<WorkingSet> ws = make_unique<WorkingSet>();
+            unique_ptr<MultiIteratorStage> mis =
+                make_unique<MultiIteratorStage>(txn, ws.get(), collection);
 
-            NamespaceString ns( dbname, cmdObj[name].String() );
-
-            Database* db = cc().database();
-            Collection* collection = db->getCollection( ns );
-
-            if ( !collection )
-                return appendCommandStatus( result,
-                                            Status( ErrorCodes::NamespaceNotFound,
-                                                    str::stream() <<
-                                                    "ns does not exist: " << ns.ns() ) );
-
-            size_t numCursors = static_cast<size_t>( cmdObj["numCursors"].numberInt() );
-
-            if ( numCursors == 0 || numCursors > 10000 )
-                return appendCommandStatus( result,
-                                            Status( ErrorCodes::BadValue,
-                                                    str::stream() <<
-                                                    "numCursors has to be between 1 and 10000" <<
-                                                    " was: " << numCursors ) );
-
-            vector< vector<ExtentInfo> > buckets;
-
-            const ExtentManager& extentManager = db->getExtentManager();
-
-            {
-                DiskLoc extentDiskLoc = collection->details()->firstExtent();
-                int extentNumber = 0;
-                while (!extentDiskLoc.isNull()) {
-
-                    Extent* thisExtent = extentManager.getExtent( extentDiskLoc );
-                    ExtentInfo info( extentDiskLoc, thisExtent->length );
-                    if ( buckets.size() < numCursors ) {
-                        vector<ExtentInfo> v;
-                        v.push_back( info );
-                        buckets.push_back( v );
-                    }
-                    else {
-                        buckets[ extentNumber % buckets.size() ].push_back( info );
-                    }
-
-                    extentDiskLoc = thisExtent->xnext;
-                    extentNumber++;
-                }
-
-                BSONArrayBuilder bucketsBuilder;
-                for ( size_t i = 0; i < buckets.size(); i++ ) {
-
-                    auto_ptr<Runner> runner( new ExtentRunner( ns.ns(),
-                                                               db,
-                                                               collection,
-                                                               buckets[i] ) );
-                    ClientCursor* cc = new ClientCursor( collection, runner.release() );
-
-                    // we are mimicking the aggregation cursor output here
-                    // that is why there are ns, ok and empty firstBatch
-                    BSONObjBuilder threadResult;
-                    {
-                        BSONObjBuilder cursor;
-                        cursor.appendArray( "firstBatch", BSONObj() );
-                        cursor.append( "ns", ns );
-                        cursor.append( "id", cc->cursorid() );
-                        threadResult.append( "cursor", cursor.obj() );
-                    }
-                    threadResult.appendBool( "ok", 1 );
-
-                    bucketsBuilder.append( threadResult.obj() );
-                }
-                result.appendArray( "cursors", bucketsBuilder.obj() );
-            }
-
-            return true;
-
+            // Takes ownership of 'ws' and 'mis'.
+            auto statusWithPlanExecutor = PlanExecutor::make(
+                txn, std::move(ws), std::move(mis), collection, PlanExecutor::YIELD_AUTO);
+            invariant(statusWithPlanExecutor.isOK());
+            execs.push_back(std::move(statusWithPlanExecutor.getValue()));
         }
-    } parallelCollectionScanCmd;
 
+        // transfer iterators to executors using a round-robin distribution.
+        // TODO consider using a common work queue once invalidation issues go away.
+        for (size_t i = 0; i < iterators.size(); i++) {
+            auto& planExec = execs[i % execs.size()];
+            MultiIteratorStage* mis = checked_cast<MultiIteratorStage*>(planExec->getRootStage());
+            mis->addIterator(std::move(iterators[i]));
+        }
+
+        {
+            BSONArrayBuilder bucketsBuilder;
+            for (auto&& exec : execs) {
+                // The PlanExecutor was registered on construction due to the YIELD_AUTO policy.
+                // We have to deregister it, as it will be registered with ClientCursor.
+                exec->deregisterExec();
+
+                // Need to save state while yielding locks between now and getMore().
+                exec->saveState();
+                exec->detachFromOperationContext();
+
+                // transfer ownership of an executor to the ClientCursor (which manages its own
+                // lifetime).
+                ClientCursor* cc =
+                    new ClientCursor(collection->getCursorManager(),
+                                     exec.release(),
+                                     ns.ns(),
+                                     txn->recoveryUnit()->isReadingFromMajorityCommittedSnapshot());
+
+                BSONObjBuilder threadResult;
+                appendCursorResponseObject(cc->cursorid(), ns.ns(), BSONArray(), &threadResult);
+                threadResult.appendBool("ok", 1);
+
+                bucketsBuilder.append(threadResult.obj());
+            }
+            result.appendArray("cursors", bucketsBuilder.obj());
+        }
+
+        return true;
+    }
+} parallelCollectionScanCmd;
 }

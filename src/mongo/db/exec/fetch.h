@@ -28,62 +28,78 @@
 
 #pragma once
 
-#include "mongo/db/diskloc.h"
+#include <memory>
+
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
+#include "mongo/db/record_id.h"
 
 namespace mongo {
 
+class SeekableRecordCursor;
+
+/**
+ * This stage turns a RecordId into a BSONObj.
+ *
+ * In WorkingSetMember terms, it transitions from LOC_AND_IDX to LOC_AND_OBJ by reading
+ * the record at the provided loc.  Returns verbatim any data that already has an object.
+ *
+ * Preconditions: Valid RecordId.
+ */
+class FetchStage : public PlanStage {
+public:
+    FetchStage(OperationContext* txn,
+               WorkingSet* ws,
+               PlanStage* child,
+               const MatchExpression* filter,
+               const Collection* collection);
+
+    ~FetchStage();
+
+    bool isEOF() final;
+    StageState work(WorkingSetID* out) final;
+
+    void doSaveState() final;
+    void doRestoreState() final;
+    void doDetachFromOperationContext() final;
+    void doReattachToOperationContext() final;
+    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
+
+    StageType stageType() const final {
+        return STAGE_FETCH;
+    }
+
+    std::unique_ptr<PlanStageStats> getStats();
+
+    const SpecificStats* getSpecificStats() const final;
+
+    static const char* kStageType;
+
+private:
     /**
-     * This stage turns a DiskLoc into a BSONObj.
-     *
-     * In WorkingSetMember terms, it transitions from LOC_AND_IDX to LOC_AND_UNOWNED_OBJ by reading
-     * the record at the provided loc.  Returns verbatim any data that already has an object.
-     *
-     * Preconditions: Valid DiskLoc.
+     * If the member (with id memberID) passes our filter, set *out to memberID and return that
+     * ADVANCED.  Otherwise, free memberID and return NEED_TIME.
      */
-    class FetchStage : public PlanStage {
-    public:
-        FetchStage(WorkingSet* ws, PlanStage* child, const MatchExpression* filter);
-        virtual ~FetchStage();
+    StageState returnIfMatches(WorkingSetMember* member, WorkingSetID memberID, WorkingSetID* out);
 
-        virtual bool isEOF();
-        virtual StageState work(WorkingSetID* out);
+    // Collection which is used by this stage. Used to resolve record ids retrieved by child
+    // stages. The lifetime of the collection must supersede that of the stage.
+    const Collection* _collection;
+    // Used to fetch Records from _collection.
+    std::unique_ptr<SeekableRecordCursor> _cursor;
 
-        virtual void prepareToYield();
-        virtual void recoverFromYield();
-        virtual void invalidate(const DiskLoc& dl, InvalidationType type);
+    // _ws is not owned by us.
+    WorkingSet* _ws;
 
-        PlanStageStats* getStats();
+    // The filter is not owned by us.
+    const MatchExpression* _filter;
 
-    private:
-        /**
-         * If the member (with id memberID) passes our filter, set *out to memberID and return that
-         * ADVANCED.  Otherwise, free memberID and return NEED_TIME.
-         */
-        StageState returnIfMatches(WorkingSetMember* member, WorkingSetID memberID,
-                                   WorkingSetID* out);
+    // If not Null, we use this rather than asking our child what to do next.
+    WorkingSetID _idRetrying;
 
-        /**
-         * work(...) delegates to this when we're called after requesting a fetch.
-         */
-        StageState fetchCompleted(WorkingSetID* out);
-
-        // _ws is not owned by us.
-        WorkingSet* _ws;
-        scoped_ptr<PlanStage> _child;
-
-        // The filter is not owned by us.
-        const MatchExpression* _filter;
-
-        // If we're fetching a DiskLoc and it points at something that's not in memory, we return a
-        // a "please page this in" result and hold on to the WSID until the next call to work(...).
-        WorkingSetID _idBeingPagedIn;
-
-        // Stats
-        CommonStats _commonStats;
-        FetchStats _specificStats;
-    };
+    // Stats
+    FetchStats _specificStats;
+};
 
 }  // namespace mongo

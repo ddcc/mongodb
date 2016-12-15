@@ -28,212 +28,212 @@
 *    then also delete it in the license file.
 */
 
-#ifndef S_BALANCER_POLICY_HEADER
-#define S_BALANCER_POLICY_HEADER
+#pragma once
 
-#include "mongo/base/status_with.h"
-#include "mongo/base/owned_pointer_vector.h"
+#include "mongo/base/disallow_copying.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/s/shard.h"
-#include "mongo/s/type_chunk.h"
+#include "mongo/s/catalog/type_chunk.h"
+#include "mongo/s/client/shard.h"
 
 namespace mongo {
 
-    class ChunkManager;
+class ChunkManager;
+class OperationContext;
 
-    struct ChunkInfo {
-        const BSONObj min;
-        const BSONObj max;
-        
-        ChunkInfo( const BSONObj& a_min, const BSONObj& a_max ) 
-            : min( a_min.getOwned() ), max( a_max.getOwned() ){}
+struct ChunkInfo {
+    const BSONObj min;
+    const BSONObj max;
 
-        ChunkInfo( const BSONObj& chunk )
-            : min(chunk[ChunkType::min()].Obj().getOwned()),
-              max(chunk[ChunkType::max()].Obj().getOwned()) {
-        }
+    ChunkInfo(const BSONObj& chunk)
+        : min(chunk[ChunkType::min()].Obj().getOwned()),
+          max(chunk[ChunkType::max()].Obj().getOwned()) {}
 
-        string toString() const;
-    };
-
-    struct TagRange {
-        BSONObj min;
-        BSONObj max;
-        string tag;
-        
-        TagRange(){}
-
-        TagRange( const BSONObj& a_min, const BSONObj& a_max, const string& a_tag ) 
-            : min( a_min.getOwned() ), max( a_max.getOwned() ), tag( a_tag ){}
-        string toString() const;
-    };
-    
-    class ShardInfo {
-    public:
-        ShardInfo();
-        ShardInfo( long long maxSize, long long currSize, 
-                   bool draining, bool opsQueued, 
-                   const set<string>& tags = set<string>(),
-                   const string& _mongoVersion = string("") );
-
-        void addTag( const string& tag );
-
-        /** @return true if we have the tag OR if the tag is "" */
-        bool hasTag( const string& tag ) const;
-        
-        /**
-         * @return true if a shard cannot receive any new chunks because it reaches 'shardLimits'.
-         * Expects the optional fields "maxSize", can in size in MB, and "usedSize", currently used size
-         * in MB, on 'shardLimits'.
-         */
-        bool isSizeMaxed() const;
-        
-        /**
-         * @return true if 'shardLimist' contains a field "draining". Expects the optional field
-         * "isDraining" on 'shrdLimits'.
-         */
-        bool isDraining() const { return _draining; }
-        
-        /**
-         * @return true if a shard currently has operations in any of its writeback queues
-         */
-        bool hasOpsQueued() const { return _hasOpsQueued; }
-        
-        long long getMaxSize() const { return _maxSize; }
-
-        long long getCurrSize() const { return _currSize; }
-
-        string getMongoVersion() const { return _mongoVersion; }
-
-        string toString() const;
-        
-    private:
-        long long _maxSize;
-        long long _currSize;
-        bool _draining;
-        bool _hasOpsQueued;
-        set<string> _tags;
-        string _mongoVersion;
-    };
-    
-    struct MigrateInfo {
-        const string ns;
-        const string to;
-        const string from;
-        const ChunkInfo chunk;
-
-        MigrateInfo( const string& a_ns , const string& a_to , const string& a_from , const BSONObj& a_chunk )
-            : ns( a_ns ) , to( a_to ) , from( a_from ), chunk( a_chunk ) {}
+    std::string toString() const;
+};
 
 
-    };
+struct TagRange {
+    BSONObj min;
+    BSONObj max;
+    std::string tag;
 
-    typedef std::map< std::string,ShardInfo > ShardInfoMap;
-    typedef std::map<std::string, OwnedPointerVector<ChunkType>* > ShardToChunksMap;
+    TagRange() {}
 
-    class DistributionStatus : boost::noncopyable {
-    public:
-        DistributionStatus( const ShardInfoMap& shardInfo,
-                            const ShardToChunksMap& shardToChunksMap );
+    TagRange(const BSONObj& a_min, const BSONObj& a_max, const std::string& a_tag)
+        : min(a_min.getOwned()), max(a_max.getOwned()), tag(a_tag) {}
 
-        // only used when building
-        
-        /**
-         * @return if range is valid
-         */
-        bool addTagRange( const TagRange& range );
-
-        // ---- these methods might be better suiting in BalancerPolicy
-        
-        /**
-         * @param forTag "" if you don't care, or a tag
-         * @return shard best suited to receive a chunk
-         */
-        string getBestReceieverShard( const string& forTag ) const;
-
-        /**
-         * @return the shard with the most chunks
-         *         based on # of chunks with the given tag
-         */
-        string getMostOverloadedShard( const string& forTag ) const;
+    std::string toString() const;
+};
 
 
-        // ---- basic accessors, counters, etc...
+class ShardInfo {
+public:
+    ShardInfo();
+    ShardInfo(long long maxSizeMB,
+              long long currSizeMB,
+              bool draining,
+              const std::set<std::string>& tags = std::set<std::string>(),
+              const std::string& _mongoVersion = std::string(""));
 
-        /** @return total number of chunks  */
-        unsigned totalChunks() const;
+    void addTag(const std::string& tag);
 
-        /** @return number of chunks in this shard */
-        unsigned numberOfChunksInShard( const string& shard ) const;
+    /** @return true if we have the tag OR if the tag is "" */
+    bool hasTag(const std::string& tag) const;
 
-        /** @return number of chunks in this shard with the given tag */
-        unsigned numberOfChunksInShardWithTag( const string& shard, const string& tag ) const;
+    /**
+     * @return true if a shard cannot receive any new chunks because it reaches 'shardLimits'.
+     * Expects the optional fields "maxSize", can in size in MB, and "usedSize", currently used size
+     * in MB, on 'shardLimits'.
+     */
+    bool isSizeMaxed() const;
 
-        /** @return chunks for the shard */
-        const std::vector<ChunkType*>& getChunks(const std::string& shard) const;
+    /**
+     * @return true if 'shardLimist' contains a field "draining". Expects the optional field
+     * "isDraining" on 'shrdLimits'.
+     */
+    bool isDraining() const {
+        return _draining;
+    }
 
-        /** @return all tags we know about, not include "" */
-        const set<string>& tags() const { return _allTags; }
+    long long getMaxSizeMB() const {
+        return _maxSizeMB;
+    }
 
-        /** @return the right tag for chunk, possibly "" */
-        std::string getTagForChunk(const ChunkType& chunk) const;
-        
-        /** @return all shards we know about */
-        const set<string>& shards() const { return _shards; }
+    long long getCurrSizeMB() const {
+        return _currSizeMB;
+    }
 
-        /** @return the ShardInfo for the shard */
-        const ShardInfo& shardInfo( const string& shard ) const;
-        
-        /** writes all state to log() */
-        void dump() const;
-        
-        static Status populateShardInfoMap(ShardInfoMap* shardInfo);
+    std::string getMongoVersion() const {
+        return _mongoVersion;
+    }
 
-        /**
-         * Note: jumbo and versions are not set.
-         */
-        static void populateShardToChunksMap(const ShardInfoMap& allShards,
-                                             const ChunkManager& chunkMgr,
-                                             ShardToChunksMap* shardToChunksMap);
+    std::string toString() const;
 
-        /**
-         * Returns the tag of the given chunk by querying the config server.
-         *
-         * TODO: add a way to incrementally update chunk tags metadata so this is not needed.
-         */
-        static StatusWith<std::string> getTagForSingleChunk(const std::string& configServer,
-                                                            const std::string& ns,
-                                                            const ChunkType& chunk);
-
-    private:
-        const ShardInfoMap& _shardInfo;
-        const ShardToChunksMap& _shardChunks;
-        map<BSONObj,TagRange> _tagRanges;
-        set<string> _allTags;
-        set<string> _shards;
-    };
-
-    class BalancerPolicy {
-    public:
-
-        /**
-         * Returns a suggested chunk to move whithin a collection's shards, given information about
-         * space usage and number of chunks for that collection. If the policy doesn't recommend
-         * moving, it returns NULL.
-         *
-         * @param ns is the collections namepace.
-         * @param DistributionStatus holds all the info about the current state of the cluster/namespace
-         * @param balancedLastTime is the number of chunks effectively moved in the last round.
-         * @returns NULL or MigrateInfo of the best move to make towards balacing the collection.
-         *          caller owns the MigrateInfo instance
-         */
-        static MigrateInfo* balance( const string& ns,
-                                     const DistributionStatus& distribution,
-                                     int balancedLastTime );
-    };
+private:
+    long long _maxSizeMB;
+    long long _currSizeMB;
+    bool _draining;
+    std::set<std::string> _tags;
+    std::string _mongoVersion;
+};
 
 
+struct MigrateInfo {
+    MigrateInfo(const std::string& a_ns,
+                const ShardId& a_to,
+                const ShardId& a_from,
+                const BSONObj& a_chunk)
+        : ns(a_ns), to(a_to), from(a_from), chunk(a_chunk) {}
+
+    const std::string ns;
+    const ShardId to;
+    const ShardId from;
+    const ChunkInfo chunk;
+};
+
+typedef std::map<ShardId, ShardInfo> ShardInfoMap;
+typedef std::map<ShardId, std::vector<ChunkType>> ShardToChunksMap;
+
+
+class DistributionStatus {
+    MONGO_DISALLOW_COPYING(DistributionStatus);
+
+public:
+    DistributionStatus(const ShardInfoMap& shardInfo, const ShardToChunksMap& shardToChunksMap);
+
+    // only used when building
+
+    /**
+     * @return if range is valid
+     */
+    bool addTagRange(const TagRange& range);
+
+    // ---- these methods might be better suiting in BalancerPolicy
+
+    /**
+     * @param forTag "" if you don't care, or a tag
+     * @return shard best suited to receive a chunk
+     */
+    std::string getBestReceieverShard(const std::string& forTag) const;
+
+    /**
+     * @return the shard with the most chunks
+     *         based on # of chunks with the given tag
+     */
+    std::string getMostOverloadedShard(const std::string& forTag) const;
+
+
+    // ---- basic accessors, counters, etc...
+
+    /** @return total number of chunks  */
+    unsigned totalChunks() const;
+
+    /** @return number of chunks in this shard */
+    unsigned numberOfChunksInShard(const ShardId& shardId) const;
+
+    /** @return number of chunks in this shard with the given tag */
+    unsigned numberOfChunksInShardWithTag(const ShardId& shardId, const std::string& tag) const;
+
+    /** @return chunks for the shard */
+    const std::vector<ChunkType>& getChunks(const ShardId& shardId) const;
+
+    /** @return all tags we know about, not include "" */
+    const std::set<std::string>& tags() const {
+        return _allTags;
+    }
+
+    /** @return the right tag for chunk, possibly "" */
+    std::string getTagForChunk(const ChunkType& chunk) const;
+
+    /** @return all shard ids we know about */
+    const std::set<ShardId>& shardIds() const {
+        return _shardIds;
+    }
+
+    /** @return the ShardInfo for the shard */
+    const ShardInfo& shardInfo(const ShardId& shardId) const;
+
+    /** writes all state to log() */
+    void dump() const;
+
+    /**
+     * Retrieves shard metadata information from the config server as well as some stats
+     * from the shards.
+     */
+    static Status populateShardInfoMap(OperationContext* txn, ShardInfoMap* shardInfo);
+
+    /**
+     * Note: jumbo and versions are not set.
+     */
+    static void populateShardToChunksMap(const ShardInfoMap& allShards,
+                                         const ChunkManager& chunkMgr,
+                                         ShardToChunksMap* shardToChunksMap);
+
+private:
+    const ShardInfoMap& _shardInfo;
+    const ShardToChunksMap& _shardChunks;
+    std::map<BSONObj, TagRange> _tagRanges;
+    std::set<std::string> _allTags;
+    std::set<ShardId> _shardIds;
+};
+
+
+class BalancerPolicy {
+public:
+    /**
+     * Returns a suggested chunk to move whithin a collection's shards, given information about
+     * space usage and number of chunks for that collection. If the policy doesn't recommend
+     * moving, it returns NULL.
+     *
+     * @param ns is the collections namepace.
+     * @param DistributionStatus holds all the info about the current state of the cluster/namespace
+     * @param balancedLastTime is the number of chunks effectively moved in the last round.
+     * @returns NULL or MigrateInfo of the best move to make towards balacing the collection.
+     *          caller owns the MigrateInfo instance
+     */
+    static MigrateInfo* balance(const std::string& ns,
+                                const DistributionStatus& distribution,
+                                int balancedLastTime);
+};
 
 }  // namespace mongo
-
-#endif  // S_BALANCER_POLICY_HEADER

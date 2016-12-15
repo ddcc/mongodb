@@ -37,77 +37,84 @@
 #include <map>
 #include <set>
 #include <boost/version.hpp>
-#include <boost/noncopyable.hpp>
-#include <boost/thread/mutex.hpp>
-#include <boost/thread/condition.hpp>
+
+#include "mongo/config.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/rwlockimpl.h"
+#include "mongo/util/concurrency/simplerwlock.h"
+#include "mongo/util/concurrency/threadlocal.h"
+#include "mongo/util/time_support.h"
 
 using namespace std;
-
-#include "mongo/util/assert_util.h"
-#include "mongo/util/time_support.h"
-#include "rwlockimpl.h"
-#include "simplerwlock.h"
-#include "threadlocal.h"
 
 namespace mongo {
 
 #if defined(NTDDI_VERSION) && defined(NTDDI_WIN7) && (NTDDI_VERSION >= NTDDI_WIN7)
-    SimpleRWLock::SimpleRWLock(const StringData& p) : name(p.toString()) {
-        InitializeSRWLock(&_lock);
-    }
-# if defined(_DEBUG)
-    // the code below in _DEBUG build will check that we don't try to recursively lock, 
-    // which is not supported by this class.  also checks that you don't unlock without 
-    // having locked
-    void SimpleRWLock::lock() {
-        unsigned me = GetCurrentThreadId();
-        int& state = s.getRef();
-        dassert( state == 0 );
-        state--;
-        AcquireSRWLockExclusive(&_lock);
-        tid = me; // this is for use in the debugger to see who does have the lock
-    }
-    void SimpleRWLock::unlock() { 
-        int& state = s.getRef();
-        dassert( state == -1 );
-        state++;
-        tid = 0xffffffff;
-        ReleaseSRWLockExclusive(&_lock);
-    }
-    void SimpleRWLock::lock_shared() { 
-        int& state = s.getRef();
-        dassert( state == 0 );
-        state++;
-        AcquireSRWLockShared(&_lock);
-        shares++;
-    }
-    void SimpleRWLock::unlock_shared() { 
-        int& state = s.getRef();
-        dassert( state == 1 );
-        state--;
-        shares--;
-        ReleaseSRWLockShared(&_lock); 
-    }
-# else
-    void SimpleRWLock::lock() {
-        AcquireSRWLockExclusive(&_lock);
-    }
-    void SimpleRWLock::unlock() { 
-        ReleaseSRWLockExclusive(&_lock);
-    }
-    void SimpleRWLock::lock_shared() { 
-        AcquireSRWLockShared(&_lock);
-    }
-    void SimpleRWLock::unlock_shared() { 
-        ReleaseSRWLockShared(&_lock); 
-    }
-# endif
+SimpleRWLock::SimpleRWLock(StringData p) : name(p.toString()) {
+    InitializeSRWLock(&_lock);
+}
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
+// the code below in a debug build will check that we don't try to recursively lock,
+// which is not supported by this class.  also checks that you don't unlock without
+// having locked
+void SimpleRWLock::lock() {
+    unsigned me = GetCurrentThreadId();
+    int& state = s.getRef();
+    dassert(state == 0);
+    state--;
+    AcquireSRWLockExclusive(&_lock);
+    tid = me;  // this is for use in the debugger to see who does have the lock
+}
+void SimpleRWLock::unlock() {
+    int& state = s.getRef();
+    dassert(state == -1);
+    state++;
+    tid = 0xffffffff;
+    ReleaseSRWLockExclusive(&_lock);
+}
+void SimpleRWLock::lock_shared() {
+    int& state = s.getRef();
+    dassert(state == 0);
+    state++;
+    AcquireSRWLockShared(&_lock);
+    shares.fetchAndAdd(1);
+}
+void SimpleRWLock::unlock_shared() {
+    int& state = s.getRef();
+    dassert(state == 1);
+    state--;
+    shares.fetchAndSubtract(1);
+    ReleaseSRWLockShared(&_lock);
+}
 #else
-    SimpleRWLock::SimpleRWLock(const StringData& p) : name(p.toString()) { }
-    void SimpleRWLock::lock() { m.lock(); }
-    void SimpleRWLock::unlock() { m.unlock(); }
-    void SimpleRWLock::lock_shared() { m.lock_shared(); }
-    void SimpleRWLock::unlock_shared() { m.unlock_shared(); }
+void SimpleRWLock::lock() {
+    AcquireSRWLockExclusive(&_lock);
+}
+void SimpleRWLock::unlock() {
+    ReleaseSRWLockExclusive(&_lock);
+}
+void SimpleRWLock::lock_shared() {
+    AcquireSRWLockShared(&_lock);
+}
+void SimpleRWLock::unlock_shared() {
+    ReleaseSRWLockShared(&_lock);
+}
 #endif
-
+#else
+SimpleRWLock::SimpleRWLock(StringData p) : name(p.toString()) {}
+void SimpleRWLock::lock() {
+    m.lock();
+}
+void SimpleRWLock::unlock() {
+    m.unlock();
+}
+void SimpleRWLock::lock_shared() {
+    m.lock_shared();
+}
+void SimpleRWLock::unlock_shared() {
+    m.unlock_shared();
+}
+#endif
 }

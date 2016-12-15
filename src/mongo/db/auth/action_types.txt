@@ -10,14 +10,15 @@
 "applicationMessage",
 "auditLogRotate",  # Not used for permissions checks, but to id the event in logs.
 "authCheck",  # Not used for permissions checks, but to id the authorization-checking event in logs.
-"authSchemaUpgrade",
 "authenticate",  # Not used for permission checks, but to id authentication events in logs.
+"authSchemaUpgrade",
+"bypassDocumentValidation",
 "changeCustomData",
 "changePassword",
 "changeOwnPassword",
 "changeOwnCustomData",
 "cleanupOrphaned",
-"closeAllDatabases",
+"closeAllDatabases",  # Deprecated, needs to stay around for backwards compatibility
 "collMod",
 "collStats",
 "compact",
@@ -30,7 +31,6 @@
 "createIndex",  # Not used for permissions checks, but to id the event in logs.
 "createRole",
 "createUser",
-"cursorInfo",
 "dbHash",
 "dbStats",
 "diagLogging",
@@ -65,7 +65,9 @@
 "invalidateUserCache",
 "killCursors",
 "killop",
+"listCollections",
 "listDatabases",
+"listIndexes",
 "listShards",
 "logRotate",
 "moveChunk",
@@ -80,6 +82,7 @@
 "renameCollectionSameDB",
 "repairDatabase",
 "replSetConfigure",
+"replSetGetConfig",
 "replSetGetStatus",
 "replSetHeartbeat",
 "replSetReconfig",  # Not used for permissions checks, but to id the event in logs.

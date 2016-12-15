@@ -33,26 +33,38 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/d_concurrency.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/scripting/engine.h"
+#include "mongo/util/assert_util.h"
+
 
 namespace mongo {
 
-    AuthzSessionExternalStateMongod::AuthzSessionExternalStateMongod(
-            AuthorizationManager* authzManager) :
-                AuthzSessionExternalStateServerCommon(authzManager) {}
-    AuthzSessionExternalStateMongod::~AuthzSessionExternalStateMongod() {}
+AuthzSessionExternalStateMongod::AuthzSessionExternalStateMongod(AuthorizationManager* authzManager)
+    : AuthzSessionExternalStateServerCommon(authzManager) {}
+AuthzSessionExternalStateMongod::~AuthzSessionExternalStateMongod() {}
 
-    void AuthzSessionExternalStateMongod::startRequest() {
-        if (!Lock::isLocked()) {
-            _checkShouldAllowLocalhost();
-        }
-    }
+void AuthzSessionExternalStateMongod::startRequest(OperationContext* txn) {
+    // No locks should be held as this happens before any database accesses occur
+    dassert(!txn->lockState()->isLocked());
 
-    bool AuthzSessionExternalStateMongod::shouldIgnoreAuthChecks() const {
-        return cc().isGod() || AuthzSessionExternalStateServerCommon::shouldIgnoreAuthChecks();
-    }
+    _checkShouldAllowLocalhost(txn);
+}
 
-} // namespace mongo
+bool AuthzSessionExternalStateMongod::shouldIgnoreAuthChecks() const {
+    // TODO(spencer): get "isInDirectClient" from OperationContext
+    return cc().isInDirectClient() ||
+        AuthzSessionExternalStateServerCommon::shouldIgnoreAuthChecks();
+}
+
+bool AuthzSessionExternalStateMongod::serverIsArbiter() const {
+    // Arbiters have access to extra privileges under localhost. See SERVER-5479.
+    return (repl::getGlobalReplicationCoordinator()->getReplicationMode() ==
+                repl::ReplicationCoordinator::modeReplSet &&
+            repl::getGlobalReplicationCoordinator()->getMemberState().arbiter());
+}
+
+}  // namespace mongo

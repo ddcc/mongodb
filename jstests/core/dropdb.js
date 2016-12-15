@@ -4,22 +4,29 @@
 
 m = db.getMongo();
 baseName = "jstests_dropdb";
-ddb = db.getSisterDB( baseName );
+ddb = db.getSisterDB(baseName);
 
 print("initial dbs: " + tojson(m.getDBNames()));
 
 function check(shouldExist) {
     var dbs = m.getDBNames();
-    assert.eq(Array.contains(dbs, baseName), shouldExist,
-              "DB " + baseName + " should " + (shouldExist ? "" : "not ") + "exist."
-              + " dbs: " + tojson(dbs) + "\n" + tojson( m.getDBs() ) );
+    assert.eq(Array.contains(dbs, baseName),
+              shouldExist,
+              "DB " + baseName + " should " + (shouldExist ? "" : "not ") + "exist." + " dbs: " +
+                  tojson(dbs) + "\n" + tojson(m.getDBs()));
 }
 
-ddb.c.save( {} );
+ddb.c.save({});
 check(true);
 
-ddb.dropDatabase();
+var res = ddb.dropDatabase();
+assert.commandWorked(res);
+assert.eq(res.dropped, baseName, "dropped field did not contain correct database name");
 check(false);
 
-ddb.dropDatabase();
+var res = ddb.dropDatabase();
+assert.commandWorked(res);
+assert.eq(res.dropped,
+          undefined,
+          "dropped field was populated even though nothing should have been dropped");
 check(false);

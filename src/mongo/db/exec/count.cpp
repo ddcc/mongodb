@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2013 10gen Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -26,179 +26,154 @@
  *    it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/exec/count.h"
 
-#include "mongo/db/index/index_cursor.h"
-#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/exec/scoped_timer.h"
+#include "mongo/db/exec/working_set_common.h"
+#include "mongo/stdx/memory.h"
 
 namespace mongo {
 
-    Count::Count(const CountParams& params, WorkingSet* workingSet)
-        : _workingSet(workingSet),
-          _descriptor(params.descriptor),
-          _iam(params.descriptor->getIndexCatalog()->getIndex(params.descriptor)),
-          _btreeCursor(NULL),
-          _params(params),
-          _hitEnd(false),
-          _shouldDedup(params.descriptor->isMultikey()) { }
+using std::unique_ptr;
+using std::vector;
+using stdx::make_unique;
 
-    void Count::initIndexCursor() {
-        CursorOptions cursorOptions;
-        cursorOptions.direction = CursorOptions::INCREASING;
+// static
+const char* CountStage::kStageType = "COUNT";
 
-        IndexCursor *cursor;
-        Status s = _iam->newCursor(&cursor);
-        verify(s.isOK());
-        verify(cursor);
+CountStage::CountStage(OperationContext* txn,
+                       Collection* collection,
+                       const CountRequest& request,
+                       WorkingSet* ws,
+                       PlanStage* child)
+    : PlanStage(kStageType, txn),
+      _collection(collection),
+      _request(request),
+      _leftToSkip(request.getSkip()),
+      _ws(ws) {
+    if (child)
+        _children.emplace_back(child);
+}
 
-        // Is this assumption always valid?  See SERVER-12397
-        _btreeCursor.reset(static_cast<BtreeIndexCursor*>(cursor));
-        _btreeCursor->setOptions(cursorOptions);
-
-        // _btreeCursor points at our start position.  We move it forward until it hits a cursor
-        // that points at the end.
-        _btreeCursor->seek(_params.startKey, !_params.startKeyInclusive);
-
-        // Create the cursor that points at our end position.
-        IndexCursor* endCursor;
-        verify(_iam->newCursor(&endCursor).isOK());
-        verify(endCursor);
-
-        // Is this assumption always valid?  See SERVER-12397
-        _endCursor.reset(static_cast<BtreeIndexCursor*>(endCursor));
-        _endCursor->setOptions(cursorOptions);
-
-        // If the end key is inclusive we want to point *past* it since that's the end.
-        _endCursor->seek(_params.endKey, _params.endKeyInclusive);
-
-        // See if we've hit the end already.
-        checkEnd();
+bool CountStage::isEOF() {
+    if (_specificStats.trivialCount) {
+        return true;
     }
 
-    void Count::checkEnd() {
-        if (isEOF()) { return; }
+    if (_request.getLimit() > 0 && _specificStats.nCounted >= _request.getLimit()) {
+        return true;
+    }
 
-        if (_endCursor->isEOF()) {
-            // If the endCursor is EOF we're only done when our 'current count position' hits EOF.
-            _hitEnd = _btreeCursor->isEOF();
-        }
-        else {
-            // If not, we're only done when we hit the end cursor's (valid) position.
-            _hitEnd = _btreeCursor->pointsAt(*_endCursor.get());
+    return !_children.empty() && child()->isEOF();
+}
+
+void CountStage::trivialCount() {
+    invariant(_collection);
+    long long nCounted = _collection->numRecords(getOpCtx());
+
+    if (0 != _request.getSkip()) {
+        nCounted -= _request.getSkip();
+        if (nCounted < 0) {
+            nCounted = 0;
         }
     }
 
-    PlanStage::StageState Count::work(WorkingSetID* out) {
-        if (NULL == _btreeCursor.get()) {
-            // First call to work().  Perform cursor init.
-            initIndexCursor();
-            checkEnd();
-            return PlanStage::NEED_TIME;
-        }
-
-        if (isEOF()) { return PlanStage::IS_EOF; }
-
-        DiskLoc loc = _btreeCursor->getValue();
-        _btreeCursor->next();
-        checkEnd();
-
-        if (_shouldDedup) {
-            if (_returned.end() != _returned.find(loc)) {
-                return PlanStage::NEED_TIME;
-            }
-            else {
-                _returned.insert(loc);
-            }
-        }
-
-        *out = WorkingSet::INVALID_ID;
-        return PlanStage::ADVANCED;
+    long long limit = _request.getLimit();
+    if (limit < 0) {
+        limit = -limit;
     }
 
-    bool Count::isEOF() {
-        if (NULL == _btreeCursor.get()) {
-            // Have to call work() at least once.
-            return false;
-        }
-
-        return _hitEnd || _btreeCursor->isEOF();
+    if (limit < nCounted && 0 != limit) {
+        nCounted = limit;
     }
 
-    void Count::prepareToYield() {
-        if (isEOF() || (NULL == _btreeCursor.get())) { return; }
+    _specificStats.nCounted = nCounted;
+    _specificStats.nSkipped = _request.getSkip();
+    _specificStats.trivialCount = true;
+}
 
-        verify(!_btreeCursor->isEOF());
-        _btreeCursor->savePosition();
-        if (!_endCursor->isEOF()) {
-            _endCursor->savePosition();
-        }
+PlanStage::StageState CountStage::work(WorkingSetID* out) {
+    ++_commonStats.works;
+
+    // Adds the amount of time taken by work() to executionTimeMillis.
+    ScopedTimer timer(&_commonStats.executionTimeMillis);
+
+    // This stage never returns a working set member.
+    *out = WorkingSet::INVALID_ID;
+
+    // If we don't have a query and we have a non-NULL collection, then we can execute this
+    // as a trivial count (just ask the collection for how many records it has).
+    if (_request.getQuery().isEmpty() && NULL != _collection) {
+        trivialCount();
+        return PlanStage::IS_EOF;
     }
 
-    void Count::recoverFromYield() {
-        if (isEOF() || (NULL == _btreeCursor.get())) { return; }
-
-        if (!_btreeCursor->restorePosition().isOK()) {
-            _hitEnd = true;
-        }
-
-        if (_btreeCursor->isEOF()) {
-            _hitEnd = true;
-            return;
-        }
-
-        // See if we're somehow already past our end key (maybe the thing we were pointing at got
-        // deleted...)
-        int cmp = _btreeCursor->getKey().woCompare(_params.endKey, _descriptor->keyPattern(), false);
-        if (cmp > 0 || (cmp == 0 && !_params.endKeyInclusive)) {
-            _hitEnd = true;
-            return;
-        }
-
-        if (!_endCursor->isEOF()) {
-            if (!_endCursor->restorePosition().isOK()) {
-                _hitEnd = true;
-                return;
-            }
-        }
-
-        // If we were EOF when we yielded we don't always want to have _btreeCursor run until
-        // EOF.  New documents may have been inserted after our endKey and our end marker
-        // may be before them.
-        //
-        // As an example, say we're counting from 5 to 10 and the index only has keys
-        // for 6, 7, 8, and 9.  btreeCursor will point at a 6 key at the start and the
-        // endCursor will be EOF.  If we insert documents with keys 11 during a yield we
-        // need to relocate the endCursor to point at them as the "end key" of our count.
-        //
-        // If we weren't EOF our end position might have moved around.  Relocate it.
-        _endCursor->seek(_params.endKey, _params.endKeyInclusive);
-
-        // This can change during yielding.
-        _shouldDedup = _descriptor->isMultikey();
-
-        checkEnd();
+    if (isEOF()) {
+        _commonStats.isEOF = true;
+        return PlanStage::IS_EOF;
     }
 
-    void Count::invalidate(const DiskLoc& dl, InvalidationType type) {
-        // The only state we're responsible for holding is what DiskLocs to drop.  If a document
-        // mutates the underlying index cursor will deal with it.
-        if (INVALIDATION_MUTATION == type) {
-            return;
+    // For non-trivial counts, we should always have a child stage from which we can retrieve
+    // results.
+    invariant(child());
+    WorkingSetID id = WorkingSet::INVALID_ID;
+    PlanStage::StageState state = child()->work(&id);
+
+    if (PlanStage::IS_EOF == state) {
+        _commonStats.isEOF = true;
+        return PlanStage::IS_EOF;
+    } else if (PlanStage::DEAD == state) {
+        return state;
+    } else if (PlanStage::FAILURE == state) {
+        *out = id;
+        // If a stage fails, it may create a status WSM to indicate why it failed, in which
+        // case 'id' is valid. If ID is invalid, we create our own error message.
+        if (WorkingSet::INVALID_ID == id) {
+            const std::string errmsg = "count stage failed to read result from child";
+            Status status = Status(ErrorCodes::InternalError, errmsg);
+            *out = WorkingSetCommon::allocateStatusMember(_ws, status);
+        }
+        return state;
+    } else if (PlanStage::ADVANCED == state) {
+        // We got a result. If we're still skipping, then decrement the number left to skip.
+        // Otherwise increment the count until we hit the limit.
+        if (_leftToSkip > 0) {
+            _leftToSkip--;
+            _specificStats.nSkipped++;
+        } else {
+            _specificStats.nCounted++;
         }
 
-        // If we see this DiskLoc again, it may not be the same document it was before, so we want
-        // to return it if we see it again.
-        unordered_set<DiskLoc, DiskLoc::Hasher>::iterator it = _returned.find(dl);
-        if (it != _returned.end()) {
-            _returned.erase(it);
+        // Count doesn't need the actual results, so we just discard any valid working
+        // set members that got returned from the child.
+        if (WorkingSet::INVALID_ID != id) {
+            _ws->free(id);
         }
+    } else if (PlanStage::NEED_YIELD == state) {
+        *out = id;
+        _commonStats.needYield++;
+        return PlanStage::NEED_YIELD;
     }
 
-    PlanStageStats* Count::getStats() {
-        // We don't collect stats since this stage is only used by the count command.
-        // If count ever collects stats we must implement this.
-        invariant(0);
-        return NULL;
+    _commonStats.needTime++;
+    return PlanStage::NEED_TIME;
+}
+
+unique_ptr<PlanStageStats> CountStage::getStats() {
+    _commonStats.isEOF = isEOF();
+    unique_ptr<PlanStageStats> ret = make_unique<PlanStageStats>(_commonStats, STAGE_COUNT);
+    ret->specific = make_unique<CountStats>(_specificStats);
+    if (!_children.empty()) {
+        ret->children.emplace_back(child()->getStats());
     }
+    return ret;
+}
+
+const SpecificStats* CountStage::getSpecificStats() const {
+    return &_specificStats;
+}
 
 }  // namespace mongo

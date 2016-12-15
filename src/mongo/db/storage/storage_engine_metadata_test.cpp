@@ -29,6 +29,8 @@
 #include "mongo/platform/basic.h"
 
 #include <boost/filesystem.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional_io.hpp>
 #include <fstream>
 #include <ios>
 #include <ostream>
@@ -41,291 +43,261 @@
 
 namespace {
 
-    using std::string;
-    using mongo::unittest::TempDir;
+using std::string;
+using mongo::unittest::TempDir;
 
-    using namespace mongo;
+using namespace mongo;
 
-    TEST(StorageEngineMetadataTest, ReadNonExistentMetadataFile) {
-        StorageEngineMetadata metadata("no_such_directory");
-        Status status = metadata.read();
-        ASSERT_NOT_OK(status);
-        ASSERT_EQUALS(ErrorCodes::NonExistentPath, status.code());
+TEST(StorageEngineMetadataTest, ReadNonExistentMetadataFile) {
+    StorageEngineMetadata metadata("no_such_directory");
+    Status status = metadata.read();
+    ASSERT_NOT_OK(status);
+    ASSERT_EQUALS(ErrorCodes::NonExistentPath, status.code());
+}
+
+TEST(StorageEngineMetadataTest, WriteToNonexistentDirectory) {
+    ASSERT_NOT_OK(StorageEngineMetadata("no_such_directory").write());
+}
+
+TEST(StorageEngineMetadataTest, InvalidMetadataFileNotBSON) {
+    TempDir tempDir("StorageEngineMetadataTest_InvalidMetadataFileNotBSON");
+    {
+        std::string filename(tempDir.path() + "/storage.bson");
+        std::ofstream ofs(filename.c_str());
+        // BSON document of size -1 and EOO as first element.
+        BSONObj obj = fromjson("{x: 1}");
+        ofs.write("\xff\xff\xff\xff", 4);
+        ofs.write(obj.objdata() + 4, obj.objsize() - 4);
+        ofs.flush();
     }
-
-    TEST(StorageEngineMetadataTest, WriteToNonexistentDirectory) {
-        ASSERT_NOT_OK(StorageEngineMetadata("no_such_directory").write());
-    }
-
-    TEST(StorageEngineMetadataTest, InvalidMetadataFileNotBSON) {
-        TempDir tempDir("StorageEngineMetadataTest_InvalidMetadataFileNotBSON");
-        {
-            std::string filename(tempDir.path() + "/storage.bson");
-            std::ofstream ofs(filename.c_str());
-            // BSON document of size -1 and EOO as first element.
-            BSONObj obj = fromjson("{x: 1}");
-            ofs.write("\xff\xff\xff\xff", 4);
-            ofs.write(obj.objdata()+4, obj.objsize()-4);
-            ofs.flush();
-        }
-        {
-            StorageEngineMetadata metadata(tempDir.path());
-            ASSERT_NOT_OK(metadata.read());
-        }
-    }
-
-    TEST(StorageEngineMetadataTest, InvalidMetadataFileStorageFieldMissing) {
-        TempDir tempDir("StorageEngineMetadataTest_InvalidMetadataFileStorageFieldMissing");
-        {
-            std::string filename(tempDir.path() + "/storage.bson");
-            std::ofstream ofs(filename.c_str(), std::ios_base::out | std::ios_base::binary);
-            BSONObj obj = fromjson("{missing_storage_field: 123}");
-            ofs.write(obj.objdata(), obj.objsize());
-            ofs.flush();
-        }
-        {
-            StorageEngineMetadata metadata(tempDir.path());
-            ASSERT_NOT_OK(metadata.read());
-        }
-    }
-
-    TEST(StorageEngineMetadataTest, InvalidMetadataFileStorageNodeNotObject) {
-        TempDir tempDir("StorageEngineMetadataTest_InvalidMetadataFileStorageNodeNotObject");
-        {
-            std::string filename(tempDir.path() + "/storage.bson");
-            std::ofstream ofs(filename.c_str());
-            BSONObj obj = fromjson("{storage: 123}");
-            ofs.write(obj.objdata(), obj.objsize());
-            ofs.flush();
-        }
-        {
-            StorageEngineMetadata metadata(tempDir.path());
-            ASSERT_NOT_OK(metadata.read());
-        }
-    }
-
-    TEST(StorageEngineMetadataTest, InvalidMetadataFileStorageEngineFieldMissing) {
-        TempDir tempDir("StorageEngineMetadataTest_InvalidMetadataFileStorageEngineFieldMissing");
-        {
-            std::string filename(tempDir.path() + "/storage.bson");
-            std::ofstream ofs(filename.c_str());
-            BSONObj obj = fromjson("{storage: {}}");
-            ofs.write(obj.objdata(), obj.objsize());
-            ofs.flush();
-        }
-        {
-            StorageEngineMetadata metadata(tempDir.path());
-            ASSERT_NOT_OK(metadata.read());
-        }
-    }
-
-    TEST(StorageEngineMetadataTest, InvalidMetadataFileStorageEngineFieldNotString) {
-        TempDir tempDir("StorageEngineMetadataTest_InvalidMetadataFileStorageEngineFieldNotString");
-        {
-            std::string filename(tempDir.path() + "/storage.bson");
-            std::ofstream ofs(filename.c_str());
-            BSONObj obj = fromjson("{storage: {engine: 123}}");
-            ofs.write(obj.objdata(), obj.objsize());
-            ofs.flush();
-        }
-        {
-            StorageEngineMetadata metadata(tempDir.path());
-            ASSERT_NOT_OK(metadata.read());
-        }
-    }
-
-    // Metadata parser should ignore unknown metadata fields.
-    TEST(StorageEngineMetadataTest, IgnoreUnknownField) {
-        TempDir tempDir("StorageEngineMetadataTest_IgnoreUnknownField");
-        {
-            std::string filename(tempDir.path() + "/storage.bson");
-            std::ofstream ofs(filename.c_str());
-            BSONObj obj = fromjson("{storage: {engine: \"storageEngine1\", unknown_field: 123}}");
-            ofs.write(obj.objdata(), obj.objsize());
-            ofs.flush();
-        }
-        {
-            StorageEngineMetadata metadata(tempDir.path());
-            ASSERT_OK(metadata.read());
-            ASSERT_EQUALS("storageEngine1", metadata.getStorageEngine());
-        }
-    }
-
-    TEST(StorageEngineMetadataTest, WriteEmptyStorageEngineName) {
-        TempDir tempDir("StorageEngineMetadataTest_WriteEmptyStorageEngineName");
+    {
         StorageEngineMetadata metadata(tempDir.path());
-        ASSERT_EQUALS("", metadata.getStorageEngine());
-        // Write empty storage engine name to metadata file.
-        ASSERT_NOT_OK(metadata.write());
+        ASSERT_NOT_OK(metadata.read());
     }
+}
 
-    TEST(StorageEngineMetadataTest, Roundtrip) {
-        TempDir tempDir("StorageEngineMetadataTest_Roundtrip");
-        {
-            StorageEngineMetadata metadata(tempDir.path());
-            metadata.setStorageEngine("storageEngine1");
-            ASSERT_OK(metadata.write());
-        }
-        // Read back storage engine name.
-        {
-            StorageEngineMetadata metadata(tempDir.path());
-            ASSERT_OK(metadata.read());
-            ASSERT_EQUALS("storageEngine1", metadata.getStorageEngine());
-        }
+TEST(StorageEngineMetadataTest, InvalidMetadataFileStorageFieldMissing) {
+    TempDir tempDir("StorageEngineMetadataTest_InvalidMetadataFileStorageFieldMissing");
+    {
+        std::string filename(tempDir.path() + "/storage.bson");
+        std::ofstream ofs(filename.c_str(), std::ios_base::out | std::ios_base::binary);
+        BSONObj obj = fromjson("{missing_storage_field: 123}");
+        ofs.write(obj.objdata(), obj.objsize());
+        ofs.flush();
     }
+    {
+        StorageEngineMetadata metadata(tempDir.path());
+        ASSERT_NOT_OK(metadata.read());
+    }
+}
 
-    TEST(StorageEngineMetadataTest, ValidateEmptyDirectory) {
-        TempDir tempDir("StorageEngineMetadataTest_ValidateEmptyDirectory");
-        StorageEngineMetadata::validate(tempDir.path(), "storageEngine1");
+TEST(StorageEngineMetadataTest, InvalidMetadataFileStorageNodeNotObject) {
+    TempDir tempDir("StorageEngineMetadataTest_InvalidMetadataFileStorageNodeNotObject");
+    {
+        std::string filename(tempDir.path() + "/storage.bson");
+        std::ofstream ofs(filename.c_str());
+        BSONObj obj = fromjson("{storage: 123}");
+        ofs.write(obj.objdata(), obj.objsize());
+        ofs.flush();
     }
+    {
+        StorageEngineMetadata metadata(tempDir.path());
+        ASSERT_NOT_OK(metadata.read());
+    }
+}
 
-    // Data directory is not empty but metadata is missing.
-    // Data directory contains local.ns.
-    // Current storage engine is 'mmapv1'.
-    TEST(StorageEngineMetadataTest, ValidateMissingMetadataStorageEngineMMapV1) {
-        TempDir tempDir("StorageEngineMetadataTest_ValidateMissingMetadataStorageEngineMMapV1");
-        {
-            std::string filename(tempDir.path() + "/local.ns");
-            std::ofstream ofs(filename.c_str());
-            ofs << "unused data" << std::endl;
-        }
-        StorageEngineMetadata::validate(tempDir.path(), "mmapv1");
+TEST(StorageEngineMetadataTest, InvalidMetadataFileStorageEngineFieldMissing) {
+    TempDir tempDir("StorageEngineMetadataTest_InvalidMetadataFileStorageEngineFieldMissing");
+    {
+        std::string filename(tempDir.path() + "/storage.bson");
+        std::ofstream ofs(filename.c_str());
+        BSONObj obj = fromjson("{storage: {}}");
+        ofs.write(obj.objdata(), obj.objsize());
+        ofs.flush();
     }
+    {
+        StorageEngineMetadata metadata(tempDir.path());
+        ASSERT_NOT_OK(metadata.read());
+    }
+}
 
-    // Data directory is not empty but metadata is missing.
-    // Data directory contains local.ns.
-    // Current storage engine is not 'mmapv1'.
-    TEST(StorageEngineMetadataTest, ValidateMissingMetadataStorageEngineNotMMapV1) {
-        TempDir tempDir("StorageEngineMetadataTest_ValidateMissingMetadataStorageEngineNotMMapV1");
-        {
-            std::string filename(tempDir.path() + "/local.ns");
-            std::ofstream ofs(filename.c_str());
-            ofs << "unused data" << std::endl;
-        }
-        ASSERT_THROWS(StorageEngineMetadata::validate(tempDir.path(), "engine1"), UserException);
+TEST(StorageEngineMetadataTest, InvalidMetadataFileStorageEngineFieldNotString) {
+    TempDir tempDir("StorageEngineMetadataTest_InvalidMetadataFileStorageEngineFieldNotString");
+    {
+        std::string filename(tempDir.path() + "/storage.bson");
+        std::ofstream ofs(filename.c_str());
+        BSONObj obj = fromjson("{storage: {engine: 123}}");
+        ofs.write(obj.objdata(), obj.objsize());
+        ofs.flush();
     }
+    {
+        StorageEngineMetadata metadata(tempDir.path());
+        ASSERT_NOT_OK(metadata.read());
+    }
+}
 
-    // Data directory is not empty but metadata is missing.
-    // Data directory contains local/local.ns.
-    // Current storage engine is 'mmapv1'.
-    TEST(StorageEngineMetadataTest, ValidateMissingMetadataDirectoryPerDb1) {
-        TempDir tempDir("StorageEngineMetadataTest_ValidateMissingMetadataDirectoryPerDb1");
-        {
-            boost::filesystem::create_directory(tempDir.path() + "/local");
-            std::string filename(tempDir.path() + "/local/local.ns");
-            std::ofstream ofs(filename.c_str());
-            ofs << "unused data" << std::endl;
-        }
-        StorageEngineMetadata::validate(tempDir.path(), "mmapv1");
+TEST(StorageEngineMetadataTest, InvalidMetadataFileStorageEngineOptionsFieldNotObject) {
+    TempDir tempDir("StorageEngineMetadataTest_IgnoreUnknownField");
+    {
+        std::string filename(tempDir.path() + "/storage.bson");
+        std::ofstream ofs(filename.c_str());
+        BSONObj obj = fromjson("{storage: {engine: \"storageEngine1\", options: 123}}");
+        ofs.write(obj.objdata(), obj.objsize());
+        ofs.flush();
     }
+    {
+        StorageEngineMetadata metadata(tempDir.path());
+        ASSERT_NOT_OK(metadata.read());
+    }
+}
 
-    // Data directory is not empty but metadata is missing.
-    // Data directory contains local.ns.
-    // Current storage engine is not 'mmapv1'.
-    TEST(StorageEngineMetadataTest, ValidateMissingMetadataDirectoryPerDb2) {
-        TempDir tempDir("StorageEngineMetadataTest_ValidateMissingMetadataDirectoryPerDb2");
-        {
-            boost::filesystem::create_directory(tempDir.path() + "/local");
-            std::string filename(tempDir.path() + "/local/local.ns");
-            std::ofstream ofs(filename.c_str());
-            ofs << "unused data" << std::endl;
-        }
-        ASSERT_THROWS(StorageEngineMetadata::validate(tempDir.path(), "engine1"), UserException);
+// Metadata parser should ignore unknown metadata fields.
+TEST(StorageEngineMetadataTest, IgnoreUnknownField) {
+    TempDir tempDir("StorageEngineMetadataTest_IgnoreUnknownField");
+    {
+        std::string filename(tempDir.path() + "/storage.bson");
+        std::ofstream ofs(filename.c_str());
+        BSONObj obj = fromjson("{storage: {engine: \"storageEngine1\", unknown_field: 123}}");
+        ofs.write(obj.objdata(), obj.objsize());
+        ofs.flush();
     }
+    {
+        StorageEngineMetadata metadata(tempDir.path());
+        ASSERT_OK(metadata.read());
+        ASSERT_EQUALS("storageEngine1", metadata.getStorageEngine());
+        ASSERT_TRUE(metadata.getStorageEngineOptions().isEmpty());
+    }
+}
 
-    // Data directory is not empty but metadata is missing.
-    // Data directory does not contain either local.ns or local/local.ns.
-    // Current storage engine is 'mmapv1'.
-    TEST(StorageEngineMetadataTest, ValidateMissingMetadataMissingMMapV1Files1) {
-        TempDir tempDir("StorageEngineMetadataTest_ValidateMissingMetadataMissingMMapV1Files1");
-        {
-            std::string filename(tempDir.path() + "/user_data.txt");
-            std::ofstream ofs(filename.c_str());
-            ofs << "unused data" << std::endl;
-        }
-        StorageEngineMetadata::validate(tempDir.path(), "mmapv1");
-    }
+TEST(StorageEngineMetadataTest, WriteEmptyStorageEngineName) {
+    TempDir tempDir("StorageEngineMetadataTest_WriteEmptyStorageEngineName");
+    StorageEngineMetadata metadata(tempDir.path());
+    ASSERT_EQUALS("", metadata.getStorageEngine());
+    // Write empty storage engine name to metadata file.
+    ASSERT_NOT_OK(metadata.write());
+}
 
-    // Data directory is not empty but metadata is missing.
-    // Data directory does not contain either local.ns or local/local.ns.
-    // Current storage engine is not 'mmapv1'.
-    TEST(StorageEngineMetadataTest, ValidateMissingMetadataMissingMMapV1Files2) {
-        TempDir tempDir("StorageEngineMetadataTest_ValidateMissingMetadataMissingMMapV1Files2");
-        {
-            std::string filename(tempDir.path() + "/user_data.txt");
-            std::ofstream ofs(filename.c_str());
-            ofs << "unused data" << std::endl;
-        }
-        StorageEngineMetadata::validate(tempDir.path(), "engine1");
+TEST(StorageEngineMetadataTest, Roundtrip) {
+    TempDir tempDir("StorageEngineMetadataTest_Roundtrip");
+    BSONObj options = fromjson("{x: 1}");
+    {
+        StorageEngineMetadata metadata(tempDir.path());
+        metadata.setStorageEngine("storageEngine1");
+        metadata.setStorageEngineOptions(options);
+        ASSERT_OK(metadata.write());
     }
+    // Read back storage engine name.
+    {
+        StorageEngineMetadata metadata(tempDir.path());
+        ASSERT_OK(metadata.read());
+        ASSERT_EQUALS("storageEngine1", metadata.getStorageEngine());
+        ASSERT_EQUALS(options, metadata.getStorageEngineOptions());
 
-    TEST(StorageEngineMetadataTest, ValidateMetadataMatchesStorageEngine) {
-        TempDir tempDir("StorageEngineMetadataTest_ValidateMetadataMatchesStorageEngine");
-        {
-            StorageEngineMetadata metadata(tempDir.path());
-            metadata.setStorageEngine("storageEngine1");
-            ASSERT_OK(metadata.write());
-        }
-        StorageEngineMetadata::validate(tempDir.path(), "storageEngine1");
+        metadata.reset();
+        ASSERT_TRUE(metadata.getStorageEngine().empty());
+        ASSERT_TRUE(metadata.getStorageEngineOptions().isEmpty());
     }
+}
 
-    TEST(StorageEngineMetadataTest, ValidateMetadataDifferentFromStorageEngine) {
-        TempDir tempDir("StorageEngineMetadataTest_ValidateMetadataDifferentFromStorageEngine");
-        {
-            StorageEngineMetadata metadata(tempDir.path());
-            metadata.setStorageEngine("storageEngine1");
-            ASSERT_OK(metadata.write());
-        }
-        ASSERT_THROWS(StorageEngineMetadata::validate(tempDir.path(), "engine2"), UserException);
-    }
+TEST(StorageEngineMetadataTest, ValidateStorageEngineOption) {
+    // It is fine to provide an invalid data directory as long as we do not
+    // call read() or write().
+    StorageEngineMetadata metadata("no_such_directory");
+    BSONObj options = fromjson("{x: true, y: false, z: 123}");
+    metadata.setStorageEngineOptions(options);
 
-    TEST(StorageEngineMetadataTest, ValidateMetadataReadFailed) {
-        TempDir tempDir("StorageEngineMetadataTest_ValidateMetadataReadFailed");
-        {
-            std::string filename(tempDir.path() + "/storage.bson");
-            std::ofstream ofs(filename.c_str());
-            // BSON document of size -1 and EOO as first element.
-            BSONObj obj = fromjson("{x: 1}");
-            ofs.write("\xff\xff\xff\xff", 4);
-            ofs.write(obj.objdata()+4, obj.objsize()-4);
-            ofs.flush();
-        }
-        ASSERT_THROWS(StorageEngineMetadata::validate(tempDir.path(), "engine2"), UserException);
-    }
+    // Non-existent field.
+    ASSERT_OK(metadata.validateStorageEngineOption("w", true));
+    ASSERT_OK(metadata.validateStorageEngineOption("w", false));
 
-    TEST(StorageEngineMetadataTest, UpdateIfMissingNoExistingMetadata) {
-        TempDir tempDir("StorageEngineMetadataTest_UpdateIfMissingNoExistingMetadata");
-        ASSERT_OK(StorageEngineMetadata::updateIfMissing(tempDir.path(), "storageEngine1"));
-        // Read back storage engine name.
-        {
-            StorageEngineMetadata metadata(tempDir.path());
-            ASSERT_OK(metadata.read());
-            ASSERT_EQUALS("storageEngine1", metadata.getStorageEngine());
-        }
-    }
+    // Non-boolean field.
+    Status status = metadata.validateStorageEngineOption("z", true);
+    ASSERT_NOT_OK(status);
+    ASSERT_EQUALS(ErrorCodes::FailedToParse, status.code());
+    status = metadata.validateStorageEngineOption("z", false);
+    ASSERT_NOT_OK(status);
+    ASSERT_EQUALS(ErrorCodes::FailedToParse, status.code());
 
-    // Do not overwrite existing metadata file.
-    TEST(StorageEngineMetadataTest, UpdateIfMissingMetadataExists) {
-        TempDir tempDir("StorageEngineMetadataTest_UpdateIfMissingMetadataExists");
-        {
-            StorageEngineMetadata metadata(tempDir.path());
-            metadata.setStorageEngine("storageEngine1");
-            ASSERT_OK(metadata.write());
-        }
-        // Invoke update() with a different storage engine name.
-        // This should not modify the existings file.
-        ASSERT_OK(StorageEngineMetadata::updateIfMissing(tempDir.path(), "storageEngine2"));
-        // Read back storage engine name.
-        {
-            StorageEngineMetadata metadata(tempDir.path());
-            ASSERT_OK(metadata.read());
-            ASSERT_EQUALS("storageEngine1", metadata.getStorageEngine());
-        }
-    }
+    // Boolean fields.
+    ASSERT_OK(metadata.validateStorageEngineOption("x", true));
+    status = metadata.validateStorageEngineOption("x", false);
+    ASSERT_NOT_OK(status);
+    ASSERT_EQUALS(ErrorCodes::InvalidOptions, status.code());
 
-    TEST(StorageEngineMetadataTest, UpdateIfMissingInvalidDirectory) {
-        // Should warn and return write() status if we fail to update the metadata file.
-        ASSERT_NOT_OK(StorageEngineMetadata::updateIfMissing("no_such_directory", "engine1"));
+    ASSERT_OK(metadata.validateStorageEngineOption("y", false));
+    status = metadata.validateStorageEngineOption("y", true);
+    ASSERT_NOT_OK(status);
+    ASSERT_EQUALS(ErrorCodes::InvalidOptions, status.code());
+}
+
+// Do not override the active storage engine when the data directory is empty.
+TEST(StorageEngineMetadataTest, StorageEngineForPath_EmptyDirectory) {
+    TempDir tempDir("StorageEngineMetadataTest_StorageEngineForPath_EmptyDirectory");
+    auto storageEngine = StorageEngineMetadata::getStorageEngineForPath(tempDir.path());
+    ASSERT_FALSE(storageEngine);
+}
+
+// Override the active storage engine with "mmapv1" when the data directory contains local.ns.
+TEST(StorageEngineMetadataTest, StorageEngineForPath_DataFilesExist) {
+    TempDir tempDir("StorageEngineMetadataTest_StorageEngineForPath_DataFilesExist");
+    {
+        std::string filename(tempDir.path() + "/local.ns");
+        std::ofstream ofs(filename.c_str());
+        ofs << "unused data" << std::endl;
     }
+    ASSERT_EQUALS(std::string("mmapv1"),
+                  StorageEngineMetadata::getStorageEngineForPath(tempDir.path()));
+}
+
+// Override the active storage engine with "mmapv1" when the data directory contains
+// local/local.ns.
+TEST(StorageEngineMetadataTest, StorageEngineForPath_DataFilesExist_DirPerDB) {
+    TempDir tempDir("StorageEngineMetadataTest_StorageEngineForPath_DataFilesExist_DirPerDB");
+    {
+        boost::filesystem::create_directory(tempDir.path() + "/local");
+        std::string filename(tempDir.path() + "/local/local.ns");
+        std::ofstream ofs(filename.c_str());
+        ofs << "unused data" << std::endl;
+    }
+    ASSERT_EQUALS(std::string("mmapv1"),
+                  StorageEngineMetadata::getStorageEngineForPath(tempDir.path()));
+}
+
+// Do not override the active storage engine when the data directory is nonempty, but does not
+// contain either local.ns or local/local.ns.
+TEST(StorageEngineMetadataTest, StorageEngineForPath_NoDataFilesExist) {
+    TempDir tempDir("StorageEngineMetadataTest_StorageEngineForPath_NoDataFilesExist");
+    {
+        std::string filename(tempDir.path() + "/user_data.txt");
+        std::ofstream ofs(filename.c_str());
+        ofs << "unused data" << std::endl;
+    }
+    auto storageEngine = StorageEngineMetadata::getStorageEngineForPath(tempDir.path());
+    ASSERT_FALSE(storageEngine);
+}
+
+// Override the active storage engine with "mmapv1" when the metadata file specifies "mmapv1".
+TEST(StorageEngineMetadataTest, StorageEngineForPath_MetadataFile_mmapv1) {
+    TempDir tempDir("StorageEngineMetadataTest_StorageEngineForPath_MetadataFile_mmapv1");
+    {
+        StorageEngineMetadata metadata(tempDir.path());
+        metadata.setStorageEngine("mmapv1");
+        ASSERT_OK(metadata.write());
+    }
+    ASSERT_EQUALS(std::string("mmapv1"),
+                  StorageEngineMetadata::getStorageEngineForPath(tempDir.path()));
+}
+
+// Override the active storage engine whatever the metadata file specifies.
+TEST(StorageEngineMetadataTest, StorageEngineForPath_MetadataFile_someEngine) {
+    TempDir tempDir("StorageEngineMetadataTest_StorageEngineForPath_MetadataFile_someEngine");
+    {
+        StorageEngineMetadata metadata(tempDir.path());
+        metadata.setStorageEngine("someEngine");
+        ASSERT_OK(metadata.write());
+    }
+    ASSERT_EQUALS(std::string("someEngine"),
+                  StorageEngineMetadata::getStorageEngineForPath(tempDir.path()));
+}
 
 }  // namespace

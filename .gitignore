@@ -2,11 +2,9 @@
 /src/mongo/db/modules
 /.jsdbshell
 /.dbshell
-/.sconsign.dblite
-/.sconf_temp
 /perf.data
+/perf.data.old
 /massif.out.*
-.scons
 /smoke-last.json
 
 *~
@@ -76,20 +74,10 @@ scratch
 /mongogrid
 /mongos
 
-/mongodump
-/mongorestore
-
-/mongofiles
-/mongoexport
-
-/mongoimport
 /mongosniff
 /mongobridge
-/mongostat
-/mongotop
-/mongooplog
 /mongoperf
-/bsondump
+/mongoshim
 /loadgen
 /docgen
 
@@ -115,7 +103,7 @@ scratch
 /tutorial
 
 #tests
-/test
+/dbtest
 /authTest
 /perftest
 /clientTest
@@ -156,6 +144,14 @@ src/third_party/v8/src/libraries.cc
 # Eclipse build artifacts
 .cproject
 .project
+.pydevproject
+
+# Idea CLion project artifacts
+.idea
+CMakeLists.txt
+
+# XCode projects
+.xcworkspace
 
 # old things that should be removed
 # maybe remove this mid 2012
@@ -167,3 +163,5 @@ buildinfo.cpp
 *.wixobj
 *.wixpdb
 DriverInclude.wxs
+
+compile_commands.json

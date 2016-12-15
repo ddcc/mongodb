@@ -26,108 +26,99 @@
 *    it in the license file.
 */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kAccessControl
+
 #include "mongo/db/auth/auth_index_d.h"
 
 #include "mongo/base/init.h"
 #include "mongo/base/status.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
-#include "mongo/db/client.h"
-#include "mongo/db/dbhelpers.h"
-#include "mongo/db/jsobj.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/structure/catalog/namespace_details.h"
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/index_catalog.h"
+#include "mongo/db/client.h"
+#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/db/operation_context_impl.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
+
+using std::endl;
+
 namespace authindex {
 
 namespace {
-    BSONObj v1SystemUsersKeyPattern;
-    BSONObj v3SystemUsersKeyPattern;
-    BSONObj v3SystemRolesKeyPattern;
-    std::string v3SystemUsersIndexName;
-    std::string v3SystemRolesIndexName;
+BSONObj v1SystemUsersKeyPattern;
+BSONObj v3SystemUsersKeyPattern;
+BSONObj v3SystemRolesKeyPattern;
+std::string v3SystemUsersIndexName;
+std::string v3SystemRolesIndexName;
 
-    MONGO_INITIALIZER(AuthIndexKeyPatterns)(InitializerContext*) {
-        v1SystemUsersKeyPattern = BSON("user" << 1 << "userSource" << 1);
-        v3SystemUsersKeyPattern = BSON(AuthorizationManager::USER_NAME_FIELD_NAME << 1 <<
-                                       AuthorizationManager::USER_DB_FIELD_NAME << 1);
-        v3SystemRolesKeyPattern = BSON(AuthorizationManager::ROLE_NAME_FIELD_NAME << 1 <<
-                                       AuthorizationManager::ROLE_SOURCE_FIELD_NAME << 1);
-        v3SystemUsersIndexName = std::string(
-                str::stream() <<
-                        AuthorizationManager::USER_NAME_FIELD_NAME << "_1_" <<
-                        AuthorizationManager::USER_DB_FIELD_NAME << "_1");
-        v3SystemRolesIndexName = std::string(
-                str::stream() <<
-                        AuthorizationManager::ROLE_NAME_FIELD_NAME << "_1_" <<
-                        AuthorizationManager::ROLE_SOURCE_FIELD_NAME << "_1");
+MONGO_INITIALIZER(AuthIndexKeyPatterns)(InitializerContext*) {
+    v1SystemUsersKeyPattern = BSON("user" << 1 << "userSource" << 1);
+    v3SystemUsersKeyPattern = BSON(AuthorizationManager::USER_NAME_FIELD_NAME
+                                   << 1 << AuthorizationManager::USER_DB_FIELD_NAME << 1);
+    v3SystemRolesKeyPattern = BSON(AuthorizationManager::ROLE_NAME_FIELD_NAME
+                                   << 1 << AuthorizationManager::ROLE_DB_FIELD_NAME << 1);
+    v3SystemUsersIndexName =
+        std::string(str::stream() << AuthorizationManager::USER_NAME_FIELD_NAME << "_1_"
+                                  << AuthorizationManager::USER_DB_FIELD_NAME << "_1");
+    v3SystemRolesIndexName =
+        std::string(str::stream() << AuthorizationManager::ROLE_NAME_FIELD_NAME << "_1_"
+                                  << AuthorizationManager::ROLE_DB_FIELD_NAME << "_1");
 
-        return Status::OK();
-    }
+    return Status::OK();
+}
 
 }  // namespace
 
-    void configureSystemIndexes(const StringData& dbname) {
-        int authzVersion;
-        Status status = getGlobalAuthorizationManager()->getAuthorizationVersion(&authzVersion);
-        if (!status.isOK()) {
-            return;
-        }
+Status verifySystemIndexes(OperationContext* txn) {
+    const NamespaceString systemUsers = AuthorizationManager::usersCollectionNamespace;
 
-        if (dbname == "admin" && authzVersion == AuthorizationManager::schemaVersion26Final) {
-            NamespaceString systemUsers(dbname, "system.users");
-
-            // Make sure the old unique index from v2.4 on system.users doesn't exist.
-            Client::WriteContext wctx(systemUsers);
-            Collection* collection = wctx.ctx().db()->getCollection(NamespaceString(systemUsers));
-            if (!collection) {
-                return;
-            }
-            IndexCatalog* indexCatalog = collection->getIndexCatalog();
-            IndexDescriptor* oldIndex = NULL;
-            while ((oldIndex = indexCatalog->findIndexByKeyPattern(v1SystemUsersKeyPattern))) {
-                indexCatalog->dropIndex(oldIndex);
-            }
-        }
+    // Make sure the old unique index from v2.4 on system.users doesn't exist.
+    ScopedTransaction scopedXact(txn, MODE_IX);
+    AutoGetDb autoDb(txn, systemUsers.db(), MODE_X);
+    if (!autoDb.getDb()) {
+        return Status::OK();
     }
 
-    void createSystemIndexes(Collection* collection) {
-        invariant( collection );
-        const NamespaceString& ns = collection->ns();
-        if (ns == AuthorizationManager::usersCollectionNamespace) {
-            try {
-                Helpers::ensureIndex(collection,
-                                     v3SystemUsersKeyPattern,
-                                     true,  // unique
-                                     v3SystemUsersIndexName.c_str());
-            } catch (const DBException& e) {
-                if (e.getCode() == ASSERT_ID_DUPKEY) {
-                    log() << "Duplicate key exception while trying to build unique index on " <<
-                            ns << ".  This is likely due to problems during the upgrade process " <<
-                            endl;
-                }
-                throw;
-            }
-        } else if (ns == AuthorizationManager::rolesCollectionNamespace) {
-            try {
-                Helpers::ensureIndex(collection,
-                                     v3SystemRolesKeyPattern,
-                                     true,  // unique
-                                     v3SystemRolesIndexName.c_str());
-            } catch (const DBException& e) {
-                if (e.getCode() == ASSERT_ID_DUPKEY) {
-                    log() << "Duplicate key exception while trying to build unique index on " <<
-                            ns << "." << endl;
-                }
-                throw;
-            }
-        }
+    Collection* collection = autoDb.getDb()->getCollection(NamespaceString(systemUsers));
+    if (!collection) {
+        return Status::OK();
     }
+
+    IndexCatalog* indexCatalog = collection->getIndexCatalog();
+    IndexDescriptor* oldIndex = NULL;
+
+    if (indexCatalog &&
+        (oldIndex = indexCatalog->findIndexByKeyPattern(txn, v1SystemUsersKeyPattern))) {
+        return Status(ErrorCodes::AuthSchemaIncompatible,
+                      "Old 2.4 style user index identified. "
+                      "The authentication schema needs to be updated by "
+                      "running authSchemaUpgrade on a 2.6 server.");
+    }
+
+    return Status::OK();
+}
+
+void createSystemIndexes(OperationContext* txn, Collection* collection) {
+    invariant(collection);
+    const NamespaceString& ns = collection->ns();
+    if (ns == AuthorizationManager::usersCollectionNamespace) {
+        collection->getIndexCatalog()->createIndexOnEmptyCollection(
+            txn,
+            BSON("name" << v3SystemUsersIndexName << "ns" << collection->ns().ns() << "key"
+                        << v3SystemUsersKeyPattern << "unique" << true));
+    } else if (ns == AuthorizationManager::rolesCollectionNamespace) {
+        collection->getIndexCatalog()->createIndexOnEmptyCollection(
+            txn,
+            BSON("name" << v3SystemRolesIndexName << "ns" << collection->ns().ns() << "key"
+                        << v3SystemRolesKeyPattern << "unique" << true));
+    }
+}
 
 }  // namespace authindex
 }  // namespace mongo

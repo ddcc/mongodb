@@ -3,23 +3,28 @@
 Import("env")
 
 env.Library(
-        target='key_generator',
+        target='index_descriptor',
         source=[
-            '2d_key_generator.cpp',
-            'btree_key_generator.cpp',
-            'fts_key_generator.cpp',
-            'hash_key_generator.cpp',
-            'haystack_key_generator.cpp',
-            'key_generator.cpp',
-            's2_key_generator.cpp',
+            'index_descriptor.cpp',
         ],
         LIBDEPS=[
-            '$BUILD_DIR/mongo/bson',
+            '$BUILD_DIR/mongo/base',
+        ],
+)
+
+env.Library(
+        target='key_generator',
+        source=[
+            'btree_key_generator.cpp',
+            'expression_keys_private.cpp',
+        ],
+        LIBDEPS=[
+            'expression_params',
+            '$BUILD_DIR/mongo/base',
             '$BUILD_DIR/mongo/db/fts/base',
-            '$BUILD_DIR/mongo/geometry',
-            '$BUILD_DIR/mongo/geoparser',
-            '$BUILD_DIR/mongo/geoquery',
-            '$BUILD_DIR/mongo/index_names',
+            '$BUILD_DIR/mongo/db/geo/geoparser',
+            '$BUILD_DIR/mongo/db/index_names',
+            '$BUILD_DIR/mongo/db/mongohasher',
             '$BUILD_DIR/third_party/s2/s2',
         ],
 )
@@ -31,6 +36,34 @@ env.Library(
         ],
         LIBDEPS=[
             'key_generator',
-            '$BUILD_DIR/mongo/bson',
+            'expression_params',
+            '$BUILD_DIR/mongo/base',
+        ],
+)
+
+env.Library(
+        target='expression_params',
+        source=[
+            'expression_params.cpp',
+            's2_common.cpp'
+        ],
+        LIBDEPS=[
+            '$BUILD_DIR/mongo/base',
+            '$BUILD_DIR/mongo/bson/util/bson_extract',
+            '$BUILD_DIR/mongo/db/geo/geometry',
+            '$BUILD_DIR/mongo/db/geo/geoparser',
+            '$BUILD_DIR/mongo/db/mongohasher',
+            '$BUILD_DIR/third_party/s2/s2',
+        ]
+)
+
+env.CppUnitTest(
+        target='btree_key_generator_test',
+        source=[
+            'btree_key_generator_test.cpp',
+        ],
+        LIBDEPS=[
+            'key_generator',
+            '$BUILD_DIR/mongo/db/mongohasher',
         ],
 )

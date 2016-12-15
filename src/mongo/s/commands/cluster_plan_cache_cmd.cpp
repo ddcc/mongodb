@@ -31,7 +31,6 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client_basic.h"
 #include "mongo/db/commands.h"
-#include "mongo/s/client_info.h"
 #include "mongo/s/config.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/stale_exception.h"
@@ -39,148 +38,137 @@
 
 namespace mongo {
 
-    using std::string;
-    using std::vector;
+using std::string;
+using std::stringstream;
+using std::vector;
 
-    /**
-     * Base class for mongos plan cache commands.
-     * Cluster plan cache commands don't do much more than
-     * forwarding the commands to all shards and combining the results.
-     */
-    class ClusterPlanCacheCmd : public Command {
+/**
+ * Base class for mongos plan cache commands.
+ * Cluster plan cache commands don't do much more than
+ * forwarding the commands to all shards and combining the results.
+ */
+class ClusterPlanCacheCmd : public Command {
     MONGO_DISALLOW_COPYING(ClusterPlanCacheCmd);
-    public:
 
-        virtual ~ClusterPlanCacheCmd() {
-        }
+public:
+    virtual ~ClusterPlanCacheCmd() {}
 
-        bool logTheOp() {
-            return false;
-        }
-
-        bool slaveOk() const {
-            return false;
-        }
-
-        LockType locktype() const {
-            return Command::NONE;
-        }
-
-        bool slaveOverrideOk() const {
-            return true;
-        }
-
-        void help(stringstream& ss) const {
-            ss << _helpText;
-        }
-
-        Status checkAuthForCommand( ClientBasic* client,
-                                    const std::string& dbname,
-                                    const BSONObj& cmdObj ) {
-            AuthorizationSession* authzSession = client->getAuthorizationSession();
-            ResourcePattern pattern = parseResourcePattern(dbname, cmdObj);
-
-            if (authzSession->isAuthorizedForActionsOnResource(pattern, _actionType)) {
-                return Status::OK();
-            }
-
-            return Status(ErrorCodes::Unauthorized, "unauthorized");
-        }
-
-        // Cluster plan cache command entry point.
-        bool run( const std::string& dbname,
-                  BSONObj& cmdObj,
-                  int options,
-                  std::string& errmsg,
-                  BSONObjBuilder& result,
-                  bool fromRepl );
-
-    public:
-
-        /**
-         * Instantiates a command that can be invoked by "name", which will be described by
-         * "helpText", and will require privilege "actionType" to run.
-         */
-        ClusterPlanCacheCmd( const std::string& name, const std::string& helpText,
-                             ActionType actionType ) :
-            Command( name ), _helpText( helpText ), _actionType( actionType ) {
-        }
-
-    private:
-
-        std::string _helpText;
-        ActionType _actionType;
-    };
-
-    //
-    // Cluster plan cache command implementation(s) below
-    //
-
-    bool ClusterPlanCacheCmd::run( const std::string& dbName,
-                               BSONObj& cmdObj,
-                               int options,
-                               std::string& errMsg,
-                               BSONObjBuilder& result,
-                               bool ) {
-        const std::string fullns = parseNs(dbName, cmdObj);
-        NamespaceString nss(fullns);
-
-        // Dispatch command to all the shards.
-        // Targeted shard commands are generally data-dependent but plan cache
-        // commands are tied to query shape (data has no effect on query shape).
-        vector<Strategy::CommandResult> results;
-        STRATEGY->commandOp(dbName, cmdObj, options, nss.ns(), BSONObj(), &results);
-
-        // Set value of first shard result's "ok" field.
-        bool clusterCmdResult = true;
-
-        for (vector<Strategy::CommandResult>::const_iterator i = results.begin();
-             i != results.end(); ++i) {
-            const Strategy::CommandResult& cmdResult = *i;
-
-            // XXX: In absence of sensible aggregation strategy,
-            //      promote first shard's result to top level.
-            if (i == results.begin()) {
-                result.appendElements(cmdResult.result);
-                clusterCmdResult = cmdResult.result["ok"].trueValue();
-            }
-
-            // Append shard result as a sub object.
-            // Name the field after the shard.
-            string shardName = cmdResult.shardTarget.getName();
-            result.append(shardName, cmdResult.result);
-        }
-
-        return clusterCmdResult;
+    bool slaveOk() const {
+        return false;
     }
 
-    //
-    // Register plan cache commands at startup
-    //
+    bool slaveOverrideOk() const {
+        return true;
+    }
 
-    namespace {
+    virtual bool isWriteCommandForConfigServer() const {
+        return false;
+    }
 
-        MONGO_INITIALIZER(RegisterPlanCacheCommands)(InitializerContext* context) {
-            // Leaked intentionally: a Command registers itself when constructed.
+    void help(stringstream& ss) const {
+        ss << _helpText;
+    }
 
-            new ClusterPlanCacheCmd(
-                "planCacheListQueryShapes",
-                "Displays all query shapes in a collection.",
-                ActionType::planCacheRead );
+    Status checkAuthForCommand(ClientBasic* client,
+                               const std::string& dbname,
+                               const BSONObj& cmdObj) {
+        AuthorizationSession* authzSession = AuthorizationSession::get(client);
+        ResourcePattern pattern = parseResourcePattern(dbname, cmdObj);
 
-            new ClusterPlanCacheCmd(
-                "planCacheClear",
-                "Drops one or all cached queries in a collection.",
-                ActionType::planCacheWrite );
-
-            new ClusterPlanCacheCmd(
-                "planCacheListPlans",
-                "Displays the cached plans for a query shape.",
-                ActionType::planCacheRead );
-
+        if (authzSession->isAuthorizedForActionsOnResource(pattern, _actionType)) {
             return Status::OK();
         }
 
-    } // namespace
+        return Status(ErrorCodes::Unauthorized, "unauthorized");
+    }
 
-} // namespace mongo
+    // Cluster plan cache command entry point.
+    bool run(OperationContext* txn,
+             const std::string& dbname,
+             BSONObj& cmdObj,
+             int options,
+             std::string& errmsg,
+             BSONObjBuilder& result);
+
+public:
+    /**
+     * Instantiates a command that can be invoked by "name", which will be described by
+     * "helpText", and will require privilege "actionType" to run.
+     */
+    ClusterPlanCacheCmd(const std::string& name, const std::string& helpText, ActionType actionType)
+        : Command(name), _helpText(helpText), _actionType(actionType) {}
+
+private:
+    std::string _helpText;
+    ActionType _actionType;
+};
+
+//
+// Cluster plan cache command implementation(s) below
+//
+
+bool ClusterPlanCacheCmd::run(OperationContext* txn,
+                              const std::string& dbName,
+                              BSONObj& cmdObj,
+                              int options,
+                              std::string& errMsg,
+                              BSONObjBuilder& result) {
+    const std::string fullns = parseNs(dbName, cmdObj);
+    NamespaceString nss(fullns);
+
+    // Dispatch command to all the shards.
+    // Targeted shard commands are generally data-dependent but plan cache
+    // commands are tied to query shape (data has no effect on query shape).
+    vector<Strategy::CommandResult> results;
+    Strategy::commandOp(txn, dbName, cmdObj, options, nss.ns(), BSONObj(), &results);
+
+    // Set value of first shard result's "ok" field.
+    bool clusterCmdResult = true;
+
+    for (vector<Strategy::CommandResult>::const_iterator i = results.begin(); i != results.end();
+         ++i) {
+        const Strategy::CommandResult& cmdResult = *i;
+
+        // XXX: In absence of sensible aggregation strategy,
+        //      promote first shard's result to top level.
+        if (i == results.begin()) {
+            result.appendElements(cmdResult.result);
+            clusterCmdResult = cmdResult.result["ok"].trueValue();
+        }
+
+        // Append shard result as a sub object.
+        // Name the field after the shard.
+        string shardName = cmdResult.shardTargetId;
+        result.append(shardName, cmdResult.result);
+    }
+
+    return clusterCmdResult;
+}
+
+//
+// Register plan cache commands at startup
+//
+
+namespace {
+
+MONGO_INITIALIZER(RegisterPlanCacheCommands)(InitializerContext* context) {
+    // Leaked intentionally: a Command registers itself when constructed.
+
+    new ClusterPlanCacheCmd("planCacheListQueryShapes",
+                            "Displays all query shapes in a collection.",
+                            ActionType::planCacheRead);
+
+    new ClusterPlanCacheCmd("planCacheClear",
+                            "Drops one or all cached queries in a collection.",
+                            ActionType::planCacheWrite);
+
+    new ClusterPlanCacheCmd("planCacheListPlans",
+                            "Displays the cached plans for a query shape.",
+                            ActionType::planCacheRead);
+
+    return Status::OK();
+}
+
+}  // namespace
+
+}  // namespace mongo

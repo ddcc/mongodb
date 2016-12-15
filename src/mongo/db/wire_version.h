@@ -28,38 +28,62 @@
 
 namespace mongo {
 
-    /**
-     * The 'WireVersion' captures all "protocol events" the write protocol went through.  A
-     * protocol event is a change in the syntax of messages on the wire or the semantics of
-     * existing messages. We may also add "logical" entries for releases, although that's not
-     * mandatory.
-     *
-     * We use the wire version to determine if two agents (a driver, a mongos, or a mongod) can
-     * interact. Each agent carries two versions, a 'max' and a 'min' one. If the two agents
-     * are on the same 'max' number, they stricly speak the same wire protocol and it is safe
-     * to allow them to communicate. If two agents' ranges do not intersect, they should not be
-     * allowed to communicate.
-     *
-     * If two agents have at least one version in common they can communicate, but one of the
-     * sides has to be ready to compensate for not being on its partner version.
-     */
-    enum WireVersion {
-        // Everything before we started tracking.
-        RELEASE_2_4_AND_BEFORE = 0,
+/**
+ * The 'WireVersion' captures all "protocol events" the write protocol went through.  A
+ * protocol event is a change in the syntax of messages on the wire or the semantics of
+ * existing messages. We may also add "logical" entries for releases, although that's not
+ * mandatory.
+ *
+ * We use the wire version to determine if two agents (a driver, a mongos, or a mongod) can
+ * interact. Each agent carries two versions, a 'max' and a 'min' one. If the two agents
+ * are on the same 'max' number, they stricly speak the same wire protocol and it is safe
+ * to allow them to communicate. If two agents' ranges do not intersect, they should not be
+ * allowed to communicate.
+ *
+ * If two agents have at least one version in common they can communicate, but one of the
+ * sides has to be ready to compensate for not being on its partner version.
+ */
+enum WireVersion {
+    // Everything before we started tracking.
+    RELEASE_2_4_AND_BEFORE = 0,
 
-        // The aggregation command may now be requested to return cursors.
-        AGG_RETURNS_CURSORS = 1,
+    // The aggregation command may now be requested to return cursors.
+    AGG_RETURNS_CURSORS = 1,
 
-        // insert, update, and delele batch command
-        BATCH_COMMANDS = 2
-    };
+    // insert, update, and delete batch command
+    BATCH_COMMANDS = 2,
 
-    // Latest version that the server accepts. This should always be at the latest entry in
-    // WireVersion.
-    static const int maxWireVersion = BATCH_COMMANDS;
+    // support SCRAM-SHA1, listIndexes, listCollections, new explain
+    RELEASE_2_7_7 = 3,
 
-    // Minimum version that the server accepts. We should bump this whenever we don't want
-    // to allow communication with too old agents.
-    static const int minWireVersion = RELEASE_2_4_AND_BEFORE;
+    // Support find and getMore commands, as well as OP_COMMAND in mongod (but not mongos).
+    FIND_COMMAND = 4,
+};
 
-} // namespace mongo
+struct WireSpec {
+    MONGO_DISALLOW_COPYING(WireSpec);
+
+    static WireSpec& instance() {
+        static WireSpec instance;
+        return instance;
+    }
+
+    // Minimum version that the server accepts on incoming requests. We should bump this whenever
+    // we don't want to allow incoming connections from clients that are too old.
+    int minWireVersionIncoming;
+    // Latest version that the server accepts on incoming requests. This should always be at the
+    // latest entry in WireVersion.
+    int maxWireVersionIncoming;
+
+    // Minimum version allowed on remote nodes when the server sends requests. We should bump this
+    // whenever we don't want to connect to clients that are too old.
+    int minWireVersionOutgoing;
+    // Latest version allowed on remote nodes when the server sends requests.
+    int maxWireVersionOutgoing;
+
+private:
+    WireSpec() = default;
+};
+
+
+}  // namespace mongo

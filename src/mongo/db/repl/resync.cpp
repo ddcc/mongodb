@@ -27,90 +27,107 @@
 */
 
 #include "mongo/db/commands.h"
+#include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/master_slave.h"  // replSettings
-#include "mongo/db/repl/replication_server_status.h"  // replSettings
-#include "mongo/db/repl/rs.h" // replLocalAuth()
+#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/operation_context.h"
 
 namespace mongo {
 
-    // operator requested resynchronization of replication (on a slave or secondary). {resync: 1}
-    class CmdResync : public Command {
-    public:
-        virtual bool slaveOk() const {
+using std::string;
+using std::stringstream;
+
+namespace repl {
+
+// operator requested resynchronization of replication (on a slave or secondary). {resync: 1}
+class CmdResync : public Command {
+public:
+    virtual bool slaveOk() const {
+        return true;
+    }
+    virtual bool adminOnly() const {
+        return true;
+    }
+    virtual bool isWriteCommandForConfigServer() const {
+        return true;
+    }
+    virtual void addRequiredPrivileges(const std::string& dbname,
+                                       const BSONObj& cmdObj,
+                                       std::vector<Privilege>* out) {
+        ActionSet actions;
+        actions.addAction(ActionType::resync);
+        out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
+    }
+
+    void help(stringstream& h) const {
+        h << "resync (from scratch) a stale slave or replica set secondary node.\n";
+    }
+
+    CmdResync() : Command("resync") {}
+    virtual bool run(OperationContext* txn,
+                     const string& dbname,
+                     BSONObj& cmdObj,
+                     int,
+                     string& errmsg,
+                     BSONObjBuilder& result) {
+        ScopedTransaction transaction(txn, MODE_X);
+        Lock::GlobalWrite globalWriteLock(txn->lockState());
+
+        ReplicationCoordinator* replCoord = getGlobalReplicationCoordinator();
+        if (getGlobalReplicationCoordinator()->getSettings().usingReplSets()) {
+            const MemberState memberState = replCoord->getMemberState();
+            if (memberState.startup()) {
+                return appendCommandStatus(
+                    result, Status(ErrorCodes::NotYetInitialized, "no replication yet active"));
+            }
+            if (memberState.primary() || !replCoord->setFollowerMode(MemberState::RS_STARTUP2)) {
+                return appendCommandStatus(
+                    result, Status(ErrorCodes::NotSecondary, "primaries cannot resync"));
+            }
+            BackgroundSync::get()->setInitialSyncRequestedFlag(true);
             return true;
         }
-        virtual bool adminOnly() const {
-            return true;
-        }
-        virtual bool logTheOp() { return false; }
-        virtual bool lockGlobally() const { return true; }
-        virtual LockType locktype() const { return WRITE; }
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {
-            ActionSet actions;
-            actions.addAction(ActionType::resync);
-            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
-        }
 
-        void help(stringstream& h) const {
-            h << "resync (from scratch) a stale slave or replica set secondary node.\n";
-        }
-
-        CmdResync() : Command("resync") { }
-        virtual bool run(const string&,
-                         BSONObj& cmdObj,
-                         int,
-                         string& errmsg,
-                         BSONObjBuilder& result,
-                         bool fromRepl) {
-            if (replSettings.usingReplSets()) {
-                if (!theReplSet) {
-                    errmsg = "no replication yet active";
-                    return false;
-                }
-                if (theReplSet->isPrimary()) {
-                    errmsg = "primaries cannot resync";
-                    return false;
-                }
-                return theReplSet->resync(errmsg);
-            }
-
-            // below this comment pertains only to master/slave replication
-            if ( cmdObj.getBoolField( "force" ) ) {
-                if ( !waitForSyncToFinish( errmsg ) )
-                    return false;
-                replAllDead = "resync forced";
-            }
-            if ( !replAllDead ) {
-                errmsg = "not dead, no need to resync";
+        // below this comment pertains only to master/slave replication
+        if (cmdObj.getBoolField("force")) {
+            if (!waitForSyncToFinish(txn, errmsg))
                 return false;
-            }
-            if ( !waitForSyncToFinish( errmsg ) )
-                return false;
+            replAllDead = "resync forced";
+        }
+        // TODO(dannenberg) replAllDead is bad and should be removed when masterslave is removed
+        if (!replAllDead) {
+            errmsg = "not dead, no need to resync";
+            return false;
+        }
+        if (!waitForSyncToFinish(txn, errmsg))
+            return false;
 
-            ReplSource::forceResyncDead( "client" );
-            result.append( "info", "triggered resync for all sources" );
-            return true;
-        }
-        bool waitForSyncToFinish( string &errmsg ) const {
-            // Wait for slave thread to finish syncing, so sources will be be
-            // reloaded with new saved state on next pass.
-            Timer t;
-            while ( 1 ) {
-                if ( syncing == 0 || t.millis() > 30000 )
-                    break;
-                {
-                    Lock::TempRelease t;
-                    relinquishSyncingSome = 1;
-                    sleepmillis(1);
-                }
+        ReplSource::forceResyncDead(txn, "client");
+        result.append("info", "triggered resync for all sources");
+
+        return true;
+    }
+
+    bool waitForSyncToFinish(OperationContext* txn, string& errmsg) const {
+        // Wait for slave thread to finish syncing, so sources will be be
+        // reloaded with new saved state on next pass.
+        Timer t;
+        while (1) {
+            if (syncing == 0 || t.millis() > 30000)
+                break;
+            {
+                Lock::TempRelease t(txn->lockState());
+                relinquishSyncingSome = 1;
+                sleepmillis(1);
             }
-            if ( syncing ) {
-                errmsg = "timeout waiting for sync() to finish";
-                return false;
-            }
-            return true;
         }
-    } cmdResync;
-}
+        if (syncing) {
+            errmsg = "timeout waiting for sync() to finish";
+            return false;
+        }
+        return true;
+    }
+} cmdResync;
+}  // namespace repl
+}  // namespace mongo

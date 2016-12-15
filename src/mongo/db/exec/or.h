@@ -28,60 +28,61 @@
 
 #pragma once
 
-#include "mongo/db/diskloc.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
+#include "mongo/db/record_id.h"
 #include "mongo/platform/unordered_set.h"
 
 namespace mongo {
 
-    /**
-     * This stage outputs the union of its children.  It optionally deduplicates on DiskLoc.
-     *
-     * Preconditions: Valid DiskLoc.
-     *
-     * If we're deduping, we may fail to dedup any invalidated DiskLoc properly.
-     */
-    class OrStage : public PlanStage {
-    public:
-        OrStage(WorkingSet* ws, bool dedup, const MatchExpression* filter);
-        virtual ~OrStage();
+/**
+ * This stage outputs the union of its children.  It optionally deduplicates on RecordId.
+ *
+ * Preconditions: Valid RecordId.
+ *
+ * If we're deduping, we may fail to dedup any invalidated RecordId properly.
+ */
+class OrStage final : public PlanStage {
+public:
+    OrStage(OperationContext* opCtx, WorkingSet* ws, bool dedup, const MatchExpression* filter);
 
-        void addChild(PlanStage* child);
+    void addChild(PlanStage* child);
 
-        virtual bool isEOF();
+    bool isEOF() final;
 
-        virtual StageState work(WorkingSetID* out);
+    StageState work(WorkingSetID* out) final;
 
-        virtual void prepareToYield();
-        virtual void recoverFromYield();
-        virtual void invalidate(const DiskLoc& dl, InvalidationType type);
+    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
 
-        virtual PlanStageStats* getStats();
+    StageType stageType() const final {
+        return STAGE_OR;
+    }
 
-    private:
-        // Not owned by us.
-        WorkingSet* _ws;
+    std::unique_ptr<PlanStageStats> getStats() final;
 
-        // The filter is not owned by us.
-        const MatchExpression* _filter;
+    const SpecificStats* getSpecificStats() const final;
 
-        // Owned by us.
-        vector<PlanStage*> _children;
+    static const char* kStageType;
 
-        // Which of _children are we calling work(...) on now?
-        size_t _currentChild;
+private:
+    // Not owned by us.
+    WorkingSet* _ws;
 
-        // True if we dedup on DiskLoc, false otherwise.
-        bool _dedup;
+    // The filter is not owned by us.
+    const MatchExpression* _filter;
 
-        // Which DiskLocs have we returned?
-        unordered_set<DiskLoc, DiskLoc::Hasher> _seen;
+    // Which of _children are we calling work(...) on now?
+    size_t _currentChild;
 
-        // Stats
-        CommonStats _commonStats;
-        OrStats _specificStats;
-    };
+    // True if we dedup on RecordId, false otherwise.
+    bool _dedup;
+
+    // Which RecordIds have we returned?
+    unordered_set<RecordId, RecordId::Hasher> _seen;
+
+    // Stats
+    OrStats _specificStats;
+};
 
 }  // namespace mongo

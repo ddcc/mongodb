@@ -26,7 +26,7 @@
 *    it in the license file.
 */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/pipeline/dependencies.h"
@@ -34,142 +34,149 @@
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
-    namespace str = mongoutils::str;
 
-    BSONObj DepsTracker::toProjection() const {
-        BSONObjBuilder bb;
+using std::set;
+using std::string;
+using std::vector;
 
-        if (needTextScore)
-            bb.append(Document::metaFieldTextScore, BSON("$meta" << "textScore"));
+namespace str = mongoutils::str;
 
-        if (needWholeDocument)
-            return bb.obj();
+BSONObj DepsTracker::toProjection() const {
+    BSONObjBuilder bb;
 
-        if (fields.empty()) {
-            // Projection language lacks good a way to say no fields needed. This fakes it.
-            bb.append("_id", 0);
-            bb.append("$noFieldsNeeded", 1);
-            return bb.obj();
-        }
+    if (needTextScore)
+        bb.append(Document::metaFieldTextScore,
+                  BSON("$meta"
+                       << "textScore"));
 
-        bool needId = false;
-        string last;
-        for (set<string>::const_iterator it(fields.begin()), end(fields.end()); it!=end; ++it) {
-            if (str::startsWith(*it, "_id") && (it->size() == 3 || (*it)[3] == '.')) {
-                // _id and subfields are handled specially due in part to SERVER-7502
-                needId = true;
-                continue;
-            }
+    if (needWholeDocument)
+        return bb.obj();
 
-            if (!last.empty() && str::startsWith(*it, last)) {
-                // we are including a parent of *it so we don't need to include this field
-                // explicitly. In fact, due to SERVER-6527 if we included this field, the parent
-                // wouldn't be fully included.  This logic relies on on set iterators going in
-                // lexicographic order so that a string is always directly before of all fields it
-                // prefixes.
-                continue;
-            }
-
-            last = *it + '.';
-            bb.append(*it, 1);
-        }
-
-        if (needId) // we are explicit either way
-            bb.append("_id", 1);
-        else
-            bb.append("_id", 0);
-
+    if (fields.empty()) {
+        // Projection language lacks good a way to say no fields needed. This fakes it.
+        bb.append("_id", 0);
+        bb.append("$noFieldsNeeded", 1);
         return bb.obj();
     }
 
-    // ParsedDeps::_fields is a simple recursive look-up table. For each field:
-    //      If the value has type==Bool, the whole field is needed
-    //      If the value has type==Object, the fields in the subobject are needed
-    //      All other fields should be missing which means not needed
-    boost::optional<ParsedDeps> DepsTracker::toParsedDeps() const {
-        MutableDocument md;
-
-        if (needWholeDocument || needTextScore) {
-            // can't use ParsedDeps in this case
-            return boost::none;
+    bool needId = false;
+    string last;
+    for (set<string>::const_iterator it(fields.begin()), end(fields.end()); it != end; ++it) {
+        if (str::startsWith(*it, "_id") && (it->size() == 3 || (*it)[3] == '.')) {
+            // _id and subfields are handled specially due in part to SERVER-7502
+            needId = true;
+            continue;
         }
 
-        string last;
-        for (set<string>::const_iterator it(fields.begin()), end(fields.end()); it!=end; ++it) {
-            if (!last.empty() && str::startsWith(*it, last)) {
-                // we are including a parent of *it so we don't need to include this field
-                // explicitly. In fact, if we included this field, the parent wouldn't be fully
-                // included.  This logic relies on on set iterators going in lexicographic order so
-                // that a string is always directly before of all fields it prefixes.
-                continue;
-            }
-            last = *it + '.';
-            md.setNestedField(*it, Value(true));
+        if (!last.empty() && str::startsWith(*it, last)) {
+            // we are including a parent of *it so we don't need to include this field
+            // explicitly. In fact, due to SERVER-6527 if we included this field, the parent
+            // wouldn't be fully included.  This logic relies on on set iterators going in
+            // lexicographic order so that a string is always directly before of all fields it
+            // prefixes.
+            continue;
         }
 
-        return ParsedDeps(md.freeze());
+        last = *it + '.';
+        bb.append(*it, 1);
     }
+
+    if (needId)  // we are explicit either way
+        bb.append("_id", 1);
+    else
+        bb.append("_id", 0);
+
+    return bb.obj();
+}
+
+// ParsedDeps::_fields is a simple recursive look-up table. For each field:
+//      If the value has type==Bool, the whole field is needed
+//      If the value has type==Object, the fields in the subobject are needed
+//      All other fields should be missing which means not needed
+boost::optional<ParsedDeps> DepsTracker::toParsedDeps() const {
+    MutableDocument md;
+
+    if (needWholeDocument || needTextScore) {
+        // can't use ParsedDeps in this case
+        return boost::none;
+    }
+
+    string last;
+    for (set<string>::const_iterator it(fields.begin()), end(fields.end()); it != end; ++it) {
+        if (!last.empty() && str::startsWith(*it, last)) {
+            // we are including a parent of *it so we don't need to include this field
+            // explicitly. In fact, if we included this field, the parent wouldn't be fully
+            // included.  This logic relies on on set iterators going in lexicographic order so
+            // that a string is always directly before of all fields it prefixes.
+            continue;
+        }
+        last = *it + '.';
+        md.setNestedField(*it, Value(true));
+    }
+
+    return ParsedDeps(md.freeze());
+}
 
 namespace {
-    // Mutually recursive with arrayHelper
-    Document documentHelper(const BSONObj& bson, const Document& neededFields);
+// Mutually recursive with arrayHelper
+Document documentHelper(const BSONObj& bson, const Document& neededFields);
 
-    // Handles array-typed values for ParsedDeps::extractFields
-    Value arrayHelper(const BSONObj& bson, const Document& neededFields) {
-        BSONObjIterator it(bson);
+// Handles array-typed values for ParsedDeps::extractFields
+Value arrayHelper(const BSONObj& bson, const Document& neededFields) {
+    BSONObjIterator it(bson);
 
-        vector<Value> values;
-        while (it.more()) {
-            BSONElement bsonElement(it.next());
-            if (bsonElement.type() == Object) {
-                Document sub = documentHelper(bsonElement.embeddedObject(), neededFields);
-                values.push_back(Value(sub));
-            }
-
-            if (bsonElement.type() == Array) {
-                values.push_back(arrayHelper(bsonElement.embeddedObject(), neededFields));
-            }
+    vector<Value> values;
+    while (it.more()) {
+        BSONElement bsonElement(it.next());
+        if (bsonElement.type() == Object) {
+            Document sub = documentHelper(bsonElement.embeddedObject(), neededFields);
+            values.push_back(Value(sub));
         }
 
-        return Value::consume(values);
+        if (bsonElement.type() == Array) {
+            values.push_back(arrayHelper(bsonElement.embeddedObject(), neededFields));
+        }
     }
 
-    // Handles object-typed values including the top-level for ParsedDeps::extractFields
-    Document documentHelper(const BSONObj& bson, const Document& neededFields) {
-        MutableDocument md(neededFields.size());
+    return Value(std::move(values));
+}
 
-        BSONObjIterator it(bson);
-        while (it.more()) {
-            BSONElement bsonElement (it.next());
-            StringData fieldName = bsonElement.fieldNameStringData();
-            Value isNeeded = neededFields[fieldName];
+// Handles object-typed values including the top-level for ParsedDeps::extractFields
+Document documentHelper(const BSONObj& bson, const Document& neededFields) {
+    MutableDocument md(neededFields.size());
 
-            if (isNeeded.missing())
-                continue;
+    BSONObjIterator it(bson);
+    while (it.more()) {
+        BSONElement bsonElement(it.next());
+        StringData fieldName = bsonElement.fieldNameStringData();
+        Value isNeeded = neededFields[fieldName];
 
-            if (isNeeded.getType() == Bool) {
-                md.addField(fieldName, Value(bsonElement));
-                continue;
-            }
+        if (isNeeded.missing())
+            continue;
 
-            dassert(isNeeded.getType() == Object);
-
-            if (bsonElement.type() == Object) {
-                Document sub = documentHelper(bsonElement.embeddedObject(), isNeeded.getDocument());
-                md.addField(fieldName, Value(sub));
-            }
-
-            if (bsonElement.type() == Array) {
-                md.addField(fieldName, arrayHelper(bsonElement.embeddedObject(),
-                                                   isNeeded.getDocument()));
-            }
+        if (isNeeded.getType() == Bool) {
+            md.addField(fieldName, Value(bsonElement));
+            continue;
         }
 
-        return md.freeze();
-    }
-} // namespace
+        dassert(isNeeded.getType() == Object);
 
-    Document ParsedDeps::extractFields(const BSONObj& input) const {
-        return documentHelper(input, _fields);
+        if (bsonElement.type() == Object) {
+            Document sub = documentHelper(bsonElement.embeddedObject(), isNeeded.getDocument());
+            md.addField(fieldName, Value(sub));
+        }
+
+        if (bsonElement.type() == Array) {
+            md.addField(fieldName,
+                        arrayHelper(bsonElement.embeddedObject(), isNeeded.getDocument()));
+        }
     }
+
+    return md.freeze();
+}
+}  // namespace
+
+Document ParsedDeps::extractFields(const BSONObj& input) const {
+    return documentHelper(input, _fields);
+}
 }

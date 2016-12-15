@@ -1,6 +1,6 @@
 # -*- mode: python -*-
 
-Import("env windows linux darwin solaris")
+Import("env")
 
 env = env.Clone()
 
@@ -12,4 +12,9 @@ env.Library(
 	"split.cc",
 	"stringprintf.cc",
 	"strutil.cc",
-    ])
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/third_party/s2/base/base',
+    ],
+)

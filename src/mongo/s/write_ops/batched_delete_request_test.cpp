@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2013-2015 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -17,72 +17,48 @@
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the GNU Affero General Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
-#include "mongo/s/write_ops/batched_delete_request.h"
+#include "mongo/platform/basic.h"
 
 #include <string>
 
 #include "mongo/db/jsobj.h"
 #include "mongo/s/write_ops/batched_delete_document.h"
+#include "mongo/s/write_ops/batched_delete_request.h"
 #include "mongo/unittest/unittest.h"
+
+namespace mongo {
+
+using std::string;
 
 namespace {
 
-    using mongo::BSONArray;
-    using mongo::BSONObj;
-    using mongo::BatchedDeleteRequest;
-    using mongo::BatchedDeleteDocument;
-    using mongo::BatchedRequestMetadata;
-    using mongo::BSONArrayBuilder;
-    using mongo::OID;
-    using mongo::OpTime;
-    using std::string;
+TEST(BatchedDeleteRequest, Basic) {
+    BSONArray deleteArray = BSON_ARRAY(
+        BSON(BatchedDeleteDocument::query(BSON("a" << 1)) << BatchedDeleteDocument::limit(1))
+        << BSON(BatchedDeleteDocument::query(BSON("b" << 1)) << BatchedDeleteDocument::limit(1)));
 
+    BSONObj origDeleteRequestObj = BSON(BatchedDeleteRequest::collName("test")
+                                        << BatchedDeleteRequest::deletes() << deleteArray
+                                        << BatchedDeleteRequest::writeConcern(BSON("w" << 1))
+                                        << BatchedDeleteRequest::ordered(true));
 
-    TEST(RoundTrip, Normal) {
-        BSONArray deleteArray =
-            BSON_ARRAY(
-                BSON(BatchedDeleteDocument::query(BSON("a" << 1)) <<
-                     BatchedDeleteDocument::limit(1)
-                    ) <<
-                BSON(BatchedDeleteDocument::query(BSON("b" << 1)) <<
-                     BatchedDeleteDocument::limit(1)
-                    )
-                );
+    string errMsg;
+    BatchedDeleteRequest request;
+    ASSERT_TRUE(request.parseBSON("foo", origDeleteRequestObj, &errMsg));
 
-        BSONObj writeConcernObj = BSON("w" << 1);
+    ASSERT_EQ("foo.test", request.getNS().ns());
 
-        // The BSON_ARRAY macro doesn't support Timestamps.
-        BSONArrayBuilder arrBuilder;
-        arrBuilder.appendTimestamp(OpTime(1,1).asDate());
-        arrBuilder.append(OID::gen());
-        BSONArray shardVersionArray = arrBuilder.arr();
+    ASSERT_EQUALS(origDeleteRequestObj, request.toBSON());
+}
 
-        BSONObj origDeleteRequestObj =
-            BSON(BatchedDeleteRequest::collName("test") <<
-                 BatchedDeleteRequest::deletes() << deleteArray <<
-                 BatchedDeleteRequest::writeConcern(writeConcernObj) <<
-                 BatchedDeleteRequest::ordered(true) <<
-                 BatchedDeleteRequest::metadata() <<
-                     BSON(BatchedRequestMetadata::shardName("shard000") <<
-                          BatchedRequestMetadata::shardVersion() << shardVersionArray <<
-                          BatchedRequestMetadata::session(0)));
-
-        string errMsg;
-        BatchedDeleteRequest request;
-        bool ok = request.parseBSON(origDeleteRequestObj, &errMsg);
-        ASSERT_TRUE(ok);
-
-        BSONObj genDeleteRequestObj = request.toBSON();
-        ASSERT_EQUALS(0, genDeleteRequestObj.woCompare(origDeleteRequestObj));
-    }
-
-} // unnamed namespace
+}  // namespace
+}  // namespace mongo

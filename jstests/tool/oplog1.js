@@ -3,24 +3,27 @@
 // very basic test for mongooplog
 // need a lot more, but test that it functions at all
 
-t = new ToolTest( "oplog1" );
+t = new ToolTest("oplog1");
 
 db = t.startDB();
 
-output = db.output
+output = db.output;
 
-doc = { _id : 5 , x : 17 };
+doc = {
+    _id: 5,
+    x: 17
+};
 
-db.oplog.insert( { ts : new Timestamp() , "op" : "i" , "ns" : output.getFullName() , "o" : doc } );
+assert.commandWorked(db.createCollection(output.getName()));
 
-assert.eq( 0 , output.count() , "before" )
+db.oplog.insert({ts: new Timestamp(), "op": "i", "ns": output.getFullName(), "o": doc});
 
-t.runTool( "oplog" , "--oplogns" , db.getName() + ".oplog" , "--from" , "127.0.0.1:" + t.port , "-vv" );
+assert.eq(0, output.count(), "before");
 
-assert.eq( 1 , output.count() , "after" );
+t.runTool("oplog", "--oplogns", db.getName() + ".oplog", "--from", "127.0.0.1:" + t.port, "-vv");
 
-assert.eq( doc , output.findOne() , "after check" );
+assert.eq(1, output.count(), "after");
+
+assert.docEq(doc, output.findOne(), "after check");
 
 t.stop();
-
-

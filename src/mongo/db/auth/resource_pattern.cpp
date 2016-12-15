@@ -26,6 +26,8 @@
  *    then also delete it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kAccessControl
+
 #include "mongo/platform/basic.h"
 
 #include <iostream>
@@ -36,8 +38,8 @@
 
 namespace mongo {
 
-    std::string ResourcePattern::toString() const {
-        switch (_matchType) {
+std::string ResourcePattern::toString() const {
+    switch (_matchType) {
         case matchNever:
             return "<no resources>";
         case matchClusterResource:
@@ -54,11 +56,11 @@ namespace mongo {
             return "<all resources>";
         default:
             return "<unknown resource pattern type>";
-        }
     }
+}
 
-    std::ostream& operator<<(std::ostream& os, const ResourcePattern& pattern) {
-        return os << pattern.toString();
-    }
+std::ostream& operator<<(std::ostream& os, const ResourcePattern& pattern) {
+    return os << pattern.toString();
+}
 
 }  // namespace mongo

@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2013-2014 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -30,47 +30,84 @@
 
 namespace mongo {
 
-    /**
-     * These map to implementations of the PlanStage interface, all of which live in db/exec/
-     */
-    enum StageType {
-        STAGE_AND_HASH,
-        STAGE_AND_SORTED,
-        STAGE_COLLSCAN,
+/**
+ * These map to implementations of the PlanStage interface, all of which live in db/exec/
+ */
+enum StageType {
+    STAGE_AND_HASH,
+    STAGE_AND_SORTED,
+    STAGE_CACHED_PLAN,
+    STAGE_COLLSCAN,
 
-        // If we're running a .count(), the query is fully covered by one ixscan, and the ixscan is
-        // from one key to another, we can just skip through the keys without bothering to examine
-        // them.
-        STAGE_COUNT,
+    // This stage sits at the root of the query tree and counts up the number of results
+    // returned by its child.
+    STAGE_COUNT,
 
-        // If we're running a distinct, we only care about one value for each key.  The distinct
-        // stage is an ixscan with some key-skipping behvaior that only distinct uses.
-        STAGE_DISTINCT,
+    // If we're running a .count(), the query is fully covered by one ixscan, and the ixscan is
+    // from one key to another, we can just skip through the keys without bothering to examine
+    // them.
+    STAGE_COUNT_SCAN,
 
-        // This is more of an "internal-only" stage where we try to keep docs that were mutated
-        // during query execution.
-        STAGE_KEEP_MUTATIONS,
+    STAGE_DELETE,
 
-        STAGE_FETCH,
+    // If we're running a distinct, we only care about one value for each key.  The distinct
+    // scan stage is an ixscan with some key-skipping behvaior that only distinct uses.
+    STAGE_DISTINCT_SCAN,
 
-        // TODO: This is secretly an expression index but we need geometry -> covering for our
-        // geohash.
-        STAGE_GEO_2D,
+    // Dummy stage used for receiving notifications of deletions during chunk migration.
+    STAGE_NOTIFY_DELETE,
 
-        // The two $geoNear impls imply a fetch+sort and must be stages.
-        STAGE_GEO_NEAR_2D,
-        STAGE_GEO_NEAR_2DSPHERE,
+    STAGE_ENSURE_SORTED,
 
-        STAGE_IXSCAN,
-        STAGE_LIMIT,
-        STAGE_OR,
-        STAGE_PROJECTION,
-        STAGE_SHARDING_FILTER,
-        STAGE_SKIP,
-        STAGE_SORT,
-        STAGE_SORT_MERGE,
-        STAGE_TEXT,
-        STAGE_UNKNOWN,
-    };
+    STAGE_EOF,
+
+    // This is more of an "internal-only" stage where we try to keep docs that were mutated
+    // during query execution.
+    STAGE_KEEP_MUTATIONS,
+
+    STAGE_FETCH,
+
+    // The two $geoNear impls imply a fetch+sort and must be stages.
+    STAGE_GEO_NEAR_2D,
+    STAGE_GEO_NEAR_2DSPHERE,
+
+    STAGE_GROUP,
+
+    STAGE_IDHACK,
+
+    // Simple wrapper to iterate a SortedDataInterface::Cursor.
+    STAGE_INDEX_ITERATOR,
+
+    STAGE_IXSCAN,
+    STAGE_LIMIT,
+
+    // Implements parallelCollectionScan.
+    STAGE_MULTI_ITERATOR,
+
+    STAGE_MULTI_PLAN,
+    STAGE_OPLOG_START,
+    STAGE_OR,
+    STAGE_PROJECTION,
+
+    // Stage for running aggregation pipelines.
+    STAGE_PIPELINE_PROXY,
+
+    STAGE_QUEUED_DATA,
+    STAGE_SHARDING_FILTER,
+    STAGE_SKIP,
+    STAGE_SORT,
+    STAGE_SORT_KEY_GENERATOR,
+    STAGE_SORT_MERGE,
+    STAGE_SUBPLAN,
+
+    // Stages for running text search.
+    STAGE_TEXT,
+    STAGE_TEXT_OR,
+    STAGE_TEXT_MATCH,
+
+    STAGE_UNKNOWN,
+
+    STAGE_UPDATE,
+};
 
 }  // namespace mongo

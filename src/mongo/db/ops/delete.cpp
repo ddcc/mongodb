@@ -26,27 +26,57 @@
  *    it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/ops/delete.h"
 
-#include "mongo/db/ops/delete_executor.h"
+#include "mongo/db/catalog/database.h"
+#include "mongo/db/exec/delete.h"
 #include "mongo/db/ops/delete_request.h"
+#include "mongo/db/ops/parsed_delete.h"
+#include "mongo/db/query/get_executor.h"
+#include "mongo/db/repl/repl_client_info.h"
 
 namespace mongo {
 
-    /* ns:      namespace, e.g. <database>.<collection>
-       pattern: the "where" clause / criteria
-       justOne: stop after 1 match
-       god:     allow access to system namespaces, and don't yield
-    */
-    long long deleteObjects(const StringData& ns, BSONObj pattern, bool justOne, bool logop, bool god) {
-        NamespaceString nsString(ns);
-        DeleteRequest request(nsString);
-        request.setQuery(pattern);
-        request.setMulti(!justOne);
-        request.setUpdateOpLog(logop);
-        request.setGod(god);
-        DeleteExecutor executor(&request);
-        return executor.execute();
+/* ns:      namespace, e.g. <database>.<collection>
+   pattern: the "where" clause / criteria
+   justOne: stop after 1 match
+   god:     allow access to system namespaces, and don't yield
+*/
+long long deleteObjects(OperationContext* txn,
+                        Collection* collection,
+                        StringData ns,
+                        BSONObj pattern,
+                        PlanExecutor::YieldPolicy policy,
+                        bool justOne,
+                        bool god,
+                        bool fromMigrate) {
+    NamespaceString nsString(ns);
+    DeleteRequest request(nsString);
+    request.setQuery(pattern);
+    request.setMulti(!justOne);
+    request.setGod(god);
+    request.setFromMigrate(fromMigrate);
+    request.setYieldPolicy(policy);
+
+    ParsedDelete parsedDelete(txn, &request);
+    uassertStatusOK(parsedDelete.parseRequest());
+
+    auto client = txn->getClient();
+    auto lastOpAtOperationStart = repl::ReplClientInfo::forClient(client).getLastOp();
+
+    std::unique_ptr<PlanExecutor> exec =
+        uassertStatusOK(getExecutorDelete(txn, collection, &parsedDelete));
+
+    uassertStatusOK(exec->executePlan());
+
+    // No-ops need to reset lastOp in the client, for write concern.
+    if (repl::ReplClientInfo::forClient(client).getLastOp() == lastOpAtOperationStart) {
+        repl::ReplClientInfo::forClient(client).setLastOpToSystemLastOpTime(txn);
     }
+
+    return DeleteStage::getNumDeleted(*exec);
+}
 
 }  // namespace mongo

@@ -26,7 +26,11 @@
 *    it in the license file.
 */
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/catalog/index_key_validate.h"
+
+#include <limits>
 
 #include "mongo/db/field_ref.h"
 #include "mongo/db/index_names.h"
@@ -34,78 +38,83 @@
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
-    Status validateKeyPattern(const BSONObj& key) {
-        const ErrorCodes::Error code = ErrorCodes::CannotCreateIndex;
 
-        if ( key.objsize() > 2048 )
-            return Status(code, "Index key pattern too large.");
+using std::string;
 
-        if ( key.isEmpty() )
-            return Status(code, "Index keys cannot be empty.");
+Status validateKeyPattern(const BSONObj& key) {
+    const ErrorCodes::Error code = ErrorCodes::CannotCreateIndex;
 
-        string pluginName = IndexNames::findPluginName( key );
-        if ( pluginName.size() ) {
-            if ( !IndexNames::isKnownName( pluginName ) )
-                return Status(code,
-                              mongoutils::str::stream() << "Unknown index plugin '"
-                                                        << pluginName << '\'');
+    if (key.objsize() > 2048)
+        return Status(code, "Index key pattern too large.");
+
+    if (key.isEmpty())
+        return Status(code, "Index keys cannot be empty.");
+
+    string pluginName = IndexNames::findPluginName(key);
+    if (pluginName.size()) {
+        if (!IndexNames::isKnownName(pluginName))
+            return Status(
+                code, mongoutils::str::stream() << "Unknown index plugin '" << pluginName << '\'');
+    }
+
+    BSONObjIterator it(key);
+    while (it.more()) {
+        BSONElement keyElement = it.next();
+
+        if (keyElement.type() == Object || keyElement.type() == Array)
+            return Status(code, "Index keys cannot be Objects or Arrays.");
+
+        if (keyElement.type() == String && pluginName != keyElement.str()) {
+            return Status(code, "Can't use more than one index plugin for a single index.");
         }
 
-        BSONObjIterator it( key );
-        while ( it.more() ) {
-            BSONElement keyElement = it.next();
+        // Ensure that the fields on which we are building the index are valid: a field must not
+        // begin with a '$' unless it is part of a DBRef or text index, and a field path cannot
+        // contain an empty field. If a field cannot be created or updated, it should not be
+        // indexable.
 
-            if( keyElement.type() == Object || keyElement.type() == Array )
-                return Status(code, "Index keys cannot be Objects or Arrays.");
+        FieldRef keyField(keyElement.fieldName());
 
-            if ( keyElement.type() == String && pluginName != keyElement.str() ) {
-                return Status(code, "Can't use more than one index plugin for a single index.");
+        const size_t numParts = keyField.numParts();
+        if (numParts == 0) {
+            return Status(code, "Index keys cannot be an empty field.");
+        }
+
+        // "$**" is acceptable for a text index.
+        if (mongoutils::str::equals(keyElement.fieldName(), "$**") &&
+            keyElement.valuestrsafe() == IndexNames::TEXT)
+            continue;
+
+        if (mongoutils::str::equals(keyElement.fieldName(), "_fts") &&
+            keyElement.valuestrsafe() != IndexNames::TEXT) {
+            return Status(code, "Index key contains an illegal field name: '_fts'");
+        }
+
+        for (size_t i = 0; i != numParts; ++i) {
+            const StringData part = keyField.getPart(i);
+
+            // Check if the index key path contains an empty field.
+            if (part.empty()) {
+                return Status(code, "Index keys cannot contain an empty field.");
             }
 
-            // Ensure that the fields on which we are building the index are valid: a field must not
-            // begin with a '$' unless it is part of a DBRef or text index, and a field path cannot
-            // contain an empty field. If a field cannot be created or updated, it should not be
-            // indexable.
-
-            FieldRef keyField( keyElement.fieldName() );
-
-            const size_t numParts = keyField.numParts();
-            if ( numParts == 0 ) {
-                return Status(code, "Index keys cannot be an empty field.");
-            }
-
-            // "$**" is acceptable for a text index.
-            if ( mongoutils::str::equals( keyElement.fieldName(), "$**" ) &&
-                 keyElement.valuestrsafe() == IndexNames::TEXT )
+            if (part[0] != '$')
                 continue;
 
+            // Check if the '$'-prefixed field is part of a DBRef: since we don't have the
+            // necessary context to validate whether this is a proper DBRef, we allow index
+            // creation on '$'-prefixed names that match those used in a DBRef.
+            const bool mightBePartOfDbRef =
+                (i != 0) && (part == "$db" || part == "$id" || part == "$ref");
 
-            for ( size_t i = 0; i != numParts; ++i ) {
-                const StringData part = keyField.getPart(i);
-
-                // Check if the index key path contains an empty field.
-                if ( part.empty() ) {
-                    return Status(code, "Index keys cannot contain an empty field.");
-                }
-
-                if ( part[0] != '$' )
-                    continue;
-
-                // Check if the '$'-prefixed field is part of a DBRef: since we don't have the
-                // necessary context to validate whether this is a proper DBRef, we allow index
-                // creation on '$'-prefixed names that match those used in a DBRef.
-                const bool mightBePartOfDbRef = (i != 0) &&
-                                                (part == "$db" ||
-                                                 part == "$id" ||
-                                                 part == "$ref");
-
-                if ( !mightBePartOfDbRef ) {
-                    return Status(code, "Index key contains an illegal field name: "
-                                        "field name starts with '$'.");
-                }
+            if (!mightBePartOfDbRef) {
+                return Status(code,
+                              "Index key contains an illegal field name: "
+                              "field name starts with '$'.");
             }
         }
-
-        return Status::OK();
     }
-} // namespace mongo
+
+    return Status::OK();
+}
+}  // namespace mongo
