@@ -14,7 +14,7 @@ Build-Depends:
  libboost-program-options-dev,
  libboost-thread-dev,
  libboost-regex-dev,
- libgoogle-perftools-dev [linux-amd64 linux-i386 armhf],
+ libgoogle-perftools-dev [linux-amd64 linux-i386],
  libyaml-cpp-dev,
  libpcap-dev,
  libpcre3-dev,
@@ -36,7 +36,7 @@ Vcs-Browser: https://anonscm.debian.org/cgit/pkg-mongodb/mongodb.git/
 Homepage: https://www.mongodb.org
 
 Package: mongodb
-Architecture: amd64 i386 armhf arm64 ppc64el
+Architecture: amd64 i386 arm64 ppc64el
 Depends: mongodb-server (>= 1:2.4.1-2), ${misc:Depends}, ${shlibs:Depends}
 Description: object/document-oriented database (metapackage)
  MongoDB is a high-performance, open source, schema-free
@@ -58,7 +58,7 @@ Description: object/document-oriented database (metapackage)
  the server, the clients and the development files (headers and library).
 
 Package: mongodb-server
-Architecture: amd64 i386 armhf arm64 ppc64el
+Architecture: amd64 i386 arm64 ppc64el
 Depends:
  mongodb-clients,
  adduser, 
@@ -87,7 +87,7 @@ Description: object/document-oriented database (server package)
  server/load-balancer (mongos).
 
 Package: mongodb-clients
-Architecture: amd64 i386 armhf arm64 ppc64el
+Architecture: amd64 i386 arm64 ppc64el
 Depends:
  ${misc:Depends},
  ${shlibs:Depends}
