@@ -7,3 +7,4 @@ fix-boost-1.60-build.patch
 fix-boost-1.62-build.patch
 CVE-2016-6494.patch
 use-mmapv1-on-i386
+fix-wt-checksum-on-arm64
