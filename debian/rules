@@ -72,7 +72,7 @@ override_dh_install:
 	dh_install --list-missing
 
 %:
-	dh $@ --parallel --with=systemd
+	dh $@ --parallel
 
 .PHONY: override_dh_auto_clean override_dh_auto_build \
 	override_dh_auto_install override_dh_installinit \
