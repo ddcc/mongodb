@@ -1,0 +1,26 @@
+Author: Apollon Oikonomopoulos <apoikos@debian.org>
+Description: Fix FTBFS with GCC 7
+ GCC 7 warns us that the mangled symbol names of various functions are due to
+ change in C++17:
+   src/mongo/util/scopeguard.h:154:7: error: mangled name for 'mongo::ScopeGuardImpl1<void (*)(void*) throw (), char*>::ScopeGuardImpl1(const mongo::ScopeGuardImpl1<void (*)(void*) throw (), char*>&)' will change in C++17 because the exception specification is part of a function type [-Werror=c++1z-compat]
+ This appears to be mostly harmless in our case, since we're not building a
+ shared library. Also, MongoDB 3.2 does not boast C++17 compatibility.
+ Fix this by treating all C++17-compat errors as warnings.
+ Additionally turn format truncation errors back to warnings again for the time
+ being.
+Bug-Debian: https://bugs.debian.org/853556
+Last-Update: 2017-08-10
+Forwarded: no
+--- a/SConstruct
++++ b/SConstruct
+@@ -1457,6 +1457,10 @@
+                          "-Wsign-compare",
+                          "-Wno-unknown-pragmas",
+ 			 "-Wno-nonnull-compare",
++			 "-Wno-error=c++1z-compat",
++			 "-Wno-error=noexcept-type",
++			 "-Wno-error=format-truncation",
++			 "-Wno-error=int-in-bool-context",
+ 			 "-Wno-overflow",
+                          "-Winvalid-pch"] )
+     # env.Append( " -Wconversion" ) TODO: this doesn't really work yet
