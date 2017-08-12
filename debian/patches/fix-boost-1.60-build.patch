@@ -10,11 +10,9 @@ Subject: [PATCH] SERVER-17294 Boost 1.60 Mongo compilation fixes
  src/mongo/util/concurrency/shared_mutex_win.hpp | 8 ++++----
  4 files changed, 8 insertions(+), 8 deletions(-)
 
-diff --git a/src/mongo/db/ftdc/compressor.cpp b/src/mongo/db/ftdc/compressor.cpp
-index 1c4bfca..ecf9c7e 100644
 --- a/src/mongo/db/ftdc/compressor.cpp
 +++ b/src/mongo/db/ftdc/compressor.cpp
-@@ -47,7 +47,7 @@ FTDCCompressor::addSample(const BSONObj& sample, Date_t date) {
+@@ -47,7 +47,7 @@
      if (_referenceDoc.isEmpty()) {
          FTDCBSONUtil::extractMetricsFromDocument(sample, sample, &_metrics);
          _reset(sample, date);
@@ -23,7 +21,7 @@ index 1c4bfca..ecf9c7e 100644
      }
  
      _metrics.resize(0);
-@@ -107,7 +107,7 @@ FTDCCompressor::addSample(const BSONObj& sample, Date_t date) {
+@@ -107,7 +107,7 @@
      }
  
      // The buffer is not full, inform the caller
@@ -32,11 +30,9 @@ index 1c4bfca..ecf9c7e 100644
  }
  
  StatusWith<std::tuple<ConstDataRange, Date_t>> FTDCCompressor::getCompressedSamples() {
-diff --git a/src/mongo/db/ftdc/compressor_test.cpp b/src/mongo/db/ftdc/compressor_test.cpp
-index 518e5e8..6950dd9 100644
 --- a/src/mongo/db/ftdc/compressor_test.cpp
 +++ b/src/mongo/db/ftdc/compressor_test.cpp
-@@ -122,7 +122,7 @@ public:
+@@ -122,7 +122,7 @@
      TestTie() : _compressor(&_config) {}
  
      ~TestTie() {
@@ -45,11 +41,9 @@ index 518e5e8..6950dd9 100644
      }
  
      StatusWith<boost::optional<std::tuple<ConstDataRange, FTDCCompressor::CompressorState, Date_t>>>
-diff --git a/src/mongo/db/ftdc/file_writer.cpp b/src/mongo/db/ftdc/file_writer.cpp
-index 576f946..7ab7ee7 100644
 --- a/src/mongo/db/ftdc/file_writer.cpp
 +++ b/src/mongo/db/ftdc/file_writer.cpp
-@@ -205,7 +205,7 @@ Status FTDCFileWriter::flush(const boost::optional<ConstDataRange>& range, Date_
+@@ -211,7 +211,7 @@
  
  Status FTDCFileWriter::close() {
      if (_archiveStream.is_open()) {
@@ -58,11 +52,9 @@ index 576f946..7ab7ee7 100644
  
          _archiveStream.close();
  
-diff --git a/src/mongo/util/concurrency/shared_mutex_win.hpp b/src/mongo/util/concurrency/shared_mutex_win.hpp
-index a51afaf..86ad659 100644
 --- a/src/mongo/util/concurrency/shared_mutex_win.hpp
 +++ b/src/mongo/util/concurrency/shared_mutex_win.hpp
-@@ -175,7 +175,7 @@ namespace boost
+@@ -175,7 +175,7 @@
                      return true;
                  }
                      
@@ -71,7 +63,7 @@ index a51afaf..86ad659 100644
                  if(res==detail::win32::timeout)
                  {
                      for(;;)
-@@ -328,7 +328,7 @@ namespace boost
+@@ -328,7 +328,7 @@
                  {
                      return true;
                  }
@@ -80,7 +72,7 @@ index a51afaf..86ad659 100644
                  if(wait_res==detail::win32::timeout)
                  {
                      for(;;)
-@@ -421,7 +421,7 @@ namespace boost
+@@ -421,7 +421,7 @@
                      return;
                  }
                      
@@ -89,7 +81,7 @@ index a51afaf..86ad659 100644
              }
          }
  
-@@ -502,7 +502,7 @@ namespace boost
+@@ -502,7 +502,7 @@
                  {
                      if(!last_reader)
                      {
@@ -98,6 +90,3 @@ index a51afaf..86ad659 100644
                      }
                      break;
                  }
--- 
-2.8.1
-

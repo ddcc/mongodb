@@ -1,6 +1,6 @@
 --- a/SConstruct
 +++ b/SConstruct
-@@ -831,6 +831,11 @@
+@@ -839,6 +839,11 @@
                 INSTALL_DIR=installDir,
                 CONFIG_HEADER_DEFINES={},
                 LIBDEPS_TAG_EXPANSIONS=[],
