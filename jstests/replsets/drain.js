@@ -25,7 +25,6 @@
 
     var primary = replSet.getPrimary();
     var secondary = replSet.getSecondary();
-    var isPV0 = replSet.getReplSetConfigFromNode().protocolVersion != 1;
 
     // Do an initial insert to prevent the secondary from going into recovery
     var numDocuments = 20;
@@ -43,7 +42,7 @@
     }
     assert.writeOK(bulk.execute());
     jsTestLog('Number of documents inserted into collection on primary: ' + numDocuments);
-    assert.eq(numDocuments, primary.getDB("foo").foo.find().itcount());
+    assert.eq(numDocuments, primary.getDB("foo").foo.count());
 
     assert.soon(function() {
         var serverStatus = secondary.getDB('foo').serverStatus();
@@ -52,13 +51,12 @@
         jsTestLog('Number of operations buffered on secondary since stopping applier: ' +
                   bufferCountChange);
         return bufferCountChange >= numDocuments - 1;
-    }, 'secondary did not buffer operations for new inserts on primary', 30000, 1000);
+    }, 'secondary did not buffer operations for new inserts on primary', 300000, 1000);
 
     // Kill primary; secondary will enter drain mode to catch up
     primary.getDB("admin").shutdownServer({force: true});
 
-    var electionTimeout = (isPV0 ? 60 : 20) * 1000;  // Timeout in milliseconds
-    replSet.waitForState(secondary, ReplSetTest.State.PRIMARY, electionTimeout);
+    replSet.waitForState(secondary, ReplSetTest.State.PRIMARY);
 
     // Ensure new primary is not yet writable
     jsTestLog('New primary should not be writable yet');
@@ -75,12 +73,7 @@
               "find failed with unexpected error code: " + tojson(res));
     // Nor should it be readable with the slaveOk bit.
     secondary.slaveOk = true;
-    res = secondary.getDB("foo").runCommand({find: "foo"});
-    assert.commandFailed(res);
-    assert.eq(ErrorCodes.NotMasterOrSecondary,
-              res.code,
-              "find failed with unexpected error code: " + tojson(res));
-    secondary.slaveOk = false;
+    assert.commandWorked(secondary.getDB("foo").runCommand({find: "foo"}));
 
     assert.commandFailedWithCode(
         secondary.adminCommand({
@@ -100,7 +93,7 @@
     assert.commandWorked(
         secondary.adminCommand({
             replSetTest: 1,
-            waitForDrainFinish: 5000,
+            waitForDrainFinish: 30000,
         }),
         'replSetTest waitForDrainFinish should work when draining is allowed to complete');
 
@@ -110,5 +103,5 @@
     // Check for at least two entries. There was one prior to freezing op application on the
     // secondary and we cannot guarantee all writes reached the secondary's op queue prior to
     // shutting down the original primary.
-    assert.gte(primary.getDB("foo").foo.find().itcount(), 2);
+    assert.gte(primary.getDB("foo").foo.count(), 2);
 })();

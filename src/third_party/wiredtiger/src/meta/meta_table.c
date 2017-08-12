@@ -68,9 +68,6 @@ __wt_metadata_cursor_open(
 	if (F_ISSET(btree, WT_BTREE_NO_LOGGING))
 		F_CLR(btree, WT_BTREE_NO_LOGGING);
 
-	/* The metadata file always uses checkpoint IDs in visibility checks. */
-	btree->include_checkpoint_txn = true;
-
 	return (0);
 }
 
@@ -195,7 +192,7 @@ __wt_metadata_update(
 	    __metadata_turtle(key) ? "" : "not ");
 
 	if (__metadata_turtle(key)) {
-		WT_WITH_TURTLE_LOCK(session, ret,
+		WT_WITH_TURTLE_LOCK(session,
 		    ret = __wt_turtle_update(session, key, value));
 		return (ret);
 	}
@@ -262,8 +259,17 @@ __wt_metadata_search(WT_SESSION_IMPL *session, const char *key, char **valuep)
 	    key, WT_META_TRACKING(session) ? "true" : "false",
 	    __metadata_turtle(key) ? "" : "not ");
 
-	if (__metadata_turtle(key))
-		return (__wt_turtle_read(session, key, valuep));
+	if (__metadata_turtle(key)) {
+		/*
+		 * The returned value should only be set if ret is non-zero, but
+		 * Coverity is convinced otherwise. The code path is used enough
+		 * that Coverity complains a lot, add an error check to get some
+		 * peace and quiet.
+		 */
+		if ((ret = __wt_turtle_read(session, key, valuep)) != 0)
+			__wt_free(session, *valuep);
+		return (ret);
+	}
 
 	/*
 	 * All metadata reads are at read-uncommitted isolation.  That's

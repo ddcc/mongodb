@@ -644,7 +644,8 @@ std::map<std::string, ApplyOpMetadata> opsMap = {
      {[](OperationContext* txn, const char* ns, BSONObj& cmd) -> Status {
          BSONObjBuilder resultWeDontCareAbout;
          return collMod(txn, parseNs(ns, cmd), cmd, &resultWeDontCareAbout);
-     }}},
+     },
+      {ErrorCodes::IndexNotFound, ErrorCodes::NamespaceNotFound}}},
     {"dropDatabase",
      {[](OperationContext* txn, const char* ns, BSONObj& cmd)
           -> Status { return dropDatabase(txn, NamespaceString(ns).db().toString()); },
@@ -712,7 +713,7 @@ std::map<std::string, ApplyOpMetadata> opsMap = {
 Status applyOperation_inlock(OperationContext* txn,
                              Database* db,
                              const BSONObj& op,
-                             bool convertUpdateToUpsert) {
+                             bool inSteadyStateReplication) {
     LOG(3) << "applying op: " << op << endl;
 
     OpCounters* opCounters = txn->writesAreReplicated() ? &globalOpCounters : &replOpCounters;
@@ -794,6 +795,7 @@ Status applyOperation_inlock(OperationContext* txn,
                     // Wait for thread to start and register itself
                     IndexBuilder::waitForBgIndexStarting();
                 }
+                txn->recoveryUnit()->abandonSnapshot();
             } else {
                 IndexBuilder builder(o);
                 Status status = builder.buildInForeground(txn, db);
@@ -866,7 +868,7 @@ Status applyOperation_inlock(OperationContext* txn,
 
         OpDebug debug;
         BSONObj updateCriteria = o2;
-        const bool upsert = valueB || convertUpdateToUpsert;
+        const bool upsert = valueB || inSteadyStateReplication;
 
         uassert(ErrorCodes::NoSuchKey,
                 str::stream() << "Failed to apply update due to missing _id: " << op.toString(),
@@ -949,7 +951,9 @@ Status applyOperation_inlock(OperationContext* txn,
     return Status::OK();
 }
 
-Status applyCommand_inlock(OperationContext* txn, const BSONObj& op) {
+Status applyCommand_inlock(OperationContext* txn,
+                           const BSONObj& op,
+                           bool inSteadyStateReplication) {
     const char* names[] = {"o", "ns", "op"};
     BSONElement fields[3];
     op.getFields(3, names, fields);
@@ -971,6 +975,14 @@ Status applyCommand_inlock(OperationContext* txn, const BSONObj& op) {
     BSONObj o = fieldO.embeddedObject();
 
     const char* ns = fieldNs.valuestrsafe();
+
+    // Applying renameCollection during initial sync might lead to data corruption, so we restart
+    // the initial sync.
+    if (!inSteadyStateReplication && o.firstElementFieldName() == std::string("renameCollection")) {
+        return Status(ErrorCodes::OplogOperationUnsupported,
+                      str::stream()
+                          << "Applying renameCollection not supported in initial sync: " << op);
+    }
 
     // Applying commands in repl is done under Global W-lock, so it is safe to not
     // perform the current DB checks after reacquiring the lock.
@@ -1190,8 +1202,7 @@ void SnapshotThread::run() {
                 invariant(!opTimeOfSnapshot.isNull());
             }
 
-            _manager->createSnapshot(txn.get(), name);
-            replCoord->onSnapshotCreate(opTimeOfSnapshot, name);
+            replCoord->createSnapshot(txn.get(), opTimeOfSnapshot, name);
         } catch (const WriteConflictException& wce) {
             log() << "skipping storage snapshot pass due to write conflict";
             continue;

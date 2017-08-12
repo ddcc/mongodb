@@ -43,8 +43,8 @@ post:
           set -e
           set -o verbose
           # call terraform destroy twice to avoid AWS timeout
-          yes yes | ./terraform destroy
-          yes yes | ./terraform destroy
+          yes yes | ./terraform destroy --var-file=cluster.json
+          yes yes | ./terraform destroy --var-file=cluster.json
           # clean all file to be safe
           rm -rf *
           echo "Cluster DESTROYED."
@@ -57,66 +57,99 @@ functions:
           rm -rf ./*
           mkdir src
           mkdir work
-          mkdir bin
-          mkdir keys
-          pwd
-          ls
     - command: manifest.load
     - command: git.get_project
       params:
         directory: src
         revisions: # for each module include revision as <module_name> : ${<module_name>_rev}
           dsi: ${dsi_rev}
-          YCSB: ${YCSB_rev}
-    - command: git.apply_patch
+    - command: shell.exec
       params:
-        directory: src
+        working_dir: work
+        script: |
+          cat > bootstrap.yml <<EOF
+          cluster_type: ${cluster}
+          platform: ${platform}
+          setup: ${setup}
+          storageEngine: ${storageEngine}
+          test: ${test}.longevity
+          production: true
+          EOF
+
+          cat > runtime.yml <<EOF
+          # evergreen default expansions
+          is_patch: ${is_patch}
+          task_id: ${task_id}
+          task_name: ${task_name}
+          execution: ${execution}
+          build_id: ${build_id}
+          build_variant: ${build_variant}
+          version_id: ${version_id}
+          workdir: ${workdir}
+          revision: ${revision}
+          project: ${project}
+          branch_name: ${branch_name}
+
+          # sys-perf expansions
+          # Shouldn't be needed: testList: ${testList}
+          ext: ${ext}
+          script_flags : ${script_flags}
+          dsi_rev: ${dsi_rev}
+          compare_task: ${compare_task}
+          workloads_rev: ${workloads_rev}
+
+          # compositions of expansions
+          mongodb_binary_archive: "https://s3.amazonaws.com/mciuploads/${project}/${version_id}/${revision}/${platform}/mongod-${version_id}.tar.gz"
+          EOF
     - command: shell.exec
       params:
         silent: true
+        working_dir: work
         script: |
-          # generate aws private key file
-          echo "${terraform_secret}" > secret
-          chmod 400 secret
-          echo "${ec2_pem}" > keys/aws.pem
-          chmod 400 keys/aws.pem
+          # AWS ssh secret key
+          echo "${ec2_pem}" > aws_ssh_key.pem
+          chmod 400 aws_ssh_key.pem
+
+          cat > runtime_secret.yml <<EOF
+          # Note that inside system_perf.yml we have ${aws_key} & ${aws_secret}, which are used for
+          # Evergreen resources. The below are used for dsi resources, and are NOT the same!
+          aws_access_key: "${terraform_key}"
+          aws_secret_key: "${terraform_secret}"
+          perf_jira_user: "${perf_jira_user}"
+          perf_jira_pw: "${perf_jira_pw}"
+          EOF
+          chmod 400 runtime_secret.yml
     - command: shell.exec
       params:
         working_dir: work
         # setup execution environment
         # configure environment
         script: |
+          set -e
           virtualenv ./venv
           source ./venv/bin/activate
           pip install -r ../src/dsi/dsi/requirements.txt
-          python ../src/dsi/dsi/bin/setup_work_env.py --cluster-type ${cluster} --aws-key-name ${terraform_key} --ssh-keyfile-path ../keys/aws.pem --aws-secret-file ../secret --production
+          python ../src/dsi/dsi/bin/bootstrap.py
     - command: shell.exec
       params:
         script: |
           set -v
+          set -e
           source work/dsienv.sh
           $DSI_PATH/bin/setup-dsi-env.sh
-          cp terraform/* work/
-          ls work
-    - command: shell.exec
-      params:
-        working_dir: work
-        script: |
-           set -v
-           ./terraform get --update
+          ls -a work
 
-  "bring up 3 shard cluster":
+  "infrastructure provisioning":
     - command: shell.exec
-      # bring up the cluster
+      # call infrastructure-provisioning.sh. This will either create a cluster, or update tags on existing instances.
       params:
         working_dir: work
-        silent: true
         script: |
-          # to create a mongod EC2 cluster
           set -e
-          set -o verbose
+          set -v
           source ./dsienv.sh
-          $DSI_PATH/bin/setup-cluster.sh ${cluster} false
+          export PRODUCTION=true
+          $DSI_PATH/bin/infrastructure_provisioning.sh ${cluster}
 
   "configure mongodb cluster":
     - command: shell.exec
@@ -128,8 +161,7 @@ functions:
           set -o verbose
           source ./dsienv.sh
           source ./venv/bin/activate
-          cp mongodb_setup.${setup}.${storageEngine}.yml mongodb_setup.yml
-          $DSI_PATH/bin/mongodb_setup.py --mongodb-binary-archive https://s3.amazonaws.com/mciuploads/longevity-v3.2/${build_variant}/${revision}/mongodb-${build_id}.tar.gz
+          $DSI_PATH/bin/mongodb_setup.py && echo "${setup} MongoDB Cluster STARTED."
 
   "run test":
     - command: shell.exec
@@ -138,12 +170,10 @@ functions:
         script: |
           set -e
           set -v
-          echo "Run test for ${test}-${storageEngine} with setup ${setup}"
           source ./dsienv.sh
           source ./venv/bin/activate
-          # Copy over the proper test control file
-          cp $DSI_PATH/test_control/test_control.${test}.longevity.yml test_control.yml
-          $DSI_PATH/bin/run-${test}.sh ${storageEngine} ${setup} ${cluster}
+          echo "Run test for ${test}-${storageEngine} with setup ${setup}"
+          $DSI_PATH/bin/run_test.py ${storageEngine} ${test} ${cluster}
           echo "Complete test for ${test} with setup ${setup}!"
     - command: "json.send"
       params:
@@ -159,10 +189,13 @@ functions:
           set -e
           set -o verbose
           source ./dsienv.sh
-          # destroy the EC2 cluster
-          yes yes | ./terraform destroy
-          yes yes | ./terraform destroy
+          # Longevity runs so rarely, we simply teardown the cluster when done.
+          # Note that nowadays infrastructure_teardown.sh is actually copying the terraform.tfstate into /data/infrastructure_provisioning
+          # but as of this writing the rhel70-perf-longevity distro didn't actually use the teardown hook.
+          source ./dsienv.sh
+          $DSI_PATH/bin/infrastructure_teardown.sh
           echo "Cluster DESTROYED."
+          echo
           echo "All perf results"
           cd ..
           cat perf.json | egrep "name|ops_per_sec"
@@ -233,7 +266,7 @@ tasks:
         aws_key: ${aws_key}
         aws_secret: ${aws_secret}
         local_file: src/mongodb.tar.gz
-        remote_file: longevity-v3.2/${build_variant}/${revision}/mongodb-${build_id}.tar.gz
+        remote_file: ${project}/${version_id}/${revision}/${platform}/mongod-${version_id}.tar.gz
         bucket: mciuploads
         permissions: public-read
         content_type: ${content_type|application/x-gzip}
@@ -245,7 +278,10 @@ tasks:
   exec_timeout_secs: 216000
   commands:
     - func: "prepare environment"
-    - func: "bring up 3 shard cluster"
+      vars:
+        storageEngine: "wiredTiger"
+        test: "ycsb"
+    - func: "infrastructure provisioning"
     - func: "configure mongodb cluster"
     - func: "run test"
       vars:
@@ -263,7 +299,10 @@ tasks:
   exec_timeout_secs: 216000
   commands:
     - func: "prepare environment"
-    - func: "bring up 3 shard cluster"
+      vars:
+        storageEngine: "mmapv1"
+        test: "ycsb"
+    - func: "infrastructure provisioning"
     - func: "configure mongodb cluster"
     - func: "run test"
       vars:
@@ -287,12 +326,6 @@ modules:
   prefix: dsi
   branch: master
 
-- name: YCSB
-  repo: git@github.com:mongodb-labs/YCSB.git
-  prefix: YCSB
-  branch: evergreen
-
-
 
 buildvariants:
 - name: linux-wt-shard
@@ -300,10 +333,9 @@ buildvariants:
   batchtime: 40320 # 4 weeks
   modules: &modules
     - dsi
-    - YCSB
   expansions:
     compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/bin/gcc CXX=/opt/mongodbtoolchain/bin/g++ --release
-    setup: shard
+    setup: shard-longevity
     cluster: longevity
     numShard: 3
     storageEngine: wiredTiger
@@ -322,7 +354,7 @@ buildvariants:
   modules: *modules
   expansions:
     compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/bin/gcc CXX=/opt/mongodbtoolchain/bin/g++ --release
-    setup: shard
+    setup: shard-longevity
     cluster: longevity
     numShard: 3
     storageEngine: mmapv1

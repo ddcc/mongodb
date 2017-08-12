@@ -149,7 +149,10 @@ void (*snmpInit)() = NULL;
 
 extern int diagLogging;
 
-static const NamespaceString startupLogCollectionName("local.startup_log");
+namespace {
+
+const NamespaceString startupLogCollectionName("local.startup_log");
+const NamespaceString kSystemReplSetCollection("local.system.replset");
 
 #ifdef _WIN32
 ntservice::NtServiceDefaultStrings defaultServiceStrings = {
@@ -215,7 +218,7 @@ public:
     }
 };
 
-static void logStartup(OperationContext* txn) {
+void logStartup(OperationContext* txn) {
     BSONObjBuilder toLog;
     stringstream id;
     id << getHostNameCached() << "-" << jsTime().asInt64();
@@ -255,7 +258,7 @@ static void logStartup(OperationContext* txn) {
     wunit.commit();
 }
 
-static void checkForIdIndexes(OperationContext* txn, Database* db) {
+void checkForIdIndexes(OperationContext* txn, Database* db) {
     if (db->name() == "local") {
         // we do not need an _id index on anything in the local database
         return;
@@ -293,13 +296,10 @@ static void checkForIdIndexes(OperationContext* txn, Database* db) {
  * @returns the number of documents in local.system.replset or 0 if this was started with
  *          --replset.
  */
-static unsigned long long checkIfReplMissingFromCommandLine(OperationContext* txn) {
-    // This is helpful for the query below to work as you can't open files when readlocked
-    ScopedTransaction transaction(txn, MODE_X);
-    Lock::GlobalWrite lk(txn->lockState());
+unsigned long long checkIfReplMissingFromCommandLine(OperationContext* txn) {
     if (!repl::getGlobalReplicationCoordinator()->getSettings().usingReplSets()) {
         DBDirectClient c(txn);
-        return c.count("local.system.replset");
+        return c.count(kSystemReplSetCollection.ns());
     }
     return 0;
 }
@@ -311,7 +311,7 @@ static unsigned long long checkIfReplMissingFromCommandLine(OperationContext* tx
  * start up or get promoted to be replica set primaries, newer nodes clear the temp flags left by
  * these versions.
  */
-static bool isSubjectToSERVER23299(OperationContext* txn) {
+bool isSubjectToSERVER23299(OperationContext* txn) {
     dbHolder().openDb(txn, startupLogCollectionName.db());
     AutoGetCollectionForRead autoColl(txn, startupLogCollectionName);
     // No startup log or an empty one means either that the user was not running an affected
@@ -353,7 +353,7 @@ static bool isSubjectToSERVER23299(OperationContext* txn) {
     return true;
 }
 
-static void handleSERVER23299ForDb(OperationContext* txn, Database* db) {
+void handleSERVER23299ForDb(OperationContext* txn, Database* db) {
     log() << "Scanning " << db->name() << " db for SERVER-23299 eligibility";
     const auto dbEntry = db->getDatabaseCatalogEntry();
     list<string> collNames;
@@ -374,7 +374,22 @@ static void handleSERVER23299ForDb(OperationContext* txn, Database* db) {
     log() << "Done scanning " << db->name() << " for SERVER-23299 eligibility";
 }
 
-static void repairDatabasesAndCheckVersion(OperationContext* txn) {
+/**
+ * Check that the oplog is capped, and abort the process if it is not.
+ * Caller must lock DB before calling this function.
+ */
+void checkForCappedOplog(OperationContext* txn, Database* db) {
+    const NamespaceString oplogNss(repl::rsOplogName);
+    invariant(txn->lockState()->isDbLockedForMode(oplogNss.db(), MODE_IS));
+    Collection* oplogCollection = db->getCollection(oplogNss);
+    if (oplogCollection && !oplogCollection->isCapped()) {
+        severe() << "The oplog collection " << oplogNss
+                 << " is not capped; a capped oplog is a requirement for replication to function.";
+        fassertFailedNoTrace(40116);
+    }
+}
+
+void repairDatabasesAndCheckVersion(OperationContext* txn) {
     LOG(1) << "enter repairDatabases (to check pdfile version #)" << endl;
 
     ScopedTransaction transaction(txn, MODE_X);
@@ -396,6 +411,13 @@ static void repairDatabasesAndCheckVersion(OperationContext* txn) {
     }
 
     const repl::ReplSettings& replSettings = repl::getGlobalReplicationCoordinator()->getSettings();
+
+    // We open the "local" database before calling checkIfReplMissingFromCommandLine() to ensure the
+    // in-memory catalog entries for the 'kSystemReplSetCollection' collection have been populated
+    // if the collection exists. If the "local" database didn't exist at this point yet, then it
+    // will be created.
+    Lock::DBLock dbLock(txn->lockState(), kSystemReplSetCollection.db(), MODE_X);
+    dbHolder().openDb(txn, kSystemReplSetCollection.db());
 
     // On replica set members we only clear temp collections on DBs other than "local" during
     // promotion to primary. On pure slaves, they are only cleared when the oplog tells them
@@ -480,6 +502,11 @@ static void repairDatabasesAndCheckVersion(OperationContext* txn) {
         if (replSettings.usingReplSets()) {
             // We only care about the _id index if we are in a replset
             checkForIdIndexes(txn, db);
+            // Ensure oplog is capped (mmap does not guarantee order of inserts on noncapped
+            // collections)
+            if (db->name() == "local") {
+                checkForCappedOplog(txn, db);
+            }
         }
 
         if (shouldDoCleanupForSERVER23299) {
@@ -503,7 +530,7 @@ static void repairDatabasesAndCheckVersion(OperationContext* txn) {
     LOG(1) << "done repairDatabases" << endl;
 }
 
-static void _initWireSpec() {
+void _initWireSpec() {
     WireSpec& spec = WireSpec::instance();
     // accept from any version
     spec.minWireVersionIncoming = RELEASE_2_4_AND_BEFORE;
@@ -513,8 +540,7 @@ static void _initWireSpec() {
     spec.maxWireVersionOutgoing = FIND_COMMAND;
 }
 
-
-static void _initAndListen(int listenPort) {
+void _initAndListen(int listenPort) {
     Client::initThread("initandlisten");
 
     _initWireSpec();
@@ -721,6 +747,8 @@ static void _initAndListen(int listenPort) {
                      "data." << startupWarningsLog;
         }
 
+        logStartup(startupOpCtx.get());
+
         getDeleter()->startWorkers();
 
         restartInProgressIndexesFromLastShutdown(startupOpCtx.get());
@@ -757,8 +785,6 @@ static void _initAndListen(int listenPort) {
         uassertStatusOK(ShardingStateRecovery::recover(startupOpCtx.get()));
     }
 
-    logStartup(startupOpCtx.get());
-
     // MessageServer::run will return when exit code closes its socket and we don't need the
     // operation context anymore
     startupOpCtx.reset();
@@ -784,6 +810,8 @@ ExitCode initAndListen(int listenPort) {
         return EXIT_UNCAUGHT;
     }
 }
+
+}  // namespace
 
 #if defined(_WIN32)
 ExitCode initService() {
