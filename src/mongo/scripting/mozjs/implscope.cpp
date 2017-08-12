@@ -169,6 +169,10 @@ void MozJSImplScope::kill() {
     JS_RequestInterruptCallback(_runtime);
 }
 
+void MozJSImplScope::interrupt() {
+    JS_RequestInterruptCallback(_runtime);
+}
+
 bool MozJSImplScope::isKillPending() const {
     return _pendingKill.load();
 }
@@ -483,11 +487,20 @@ BSONObj MozJSImplScope::getObject(const char* field) {
 void MozJSImplScope::newFunction(StringData raw, JS::MutableHandleValue out) {
     MozJSEntry entry(this);
 
-    std::string code = str::stream() << "____MongoToSM_newFunction_temp = " << raw;
+    _MozJSCreateFunction(raw, std::move(out));
+}
+
+void MozJSImplScope::_MozJSCreateFunction(StringData raw, JS::MutableHandleValue fun) {
+    std::string code = str::stream()
+        << "(" << parseJSFunctionOrExpression(_context, StringData(raw)) << ")";
 
     JS::CompileOptions co(_context);
     setCompileOptions(&co);
-    _checkErrorState(JS::Evaluate(_context, _global, co, code.c_str(), code.length(), out));
+
+    _checkErrorState(JS::Evaluate(_context, _global, co, code.c_str(), code.length(), fun));
+    uassert(10232,
+            "not a function",
+            fun.isObject() && JS_ObjectIsFunction(_context, fun.toObjectOrNull()));
 }
 
 BSONObj MozJSImplScope::callThreadArgs(const BSONObj& args) {
@@ -528,39 +541,20 @@ bool hasFunctionIdentifier(StringData code) {
     return code[8] == ' ' || code[8] == '(';
 }
 
-void MozJSImplScope::_MozJSCreateFunction(const char* raw,
-                                          ScriptingFunction functionNumber,
-                                          JS::MutableHandleValue fun) {
-    std::string code = str::stream() << "_funcs" << functionNumber << " = "
-                                     << parseJSFunctionOrExpression(_context, StringData(raw));
-
-    JS::CompileOptions co(_context);
-    setCompileOptions(&co);
-
-    _checkErrorState(JS::Evaluate(_context, _global, co, code.c_str(), code.length(), fun));
-    uassert(10232,
-            "not a function",
-            fun.isObject() && JS_ObjectIsFunction(_context, fun.toObjectOrNull()));
-}
-
-ScriptingFunction MozJSImplScope::_createFunction(const char* raw,
-                                                  ScriptingFunction functionNumber) {
+ScriptingFunction MozJSImplScope::_createFunction(const char* raw) {
     MozJSEntry entry(this);
 
     JS::RootedValue fun(_context);
-    _MozJSCreateFunction(raw, functionNumber, &fun);
+    _MozJSCreateFunction(raw, &fun);
     _funcs.emplace_back(_context, fun.get());
-
-    return functionNumber;
+    return _funcs.size();
 }
 
 void MozJSImplScope::setFunction(const char* field, const char* code) {
     MozJSEntry entry(this);
 
     JS::RootedValue fun(_context);
-
-    _MozJSCreateFunction(code, getFunctionCache().size() + 1, &fun);
-
+    _MozJSCreateFunction(code, &fun);
     ObjectWrapper(_context, _global).setValue(field, fun);
 }
 
@@ -606,14 +600,16 @@ int MozJSImplScope::invoke(ScriptingFunction func,
 
     if (timeoutMs)
         _engine->getDeadlineMonitor().startDeadline(this, timeoutMs);
+    else {
+        _engine->getDeadlineMonitor().startDeadline(this, -1);
+    }
 
     JS::RootedValue out(_context);
     JS::RootedObject obj(_context, smrecv.toObjectOrNull());
 
     bool success = JS::Call(_context, obj, funcValue, args, &out);
 
-    if (timeoutMs)
-        _engine->getDeadlineMonitor().stopDeadline(this);
+    _engine->getDeadlineMonitor().stopDeadline(this);
 
     _checkErrorState(success);
 
@@ -651,15 +647,17 @@ bool MozJSImplScope::exec(StringData code,
     if (_checkErrorState(success, reportError, assertOnError))
         return false;
 
-    if (timeoutMs)
+    if (timeoutMs) {
         _engine->getDeadlineMonitor().startDeadline(this, timeoutMs);
+    } else {
+        _engine->getDeadlineMonitor().startDeadline(this, -1);
+    }
 
     JS::RootedValue out(_context);
 
     success = JS_ExecuteScript(_context, _global, script, &out);
 
-    if (timeoutMs)
-        _engine->getDeadlineMonitor().stopDeadline(this);
+    _engine->getDeadlineMonitor().stopDeadline(this);
 
     if (_checkErrorState(success, reportError, assertOnError))
         return false;
@@ -706,6 +704,11 @@ void MozJSImplScope::localConnectForDbEval(OperationContext* txn, const char* db
     // NOTE: order is important here.  the following methods must be called after
     //       the above conditional statements.
 
+    _connectState = ConnectState::Local;
+    _localDBName = dbName;
+
+    loadStored(txn);
+
     // install db access functions in the global object
     installDBAccess();
 
@@ -713,16 +716,11 @@ void MozJSImplScope::localConnectForDbEval(OperationContext* txn, const char* db
     _mongoLocalProto.install(_global);
     execCoreFiles();
 
-    const char* const makeMongo = "_mongo = new Mongo()";
+    const char* const makeMongo = "const _mongo = new Mongo()";
     exec(makeMongo, "local connect 2", false, true, true, 0);
 
-    std::string makeDB = str::stream() << "db = _mongo.getDB(\"" << dbName << "\");";
+    std::string makeDB = str::stream() << "const db = _mongo.getDB(\"" << dbName << "\");";
     exec(makeDB, "local connect 3", false, true, true, 0);
-
-    _connectState = ConnectState::Local;
-    _localDBName = dbName;
-
-    loadStored(txn);
 }
 
 void MozJSImplScope::externalSetup() {

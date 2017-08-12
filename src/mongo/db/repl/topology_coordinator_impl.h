@@ -219,12 +219,15 @@ public:
     virtual void processLoseElection();
     virtual Status checkShouldStandForElection(Date_t now, const OpTime& lastOpApplied) const;
     virtual void setMyHeartbeatMessage(const Date_t now, const std::string& message);
-    virtual bool stepDown(Date_t until, bool force, const OpTime& lastOpApplied);
+    virtual bool stepDown(Date_t until,
+                          bool force,
+                          const OpTime& lastOpApplied,
+                          const OpTime& lastOpCommitted);
     virtual bool stepDownIfPending();
     virtual Date_t getStepDownTime() const;
-    virtual void prepareReplResponseMetadata(rpc::ReplSetMetadata* metadata,
-                                             const OpTime& lastVisibleOpTime,
-                                             const OpTime& lastCommitttedOpTime) const;
+    virtual void prepareReplMetadata(rpc::ReplSetMetadata* metadata,
+                                     const OpTime& lastVisibleOpTime,
+                                     const OpTime& lastCommitttedOpTime) const;
     Status processReplSetDeclareElectionWinner(const ReplSetDeclareElectionWinnerArgs& args,
                                                long long* responseTerm);
     virtual void processReplSetRequestVotes(const ReplSetRequestVotesArgs& args,
@@ -304,6 +307,10 @@ private:
 
     // Sees if a majority number of votes are held by members who are currently "up"
     bool _aMajoritySeemsToBeUp() const;
+
+    // Returns true if the node can see a healthy primary of equal or greater priority to the
+    // candidate.
+    bool _canSeeHealthyPrimaryOfEqualOrGreaterPriority(const int candidateIndex) const;
 
     // Is otherOpTime close enough (within 10 seconds) to the latest known optime to qualify
     // for an election
@@ -457,7 +464,7 @@ private:
     } _voteLease;
 
     // V1 last vote info for elections
-    LastVote _lastVote;
+    LastVote _lastVote{OpTime::kInitialTerm, -1};
 
     enum class ReadCommittedSupport {
         kUnknown,

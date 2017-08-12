@@ -86,6 +86,7 @@ NetworkInterfaceASIO::NetworkInterfaceASIO(Options options)
       _timerFactory(std::move(_options.timerFactory)),
       _streamFactory(std::move(_options.streamFactory)),
       _connectionPool(stdx::make_unique<connection_pool_asio::ASIOImpl>(this),
+                      _options.instanceName,
                       _options.connectionPoolOptions),
       _isExecutorRunnable(false),
       _strand(_io_service) {}
@@ -390,6 +391,10 @@ bool NetworkInterfaceASIO::onNetworkThread() {
     return std::any_of(_serviceRunners.begin(),
                        _serviceRunners.end(),
                        [id](const stdx::thread& thread) { return id == thread.get_id(); });
+}
+
+void NetworkInterfaceASIO::dropConnections(const HostAndPort& hostAndPort) {
+    _connectionPool.dropConnections(hostAndPort);
 }
 
 }  // namespace executor
