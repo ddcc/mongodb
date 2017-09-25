@@ -1,3 +1,10 @@
+mongodb (1:3.2.11-4) unstable; urgency=medium
+
+  * Bump Standards to 4.1.0; no changes needed
+  * Fix segfault/FTBFS on ARM64 with 48-bit virtual addresses (Closes: #871906)
+
+ -- Apollon Oikonomopoulos <apoikos@debian.org>  Mon, 25 Sep 2017 23:50:52 +0300
+
 mongodb (1:3.2.11-3) unstable; urgency=medium
 
   * d/changelog: restore the 2.6.12-3 entry (Closes: #848305)
