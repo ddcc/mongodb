@@ -1,0 +1,29 @@
+Author: Apollon Oikonomopoulos <apoikos@debian.org>
+Description: Fix mozjs-related segfaults when built with GCC >=6
+ Apparently, mozjs 38 and up to 49 is prone to segfaults at GC time when built
+ using GCC 6 or later. I've seen MongoDB crash a number of times with only
+ mozjs GC operations in the stack trace. We're also currently having a segfault
+ on ARM64 that is probably related (#871906).
+ .
+ According to https://trac.wildfiregames.com/ticket/4053 and
+ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=70526#c14, disabling a couple of
+ optimizations should fix this.
+Last-Update: 2017-09-25
+Forwarded: no
+--- a/src/third_party/mozjs-38/SConscript
++++ b/src/third_party/mozjs-38/SConscript
+@@ -92,6 +92,14 @@
+     'platform/' + env["TARGET_ARCH"] + "/" + env["TARGET_OS"] + "/include",
+ ])
+ 
++# Debian
++# Apparently, Spidermonkey 38 (and up to 49) is prone to segfaults at GC time
++# when built with GCC 6 or later. Disabling the following optimizations fixes
++# this.
++# See https://trac.wildfiregames.com/ticket/4053 and
++# https://gcc.gnu.org/bugzilla/show_bug.cgi?id=70526#c14 for more information
++env.Append(CXXFLAGS=["-fno-schedule-insns2", "-fno-delete-null-pointer-checks"])
++
+ sources = [
+     "extract/js/src/builtin/RegExp.cpp",
+     "extract/js/src/frontend/Parser.cpp",
