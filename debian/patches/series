@@ -9,3 +9,4 @@ CVE-2016-6494.patch
 use-mmapv1-on-i386
 fix-wt-checksum-on-arm64
 fix-ftbfs-with-gcc-7.patch
+arm64-48bit-va-compat.patch
