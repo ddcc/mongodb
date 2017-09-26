@@ -1,0 +1,613 @@
+From f4b8b13827d8c856c3b06a4385dbc0bacc3dc186 Mon Sep 17 00:00:00 2001
+From: Apollon Oikonomopoulos <apoikos@debian.org>
+Date: Tue, 26 Sep 2017 16:18:23 +0300
+Subject: [PATCH] [asio] Backport OpenSSL 1.1 support
+
+commit fb0cd6b20fe7285534eefb57e5dc2548111b1e97
+Author: Christopher Kohlhoff <chris@kohlhoff.com>
+Date:   Tue Sep 13 21:59:03 2016 +1000
+
+    Call SSL_COMP_free_compression_methods() on ssl cleanup.
+
+    This call is needed for OpenSSL >=1.0.2 and <1.1.0.
+
+    (cherry picked from commit 797b360cf9bd30710b32c11d82ec41c321607466)
+
+commit b19f7ade2d9cd2b6a77bdeca30e7f093676c1cc3
+Author: Christopher Kohlhoff <chris@kohlhoff.com>
+Date:   Sun Sep 11 10:06:38 2016 +1000
+
+    Use new TLS methods on OpenSSL 1.1.0.
+
+    (cherry picked from commit 231d05fa76bfa43764fc38f139e4bf71a7b42ed9)
+
+commit 6f7a288b732ea1993eeee5b92221da107f0922d3
+Author: Christopher Kohlhoff <chris@kohlhoff.com>
+Date:   Sun Sep 11 09:16:14 2016 +1000
+
+    Backward compatibility for code using OpenSSL < 1.1.0.
+
+    Some application code using asio::ssl::stream<> explicitly tests for the
+    SSL_R_SHORT_READ error. For compatibility, when using older versions of
+    OpenSSL we will define the ssl::error::stream_truncated to use this
+    value.
+
+    (cherry picked from commit f710d3ae7ab803d3061b155c6bb65366d1e1e2bf)
+
+commit 910da2e0ffb7bd2b75776bf5537815f2607e6b4a
+Author: Christopher Kohlhoff <chris@kohlhoff.com>
+Date:   Sun Aug 28 10:02:08 2016 +1000
+
+    Fix errors when OPENSSL_NO_DEPRECATED is defined.
+
+    (cherry picked from commit 3edc9d3574b3fa8e3ad039df19230ec7fcf156b4)
+
+commit a7121a543968e7f74740b2872a31a50b2e3209ac
+Author: Marcel Raad <raad@teamviewer.com>
+Date:   Fri Apr 1 10:46:17 2016 +0200
+
+    Add compatibility with OpenSSL 1.1
+    - SSLv2 has been completely removed from OpenSSL, even without OPENSSL_NO_SSL2
+    - there is a new threading API without locking callbacks
+    - struct SSL_CTX has been made opaque and must be used via accessor functions
+    - some cleanup functions have been removed
+
+    (cherry picked from commit eff53f61868f0916b0d2d644ed2343ef6341116c)
+
+commit bd084e209f4afa5a99359e3d15a8d1737c7e6bc6
+Author: Christopher Kohlhoff <chris@kohlhoff.com>
+Date:   Fri Mar 20 08:46:51 2015 +1100
+
+    ERR_remove_state is deprecated, use ERR_remove_thread_state instead.
+
+    (cherry picked from commit a671d5ae5d0ac07988aaf21f987b50e874c0629a)
+
+commit c6de55fd1fdf9d58bc05f0591cb9a1a48b434139
+Author: Christopher Kohlhoff <chris@kohlhoff.com>
+Date:   Thu Nov 19 10:25:42 2015 +1100
+
+    BoringSSL does not provide CONF_modules_unload.
+
+    (cherry picked from commit a2927da5af54666c5bd2a8564ef58297522aaa20)
+
+commit 8a0fd7dfcba406fbbd489fdde5fcbbbc16fea6a6
+Author: Christopher Kohlhoff <chris@kohlhoff.com>
+Date:   Thu Nov 19 10:24:56 2015 +1100
+
+    Add new error category and constant for ssl::error::stream_truncated.
+
+    This error replaces uses of SSL_R_SHORT_READ, and indicates that the
+    SSL stream has been shut down abruptly. (I.e. the underlying socket
+    has been closed without performing an SSL-layer shutdown.)
+
+    (cherry picked from commit b3552abcb697062d141c05fff32284ba6a766217)
+
+commit 8076e5dca0f7e86e097fe9a5c06d29cd22c566b0
+Author: Christopher Kohlhoff <chris@kohlhoff.com>
+Date:   Sat Dec 12 10:57:03 2015 +1100
+
+    LibreSSL doesn't provide SSL_CTX_clear_chain_certs.
+
+    (cherry picked from commit c410f5145f1e53e12c8436721f3284f449495717)
+
+commit a606c98224c668dce8658adbeb1196a0b980cd68
+Author: Christopher Kohlhoff <chris@kohlhoff.com>
+Date:   Thu Oct 1 08:44:30 2015 +1000
+
+    Use SSL_CTX_clear_chain_certs, if available.
+
+    (cherry picked from commit 7f5d022322ae3d1f0a8fce3e1d95192c20d253d7)
+
+commit 3e01396857b68550b6a5411b9a6d84b7d74d9247
+Author: Christopher Kohlhoff <chris@kohlhoff.com>
+Date:   Sat Mar 21 20:52:42 2015 +1100
+
+    Remove redundant pointer check in SSL engine.
+
+    (cherry picked from commit a984e09e3f5d97fc12ef5ce0c193c7d9d377a1ca)
+---
+ asio/include/asio/ssl/detail/impl/engine.ipp       | 12 ++-
+ asio/include/asio/ssl/detail/impl/openssl_init.ipp | 38 ++++++---
+ asio/include/asio/ssl/detail/openssl_types.hpp     |  2 +
+ asio/include/asio/ssl/error.hpp                    | 40 +++++++++
+ asio/include/asio/ssl/impl/context.ipp             | 95 ++++++++++++++++++----
+ asio/include/asio/ssl/impl/error.ipp               | 45 +++++++++-
+ 6 files changed, 199 insertions(+), 33 deletions(-)
+
+diff --git a/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/detail/impl/engine.ipp b/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/detail/impl/engine.ipp
+index 55044112..0876a6d4 100644
+--- a/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/detail/impl/engine.ipp
++++ b/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/detail/impl/engine.ipp
+@@ -198,23 +198,21 @@ const asio::error_code& engine::map_error_code(
+   // If there's data yet to be read, it's an error.
+   if (BIO_wpending(ext_bio_))
+   {
+-    ec = asio::error_code(
+-        ERR_PACK(ERR_LIB_SSL, 0, SSL_R_SHORT_READ),
+-        asio::error::get_ssl_category());
++    ec = asio::ssl::error::stream_truncated;
+     return ec;
+   }
+ 
+   // SSL v2 doesn't provide a protocol-level shutdown, so an eof on the
+   // underlying transport is passed through.
+-  if (ssl_ && ssl_->version == SSL2_VERSION)
++#if (OPENSSL_VERSION_NUMBER < 0x10100000L)
++  if (ssl_->version == SSL2_VERSION)
+     return ec;
++#endif // (OPENSSL_VERSION_NUMBER < 0x10100000L)
+ 
+   // Otherwise, the peer should have negotiated a proper shutdown.
+   if ((::SSL_get_shutdown(ssl_) & SSL_RECEIVED_SHUTDOWN) == 0)
+   {
+-    ec = asio::error_code(
+-        ERR_PACK(ERR_LIB_SSL, 0, SSL_R_SHORT_READ),
+-        asio::error::get_ssl_category());
++    ec = asio::ssl::error::stream_truncated;
+   }
+ 
+   return ec;
+diff --git a/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/detail/impl/openssl_init.ipp b/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/detail/impl/openssl_init.ipp
+index 2c40d400..070d15a8 100644
+--- a/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/detail/impl/openssl_init.ipp
++++ b/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/detail/impl/openssl_init.ipp
+@@ -39,11 +39,15 @@ public:
+     ::SSL_load_error_strings();        
+     ::OpenSSL_add_all_algorithms();
+ 
++#if (OPENSSL_VERSION_NUMBER < 0x10100000L)
+     mutexes_.resize(::CRYPTO_num_locks());
+     for (size_t i = 0; i < mutexes_.size(); ++i)
+       mutexes_[i].reset(new asio::detail::mutex);
+     ::CRYPTO_set_locking_callback(&do_init::openssl_locking_func);
++#endif // (OPENSSL_VERSION_NUMBER < 0x10100000L)
++#if (OPENSSL_VERSION_NUMBER < 0x10000000L)
+     ::CRYPTO_set_id_callback(&do_init::openssl_id_func);
++#endif // (OPENSSL_VERSION_NUMBER < 0x10000000L)
+ 
+ #if !defined(SSL_OP_NO_COMPRESSION) \
+   && (OPENSSL_VERSION_NUMBER >= 0x00908000L)
+@@ -60,16 +64,33 @@ public:
+ #endif // !defined(SSL_OP_NO_COMPRESSION)
+        // && (OPENSSL_VERSION_NUMBER >= 0x00908000L)
+ 
++#if (OPENSSL_VERSION_NUMBER < 0x10000000L)
+     ::CRYPTO_set_id_callback(0);
++#endif // (OPENSSL_VERSION_NUMBER < 0x10000000L)
++#if (OPENSSL_VERSION_NUMBER < 0x10100000L)
+     ::CRYPTO_set_locking_callback(0);
+     ::ERR_free_strings();
+-    ::ERR_remove_state(0);
+     ::EVP_cleanup();
+     ::CRYPTO_cleanup_all_ex_data();
++#endif // (OPENSSL_VERSION_NUMBER < 0x10100000L)
++#if (OPENSSL_VERSION_NUMBER < 0x10000000L)
++    ::ERR_remove_state(0);
++#elif (OPENSSL_VERSION_NUMBER < 0x10100000L)
++    ::ERR_remove_thread_state(NULL);
++#endif // (OPENSSL_VERSION_NUMBER < 0x10000000L)
++#if (OPENSSL_VERSION_NUMBER >= 0x10002000L) \
++    && (OPENSSL_VERSION_NUMBER < 0x10100000L)
++    ::SSL_COMP_free_compression_methods();
++#endif // (OPENSSL_VERSION_NUMBER >= 0x10002000L)
++       // && (OPENSSL_VERSION_NUMBER < 0x10100000L)
++#if !defined(OPENSSL_IS_BORINGSSL)
+     ::CONF_modules_unload(1);
+-#if !defined(OPENSSL_NO_ENGINE)
++#endif // !defined(OPENSSL_IS_BORINGSSL)
++#if !defined(OPENSSL_NO_ENGINE) \
++  && (OPENSSL_VERSION_NUMBER < 0x10100000L)
+     ::ENGINE_cleanup();
+ #endif // !defined(OPENSSL_NO_ENGINE)
++       // && (OPENSSL_VERSION_NUMBER < 0x10100000L)
+   }
+ 
+ #if !defined(SSL_OP_NO_COMPRESSION) \
+@@ -82,19 +103,20 @@ public:
+        // && (OPENSSL_VERSION_NUMBER >= 0x00908000L)
+ 
+ private:
++#if (OPENSSL_VERSION_NUMBER < 0x10000000L)
+   static unsigned long openssl_id_func()
+   {
+ #if defined(ASIO_WINDOWS) || defined(__CYGWIN__)
+     return ::GetCurrentThreadId();
+ #else // defined(ASIO_WINDOWS) || defined(__CYGWIN__)
+-    void* id = instance()->thread_id_;
+-    if (id == 0)
+-      instance()->thread_id_ = id = &id; // Ugh.
++    void* id = &errno;
+     ASIO_ASSERT(sizeof(unsigned long) >= sizeof(void*));
+     return reinterpret_cast<unsigned long>(id);
+ #endif // defined(ASIO_WINDOWS) || defined(__CYGWIN__)
+   }
++#endif // (OPENSSL_VERSION_NUMBER < 0x10000000L)
+ 
++#if (OPENSSL_VERSION_NUMBER < 0x10100000L)
+   static void openssl_locking_func(int mode, int n, 
+     const char* /*file*/, int /*line*/)
+   {
+@@ -107,11 +129,7 @@ private:
+   // Mutexes to be used in locking callbacks.
+   std::vector<asio::detail::shared_ptr<
+         asio::detail::mutex> > mutexes_;
+-
+-#if !defined(ASIO_WINDOWS) && !defined(__CYGWIN__)
+-  // The thread identifiers to be used by openssl.
+-  asio::detail::tss_ptr<void> thread_id_;
+-#endif // !defined(ASIO_WINDOWS) && !defined(__CYGWIN__)
++#endif // (OPENSSL_VERSION_NUMBER < 0x10100000L)
+ 
+ #if !defined(SSL_OP_NO_COMPRESSION) \
+   && (OPENSSL_VERSION_NUMBER >= 0x00908000L)
+diff --git a/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/detail/openssl_types.hpp b/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/detail/openssl_types.hpp
+index 5a141484..323c14a3 100644
+--- a/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/detail/openssl_types.hpp
++++ b/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/detail/openssl_types.hpp
+@@ -21,7 +21,9 @@
+ #if !defined(OPENSSL_NO_ENGINE)
+ # include <openssl/engine.h>
+ #endif // !defined(OPENSSL_NO_ENGINE)
++#include <openssl/dh.h>
+ #include <openssl/err.h>
++#include <openssl/rsa.h>
+ #include <openssl/x509v3.h>
+ #include "asio/detail/socket_types.hpp"
+ 
+diff --git a/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/error.hpp b/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/error.hpp
+index 1385d2a2..3057b267 100644
+--- a/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/error.hpp
++++ b/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/error.hpp
+@@ -25,6 +25,7 @@ namespace error {
+ 
+ enum ssl_errors
+ {
++  // Error numbers are those produced by openssl.
+ };
+ 
+ extern ASIO_DECL
+@@ -34,6 +35,29 @@ static const asio::error_category& ssl_category
+   = asio::error::get_ssl_category();
+ 
+ } // namespace error
++namespace ssl {
++namespace error {
++
++enum stream_errors
++{
++#if defined(GENERATING_DOCUMENTATION)
++  /// The underlying stream closed before the ssl stream gracefully shut down.
++  stream_truncated
++#elif (OPENSSL_VERSION_NUMBER < 0x10100000L) && !defined(OPENSSL_IS_BORINGSSL)
++  stream_truncated = ERR_PACK(ERR_LIB_SSL, 0, SSL_R_SHORT_READ)
++#else
++  stream_truncated = 1
++#endif
++};
++
++extern ASIO_DECL
++const asio::error_category& get_stream_category();
++
++static const asio::error_category& stream_category
++  = asio::ssl::error::get_stream_category();
++
++} // namespace error
++} // namespace ssl
+ } // namespace asio
+ 
+ #if defined(ASIO_HAS_STD_SYSTEM_ERROR)
+@@ -44,6 +68,11 @@ template<> struct is_error_code_enum<asio::error::ssl_errors>
+   static const bool value = true;
+ };
+ 
++template<> struct is_error_code_enum<asio::ssl::error::stream_errors>
++{
++  static const bool value = true;
++};
++
+ } // namespace std
+ #endif // defined(ASIO_HAS_STD_SYSTEM_ERROR)
+ 
+@@ -57,6 +86,17 @@ inline asio::error_code make_error_code(ssl_errors e)
+ }
+ 
+ } // namespace error
++namespace ssl {
++namespace error {
++
++inline asio::error_code make_error_code(stream_errors e)
++{
++  return asio::error_code(
++      static_cast<int>(e), get_stream_category());
++}
++
++} // namespace error
++} // namespace ssl
+ } // namespace asio
+ 
+ #include "asio/detail/pop_options.hpp"
+diff --git a/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/impl/context.ipp b/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/impl/context.ipp
+index 2349353d..6d1130ca 100644
+--- a/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/impl/context.ipp
++++ b/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/impl/context.ipp
+@@ -66,7 +66,8 @@ context::context(context::method m)
+ 
+   switch (m)
+   {
+-#if defined(OPENSSL_NO_SSL2)
++#if defined(OPENSSL_NO_SSL2) \
++  || (OPENSSL_VERSION_NUMBER >= 0x10100000L)
+   case context::sslv2:
+   case context::sslv2_client:
+   case context::sslv2_server:
+@@ -74,6 +75,7 @@ context::context(context::method m)
+         asio::error::invalid_argument, "context");
+     break;
+ #else // defined(OPENSSL_NO_SSL2)
++      // || (OPENSSL_VERSION_NUMBER >= 0x10100000L)
+   case context::sslv2:
+     handle_ = ::SSL_CTX_new(::SSLv2_method());
+     break;
+@@ -84,6 +86,7 @@ context::context(context::method m)
+     handle_ = ::SSL_CTX_new(::SSLv2_server_method());
+     break;
+ #endif // defined(OPENSSL_NO_SSL2)
++       // || (OPENSSL_VERSION_NUMBER >= 0x10100000L)
+ #if defined(OPENSSL_NO_SSL3)
+   case context::sslv3:
+   case context::sslv3_client:
+@@ -102,6 +105,7 @@ context::context(context::method m)
+     handle_ = ::SSL_CTX_new(::SSLv3_server_method());
+     break;
+ #endif // defined(OPENSSL_NO_SSL3)
++#if (OPENSSL_VERSION_NUMBER < 0x10100000L)
+   case context::tlsv1:
+     handle_ = ::SSL_CTX_new(::TLSv1_method());
+     break;
+@@ -111,6 +115,7 @@ context::context(context::method m)
+   case context::tlsv1_server:
+     handle_ = ::SSL_CTX_new(::TLSv1_server_method());
+     break;
++#endif // (OPENSSL_VERSION_NUMBER < 0x10100000L)
+   case context::sslv23:
+     handle_ = ::SSL_CTX_new(::SSLv23_method());
+     break;
+@@ -120,6 +125,7 @@ context::context(context::method m)
+   case context::sslv23_server:
+     handle_ = ::SSL_CTX_new(::SSLv23_server_method());
+     break;
++#if (OPENSSL_VERSION_NUMBER < 0x10100000L)
+ #if defined(SSL_TXT_TLSV1_1)
+   case context::tlsv11:
+     handle_ = ::SSL_CTX_new(::TLSv1_1_method());
+@@ -156,6 +162,23 @@ context::context(context::method m)
+         asio::error::invalid_argument, "context");
+     break;
+ #endif // defined(SSL_TXT_TLSV1_2) 
++#else // (OPENSSL_VERSION_NUMBER < 0x10100000L)
++  case context::tlsv1:
++  case context::tlsv11:
++  case context::tlsv12:
++    handle_ = ::SSL_CTX_new(::TLS_method());
++    break;
++  case context::tlsv1_client:
++  case context::tlsv11_client:
++  case context::tlsv12_client:
++    handle_ = ::SSL_CTX_new(::TLS_client_method());
++    break;
++  case context::tlsv1_server:
++  case context::tlsv11_server:
++  case context::tlsv12_server:
++    handle_ = ::SSL_CTX_new(::TLS_server_method());
++    break;
++#endif // (OPENSSL_VERSION_NUMBER < 0x10100000L)
+   default:
+     handle_ = ::SSL_CTX_new(0);
+     break;
+@@ -192,13 +215,22 @@ context::~context()
+ {
+   if (handle_)
+   {
+-    if (handle_->default_passwd_callback_userdata)
++#if (OPENSSL_VERSION_NUMBER >= 0x10100000L)
++    void* cb_userdata = ::SSL_CTX_get_default_passwd_cb_userdata(handle_);
++#else // (OPENSSL_VERSION_NUMBER >= 0x10100000L)
++    void* cb_userdata = handle_->default_passwd_callback_userdata;
++#endif // (OPENSSL_VERSION_NUMBER >= 0x10100000L)
++    if (cb_userdata)
+     {
+       detail::password_callback_base* callback =
+         static_cast<detail::password_callback_base*>(
+-            handle_->default_passwd_callback_userdata);
++            cb_userdata);
+       delete callback;
++#if (OPENSSL_VERSION_NUMBER >= 0x10100000L)
++      ::SSL_CTX_set_default_passwd_cb_userdata(handle_, 0);
++#else // (OPENSSL_VERSION_NUMBER >= 0x10100000L)
+       handle_->default_passwd_callback_userdata = 0;
++#endif // (OPENSSL_VERSION_NUMBER >= 0x10100000L)
+     }
+ 
+     if (SSL_CTX_get_app_data(handle_))
+@@ -528,10 +560,17 @@ asio::error_code context::use_certificate_chain(
+   bio_cleanup bio = { make_buffer_bio(chain) };
+   if (bio.p)
+   {
++#if (OPENSSL_VERSION_NUMBER >= 0x10100000L)
++    pem_password_cb* callback = ::SSL_CTX_get_default_passwd_cb(handle_);
++    void* cb_userdata = ::SSL_CTX_get_default_passwd_cb_userdata(handle_);
++#else // (OPENSSL_VERSION_NUMBER >= 0x10100000L)
++    pem_password_cb* callback = handle_->default_passwd_callback;
++    void* cb_userdata = handle_->default_passwd_callback_userdata;
++#endif // (OPENSSL_VERSION_NUMBER >= 0x10100000L)
+     x509_cleanup cert = {
+       ::PEM_read_bio_X509_AUX(bio.p, 0,
+-          handle_->default_passwd_callback,
+-          handle_->default_passwd_callback_userdata) };
++          callback,
++          cb_userdata) };
+     if (!cert.p)
+     {
+       ec = asio::error_code(ERR_R_PEM_LIB,
+@@ -548,15 +587,19 @@ asio::error_code context::use_certificate_chain(
+       return ec;
+     }
+ 
++#if (OPENSSL_VERSION_NUMBER >= 0x10002000L) && !defined(LIBRESSL_VERSION_NUMBER)
++    ::SSL_CTX_clear_chain_certs(handle_);
++#else
+     if (handle_->extra_certs)
+     {
+       ::sk_X509_pop_free(handle_->extra_certs, X509_free);
+       handle_->extra_certs = 0;
+     }
++#endif // (OPENSSL_VERSION_NUMBER >= 0x10002000L)
+ 
+     while (X509* cacert = ::PEM_read_bio_X509(bio.p, 0,
+-          handle_->default_passwd_callback,
+-          handle_->default_passwd_callback_userdata))
++          callback,
++          cb_userdata))
+     {
+       if (!::SSL_CTX_add_extra_chain_cert(handle_, cacert))
+       {
+@@ -621,6 +664,14 @@ asio::error_code context::use_private_key(
+ {
+   ::ERR_clear_error();
+ 
++#if (OPENSSL_VERSION_NUMBER >= 0x10100000L)
++    pem_password_cb* callback = ::SSL_CTX_get_default_passwd_cb(handle_);
++    void* cb_userdata = ::SSL_CTX_get_default_passwd_cb_userdata(handle_);
++#else // (OPENSSL_VERSION_NUMBER >= 0x10100000L)
++    pem_password_cb* callback = handle_->default_passwd_callback;
++    void* cb_userdata = handle_->default_passwd_callback_userdata;
++#endif // (OPENSSL_VERSION_NUMBER >= 0x10100000L)
++
+   bio_cleanup bio = { make_buffer_bio(private_key) };
+   if (bio.p)
+   {
+@@ -632,8 +683,8 @@ asio::error_code context::use_private_key(
+       break;
+     case context_base::pem:
+       evp_private_key.p = ::PEM_read_bio_PrivateKey(
+-          bio.p, 0, handle_->default_passwd_callback,
+-          handle_->default_passwd_callback_userdata);
++          bio.p, 0, callback,
++          cb_userdata);
+       break;
+     default:
+       {
+@@ -680,6 +731,14 @@ asio::error_code context::use_rsa_private_key(
+ {
+   ::ERR_clear_error();
+ 
++#if (OPENSSL_VERSION_NUMBER >= 0x10100000L)
++    pem_password_cb* callback = ::SSL_CTX_get_default_passwd_cb(handle_);
++    void* cb_userdata = ::SSL_CTX_get_default_passwd_cb_userdata(handle_);
++#else // (OPENSSL_VERSION_NUMBER >= 0x10100000L)
++    pem_password_cb* callback = handle_->default_passwd_callback;
++    void* cb_userdata = handle_->default_passwd_callback_userdata;
++#endif // (OPENSSL_VERSION_NUMBER >= 0x10100000L)
++
+   bio_cleanup bio = { make_buffer_bio(private_key) };
+   if (bio.p)
+   {
+@@ -691,8 +750,8 @@ asio::error_code context::use_rsa_private_key(
+       break;
+     case context_base::pem:
+       rsa_private_key.p = ::PEM_read_bio_RSAPrivateKey(
+-          bio.p, 0, handle_->default_passwd_callback,
+-          handle_->default_passwd_callback_userdata);
++          bio.p, 0, callback,
++          cb_userdata);
+       break;
+     default:
+       {
+@@ -911,11 +970,17 @@ int context::verify_callback_function(int preverified, X509_STORE_CTX* ctx)
+ asio::error_code context::do_set_password_callback(
+     detail::password_callback_base* callback, asio::error_code& ec)
+ {
+-  if (handle_->default_passwd_callback_userdata)
+-    delete static_cast<detail::password_callback_base*>(
+-        handle_->default_passwd_callback_userdata);
+-
++#if (OPENSSL_VERSION_NUMBER >= 0x10100000L)
++  void* old_callback = ::SSL_CTX_get_default_passwd_cb_userdata(handle_);
++  ::SSL_CTX_set_default_passwd_cb_userdata(handle_, callback);
++#else // (OPENSSL_VERSION_NUMBER >= 0x10100000L)
++  void* old_callback = handle_->default_passwd_callback_userdata;
+   handle_->default_passwd_callback_userdata = callback;
++#endif // (OPENSSL_VERSION_NUMBER >= 0x10100000L)
++
++  if (old_callback)
++    delete static_cast<detail::password_callback_base*>(
++        old_callback);
+ 
+   SSL_CTX_set_default_passwd_cb(handle_, &context::password_callback_function);
+ 
+diff --git a/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/impl/error.ipp b/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/impl/error.ipp
+index 9e76039a..f66c15c6 100644
+--- a/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/impl/error.ipp
++++ b/src/third_party/asio-asio-1-11-0/asio/include/asio/ssl/impl/error.ipp
+@@ -23,7 +23,6 @@
+ 
+ namespace asio {
+ namespace error {
+-
+ namespace detail {
+ 
+ class ssl_category : public asio::error_category
+@@ -50,6 +49,50 @@ const asio::error_category& get_ssl_category()
+ }
+ 
+ } // namespace error
++namespace ssl {
++namespace error {
++
++#if (OPENSSL_VERSION_NUMBER < 0x10100000L) && !defined(OPENSSL_IS_BORINGSSL)
++
++const asio::error_category& get_stream_category()
++{
++  return asio::error::get_ssl_category();
++}
++
++#else
++
++namespace detail {
++
++class stream_category : public asio::error_category
++{
++public:
++  const char* name() const ASIO_ERROR_CATEGORY_NOEXCEPT
++  {
++    return "asio.ssl.stream";
++  }
++
++  std::string message(int value) const
++  {
++    switch (value)
++    {
++    case stream_truncated: return "stream truncated";
++    default: return "asio.ssl.stream error";
++    }
++  }
++};
++
++} // namespace detail
++
++const asio::error_category& get_stream_category()
++{
++  static detail::stream_category instance;
++  return instance;
++}
++
++#endif
++
++} // namespace error
++} // namespace ssl
+ } // namespace asio
+ 
+ #include "asio/detail/pop_options.hpp"
+-- 
+2.14.1
+
