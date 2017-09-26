@@ -11,6 +11,11 @@ EnvironmentFile=-/etc/default/mongodb
 Environment=CONF=/etc/mongodb.conf
 Environment=SOCKETPATH=/run/mongodb
 ExecStart=/usr/bin/mongod --unixSocketPrefix=${SOCKETPATH} --config ${CONF} $DAEMON_OPTS
+LimitFSIZE=infinity
+LimitCPU=infinity
+LimitAS=infinity
+LimitNOFILE=64000
+LimitNPROC=64000
 
 [Install]
 WantedBy=multi-user.target
