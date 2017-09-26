@@ -93,7 +93,7 @@ __recovery_cursor(WT_SESSION_IMPL *session, WT_RECOVERY *r,
 	    "%s op %" PRIu32 " to file %" PRIu32 " at LSN %" PRIu32	\
 	    "/%" PRIu32,						\
 	    cursor == NULL ? "Skipping" : "Applying",			\
-	    optype, fileid, lsnp->l.file, lsnp->l.offset);		\
+	    optype, fileid, (lsnp)->l.file, (lsnp)->l.offset);		\
 	if (cursor == NULL)						\
 		break
 
@@ -248,8 +248,6 @@ static int
 __txn_commit_apply(
     WT_RECOVERY *r, WT_LSN *lsnp, const uint8_t **pp, const uint8_t *end)
 {
-	WT_UNUSED(lsnp);
-
 	/* The logging subsystem zero-pads records. */
 	while (*pp < end && **pp)
 		WT_RET(__txn_op_apply(r, lsnp, pp, end));
@@ -503,7 +501,7 @@ __wt_txn_recover(WT_SESSION_IMPL *session)
 	 * Pass WT_LOGSCAN_RECOVER so that old logs get truncated.
 	 */
 	r.metadata_only = false;
-	__wt_verbose(session, WT_VERB_RECOVERY,
+	__wt_verbose(session, WT_VERB_RECOVERY | WT_VERB_RECOVERY_PROGRESS,
 	    "Main recovery loop: starting at %" PRIu32 "/%" PRIu32,
 	    r.ckpt_lsn.l.file, r.ckpt_lsn.l.offset);
 	WT_ERR(__wt_log_needs_recovery(session, &r.ckpt_lsn, &needs_rec));

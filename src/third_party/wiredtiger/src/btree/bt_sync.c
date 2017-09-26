@@ -78,6 +78,7 @@ __sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
 	uint64_t internal_bytes, internal_pages, leaf_bytes, leaf_pages;
 	uint64_t oldest_id, saved_pinned_id;
 	uint32_t flags;
+	bool timer;
 
 	conn = S2C(session);
 	btree = S2BT(session);
@@ -88,7 +89,8 @@ __sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
 
 	internal_bytes = leaf_bytes = 0;
 	internal_pages = leaf_pages = 0;
-	if (WT_VERBOSE_ISSET(session, WT_VERB_CHECKPOINT))
+	timer = WT_VERBOSE_ISSET(session, WT_VERB_CHECKPOINT);
+	if (timer)
 		__wt_epoch(session, &start);
 
 	switch (syncop) {
@@ -133,11 +135,11 @@ __sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
 			if (__wt_page_is_modified(page) &&
 			    WT_TXNID_LT(page->modify->update_txn, oldest_id)) {
 				if (txn->isolation == WT_ISO_READ_COMMITTED)
-					WT_ERR(__wt_txn_get_snapshot(session));
+					__wt_txn_get_snapshot(session);
 				leaf_bytes += page->memory_footprint;
 				++leaf_pages;
-				WT_ERR(__wt_reconcile(
-				    session, walk, NULL, WT_CHECKPOINTING));
+				WT_ERR(__wt_reconcile(session,
+				    walk, NULL, WT_CHECKPOINTING, NULL));
 			}
 		}
 		break;
@@ -155,7 +157,7 @@ __sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
 		 * the checkpoint are included.
 		 */
 		if (txn->isolation == WT_ISO_READ_COMMITTED)
-			WT_ERR(__wt_txn_get_snapshot(session));
+			__wt_txn_get_snapshot(session);
 
 		/*
 		 * We cannot check the tree modified flag in the case of a
@@ -186,9 +188,9 @@ __sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
 		 * to grow significantly larger than the configured maximum
 		 * size.
 		 */
-		F_SET(btree, WT_BTREE_NO_RECONCILE);
+		F_SET(btree, WT_BTREE_ALLOW_SPLITS);
 		ret = __wt_evict_file_exclusive_on(session);
-		F_CLR(btree, WT_BTREE_NO_RECONCILE);
+		F_CLR(btree, WT_BTREE_ALLOW_SPLITS);
 		WT_ERR(ret);
 		__wt_evict_file_exclusive_off(session);
 
@@ -233,7 +235,7 @@ __sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
 				++leaf_pages;
 			}
 			WT_ERR(__wt_reconcile(
-			    session, walk, NULL, WT_CHECKPOINTING));
+			    session, walk, NULL, WT_CHECKPOINTING, NULL));
 		}
 		break;
 	case WT_SYNC_CLOSE:
@@ -242,7 +244,7 @@ __sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
 		break;
 	}
 
-	if (WT_VERBOSE_ISSET(session, WT_VERB_CHECKPOINT)) {
+	if (timer) {
 		__wt_epoch(session, &end);
 		__wt_verbose(session, WT_VERB_CHECKPOINT,
 		    "__sync_file WT_SYNC_%s wrote: %" PRIu64

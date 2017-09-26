@@ -537,7 +537,7 @@ bool ReplSource::handleDuplicateDbName(OperationContext* txn,
         // missing from master after optime "ts".
         return false;
     }
-    if (Database::duplicateUncasedName(db).empty()) {
+    if (dbHolder().getNamesWithConflictingCasing(db).empty()) {
         // No duplicate database names are present.
         return true;
     }
@@ -547,7 +547,7 @@ bool ReplSource::handleDuplicateDbName(OperationContext* txn,
     {
         // This is always a GlobalWrite lock (so no ns/db used from the context)
         invariant(txn->lockState()->isW());
-        Lock::TempRelease(txn->lockState());
+        Lock::TempRelease tempRelease(txn->lockState());
 
         // We always log an operation after executing it (never before), so
         // a database list will always be valid as of an oplog entry generated
@@ -594,8 +594,7 @@ bool ReplSource::handleDuplicateDbName(OperationContext* txn,
     }
 
     // Check for duplicates again, since we released the lock above.
-    set<string> duplicates;
-    Database::duplicateUncasedName(db, &duplicates);
+    auto duplicates = dbHolder().getNamesWithConflictingCasing(db);
 
     // The database is present on the master and no conflicting databases
     // are present on the master.  Drop any local conflicts.
@@ -610,20 +609,20 @@ bool ReplSource::handleDuplicateDbName(OperationContext* txn,
 
     massert(14034,
             "Duplicate database names present after attempting to delete duplicates",
-            Database::duplicateUncasedName(db).empty());
+            dbHolder().getNamesWithConflictingCasing(db).empty());
     return true;
 }
 
 void ReplSource::applyCommand(OperationContext* txn, const BSONObj& op) {
     try {
-        Status status = applyCommand_inlock(txn, op);
+        Status status = applyCommand_inlock(txn, op, true);
         if (!status.isOK()) {
             SyncTail sync(nullptr, SyncTail::MultiSyncApplyFunc());
             sync.setHostname(hostName);
             if (sync.shouldRetry(txn, op)) {
                 uassert(28639,
                         "Failure retrying initial sync update",
-                        applyCommand_inlock(txn, op).isOK());
+                        applyCommand_inlock(txn, op, true).isOK());
             }
         }
     } catch (UserException& e) {

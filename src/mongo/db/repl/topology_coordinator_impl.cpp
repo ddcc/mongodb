@@ -51,6 +51,7 @@
 #include "mongo/db/server_parameters.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
 #include "mongo/s/catalog/catalog_manager.h"
+#include "mongo/util/fail_point_service.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
@@ -66,6 +67,11 @@ const Seconds TopologyCoordinatorImpl::VoteLease::leaseTime = Seconds(30);
 // Controls how caught up in replication a secondary with higher priority than the current primary
 // must be before it will call for a priority takeover election.
 MONGO_EXPORT_STARTUP_SERVER_PARAMETER(priorityTakeoverFreshnessWindowSeconds, int, 2);
+
+// If this fail point is enabled, TopologyCoordinatorImpl::shouldChangeSyncSource() will ignore
+// the option TopologyCoordinatorImpl::Options::maxSyncSourceLagSecs. The sync source will not be
+// re-evaluated if it lags behind another node by more than 'maxSyncSourceLagSecs' seconds.
+MONGO_FP_DECLARE(disableMaxSyncSourceLagSecs);
 
 namespace {
 
@@ -1361,6 +1367,23 @@ bool TopologyCoordinatorImpl::_aMajoritySeemsToBeUp() const {
     return vUp * 2 > _rsConfig.getTotalVotingMembers();
 }
 
+bool TopologyCoordinatorImpl::_canSeeHealthyPrimaryOfEqualOrGreaterPriority(
+    const int candidateIndex) const {
+    const double candidatePriority = _rsConfig.getMemberAt(candidateIndex).getPriority();
+    for (auto it = _hbdata.begin(); it != _hbdata.end(); ++it) {
+        if (!it->up() || it->getState() != MemberState::RS_PRIMARY) {
+            continue;
+        }
+        const int itIndex = indexOfIterator(_hbdata, it);
+        const double priority = _rsConfig.getMemberAt(itIndex).getPriority();
+        if (itIndex != candidateIndex && priority >= candidatePriority) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool TopologyCoordinatorImpl::_isOpTimeCloseEnoughToLatestToElect(
     const OpTime& otherOpTime, const OpTime& ourLastOpApplied) const {
     const OpTime latestKnownOpTime = _latestKnownOpTime(ourLastOpApplied);
@@ -2228,24 +2251,37 @@ void TopologyCoordinatorImpl::processLoseElection() {
     }
 }
 
-bool TopologyCoordinatorImpl::stepDown(Date_t until, bool force, const OpTime& lastOpApplied) {
-    bool canStepDown = force;
-    for (int i = 0; !canStepDown && i < _rsConfig.getNumMembers(); ++i) {
-        if (i == _selfIndex) {
-            continue;
-        }
-        UnelectableReasonMask reason = _getUnelectableReason(i, lastOpApplied);
-        if (!reason && _hbdata[i].getAppliedOpTime() >= lastOpApplied) {
-            canStepDown = true;
-        }
+bool TopologyCoordinatorImpl::stepDown(Date_t until,
+                                       bool force,
+                                       const OpTime& lastOpApplied,
+                                       const OpTime& lastOpCommitted) {
+    // force==true overrides all other checks.
+    if (force) {
+        _stepDownUntil = until;
+        _stepDownSelfAndReplaceWith(-1);
+        return true;
     }
 
-    if (!canStepDown) {
+    // Ensure a majority of caught up nodes.
+    if (lastOpCommitted < lastOpApplied) {
         return false;
     }
-    _stepDownUntil = until;
-    _stepDownSelfAndReplaceWith(-1);
-    return true;
+
+    // Now make sure we also have at least one caught up node that is also electable.
+    for (int memberIndex = 0; memberIndex < _rsConfig.getNumMembers(); memberIndex++) {
+        // ignore your self
+        if (memberIndex == _selfIndex) {
+            continue;
+        }
+        UnelectableReasonMask reason = _getUnelectableReason(memberIndex, lastOpApplied);
+        if (!reason && _hbdata.at(memberIndex).getAppliedOpTime() >= lastOpApplied) {
+            // Found a caught up and electable node, succeed with step down.
+            _stepDownUntil = until;
+            _stepDownSelfAndReplaceWith(-1);
+            return true;
+        }
+    }
+    return false;
 }
 
 void TopologyCoordinatorImpl::setFollowerMode(MemberState::MS newMode) {
@@ -2383,32 +2419,40 @@ bool TopologyCoordinatorImpl::shouldChangeSyncSource(const HostAndPort& currentS
         return true;
     }
 
-    unsigned int currentSecs = currentSourceOpTime.getSecs();
-    unsigned int goalSecs = currentSecs + durationCount<Seconds>(_options.maxSyncSourceLagSecs);
+    if (MONGO_FAIL_POINT(disableMaxSyncSourceLagSecs)) {
+        log() << "disableMaxSyncSourceLagSecs fail point enabled - not checking the most recent "
+                 "OpTime, " << currentSourceOpTime.toString() << ", of our current sync source, "
+              << currentSource << ", against the OpTimes of the other nodes in this replica set.";
+    } else {
+        unsigned int currentSecs = currentSourceOpTime.getSecs();
+        unsigned int goalSecs = currentSecs + durationCount<Seconds>(_options.maxSyncSourceLagSecs);
 
-    for (std::vector<MemberHeartbeatData>::const_iterator it = _hbdata.begin(); it != _hbdata.end();
-         ++it) {
-        const int itIndex = indexOfIterator(_hbdata, it);
-        const MemberConfig& candidateConfig = _rsConfig.getMemberAt(itIndex);
-        if (it->up() && (candidateConfig.isVoter() || !_selfConfig().isVoter()) &&
-            (candidateConfig.shouldBuildIndexes() || !_selfConfig().shouldBuildIndexes()) &&
-            it->getState().readable() && !_memberIsBlacklisted(candidateConfig, now) &&
-            goalSecs < it->getAppliedOpTime().getSecs()) {
-            log() << "re-evaluating sync source because our current sync source's most recent "
-                  << "OpTime is " << currentSourceOpTime.toString() << " which is more than "
-                  << _options.maxSyncSourceLagSecs << " behind member "
-                  << candidateConfig.getHostAndPort().toString() << " whose most recent OpTime is "
-                  << it->getAppliedOpTime().toString();
-            invariant(itIndex != _selfIndex);
-            return true;
+        for (std::vector<MemberHeartbeatData>::const_iterator it = _hbdata.begin();
+             it != _hbdata.end();
+             ++it) {
+            const int itIndex = indexOfIterator(_hbdata, it);
+            const MemberConfig& candidateConfig = _rsConfig.getMemberAt(itIndex);
+            if (it->up() && (candidateConfig.isVoter() || !_selfConfig().isVoter()) &&
+                (candidateConfig.shouldBuildIndexes() || !_selfConfig().shouldBuildIndexes()) &&
+                it->getState().readable() && !_memberIsBlacklisted(candidateConfig, now) &&
+                goalSecs < it->getAppliedOpTime().getSecs()) {
+                log() << "re-evaluating sync source because our current sync source's most recent "
+                      << "OpTime is " << currentSourceOpTime.toString() << " which is more than "
+                      << _options.maxSyncSourceLagSecs << " behind member "
+                      << candidateConfig.getHostAndPort().toString()
+                      << " whose most recent OpTime is " << it->getAppliedOpTime().toString();
+                invariant(itIndex != _selfIndex);
+                return true;
+            }
         }
     }
+
     return false;
 }
 
-void TopologyCoordinatorImpl::prepareReplResponseMetadata(rpc::ReplSetMetadata* metadata,
-                                                          const OpTime& lastVisibleOpTime,
-                                                          const OpTime& lastCommittedOpTime) const {
+void TopologyCoordinatorImpl::prepareReplMetadata(rpc::ReplSetMetadata* metadata,
+                                                  const OpTime& lastVisibleOpTime,
+                                                  const OpTime& lastCommittedOpTime) const {
     *metadata =
         rpc::ReplSetMetadata(_term,
                              lastCommittedOpTime,
@@ -2442,12 +2486,16 @@ void TopologyCoordinatorImpl::processReplSetRequestVotes(const ReplSetRequestVot
     } else if (args.getSetName() != _rsConfig.getReplSetName()) {
         response->setVoteGranted(false);
         response->setReason("candidate's set name differs from mine");
-    } else if (args.getLastCommittedOp() < lastAppliedOpTime) {
+    } else if (args.getLastDurableOpTime() < lastAppliedOpTime) {
         response->setVoteGranted(false);
         response->setReason("candidate's data is staler than mine");
     } else if (!args.isADryRun() && _lastVote.getTerm() == args.getTerm()) {
         response->setVoteGranted(false);
         response->setReason("already voted for another candidate this term");
+    } else if (_selfConfig().isArbiter() &&
+               _canSeeHealthyPrimaryOfEqualOrGreaterPriority(args.getCandidateIndex())) {
+        response->setVoteGranted(false);
+        response->setReason("can see a healthy primary of equal or greater priority");
     } else {
         if (!args.isADryRun()) {
             _lastVote.setTerm(args.getTerm());

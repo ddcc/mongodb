@@ -92,6 +92,7 @@
 #include "mongo/rpc/reply_builder_interface.h"
 #include "mongo/rpc/metadata.h"
 #include "mongo/rpc/metadata/config_server_metadata.h"
+#include "mongo/rpc/metadata/repl_set_metadata.h"
 #include "mongo/rpc/metadata/server_selection_metadata.h"
 #include "mongo/rpc/metadata/sharding_metadata.h"
 #include "mongo/rpc/protocol.h"
@@ -141,7 +142,7 @@ public:
                      BSONObjBuilder& result) {
         bool force = cmdObj.hasField("force") && cmdObj["force"].trueValue();
 
-        long long timeoutSecs = 0;
+        long long timeoutSecs = 10;
         if (cmdObj.hasField("timeoutSecs")) {
             timeoutSecs = cmdObj["timeoutSecs"].numberLong();
         }
@@ -1257,7 +1258,16 @@ void Command::execCommand(OperationContext* txn,
                 replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet &&
                 !replCoord->canAcceptWritesForDatabase(dbname) &&
                 !replCoord->getMemberState().secondary()) {
-                uasserted(ErrorCodes::NotMasterOrSecondary, "node is recovering");
+                uassert(ErrorCodes::NotMasterOrSecondary,
+                        "node is recovering",
+                        !replCoord->getMemberState().recovering());
+                uassert(ErrorCodes::NotMasterOrSecondary,
+                        "node is not in primary or recovering state",
+                        replCoord->getMemberState().primary());
+                // Check ticket SERVER-21432, slaveOk commands are allowed in drain mode
+                uassert(ErrorCodes::NotMasterOrSecondary,
+                        "node is in drain mode",
+                        commandIsOverriddenToRunOnSecondary || commandCanRunOnSecondary);
             }
         }
 
@@ -1466,8 +1476,9 @@ bool Command::run(OperationContext* txn,
     if (isReplSet) {
         repl::OpTime lastOpTimeFromClient =
             repl::ReplClientInfo::forClient(txn->getClient()).getLastOp();
-        replCoord->prepareReplResponseMetadata(request, lastOpTimeFromClient, &metadataBob);
-
+        if (request.getMetadata().hasField(rpc::kReplSetMetadataFieldName)) {
+            replCoord->prepareReplMetadata(lastOpTimeFromClient, &metadataBob);
+        }
         // For commands from mongos, append some info to help getLastError(w) work.
         // TODO: refactor out of here as part of SERVER-18326
         if (isShardingAware || serverGlobalParams.configsvr) {

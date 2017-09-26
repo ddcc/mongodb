@@ -59,7 +59,7 @@ public:
     /**
      * Type of function that takes a non-command op and applies it locally.
      * Used for applying from an oplog.
-     * Last boolean argument 'convertUpdateToUpsert' converts some updates to upserts for
+     * Last boolean argument 'inSteadyStateReplication' converts some updates to upserts for
      * idempotency reasons.
      * Returns failure status if the op was an update that could not be applied.
      */
@@ -71,7 +71,7 @@ public:
      * Used for applying from an oplog.
      * Returns failure status if the op that could not be applied.
      */
-    using ApplyCommandInLockFn = stdx::function<Status(OperationContext*, const BSONObj&)>;
+    using ApplyCommandInLockFn = stdx::function<Status(OperationContext*, const BSONObj&, bool)>;
 
     /**
      * Type of function to increment "repl.apply.ops" server status metric.
@@ -88,12 +88,12 @@ public:
      */
     static Status syncApply(OperationContext* txn,
                             const BSONObj& o,
-                            bool convertUpdateToUpsert,
+                            bool inSteadyStateReplication,
                             ApplyOperationInLockFn applyOperationInLock,
                             ApplyCommandInLockFn applyCommandInLock,
                             IncrementOpsAppliedStatsFn incrementOpsAppliedStats);
 
-    static Status syncApply(OperationContext* txn, const BSONObj& o, bool convertUpdateToUpsert);
+    static Status syncApply(OperationContext* txn, const BSONObj& o, bool inSteadyStateReplication);
 
     void oplogApplication(StorageInterface* storageInterface);
     bool peek(BSONObj* obj);
@@ -191,9 +191,9 @@ public:
     static int replWriterThreadCount;
 
 protected:
-    // Cap the batches using the limit on journal commits.
-    // This works out to be 100 MB (64 bit) or 50 MB (32 bit)
-    static const unsigned int replBatchLimitBytes = dur::UncommittedBytesLimit;
+    // Cap the batches to 50 MB for 32-bit systems and 100 MB for 64-bit systems.
+    static const unsigned int replBatchLimitBytes =
+        (sizeof(void*) == 4) ? 50 * 1024 * 1024 : 100 * 1024 * 1024;
     static const unsigned int replBatchLimitOperations = 5000;
 
     // Apply a batch of operations, using multiple threads.
@@ -220,6 +220,9 @@ private:
 // These free functions are used by the thread pool workers to write ops to the db.
 void multiSyncApply(const std::vector<BSONObj>& ops, SyncTail* st);
 void multiInitialSyncApply(const std::vector<BSONObj>& ops, SyncTail* st);
+Status multiInitialSyncApply_noAbort(OperationContext* txn,
+                                     const std::vector<BSONObj>& ops,
+                                     SyncTail* st);
 
 }  // namespace repl
 }  // namespace mongo

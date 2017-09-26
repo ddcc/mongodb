@@ -45,6 +45,7 @@ ReplSetTest.prototype.upgradeNode = function(node, opts, user, pwd) {
     if (user != undefined) {
         assert.eq(1, node.getDB("admin").auth(user, pwd));
     }
+    jsTest.authenticate(node);
 
     var isMaster = node.getDB('admin').runCommand({isMaster: 1});
 
@@ -71,7 +72,7 @@ ReplSetTest.prototype.stepdown = function(nodeId) {
     var node = this.nodes[nodeId];
 
     try {
-        node.getDB("admin").runCommand({replSetStepDown: 50, force: true});
+        node.getDB("admin").runCommand({replSetStepDown: 300, secondaryCatchUpPeriodSecs: 60});
         assert(false);
     } catch (ex) {
         print('Caught exception after stepDown cmd: ' + tojson(ex));

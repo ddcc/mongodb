@@ -24,8 +24,6 @@ __wt_bm_preload(
 	uint32_t checksum, size;
 	bool mapped;
 
-	WT_UNUSED(addr_size);
-
 	block = bm->block;
 
 	WT_STAT_CONN_INCR(session, block_preload);
@@ -41,7 +39,7 @@ __wt_bm_preload(
 		    (uint8_t *)bm->map + offset, size, bm->mapped_cookie);
 	if (!mapped && handle->fh_advise != NULL)
 		ret = handle->fh_advise(handle, (WT_SESSION *)session,
-		    (wt_off_t)offset, (wt_off_t)size, WT_FILE_HANDLE_WILLNEED);
+		    offset, (wt_off_t)size, WT_FILE_HANDLE_WILLNEED);
 	if (ret != EBUSY && ret != ENOTSUP)
 		return (ret);
 

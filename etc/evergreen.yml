@@ -385,6 +385,57 @@ functions:
 
         rm -rf src /data/db/* mongo-coredumps.tgz ~/.aws
 
+  "set up kitchen credentials":
+    command: shell.exec
+    params:
+      silent: true
+      script: |
+        set -o errexit
+
+        mkdir -p ~/.ssh ~/.aws
+        echo -n "${kitchen_private_key}" > ~/.ssh/kitchen.pem
+        chmod 0600 ~/.ssh/kitchen.pem
+
+        cat <<EOF > ~/.aws/config
+        [default]
+        region = us-east-1
+        EOF
+
+        cat <<EOF > ~/.aws/credentials
+        [default]
+        aws_access_key_id = ${kitchen_aws_key}
+        aws_secret_access_key = ${kitchen_aws_secret}
+        EOF
+
+  "run kitchen":
+    command: shell.exec
+    type: test
+    params:
+      shell: bash
+      working_dir: src/buildscripts/package_test
+      script: |
+        set -o errexit
+
+        export KITCHEN_ARTIFACTS_URL="https://s3.amazonaws.com/mciuploads/${project}/${build_variant}/${revision}/artifacts/${build_id}.tgz"
+        export KITCHEN_SECURITY_GROUP="${kitchen_security_group}"
+        export KITCHEN_SSH_KEY_ID="${kitchen_ssh_key_id}"
+        export KITCHEN_SUBNET="${kitchen_subnet}"
+
+        for i in {1..3}
+        do
+          if ! kitchen verify "${packager_distro}"; then
+            verified="false"
+            kitchen destroy "${packager_distro}" || true
+            sleep 30
+          else
+            verified="true"
+            break
+          fi
+        done
+
+        kitchen destroy "${packager_distro}" || true
+        test "$verified" = "true"
+
 pre:
   - command: shell.track
   - command: shell.exec
@@ -594,6 +645,15 @@ tasks:
             ${python|python} ${packager_script} --prefix `pwd`/.. --distros ${packager_distro} --tarball `pwd`/../mongodb-binaries.tgz -s ${version} -m HEAD -a ${packager_arch}
             cd ..
           fi
+
+          # Create separate shell archive
+          mkdir -p shell-archive/build
+          cd shell-archive
+          ${platform_decompress|tar xzvf} ../mongodb-binaries.tgz
+          find . -mindepth 3 ! -name "mongo${exe}" -type f -exec rm {} \; # delete bin/* except bin/mongo
+          ${python|python} ../buildscripts/make_archive.py -o mongodb-shell.${ext|tgz} $(find mongodb-* -type f)
+          cd ..
+
     - command: archive.targz_pack
       params:
         target: "artifacts.tgz"
@@ -632,6 +692,16 @@ tasks:
         permissions: public-read
         content_type: ${content_type|application/x-gzip}
         display_name: Binaries
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/shell-archive/mongodb-shell.${ext|tgz}
+        remote_file: mongodb-mongo-v3.2/${build_variant}/${revision}/binaries/mongo-shell-${build_id}.${ext|tgz}
+        bucket: mciuploads
+        permissions: public-read
+        content_type: ${content_type|application/x-gzip}
+        display_name: Shell
     - command: s3.put
       params:
         aws_key: ${aws_key}
@@ -1293,6 +1363,17 @@ tasks:
       run_multiple_jobs: true
 
 - <<: *task_template
+  name: multiversion_auth
+  commands:
+  - func: "do setup"
+  - func: "do multiversion setup"
+  - func: "run tests"
+    vars:
+      path_prefix: PATH=$PATH:/data/multiversion
+      resmoke_args: --suites=multiversion_auth
+      run_multiple_jobs: true
+
+- <<: *task_template
   name: noPassthrough
   commands:
   - func: "do setup"
@@ -1656,6 +1737,7 @@ tasks:
 
 - <<: *task_template
   name: sharding
+  exec_timeout_secs: 28800 # 8 hour timeout for the task overall
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -1665,6 +1747,7 @@ tasks:
 
 - <<: *task_template
   name: sharding_WT
+  exec_timeout_secs: 28800 # 8 hour timeout for the task overall
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -1699,6 +1782,7 @@ tasks:
 
 - <<: *task_template
   name: sharding_WT_ese
+  exec_timeout_secs: 28800 # 8 hour timeout for the task overall
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -1717,6 +1801,7 @@ tasks:
 
 - <<: *task_template
   name: sharding_auth
+  exec_timeout_secs: 28800 # 8 hour timeout for the task overall
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -1728,6 +1813,7 @@ tasks:
   name: sharding_auth_audit_WT
   depends_on:
   - name: sharding_auth
+  exec_timeout_secs: 28800 # 8 hour timeout for the task overall
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -1842,6 +1928,14 @@ tasks:
       resmoke_args: --suites=tool --storageEngine=wiredTiger
       run_multiple_jobs: true
 
+- name: package
+  depends_on:
+  - name: compile
+  commands:
+    - func: "fetch artifacts"
+    - func: "set up kitchen credentials"
+    - func: "run kitchen"
+
 - name: push
   patchable: false
   depends_on:
@@ -1850,6 +1944,13 @@ tasks:
   commands:
     - func: "fetch artifacts"
     - func: "fetch binaries"
+    - command: s3.get
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        remote_file: mongodb-mongo-v3.2/${build_variant}/${revision}/binaries/mongo-shell-${build_id}.${ext|tgz}
+        bucket: mciuploads
+        local_file: src/mongo-shell.tgz
     - command: s3.get
       params:
         aws_key: ${aws_key}
@@ -1896,23 +1997,16 @@ tasks:
           set -o errexit
           set -o verbose
 
-          mv mongo-binaries.tgz mongodb-binaries.${ext|tgz}
-          mv mongo-debugsymbols.tgz debugsymbols-*.${ext|tgz} || true
-          cp mongodb-*.${ext|tgz} mongodb-${push_name}-${push_arch}-${suffix}.${ext|tgz}
-          cp debugsymbols-*.${ext|tgz} mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}.${ext|tgz} || true
+          mv mongo-binaries.tgz mongodb-${push_name}-${push_arch}-${suffix}.${ext|tgz}
+          mv mongo-shell.tgz mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz}
+          mv mongo-debugsymbols.tgz mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}.${ext|tgz} || true
           mv distsrc.${ext|tgz} mongodb-src-${src_suffix}.${ext|tar.gz} || true
           /usr/bin/find build/ -type f | grep msi$ | xargs -I original_filename cp original_filename mongodb-win32-${push_arch}-${suffix}.msi || true
-
-          # Extract shell and banner files out of scons-made archive for separate shell archive
-          ${platform_decompress|tar --wildcards -zxvf} mongodb-binaries.${ext|tgz} mongodb-*/bin/mongo${exe} mongodb-*/\[A-Z\]*
-
-          # Create new shell archive (make_archive.py uses filename to determine what format archive to create)
-          ${python|python} buildscripts/make_archive.py -o mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz} $(ls -d mongodb-*/bin/mongo${exe} mongodb-*/[A-Z]*)
 
           notary-client.py --key-name "server-3.2" --auth-token-file ${workdir}/src/signing_auth_token --comment "Evergreen Automatic Signing ${revision} - ${build_variant} - ${branch_name}" --notary-url http://notary-service.build.10gen.cc:5000 --skip-missing mongodb-${push_name}-${push_arch}-${suffix}.${ext|tgz} mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz} mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}.${ext|tgz} mongodb-win32-${push_arch}-${suffix}.msi mongodb-src-${src_suffix}.${ext|tar.gz}
 
           if [ "${has_packages|}" = "true" ]; then
-             CURATOR_RELEASE="fab90fac3cb45c0ef411e647b3d621cbe053fe19"
+             CURATOR_RELEASE="88f34a9f1c79db7ea9597b6e85eb5995d03714ba"
              curl -L -O http://boxes.10gen.com/build/curator/curator-dist-rhel70-$CURATOR_RELEASE.tar.gz
              tar -zxvf curator-dist-rhel70-$CURATOR_RELEASE.tar.gz
              ./curator repo --config ./etc/repo_config.yaml --distro ${packager_distro} --edition ${repo_edition} --version ${version} --arch ${packager_arch} --packages repo
@@ -2822,6 +2916,9 @@ buildvariants:
   - name: tool
   - name: tool_WT
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 - name: ubuntu1404
@@ -2930,6 +3027,9 @@ buildvariants:
   - name: tool
   - name: tool_WT
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 - name: ubuntu1604
@@ -3038,15 +3138,19 @@ buildvariants:
   - name: tool
   - name: tool_WT
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 - name: enterprise-linux-64-amazon-ami
-  display_name: Enterprise Amazon Linux
+  display_name: "Enterprise Amazon Linux"
   modules:
   - enterprise
   - mongo-tools
   run_on:
   - linux-64-amzn-test
+  batchtime: 1440 # 1 day
   expansions:
     tooltags: "-tags 'ssl sasl'"
     push_path: linux
@@ -3114,6 +3218,9 @@ buildvariants:
   - name: ssl
   - name: sslSpecial
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 - name: amazon
@@ -3225,6 +3332,9 @@ buildvariants:
   - name: tool
   - name: tool_WT
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
     distros:
     - rhel70
@@ -3424,6 +3534,7 @@ buildvariants:
   - name: mmap
   - name: mongosTest
   - name: multiversion
+  - name: multiversion_auth
   - name: noPassthrough
   - name: noPassthrough_WT
   - name: noPassthroughWithMongod
@@ -3468,7 +3579,7 @@ buildvariants:
     - rhel70
 
 - name: windows-64-2k8-debug
-  display_name: Windows 2008R2 DEBUG
+  display_name: "! Windows 2008R2 DEBUG"
   modules:
   - mongo-tools
   run_on:
@@ -3564,7 +3675,7 @@ buildvariants:
   - name: unittests
 
 - name: enterprise-windows-64
-  display_name: Enterprise Windows
+  display_name: "* Enterprise Windows"
   modules:
   - enterprise
   - mongo-tools
@@ -3811,13 +3922,14 @@ buildvariants:
   modules:
   - mongo-tools
   run_on:
-  - osx-1010
+  - macos-1012
   batchtime: 1440 # 1 day
   expansions:
     push_path: osx
     push_bucket: downloads.mongodb.org
     push_name: osx
     push_arch: x86_64
+    gorootvars: CGO_CFLAGS=-mmacosx-version-min=10.7 CGO_LDFLAGS=-mmacosx-version-min=10.7
     compile_flags: --allocator=system -j$(sysctl -n hw.logicalcpu) --release --osx-version-min=10.7 --libc++
     num_jobs_available: 1
   tasks:
@@ -3899,7 +4011,7 @@ buildvariants:
   modules:
   - mongo-tools
   run_on:
-  - osx-1010
+  - macos-1012
   batchtime: 1440 # 1 day
   expansions:
     push_path: osx
@@ -3907,7 +4019,8 @@ buildvariants:
     push_name: osx-ssl
     push_arch: x86_64
     tooltags: "-tags ssl"
-    compile_flags: --ssl --allocator=system -j$(sysctl -n hw.logicalcpu) --release --osx-version-min=10.7 --libc++
+    gorootvars: CGO_CPPFLAGS=-I/opt/mongodbtoolchain/v2/include CGO_CFLAGS=-mmacosx-version-min=10.7 CGO_LDFLAGS=-mmacosx-version-min=10.7
+    compile_flags: --ssl --allocator=system -j$(sysctl -n hw.logicalcpu) --release --osx-version-min=10.7 --libc++ CPPPATH=/opt/mongodbtoolchain/v2/include
     num_jobs_available: 1
   tasks:
   - name: compile
@@ -3984,17 +4097,18 @@ buildvariants:
     - rhel70
 
 - name: osx-107-debug
-  display_name: OS X 10.7 DEBUG
+  display_name: "* OS X 10.7 DEBUG"
   modules:
   - mongo-tools
   run_on:
-  - osx-1010
+  - macos-1012
   expansions:
     push_path: osx
     push_bucket: downloads.mongodb.org
     push_name: osx-debug
     push_arch: x86_64
     num_jobs_available: 1
+    gorootvars: CGO_CFLAGS=-mmacosx-version-min=10.7 CGO_LDFLAGS=-mmacosx-version-min=10.7
     compile_flags: --dbg=on --opt=on --allocator=system -j$(sysctl -n hw.logicalcpu) --osx-version-min=10.7 --libc++
   tasks:
   - name: compile
@@ -4029,7 +4143,7 @@ buildvariants:
   - enterprise
   - mongo-tools
   run_on:
-  - osx-1010
+  - macos-1012
   batchtime: 1440 # 1 day
   expansions:
     push_path: osx
@@ -4037,7 +4151,8 @@ buildvariants:
     push_name: osx
     push_arch: x86_64-enterprise
     tooltags: "-tags 'ssl sasl'"
-    compile_flags: --ssl --allocator=system -j$(sysctl -n hw.logicalcpu) --release --osx-version-min=10.7 --libc++
+    gorootvars: CGO_CPPFLAGS=-I/opt/mongodbtoolchain/v2/include CGO_CFLAGS=-mmacosx-version-min=10.7 CGO_LDFLAGS=-mmacosx-version-min=10.7
+    compile_flags: --ssl --allocator=system -j$(sysctl -n hw.logicalcpu) --release --osx-version-min=10.7 --libc++ CPPPATH=/opt/mongodbtoolchain/v2/include
     num_jobs_available: 1
   tasks:
   - name: compile
@@ -4054,8 +4169,6 @@ buildvariants:
   - name: replicasets_auth
   - name: sasl
   - name: sharding_csrs_upgrade_auth_WT
-  - name: snmp
-  - name: snmp_WT
   - name: ssl
   - name: sslSpecial
   - name: unittests
@@ -4117,7 +4230,7 @@ buildvariants:
   - name: push
 
 - name: enterprise-rhel-62-64-bit
-  display_name: Enterprise RHEL 6.2
+  display_name: "! Enterprise RHEL 6.2"
   modules:
   - enterprise
   - mongo-tools
@@ -4205,6 +4318,7 @@ buildvariants:
   - name: mmap
   - name: mongosTest
   - name: multiversion
+  - name: multiversion_auth
   - name: noPassthrough
   - name: noPassthroughWithMongod
   - name: noPassthroughWithMongod_WT
@@ -4258,6 +4372,9 @@ buildvariants:
   - name: tool
   - name: tool_WT
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
     distros:
     - rhel70
@@ -4308,6 +4425,9 @@ buildvariants:
   - name: ssl
   - name: sslSpecial
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 - name: enterprise-rhel-71-ppc64le
@@ -4662,6 +4782,9 @@ buildvariants:
   - name: tool
   - name: tool_WT
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
     distros:
     - rhel70
@@ -4771,6 +4894,9 @@ buildvariants:
   - name: tool
   - name: tool_WT
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 ###########################################
@@ -4824,6 +4950,9 @@ buildvariants:
   - name: ssl
   - name: sslSpecial
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 - name: enterprise-ubuntu1404-64
@@ -4873,6 +5002,9 @@ buildvariants:
   - name: ssl
   - name: sslSpecial
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 - name: enterprise-ubuntu1604-64
@@ -4922,6 +5054,9 @@ buildvariants:
   - name: ssl
   - name: sslSpecial
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 
@@ -4977,6 +5112,9 @@ buildvariants:
   - name: ssl
   - name: sslSpecial
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 - name: suse12
@@ -5086,6 +5224,9 @@ buildvariants:
   - name: tool
   - name: tool_WT
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 
@@ -5136,6 +5277,9 @@ buildvariants:
   - name: ssl
   - name: sslSpecial
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 - name: suse11
@@ -5245,6 +5389,9 @@ buildvariants:
   - name: tool
   - name: tool_WT
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 ###########################################
@@ -5252,7 +5399,7 @@ buildvariants:
 ###########################################
 
 - name: solaris-64-bit
-  display_name: Solaris
+  display_name: "* Solaris"
   modules:
   - mongo-tools
   run_on:
@@ -5381,6 +5528,9 @@ buildvariants:
   - name: ssl
   - name: sslSpecial
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 - name: enterprise-debian81-64
@@ -5430,6 +5580,9 @@ buildvariants:
   - name: ssl
   - name: sslSpecial
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 
@@ -5543,6 +5696,9 @@ buildvariants:
   - name: tool
   - name: tool_WT
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 - name: debian81
@@ -5655,6 +5811,9 @@ buildvariants:
   - name: tool
   - name: tool_WT
   - name: unittests
+  - name: package
+    distros:
+    - ubuntu1604-packer
   - name: push
 
 
@@ -5890,20 +6049,21 @@ buildvariants:
 #     Experimental buildvariants          #
 ###########################################
 
-- name: ubuntu1410-debug-asan
-  display_name: ~ ASAN Enterprise SSL Ubuntu 14.10 DEBUG
+- name: ubuntu1604-debug-asan
+  display_name: ~ ASAN Enterprise SSL Ubuntu 16.04 DEBUG
   modules:
   - enterprise
   - mongo-tools
   run_on:
-  - ubuntu1410-build
+  - ubuntu1604-build
   stepback: false
   batchtime: 1440 # 1 day
   expansions:
     tooltags: "-tags 'ssl'"
-    asan_symbolizer: ASAN_SYMBOLIZER_PATH=/usr/bin/llvm-symbolizer-3.5
+    # We need llvm-symbolizer in the PATH for ASAN for clang-3.7 or later.
+    path_prefix: PATH=$PATH:/usr/lib/llvm-3.8/bin
     enable_lsan: LSAN_OPTIONS="suppressions=etc/lsan.suppressions" ASAN_OPTIONS=detect_leaks=1
-    compile_flags: CC=/usr/bin/clang CXX=/usr/bin/clang++ --dbg=on --opt=on --allocator=system --sanitize=address --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip VARIANT_DIR=build
+    compile_flags: CC=/usr/bin/clang-3.8 CXX=/usr/bin/clang++-3.8 CPPDEFINES="_GLIBCXX_USE_CXX11_ABI=0" --dbg=on --opt=on --allocator=system --sanitize=address --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip VARIANT_DIR=build
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     test_flags: -j1 # Avoid starting too many mongod's under ASAN build.
   tasks:
@@ -5967,6 +6127,7 @@ buildvariants:
   - name: mmap
   - name: mongosTest
   - name: multiversion
+  - name: multiversion_auth
   - name: noPassthrough
   - name: noPassthroughWithMongod
   - name: noPassthroughWithMongod_WT
@@ -6018,19 +6179,20 @@ buildvariants:
   - name: tool_WT
   - name: unittests
 
-- name: ubuntu1410-asan
-  display_name: ~ ASAN SSL Ubuntu 14.10
+- name: ubuntu1604-asan
+  display_name: ~ ASAN SSL Ubuntu 16.04
   modules:
   - mongo-tools
   run_on:
-  - ubuntu1410-build
+  - ubuntu1604-build
   stepback: false
   batchtime: 1440 # 1 day
   expansions:
     tooltags: "-tags 'ssl'"
-    asan_symbolizer: ASAN_SYMBOLIZER_PATH=/usr/bin/llvm-symbolizer-3.5
+    # We need llvm-symbolizer in the PATH for ASAN for clang-3.7 or later.
+    path_prefix: PATH=$PATH:/usr/lib/llvm-3.8/bin
     enable_lsan: LSAN_OPTIONS="suppressions=etc/lsan.suppressions" ASAN_OPTIONS=detect_leaks=1
-    compile_flags: CC=/usr/bin/clang CXX=/usr/bin/clang++ --opt=on --allocator=system --sanitize=address --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip VARIANT_DIR=build
+    compile_flags: CC=/usr/bin/clang-3.8 CXX=/usr/bin/clang++-3.8 CPPDEFINES="_GLIBCXX_USE_CXX11_ABI=0" --opt=on --allocator=system --sanitize=address --ssl -j$(grep -c ^processor /proc/cpuinfo) --nostrip VARIANT_DIR=build
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     test_flags: -j1 # Avoid starting too many mongod's under ASAN build.
   tasks:

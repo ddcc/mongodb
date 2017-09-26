@@ -10,7 +10,7 @@
 
 #define	WT_DHANDLE_CAN_DISCARD(dhandle)					\
 	(!F_ISSET(dhandle, WT_DHANDLE_EXCLUSIVE | WT_DHANDLE_OPEN) &&	\
-	dhandle->session_inuse == 0 && dhandle->session_ref == 0)
+	(dhandle)->session_inuse == 0 && (dhandle)->session_ref == 0)
 
 /*
  * __sweep_mark --
@@ -26,7 +26,7 @@ __sweep_mark(WT_SESSION_IMPL *session, time_t now)
 	conn = S2C(session);
 
 	TAILQ_FOREACH(dhandle, &conn->dhqh, q) {
-		if (WT_IS_METADATA(session, dhandle))
+		if (WT_IS_METADATA(dhandle))
 			continue;
 
 		/*
@@ -81,7 +81,7 @@ __sweep_expire_one(WT_SESSION_IMPL *session)
 	 * handle list lock so that connection-level handle searches
 	 * never need to retry.
 	 */
-	WT_RET(__wt_try_writelock(session, dhandle->rwlock));
+	WT_RET(__wt_try_writelock(session, &dhandle->rwlock));
 
 	/* Only sweep clean trees where all updates are visible. */
 	if (btree->modified ||
@@ -95,7 +95,7 @@ __sweep_expire_one(WT_SESSION_IMPL *session)
 	 */
 	ret = __wt_conn_btree_sync_and_close(session, false, true);
 
-err:	__wt_writeunlock(session, dhandle->rwlock);
+err:	__wt_writeunlock(session, &dhandle->rwlock);
 
 	return (ret);
 }
@@ -122,7 +122,7 @@ __sweep_expire(WT_SESSION_IMPL *session, time_t now)
 		if (conn->open_btree_count < conn->sweep_handles_min)
 			break;
 
-		if (WT_IS_METADATA(session, dhandle) ||
+		if (WT_IS_METADATA(dhandle) ||
 		    !F_ISSET(dhandle, WT_DHANDLE_OPEN) ||
 		    dhandle->session_inuse != 0 ||
 		    dhandle->timeofdeath == 0 ||
@@ -188,7 +188,7 @@ __sweep_remove_one(WT_SESSION_IMPL *session, WT_DATA_HANDLE *dhandle)
 	WT_DECL_RET;
 
 	/* Try to get exclusive access. */
-	WT_RET(__wt_try_writelock(session, dhandle->rwlock));
+	WT_RET(__wt_try_writelock(session, &dhandle->rwlock));
 
 	/*
 	 * If there are no longer any references to the handle in any
@@ -205,7 +205,7 @@ __sweep_remove_one(WT_SESSION_IMPL *session, WT_DATA_HANDLE *dhandle)
 	 * don't retry the discard until it times out again.
 	 */
 	if (ret != 0) {
-err:		__wt_writeunlock(session, dhandle->rwlock);
+err:		__wt_writeunlock(session, &dhandle->rwlock);
 	}
 
 	return (ret);
@@ -228,12 +228,12 @@ __sweep_remove_handles(WT_SESSION_IMPL *session)
 	    dhandle != NULL;
 	    dhandle = dhandle_next) {
 		dhandle_next = TAILQ_NEXT(dhandle, q);
-		if (WT_IS_METADATA(session, dhandle))
+		if (WT_IS_METADATA(dhandle))
 			continue;
 		if (!WT_DHANDLE_CAN_DISCARD(dhandle))
 			continue;
 
-		WT_WITH_HANDLE_LIST_LOCK(session,
+		WT_WITH_HANDLE_LIST_WRITE_LOCK(session,
 		    ret = __sweep_remove_one(session, dhandle));
 		if (ret == 0)
 			WT_STAT_CONN_INCR(session, dh_sweep_remove);
@@ -243,6 +243,16 @@ __sweep_remove_handles(WT_SESSION_IMPL *session)
 	}
 
 	return (ret == EBUSY ? 0 : ret);
+}
+
+/*
+ * __sweep_server_run_chk --
+ *	Check to decide if the checkpoint server should continue running.
+ */
+static bool
+__sweep_server_run_chk(WT_SESSION_IMPL *session)
+{
+	return (F_ISSET(S2C(session), WT_CONN_SERVER_SWEEP));
 }
 
 /*
@@ -266,11 +276,15 @@ __sweep_server(void *arg)
 	/*
 	 * Sweep for dead and excess handles.
 	 */
-	while (F_ISSET(conn, WT_CONN_SERVER_RUN) &&
-	    F_ISSET(conn, WT_CONN_SERVER_SWEEP)) {
+	for (;;) {
 		/* Wait until the next event. */
-		__wt_cond_wait(session,
-		    conn->sweep_cond, conn->sweep_interval * WT_MILLION);
+		__wt_cond_wait(session, conn->sweep_cond,
+		    conn->sweep_interval * WT_MILLION, __sweep_server_run_chk);
+
+		/* Check if we're quitting or being reconfigured. */
+		if (!__sweep_server_run_chk(session))
+			break;
+
 		__wt_seconds(session, &now);
 
 		WT_STAT_CONN_INCR(session, dh_sweeps);
@@ -390,7 +404,7 @@ __wt_sweep_create(WT_SESSION_IMPL *session)
 	session = conn->sweep_session;
 
 	WT_RET(__wt_cond_alloc(
-	    session, "handle sweep server", false, &conn->sweep_cond));
+	    session, "handle sweep server", &conn->sweep_cond));
 
 	WT_RET(__wt_thread_create(
 	    session, &conn->sweep_tid, __sweep_server, session));
@@ -418,7 +432,7 @@ __wt_sweep_destroy(WT_SESSION_IMPL *session)
 		WT_TRET(__wt_thread_join(session, conn->sweep_tid));
 		conn->sweep_tid_set = 0;
 	}
-	WT_TRET(__wt_cond_destroy(session, &conn->sweep_cond));
+	__wt_cond_destroy(session, &conn->sweep_cond);
 
 	if (conn->sweep_session != NULL) {
 		wt_session = &conn->sweep_session->iface;
