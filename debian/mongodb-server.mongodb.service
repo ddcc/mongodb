@@ -1,6 +1,7 @@
 [Unit]
 Description=An object/document-oriented database
 Documentation=man:mongod(1)
+After=network.target
 
 [Service]
 User=mongodb
