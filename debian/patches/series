@@ -11,3 +11,4 @@ fix-wt-checksum-on-arm64
 fix-ftbfs-with-gcc-7.patch
 arm64-48bit-va-compat.patch
 fix-mozjs-38-segfaults.patch
+fix-build-with-openssl-1.1.patch

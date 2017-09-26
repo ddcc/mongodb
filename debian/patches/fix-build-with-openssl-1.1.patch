@@ -1,0 +1,39 @@
+From 557c0a3ca5f55ae3ca8ff26918fe94113c403390 Mon Sep 17 00:00:00 2001
+From: Apollon Oikonomopoulos <apoikos@debian.org>
+Date: Tue, 26 Sep 2017 12:25:06 +0300
+Subject: [PATCH] Fix build with OpenSSL 1.1
+
+Upstream merged a commit that pre-dated OpenSSL 1.1 support in 3.2.16,
+effectively removing parts of 1.1 support. Fix this by restoring the
+correct declarations.
+---
+ src/mongo/crypto/sha1_block_openssl.cpp | 11 +++++------
+ 1 file changed, 5 insertions(+), 6 deletions(-)
+
+diff --git a/src/mongo/crypto/sha1_block_openssl.cpp b/src/mongo/crypto/sha1_block_openssl.cpp
+index ce0cab8e9e..4514c6afc3 100644
+--- a/src/mongo/crypto/sha1_block_openssl.cpp
++++ b/src/mongo/crypto/sha1_block_openssl.cpp
+@@ -70,14 +70,13 @@ namespace mongo {
+ SHA1Block SHA1Block::computeHash(const uint8_t* input, size_t inputLen) {
+     HashType output;
+ 
+-    EVP_MD_CTX digestCtx;
+-    EVP_MD_CTX_init(&digestCtx);
+-    ON_BLOCK_EXIT(EVP_MD_CTX_cleanup, &digestCtx);
++    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> digestCtx(EVP_MD_CTX_new(),
++                                                                      EVP_MD_CTX_free);
+ 
+     fassert(40379,
+-            EVP_DigestInit_ex(&digestCtx, EVP_sha1(), NULL) == 1 &&
+-                EVP_DigestUpdate(&digestCtx, input, inputLen) == 1 &&
+-                EVP_DigestFinal_ex(&digestCtx, output.data(), NULL) == 1);
++            EVP_DigestInit_ex(digestCtx.get(), EVP_sha1(), NULL) == 1 &&
++                EVP_DigestUpdate(digestCtx.get(), input, inputLen) == 1 &&
++                EVP_DigestFinal_ex(digestCtx.get(), output.data(), NULL) == 1);
+     return SHA1Block(output);
+ }
+ 
+-- 
+2.14.1
+
