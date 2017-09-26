@@ -21,9 +21,11 @@ set -e
 case "$1" in
     configure)
 	# create a mongodb group and user
-	adduser --system --disabled-password --disabled-login \
-		--home /var/lib/mongodb --no-create-home \
-		--quiet --group mongodb
+	if ! getent passwd mongodb >/dev/null; then
+		adduser --system --disabled-password --disabled-login \
+			--home /var/lib/mongodb --no-create-home \
+			--quiet --group mongodb
+	fi
 
 	for dir in /var/lib/mongodb /var/log/mongodb; do
 		if ! dpkg-statoverride --list "$dir" >/dev/null 2>&1; then
