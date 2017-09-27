@@ -1,3 +1,21 @@
+mongodb (1:3.2.16-1) unstable; urgency=medium
+
+  * New upstream stable release; see
+    https://docs.mongodb.com/manual/release-notes/3.2/ for notable changes
+    since 3.2.11.
+  * Fix mongod NULL pointer dereference by disabling GCC optimizations for
+    mozjs (Closes: #876755)
+  * mongodb.service: raise resource limits.
+    Thanks to Joshua Powers <josh.powers@canonical.com> (Closes: #857969)
+  * mongodb.service: start after network.target (Closes: #864407)
+  * mongodb-server.postinst: only create the mongodb user when it doesn't
+    exist (Closes: #858903)
+  * Switch to OpenSSL 1.1 (Closes: #859232)
+    + Patch upstream source to revert breakage introduced in 3.2.16.
+    + Backport OpenSSL 1.1 support for ASIO.
+
+ -- Apollon Oikonomopoulos <apoikos@debian.org>  Thu, 28 Sep 2017 01:13:37 +0300
+
 mongodb (1:3.2.11-4) unstable; urgency=medium
 
   * Bump Standards to 4.1.0; no changes needed
