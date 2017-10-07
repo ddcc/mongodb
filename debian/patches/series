@@ -13,3 +13,4 @@ arm64-48bit-va-compat.patch
 fix-mozjs-38-segfaults.patch
 fix-build-with-openssl-1.1.patch
 asio-openssl-1.1-support.patch
+scons-3.0-compat.patch
