@@ -1,0 +1,151 @@
+From 7e0157c3bacd96e7b871f309280e1b26760c43cf Mon Sep 17 00:00:00 2001
+From: William Deegan <bill@baddogconsulting.com>
+Date: Mon, 24 Jul 2017 08:34:32 -0700
+Subject: [PATCH] SERVER-30300 Changes to allow build to work with SCons 3.0.
+
+Entirely changes to print calls.
+
+Signed-off-by: Andrew Morrow <acm@mongodb.com>
+(cherry picked from commit e9570ae0bc9dae3823ee2ef815251c02ff50e2bc and
+adjusted for 3.2 by Apollon Oikonomopoulos <apoikos@debian.org>)
+---
+ SConstruct                                              | 17 ++++++++---------
+ .../scons-local-2.5.0/SCons/Script/SConscript.py        |  7 ++++---
+ src/third_party/wiredtiger/SConscript                   |  2 +-
+ 3 files changed, 13 insertions(+), 13 deletions(-)
+
+--- a/SConstruct
++++ b/SConstruct
+@@ -481,7 +481,7 @@
+         version_data = json.load(version_fp)
+ 
+     if 'version' not in version_data:
+-        print "version.json does not contain a version string"
++        print("version.json does not contain a version string")
+         Exit(1)
+     if 'githash' not in version_data:
+         version_data['githash'] = utils.getGitVersion()
+@@ -489,7 +489,7 @@
+ except IOError as e:
+     # If the file error wasn't because the file is missing, error out
+     if e.errno != errno.ENOENT:
+-        print "Error opening version.json: {0}".format(e.strerror)
++        print("Error opening version.json: {0}".format(e.strerror))
+         Exit(1)
+ 
+     version_data = {
+@@ -498,7 +498,7 @@
+     }
+ 
+ except ValueError as e:
+-    print "Error decoding version.json: {0}".format(e)
++    print("Error decoding version.json: {0}".format(e))
+     Exit(1)
+ 
+ # Setup the command-line variables
+@@ -568,7 +568,7 @@
+ 
+ variables_files = variable_shlex_converter(get_option('variables-files'))
+ for file in variables_files:
+-    print "Using variable customization file %s" % file
++    print("Using variable customization file %s" % file)
+ 
+ env_vars = Variables(
+     files=variables_files,
+@@ -853,13 +853,12 @@
+ env.AddMethod(env_get_os_name_wrapper, 'GetTargetOSName')
+ 
+ def fatal_error(env, msg, *args):
+-    print msg.format(*args)
++    print(msg.format(*args))
+     Exit(1)
+ 
+ def conf_error(env, msg, *args):
+-    print msg.format(*args)
+-    print "See {0} for details".format(env['CONFIGURELOG'].abspath)
+-
++    print(msg.format(*args))
++    print("See {0} for details".format(env['CONFIGURELOG'].abspath))
+     Exit(1)
+ 
+ env.AddMethod(fatal_error, 'FatalError')
+@@ -878,7 +877,7 @@
+ env.AddMethod(lambda env: env['VERBOSE'], 'Verbose')
+ 
+ if has_option('variables-help'):
+-    print env_vars.GenerateHelpText(env)
++    print(env_vars.GenerateHelpText(env))
+     Exit(0)
+ 
+ unknown_vars = env_vars.UnknownVariables()
+@@ -1050,7 +1049,7 @@
+     env['TARGET_ARCH'] = detected_processor
+ 
+ if env['TARGET_OS'] not in os_macros:
+-    print "No special config for [{0}] which probably means it won't work".format(env['TARGET_OS'])
++    print("No special config for [{0}] which probably means it won't work".format(env['TARGET_OS']))
+ elif not detectConf.CheckForOS(env['TARGET_OS']):
+     env.FatalError("TARGET_OS ({0}) is not supported by compiler", env['TARGET_OS'])
+ 
+@@ -2237,7 +2236,7 @@
+             myenv.SetConfigHeaderDefine(macro_name)
+     conf.Finish()
+     if not haveTriviallyConstructibleThreadLocals:
+-        print "Compiler must support a thread local storage class for trivially constructible types"
++        print("Compiler must support a thread local storage class for trivially constructible types")
+         Exit(1)
+ 
+     # not all C++11-enabled gcc versions have type properties
+--- a/src/third_party/scons-2.5.0/scons-local-2.5.0/SCons/Script/SConscript.py
++++ b/src/third_party/scons-2.5.0/scons-local-2.5.0/SCons/Script/SConscript.py
+@@ -27,6 +27,7 @@
+ # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+ # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ from __future__ import division
++from __future__ import print_function
+ 
+ __revision__ = "src/engine/SCons/Script/SConscript.py rel_2.5.0:3543:937e55cd78f7 2016/04/09 11:29:54 bdbaddog"
+ 
+@@ -462,15 +463,15 @@
+                 scons_ver_string = '%d.%d.%d' % (major, minor, revision)
+             else:
+                 scons_ver_string = '%d.%d' % (major, minor)
+-            print "SCons %s or greater required, but you have SCons %s" % \
+-                  (scons_ver_string, SCons.__version__)
++            print ("SCons %s or greater required, but you have SCons %s" % \
++                  (scons_ver_string, SCons.__version__))
+             sys.exit(2)
+ 
+     def EnsurePythonVersion(self, major, minor):
+         """Exit abnormally if the Python version is not late enough."""
+         if sys.version_info < (major, minor):
+             v = sys.version.split()[0]
+-            print "Python %d.%d or greater required, but you have Python %s" %(major,minor,v)
++            print ("Python %d.%d or greater required, but you have Python %s" %(major,minor,v))
+             sys.exit(2)
+ 
+     def Exit(self, value=0):
+--- a/src/third_party/wiredtiger/SConscript
++++ b/src/third_party/wiredtiger/SConscript
+@@ -87,7 +87,7 @@
+     VERSION_MINOR == None or
+     VERSION_PATCH == None or
+     VERSION_STRING == None):
+-    print "Failed to find version variables in " + version_file
++    print("Failed to find version variables in " + version_file)
+     Exit(1)
+ 
+ wiredtiger_includes = """
+--- a/src/mongo/installer/msi/SConscript
++++ b/src/mongo/installer/msi/SConscript
+@@ -69,8 +69,8 @@
+       upgrade_code = '54BEB8CC-C8F7-4292-A411-BDE0A9F21CA3'
+ 
+ if 'msi' in BUILD_TARGETS and msi_edition == 'SSL' and msi_flavor != '2008R2Plus':
+-  print "Building the MongoDB SSL MSI is only supported on Windows 2008 R2+ or Windows 7+ platforms."
+-  print "You must add --win-version-min=ws08r2 to your scons flags"
++  print("Building the MongoDB SSL MSI is only supported on Windows 2008 R2+ or Windows 7+ platforms.")
++  print("You must add --win-version-min=ws08r2 to your scons flags")
+   exit(1)
+ 
+ if msi_platform == 'x64':
