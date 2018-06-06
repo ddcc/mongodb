@@ -475,7 +475,7 @@ void ReplicationCoordinatorImpl::_finishLoadLocalConfig(
     }
     _performPostMemberStateUpdateAction(action);
     if (!isArbiter) {
-        _externalState->startThreads(_settings);
+        _externalState->startThreads(_settings, this);
     }
 }
 
@@ -2532,7 +2532,7 @@ Status ReplicationCoordinatorImpl::processReplSetInitiate(OperationContext* txn,
         // A configuration passed to replSetInitiate() with the current node as an arbiter
         // will fail validation with a "replSet initiate got ... while validating" reason.
         invariant(!newConfig.getMemberAt(myIndex.getValue()).isArbiter());
-        _externalState->startThreads(_settings);
+        _externalState->startThreads(_settings, this);
     }
 
     return Status::OK();
@@ -2795,6 +2795,26 @@ ReplicationCoordinatorImpl::_setCurrentRSConfig_inlock(
     const ReplicaSetConfig oldConfig = _rsConfig;
     _rsConfig = newConfig;
     _protVersion.store(_rsConfig.getProtocolVersion());
+
+    // Warn if running --nojournal and writeConcernMajorityJournalDefault = false
+    StorageEngine* storageEngine = getGlobalServiceContext()->getGlobalStorageEngine();
+    if (storageEngine && !storageEngine->isDurable() &&
+        (newConfig.getWriteConcernMajorityShouldJournal() &&
+         (!oldConfig.isInitialized() || !oldConfig.getWriteConcernMajorityShouldJournal()))) {
+        log() << startupWarningsLog;
+        log() << "** WARNING: This replica set is running without journaling enabled but the "
+              << startupWarningsLog;
+        log() << "**          writeConcernMajorityJournalDefault option to the replica set config "
+              << startupWarningsLog;
+        log() << "**          is set to true. The writeConcernMajorityJournalDefault "
+              << startupWarningsLog;
+        log() << "**          option to the replica set config must be set to false "
+              << startupWarningsLog;
+        log() << "**          or w:majority write concerns will never complete."
+              << startupWarningsLog;
+        log() << startupWarningsLog;
+    }
+
     log() << "New replica set config in use: " << _rsConfig.toBSON() << rsLog;
     _selfIndex = myIndex;
     if (_selfIndex >= 0) {
