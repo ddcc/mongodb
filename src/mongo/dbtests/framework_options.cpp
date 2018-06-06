@@ -92,7 +92,11 @@ Status addTestFrameworkOptions(moe::OptionSection* options) {
 
     options->addOptionChaining(
                  "storage.engine", "storageEngine", moe::String, "what storage engine to use")
+#if defined(__i386__) || defined(__arm__)
+        .setDefault(moe::Value(std::string("mmapv1")));
+#else
         .setDefault(moe::Value(std::string("wiredTiger")));
+#endif
 
     options->addOptionChaining("suites", "suites", moe::StringVector, "test suites to run")
         .hidden()

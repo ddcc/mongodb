@@ -38,7 +38,7 @@ endif
 
 # Wiredtiger does not build on 32-bit systems
 ifeq (32, $(DEB_HOST_ARCH_BITS))
-COMMON_OPTIONS += --wiredtiger=off
+COMMON_OPTIONS += --wiredtiger=off --mmapv1=on
 endif
 
 override_dh_auto_clean:
