@@ -51,7 +51,11 @@ struct StorageGlobalParams {
     static const char* kDefaultConfigDbPath;
 
     StorageGlobalParams()
+#if defined(__i386__) || defined(__arm__)
+        : engine("mmapv1"),
+#else
         : engine("wiredTiger"),
+#endif
           engineSetByUser(false),
           dbpath(kDefaultDbPath),
           upgrade(false),
