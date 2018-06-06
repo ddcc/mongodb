@@ -55,9 +55,9 @@
 
 namespace mongo {
 
-using std::cout;
 using std::endl;
 using std::string;
+
 
 MongodGlobalParams mongodGlobalParams;
 
@@ -1047,7 +1047,7 @@ Status storeMongodOptions(const moe::Environment& params, const std::vector<std:
     }
     if (params.count("storage.mmapv1.preallocDataFiles")) {
         mmapv1GlobalOptions.prealloc = params["storage.mmapv1.preallocDataFiles"].as<bool>();
-        cout << "note: noprealloc may hurt performance in many applications" << endl;
+        log() << "note: noprealloc may hurt performance in many applications" << endl;
     }
     if (params.count("storage.mmapv1.smallFiles")) {
         mmapv1GlobalOptions.smallfiles = params["storage.mmapv1.smallFiles"].as<bool>();
@@ -1268,6 +1268,21 @@ Status storeMongodOptions(const moe::Environment& params, const std::vector<std:
         log() << endl;
     }
 
+    bool isClusterRoleShard = params.count("shardsvr");
+    bool isClusterRoleConfig = params.count("configsvr");
+    if (params.count("sharding.clusterRole")) {
+        auto clusterRole = params["sharding.clusterRole"].as<std::string>();
+        isClusterRoleShard = isClusterRoleShard || (clusterRole == "shardsvr");
+        isClusterRoleConfig = isClusterRoleConfig || (clusterRole == "configsvr");
+    }
+
+    if ((isClusterRoleShard || isClusterRoleConfig) && skipShardingConfigurationChecks) {
+        auto clusterRoleStr = isClusterRoleConfig ? "--configsvr" : "--shardsvr";
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << "Can not specify " << clusterRoleStr
+                                    << " and set skipShardingConfigurationChecks=true");
+    }
+
 #ifdef _WIN32
     // If dbPath is a default value, prepend with drive name so log entries are explicit
     if (storageGlobalParams.dbpath == storageGlobalParams.kDefaultDbPath ||
@@ -1276,7 +1291,6 @@ Status storeMongodOptions(const moe::Environment& params, const std::vector<std:
         storageGlobalParams.dbpath = currentPath.root_name().string() + storageGlobalParams.dbpath;
     }
 #endif
-
     setGlobalReplSettings(replSettings);
     return Status::OK();
 }
