@@ -1,0 +1,24 @@
+Description: Strip test binaries by default
+ This is needed to reduce build size to within Launchpad's limit.
+Author: Dimitri John Ledkov <xnox@ubuntu.com>
+Bug: https://jira.mongodb.org/browse/SERVER-34079
+Bug-Ubuntu: https://launchpad.net/bugs/1763119
+Forwarded: no
+Last-Update: 2018-03-23
+
+--- juju-mongodb3.6-3.6.3.orig/site_scons/site_tools/mongo_unittest.py
++++ juju-mongodb3.6-3.6.3/site_scons/site_tools/mongo_unittest.py
+@@ -29,7 +29,13 @@ def build_cpp_unit_test(env, target, source, **kwargs):
+     if includeCrutch:
+         libdeps.append( '$BUILD_DIR/mongo/unittest/unittest_crutch' )
+
++    linkflags = []
++    linkflags.extend(env.get('LINKFLAGS', []))
++    linkflags.extend(kwargs.get('LINKFLAGS', []))
++    linkflags.append('-Wl,--strip-debug')
++
+     kwargs['LIBDEPS'] = libdeps
++    kwargs['LINKFLAGS'] = linkflags
+
+     result = env.Program(target, source, **kwargs)
+     env.RegisterUnitTest(result[0])

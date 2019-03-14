@@ -13,8 +13,8 @@ Forwarded: no
                           "-Wall",
                           "-Wsign-compare",
                           "-Wno-unknown-pragmas",
-+			 "-Wno-nonnull-compare",
-+			 "-Wno-overflow",
++                         "-Wno-nonnull-compare",
++                         "-Wno-overflow",
                           "-Winvalid-pch"] )
      # env.Append( " -Wconversion" ) TODO: this doesn't really work yet
      if env.TargetOSIs('linux', 'osx', 'solaris'):
