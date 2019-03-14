@@ -9,29 +9,18 @@ post:
       params:
         working_dir: work
         script: |
-          set -v
           source ./dsienv.sh
-          $DSI_PATH/bin/make_artifact.sh
+          make_artifact.sh
     - command: s3.put
       params:
         aws_key: ${aws_key}
         aws_secret: ${aws_secret}
-        local_file: work/reports.tgz
-        remote_file: ${project}/${build_variant}/${revision}/${task_id}/${version_id}/logs/${task_name}-${build_id}.${ext|tgz}
+        local_file: work/dsi-artifacts.tgz
+        remote_file: ${project}/${build_variant}/${revision}/${task_id}/${version_id}/logs/dsi-artifacts-${task_name}-${build_id}-${execution}.${ext|tgz}
         bucket: mciuploads
         permissions: public-read
         content_type: ${content_type|application/x-gzip}
-        display_name: test-log
-    - command: s3.put
-      params:
-        aws_key: ${aws_key}
-        aws_secret: ${aws_secret}
-        local_file: work/reports/graphs/timeseries-p1.html
-        remote_file: ${project}/${build_variant}/${revision}/${task_id}/${version_id}/logs/timeseries-p1-${task_name}-${build_id}.html
-        bucket: mciuploads
-        permissions: public-read
-        content_type: text/html
-        display_name: timeseries-p1.html
+        display_name: Dsi Artifacts - Execution ${execution}
     - command: attach.results
       params:
         file_location: work/report.json
@@ -68,12 +57,17 @@ functions:
         working_dir: work
         script: |
           cat > bootstrap.yml <<EOF
-          cluster_type: ${cluster}
+          infrastructure_provisioning: ${cluster}
           platform: ${platform}
-          setup: ${setup}
+          mongodb_setup: ${setup}
           storageEngine: ${storageEngine}
-          test: ${test}.longevity
+          test_control: ${test}.longevity
           production: true
+          workloads_dir: ../src/workloads/workloads
+          ycsb_dir: ../src/YCSB/YCSB
+
+          # compositions of expansions
+          mongodb_binary_archive: "https://s3.amazonaws.com/mciuploads/${project}/${version_id}/${revision}/${platform}/mongod-${version_id}.tar.gz"
           EOF
 
           cat > runtime.yml <<EOF
@@ -95,11 +89,6 @@ functions:
           ext: ${ext}
           script_flags : ${script_flags}
           dsi_rev: ${dsi_rev}
-          compare_task: ${compare_task}
-          workloads_rev: ${workloads_rev}
-
-          # compositions of expansions
-          mongodb_binary_archive: "https://s3.amazonaws.com/mciuploads/${project}/${version_id}/${revision}/${platform}/mongod-${version_id}.tar.gz"
           EOF
     - command: shell.exec
       params:
@@ -122,8 +111,6 @@ functions:
     - command: shell.exec
       params:
         working_dir: work
-        # setup execution environment
-        # configure environment
         script: |
           set -e
           virtualenv ./venv
@@ -136,12 +123,11 @@ functions:
           set -v
           set -e
           source work/dsienv.sh
-          $DSI_PATH/bin/setup-dsi-env.sh
+          setup-dsi-env.sh
           ls -a work
 
-  "infrastructure provisioning":
+  "deploy cluster":
     - command: shell.exec
-      # call infrastructure-provisioning.py. This will either create a cluster, or update tags on existing instances.
       params:
         working_dir: work
         script: |
@@ -149,22 +135,13 @@ functions:
           set -v
           source ./dsienv.sh
           source ./venv/bin/activate
-          $DSI_PATH/bin/infrastructure_provisioning.py
-
-  "configure mongodb cluster":
-    - command: shell.exec
-      # bring up the mongod
-      params:
-        working_dir: work
-        script: |
-          set -e
-          set -o verbose
-          source ./dsienv.sh
-          source ./venv/bin/activate
-          $DSI_PATH/bin/mongodb_setup.py && echo "${setup} MongoDB Cluster STARTED."
+          infrastructure_provisioning.py
+          workload_setup.py
+          mongodb_setup.py
 
   "run test":
     - command: shell.exec
+      type: test
       params:
         working_dir: work
         script: |
@@ -172,9 +149,7 @@ functions:
           set -v
           source ./dsienv.sh
           source ./venv/bin/activate
-          echo "Run test for ${test}-${storageEngine} with setup ${setup}"
-          $DSI_PATH/bin/run_test.py ${storageEngine} ${test} ${cluster}
-          echo "Complete test for ${test} with setup ${setup}!"
+          test_control.py
     - command: "json.send"
       params:
           name: "perf"
@@ -188,42 +163,20 @@ functions:
         script: |
           set -e
           set -o verbose
-          source ./dsienv.sh
           # Longevity runs so rarely, we simply teardown the cluster when done.
           # Note that nowadays infrastructure_teardown.py is actually copying the terraform.tfstate into /data/infrastructure_provisioning
           # but as of this writing the rhel70-perf-longevity distro didn't actually use the teardown hook.
           source ./dsienv.sh
           source ./venv/bin/activate
-          $DSI_PATH/bin/infrastructure_teardown.py
+          infrastructure_teardown.py
           echo "Cluster DESTROYED."
           echo
           echo "All perf results"
           cd ..
           cat perf.json | egrep "name|ops_per_sec"
 
-  "make test log artifact":
-    - command: shell.exec
-      params:
-        working_dir: work
-        script: |
-          set -v
-          source ./dsienv.sh
-          $DSI_PATH/bin/make_artifact.sh
-
   "analyze":
-    - command: json.get_history
-      params:
-        task: ${task_name}
-        file: "work/history.json"
-        name: "perf"
-    - command: json.get_history
-      params:
-        tags: true
-        task: ${task_name}
-        file: "work/tags.json"
-        name: "perf"
     - command: shell.exec
-      # post_run_check.py and longevity_override.json for DSI tests are part of dsi repo
       type : test
       params:
         working_dir: work
@@ -232,8 +185,8 @@ functions:
           set -o verbose
           TAG="3.0.12-Baseline"
           PROJECT="mongo-longevity"
-          OVERRIDEFILE="../src/dsi/dsi/analysis/v3.2/longevity_override.json"
-          python -u ../src/dsi/dsi/analysis/post_run_check.py ${script_flags} --reports-analysis reports --perf-file reports/perf.json --rev ${revision} -f history.json -t tags.json --refTag $TAG --overrideFile $OVERRIDEFILE --project_id $PROJECT --task_name ${task_name} --variant ${build_variant}
+          OVERRIDEFILE="../src/dsi/dsi/analysis/${branch_name}/longevity_override.json"
+          python -u ../src/dsi/dsi/analysis/post_run_check.py ${script_flags} --reports-analysis reports --perf-file perf.json --rev ${revision} --refTag $TAG --overrideFile $OVERRIDEFILE --project_id $PROJECT --task_name ${task_name} --variant ${build_variant}
 
 tasks:
 - name: compile
@@ -282,13 +235,8 @@ tasks:
       vars:
         storageEngine: "wiredTiger"
         test: "ycsb"
-    - func: "infrastructure provisioning"
-    - func: "configure mongodb cluster"
+    - func: "deploy cluster"
     - func: "run test"
-      vars:
-        storageEngine: "wiredTiger"
-        test: "ycsb"
-    - func: "make test log artifact"
     - func: "analyze"
       vars:
         script_flags: --ycsb-throughput-analysis reports
@@ -303,13 +251,8 @@ tasks:
       vars:
         storageEngine: "mmapv1"
         test: "ycsb"
-    - func: "infrastructure provisioning"
-    - func: "configure mongodb cluster"
+    - func: "deploy cluster"
     - func: "run test"
-      vars:
-        storageEngine: "mmapv1"
-        test: "ycsb"
-    - func: "make test log artifact"
     - func: "analyze"
       vars:
         script_flags: --ycsb-throughput-analysis reports
@@ -327,6 +270,11 @@ modules:
   prefix: dsi
   branch: master
 
+
+
+#######################################
+#         Linux Buildvariants         #
+#######################################
 
 buildvariants:
 - name: linux-wt-shard

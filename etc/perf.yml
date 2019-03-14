@@ -76,7 +76,7 @@ functions:
           set -v
           chmod +x mongod
           chmod +x mongo
-          git clone https://github.com/mongodb/mongo-perf perf
+          git clone git@github.com:mongodb/mongo-perf.git perf
           cd perf
           git describe --tags
     - command: shell.exec
@@ -152,8 +152,8 @@ functions:
           # appropriate flags if it's `true`.
           reports_analysis_flags="--reports-analysis . --perf-file perf/perf.json"
           cmd_flags=$([ "${reports_analysis}" = "true" ] && echo "$reports_analysis_flags" || echo "")
-          REFTAG="3.0.14-Baseline"
-          OVERRIDE="../dsi/analysis/v3.2/perf_override.json" # Note use of v3.2 here cannot use ${project} perf
+          REFTAG="3.2.19-Baseline"
+          OVERRIDE="../dsi/analysis/${branch_name}/perf_override.json"
           python ../dsi/analysis/perf_regression_check.py $cmd_flags -f history.json --rev ${revision} -t tags.json --refTag $REFTAG --overrideFile $OVERRIDE --variant ${build_variant} --task ${task_name} --threshold 0.10 --threadThreshold 0.15
   "run perf tests":
     - command: shell.exec
@@ -166,6 +166,7 @@ functions:
           source ./venv/bin/activate
           pip install argparse
     - command: shell.exec
+      type : test
       params:
         working_dir: src
         script: |
@@ -357,7 +358,10 @@ buildvariants:
   modules:
     - enterprise
   expansions:
-    compile_flags: &compile_flags -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/bin/gcc CXX=/opt/mongodbtoolchain/bin/g++ --release --ssl
+    # We are explicitly tracking the rhel62 variant compile options from evergreen.yml for
+    # microbenchmarks, since they run on the centos6 boxes.  If we can get proper artifacts directly
+    # from that project, we should do that and remove the compile tasks.
+    compile_flags: &compile_flags --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     mongod_exec_wrapper: &exec_wrapper "numactl --physcpubind=4,5,6,7 -i 1"
     perf_exec_wrapper: &perf_wrapper "numactl --physcpubind=1,2,3 -i 0"
     mongod_flags: "--storageEngine=inMemory --logpath ./mongod.log --fork --syncdelay 0 --setParameter ttlMonitorEnabled=false --setParameter diagnosticDataCollectionEnabled=false --inMemoryEngineConfigString 'eviction=(threads_min=1),' --inMemorySizeGB 60 --auth"
@@ -400,7 +404,7 @@ buildvariants:
 
 - name: linux-wt-repl
   display_name: 1-Node ReplSet Linux inMemory
-  batchtime: 360 # 6 hours
+  batchtime: 90 # 1.5 hours
   expansions:
     compile_flags: *compile_flags
     mongod_exec_wrapper: *exec_wrapper
@@ -417,7 +421,7 @@ buildvariants:
 
 - name: linux-mmap-repl
   display_name: 1-Node ReplSet Linux MMAPv1
-  batchtime: 360 # 6 hours
+  batchtime: 90 # 1.5 hours
   expansions:
     compile_flags: *compile_flags
     mongod_exec_wrapper: *exec_wrapper

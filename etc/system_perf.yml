@@ -10,37 +10,41 @@ post:
         working_dir: work
         script: |
           source ./dsienv.sh
-          $DSI_PATH/bin/make_artifact.sh
+          make_artifact.sh
     - command: s3.put
       params:
         aws_key: ${aws_key}
         aws_secret: ${aws_secret}
-        local_file: work/reports.tgz
-        remote_file: ${project}/${build_variant}/${revision}/${task_id}/${version_id}/logs/${task_name}-${build_id}.${ext|tgz}
+        local_file: work/dsi-artifacts.tgz
+        remote_file: ${project_dir}/${build_variant}/${revision}/${task_id}/${version_id}/logs/dsi-artifacts-${task_name}-${build_id}-${execution}.${ext|tgz}
         bucket: mciuploads
         permissions: public-read
         content_type: ${content_type|application/x-gzip}
-        display_name: test-log
+        display_name: Dsi Artifacts - Execution ${execution}
     - command: s3.put
       params:
         aws_key: ${aws_key}
         aws_secret: ${aws_secret}
-        local_file: work/reports/graphs/timeseries-mongod.0.html
-        remote_file: ${project}/${build_variant}/${revision}/${task_id}/${version_id}/logs/timeseries-mongod.0-${task_name}-${build_id}.html
+        local_file: src/workloads/workloads/jsdoc/jsdocs-redirect.html
+        remote_file: ${project_dir}/${build_variant}/${revision}/${task_id}/${version_id}/logs/workloads-${task_name}-${build_id}.html
         bucket: mciuploads
         permissions: public-read
         content_type: text/html
-        display_name: timeseries-p1.html
+        display_name: workloads documentation
     - command: attach.results
       params:
         file_location: work/report.json
+    - command: "json.send"
+      params:
+         name: "perf"
+         file: "work/perf.json"
     - command: shell.exec
       params:
         working_dir: work
         script: |
           source ./dsienv.sh
           if [ -e /data/infrastructure_provisioning/terraform/provisioned.${cluster} ]; then
-            $DSI_PATH/bin/mark_idle.sh
+            mark_idle.sh
           fi
 
     - command: shell.exec
@@ -57,6 +61,44 @@ post:
     - command: shell.cleanup
 
 functions:
+  "compile mongodb":
+    - command: shell.exec
+      params:
+        working_dir: src
+        script: |
+          set -o errexit
+          set -o verbose
+          ${scons|scons} ${compile_flags|} mongo mongod mongos
+          mkdir -p mongodb/bin
+          mv mongo mongodb/bin
+          mv mongod mongodb/bin
+          mv mongos mongodb/bin
+          tar czf mongodb${wtdevelop|}.tar.gz mongodb
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/mongodb${wtdevelop|}.tar.gz
+        remote_file: ${project_dir}/${version_id}/${revision}/${platform}/mongodb${wtdevelop|}-${version_id}.tar.gz
+        bucket: mciuploads
+        permissions: public-read
+        content_type: ${content_type|application/x-gzip}
+        display_name: mongodb${wtdevelop|}.tar.gz
+
+  # NOTE: Unlike evergreen.yml, there's no conditional here. If called, this is never a noop!
+  "use WiredTiger develop" :
+    command: shell.exec
+    params:
+      working_dir: src
+      script: |
+        set -o errexit
+        set -o verbose
+        cd src/third_party
+        for wtdir in api dist examples ext lang src test tools ; do
+          rm -rf wiredtiger/$wtdir
+          mv wtdevelop/$wtdir wiredtiger/
+        done
+
   "prepare environment":
     - command: shell.exec
       params:
@@ -76,12 +118,15 @@ functions:
         working_dir: work
         script: |
           cat > bootstrap.yml <<EOF
-          cluster_type: ${cluster}
+          infrastructure_provisioning: ${cluster}
           platform: ${platform}
-          setup: ${setup}
+          mongodb_setup: ${setup}
           storageEngine: ${storageEngine}
-          test: ${test}
+          test_control: ${test}
           production: true
+          mongodb_binary_archive: "https://s3.amazonaws.com/mciuploads/${project_dir}/${version_id}/${revision}/${platform}/mongodb${wtdevelop|}-${version_id}.tar.gz"
+          workloads_dir: ../src/workloads/workloads
+          ycsb_dir: ../src/YCSB/YCSB
           EOF
 
           cat > runtime.yml <<EOF
@@ -95,7 +140,7 @@ functions:
           version_id: ${version_id}
           workdir: ${workdir}
           revision: ${revision}
-          project: ${project}
+          project_dir: ${project_dir}
           branch_name: ${branch_name}
 
           # sys-perf expansions
@@ -104,10 +149,8 @@ functions:
           script_flags : ${script_flags}
           dsi_rev: ${dsi_rev}
           workloads_rev: ${workloads_rev}
-
-          # compositions of expansions
-          mongodb_binary_archive: "https://s3.amazonaws.com/mciuploads/${project}/${version_id}/${revision}/${platform}/mongod-${version_id}.tar.gz"
           EOF
+
     - command: shell.exec
       params:
         silent: true
@@ -124,6 +167,8 @@ functions:
           aws_secret_key: "${terraform_secret}"
           perf_jira_user: "${perf_jira_user}"
           perf_jira_pw: "${perf_jira_pw}"
+          dsi_analysis_atlas_user: "${dsi_analysis_atlas_user}"
+          dsi_analysis_atlas_pw: "${dsi_analysis_atlas_pw}"
           EOF
           chmod 400 runtime_secret.yml
     - command: shell.exec
@@ -133,108 +178,59 @@ functions:
         # configure environment, has private information, no logging
         script: |
           set -e
-          virtualenv ./venv
-          source ./venv/bin/activate
-          pip install -r ../src/dsi/dsi/requirements.txt
-          python ../src/dsi/dsi/bin/bootstrap.py --production
-          ls
-          pwd
+          ../src/dsi/dsi/run-dsi python ../src/dsi/dsi/bin/bootstrap.py
     - command: shell.exec
       params:
         script: |
           set -v
           set -e
           source work/dsienv.sh
-          $DSI_PATH/bin/setup-dsi-env.sh
+          setup-dsi-env.sh
           ls -a work
 
-  "infrastructure provisioning":
+  "deploy cluster":
     - command: shell.exec
-      # call infrastructure-provisioning.py. This will either create a cluster, or update tags on existing instances.
       params:
         working_dir: work
         script: |
           set -e
           set -v
           source ./dsienv.sh
-          source ./venv/bin/activate
-          $DSI_PATH/bin/infrastructure_provisioning.py
-
-  "configure mongodb cluster":
-    - command: shell.exec
-      # bring up the mongod
-      params:
-        working_dir: work
-        script: |
-          set -e
-          set -o verbose
-          source ./dsienv.sh
-          source ./venv/bin/activate
-          $DSI_PATH/bin/mongodb_setup.py && echo "${setup} MongoDB Cluster STARTED."
+          ../src/dsi/dsi/run-dsi infrastructure_provisioning.py
+          ../src/dsi/dsi/run-dsi workload_setup.py
+          ../src/dsi/dsi/run-dsi mongodb_setup.py
 
   "run test":
     - command: shell.exec
+      type: test
       params:
         working_dir: work
         script: |
           set -e
           set -v
           source ./dsienv.sh
-          source ./venv/bin/activate
-          echo "Run test for ${test}-${storageEngine} with setup ${setup}"
-          $DSI_PATH/bin/run_test.py ${storageEngine} ${test} ${cluster}
+          ../src/dsi/dsi/run-dsi test_control.py
     - command: "json.send"
       params:
          name: "perf"
          file: "work/perf.json"
 
-  "make test log artifact":
-    - command: shell.exec
-      params:
-        working_dir: work
-        script: |
-          source ./dsienv.sh
-          $DSI_PATH/bin/make_artifact.sh
-
   "analyze":
-    - command: json.get_history
-      params:
-        task: ${task_name}
-        file: "work/history.json"
-        name: "perf"
-    - command: json.get_history
-      params:
-        tags: true
-        task: ${task_name}
-        file: "work/tags.json"
-        name: "perf"
     - command: shell.exec
-      # generate dashboard data
-      type : test
       params:
         working_dir: work
-        silent: true
         script: |
-          set -o errexit
-          TAGS="3.2.15-Baseline"
-          PROJECT="sys-perf-3.2"
-          OVERRIDEFILE="../src/dsi/dsi/analysis/v3.2/system_perf_override.json"
-          python -u ../src/dsi/dsi/analysis/dashboard_gen.py --rev ${revision} -f history.json -t tags.json --refTag $TAGS --overrideFile $OVERRIDEFILE --project_id sys-perf --variant ${build_variant} --task ${task_name} --jira-user ${perf_jira_user} --jira-password ${perf_jira_pw} || true
-    - command: "json.send"
-      params:
-         name: "dashboard"
-         file: "work/dashboard.json"
+          ../src/dsi/dsi/run-dsi detect-changes
     - command: shell.exec
-      # post_run_check.py and override.json for DSI tests are part of dsi repo
       type : test
       params:
         working_dir: work
         script: |
           set -o errexit
           set -o verbose
-          TAG="3.2.15-Baseline"
-          OVERRIDEFILE="../src/dsi/dsi/analysis/v3.2/system_perf_override.json"
-          python -u ../src/dsi/dsi/analysis/post_run_check.py ${script_flags} --reports-analysis reports --perf-file reports/perf.json --rev ${revision} -f history.json -t tags.json --refTag $TAG --overrideFile $OVERRIDEFILE --project_id sys-perf --variant ${build_variant} --task ${task_name}
+          TAG="3.2.21-Baseline"
+          OVERRIDEFILE="../src/dsi/dsi/analysis/${branch_name}/system_perf_override.json"
+          python -u ../src/dsi/dsi/analysis/post_run_check.py ${script_flags} --reports-analysis reports --perf-file perf.json --rev ${revision} --refTag $TAG --overrideFile $OVERRIDEFILE --project_id sys-perf --variant ${build_variant} --task ${task_name}
 
 #######################################
 #               Tasks                 #
@@ -246,322 +242,131 @@ tasks:
     - command: git.get_project
       params:
         directory: src
-    - command: git.apply_patch
-      params:
-        directory: src
-    - command: shell.exec
-      params:
-        working_dir: src
-        script: |
-          set -o errexit
-          set -o verbose
-          ${scons|scons} ${compile_flags|} mongo mongod mongos
-          mkdir -p mongodb/bin
-          mv mongo mongodb/bin
-          mv mongod mongodb/bin
-          mv mongos mongodb/bin
-          tar cvf mongodb.tar mongodb
-          gzip mongodb.tar
-    - command: s3.put
-      params:
-        aws_key: ${aws_key}
-        aws_secret: ${aws_secret}
-        local_file: src/mongodb.tar.gz
-        remote_file: ${project}/${version_id}/${revision}/${platform}/mongod-${version_id}.tar.gz
-        bucket: mciuploads
-        permissions: public-read
-        content_type: ${content_type|application/x-gzip}
-        display_name: mongodb.tar.gz
+    - func: "compile mongodb"
 
-- name: industry_benchmarks_WT
-  depends_on:
-    - name: compile
-      variant: linux-standalone
+- name: industry_benchmarks
+  priority: 5
   commands:
     - func: "prepare environment"
       vars:
-        storageEngine: "wiredTiger"
         test: "ycsb"
-    - func: "infrastructure provisioning"
-    - func: "configure mongodb cluster"
-      vars:
-        storageEngine: "wiredTiger"
+    - func: "deploy cluster"
     - func: "run test"
-      vars:
-        storageEngine: "wiredTiger"
-        test: "ycsb"
-    - func: "make test log artifact"
     - func: "analyze"
       vars:
         script_flags: --ycsb-throughput-analysis reports
 
-- name: industry_benchmarks_MMAPv1
-  depends_on:
-    - name: compile
-      variant: linux-standalone
+- name: industry_benchmarks_wmajority
+  priority: 5
   commands:
     - func: "prepare environment"
       vars:
-        storageEngine: "mmapv1"
-        test: "ycsb"
-    - func: "infrastructure provisioning"
-    - func: "configure mongodb cluster"
-      vars:
-        storageEngine: "mmapv1"
+        test: "ycsb-wmajority"
+    - func: "deploy cluster"
     - func: "run test"
-      vars:
-        storageEngine: "mmapv1"
-        test: "ycsb"
-    - func: "make test log artifact"
     - func: "analyze"
       vars:
         script_flags: --ycsb-throughput-analysis reports
 
-- name: industry_benchmarks_wmajority_WT
-  depends_on:
-    - name: compile
-      variant: linux-standalone
+- name: crud_workloads
+  priority: 5
   commands:
     - func: "prepare environment"
       vars:
-        storageEngine: "wiredTiger"
-        test: "ycsb-wmajority"
-    - func: "infrastructure provisioning"
-    - func: "configure mongodb cluster"
-      vars:
-        storageEngine: "wiredTiger"
+        test: "crud_workloads"
+    - func: "deploy cluster"
     - func: "run test"
-      vars:
-        storageEngine: "wiredTiger"
-        test: "ycsb-wmajority"
-    - func: "make test log artifact"
-    - func: "analyze"
-      vars:
-        script_flags: --ycsb-throughput-analysis reports
-
-- name: industry_benchmarks_wmajority_MMAPv1
-  depends_on:
-    - name: compile
-      variant: linux-standalone
-  commands:
-    - func: "prepare environment"
-      vars:
-        storageEngine: "mmapv1"
-        test: "ycsb-wmajority"
-    - func: "infrastructure provisioning"
-    - func: "configure mongodb cluster"
-      vars:
-        storageEngine: "mmapv1"
-    - func: "run test"
-      vars:
-        storageEngine: "mmapv1"
-        test: "ycsb-wmajority"
-    - func: "make test log artifact"
-    - func: "analyze"
-      vars:
-        script_flags: --ycsb-throughput-analysis reports
-
-- name: core_workloads_WT
-  depends_on:
-    - name: compile
-      variant: linux-standalone
-  commands:
-    - func: "prepare environment"
-      vars:
-        storageEngine: "wiredTiger"
-        test: "core"
-    - func: "infrastructure provisioning"
-    - func: "configure mongodb cluster"
-      vars:
-        storageEngine: "wiredTiger"
-    - func: "run test"
-      vars:
-        storageEngine: "wiredTiger"
-        test: "core"
-    - func: "make test log artifact"
     - func: "analyze"
 
-- name: core_workloads_MMAPv1
-  depends_on:
-    - name: compile
-      variant: linux-standalone
+- name: mixed_workloads
+  priority: 5
   commands:
     - func: "prepare environment"
       vars:
-        storageEngine: "mmapv1"
-        test: "core"
-    - func: "infrastructure provisioning"
-    - func: "configure mongodb cluster"
-      vars:
-        storageEngine: "mmapv1"
+        test: "mixed_workloads"
+    - func: "deploy cluster"
     - func: "run test"
-      vars:
-        storageEngine: "mmapv1"
-        test: "core"
-    - func: "make test log artifact"
     - func: "analyze"
 
-- name: non_sharded_workloads_WT
-  depends_on:
-    - name: compile
-      variant: linux-standalone
+- name: misc_workloads
+  priority: 5
   commands:
     - func: "prepare environment"
       vars:
-        storageEngine: "wiredTiger"
+        test: "misc_workloads"
+    - func: "deploy cluster"
+    - func: "run test"
+    - func: "analyze"
+
+- name: map_reduce_workloads
+  priority: 5
+  commands:
+    - func: "prepare environment"
+      vars:
+        test: "map_reduce_workloads"
+    - func: "deploy cluster"
+    - func: "run test"
+    - func: "analyze"
+
+- name: smoke_test
+  priority: 5
+  commands:
+    - func: "prepare environment"
+      vars:
+        test: "short"
+    - func: "deploy cluster"
+    - func: "run test"
+    - func: "analyze"
+
+- name: non_sharded_workloads
+  priority: 5
+  commands:
+    - func: "prepare environment"
+      vars:
         test: "non_sharded"
-    - func: "infrastructure provisioning"
-    - func: "configure mongodb cluster"
-      vars:
-        storageEngine: "wiredTiger"
+    - func: "deploy cluster"
     - func: "run test"
-      vars:
-        storageEngine: "wiredTiger"
-        test: "non_sharded"
-    - func: "make test log artifact"
     - func: "analyze"
 
-- name: non_sharded_workloads_MMAPv1
-  depends_on:
-    - name: compile
-      variant: linux-standalone
+- name: mongos_workloads
+  priority: 5
   commands:
     - func: "prepare environment"
       vars:
-        storageEngine: "mmapv1"
-        test: "non_sharded"
-    - func: "infrastructure provisioning"
-    - func: "configure mongodb cluster"
-      vars:
-        storageEngine: "mmapv1"
-    - func: "run test"
-      vars:
-        storageEngine: "mmapv1"
-        test: "non_sharded"
-    - func: "make test log artifact"
-    - func: "analyze"
-
-- name: mongos_workloads_WT
-  depends_on:
-    - name: compile
-      variant: linux-standalone
-  commands:
-    - func: "prepare environment"
-      vars:
-        storageEngine: "wiredTiger"
         test: "mongos"
-    - func: "infrastructure provisioning"
-    - func: "configure mongodb cluster"
-      vars:
-        storageEngine: "wiredTiger"
+    - func: "deploy cluster"
     - func: "run test"
-      vars:
-        storageEngine: "wiredTiger"
-        test: "mongos"
-    - func: "make test log artifact"
     - func: "analyze"
 
-- name: mongos_workloads_MMAPv1
-  depends_on:
-    - name: compile
-      variant: linux-standalone
-  exec_timeout_secs: 32400 # 9 hours
+- name: move_chunk_workloads
+  priority: 5
   commands:
     - func: "prepare environment"
       vars:
-        storageEngine: "mmapv1"
-        test: "mongos"
-    - func: "infrastructure provisioning"
-    - func: "configure mongodb cluster"
-      vars:
-        storageEngine: "mmapv1"
-    - func: "run test"
-      vars:
-        storageEngine: "mmapv1"
-        test: "mongos"
-    - func: "make test log artifact"
-    - func: "analyze"
-
-- name: move_chunk_workloads_WT
-  depends_on:
-    - name: compile
-      variant: linux-standalone
-  commands:
-    - func: "prepare environment"
-      vars:
-        storageEngine: "wiredTiger"
         test: "move_chunk"
-    - func: "infrastructure provisioning"
-    - func: "configure mongodb cluster"
-      vars:
-        storageEngine: "wiredTiger"
+    - func: "deploy cluster"
     - func: "run test"
-      vars:
-        storageEngine: "wiredTiger"
-        test: "move_chunk"
-    - func: "make test log artifact"
     - func: "analyze"
 
-- name: move_chunk_workloads_MMAPv1
-  depends_on:
-    - name: compile
-      variant: linux-standalone
+- name: move_chunk_waiting_workloads
+  priority: 5
   commands:
     - func: "prepare environment"
       vars:
-        storageEngine: "mmapv1"
-        test: "move_chunk"
-    - func: "infrastructure provisioning"
-    - func: "configure mongodb cluster"
-      vars:
-        storageEngine: "mmapv1"
+        test: "move_chunk_waiting"
+    - func: "deploy cluster"
     - func: "run test"
-      vars:
-        storageEngine: "mmapv1"
-        test: "move_chunk"
-    - func: "make test log artifact"
     - func: "analyze"
 
-- name: initialsync_WT
-  depends_on:
-    - name: compile
-      variant: linux-standalone
+- name: initialsync
+  priority: 5
   commands:
     - func: "prepare environment"
       vars:
-        storageEngine: "wiredTiger"
-        test: "initialSync"
-    - func: "infrastructure provisioning"
-    - func: "configure mongodb cluster"
-      vars:
-        storageEngine: "wiredTiger"
+        test: "initialsync"
+    - func: "deploy cluster"
     - func: "run test"
-      vars:
-        storageEngine: "wiredTiger"
-        test: "initialSync"
-    - func: "make test log artifact"
     - func: "analyze"
-
-- name: initialsync_MMAPv1
-  depends_on:
-    - name: compile
-      variant : linux-standalone
-  commands:
-    - func: "prepare environment"
-      vars:
-        storageEngine: "mmapv1"
-        test: "initialSync"
-    - func: "infrastructure provisioning"
-    - func: "configure mongodb cluster"
-      vars:
-        storageEngine: "mmapv1"
-    - func: "run test"
-      vars:
-        storageEngine: "mmapv1"
-        test: "initialSync"
-    - func: "make test log artifact"
-    - func: "analyze"
-
 
 #######################################
 #               Modules               #
@@ -581,10 +386,33 @@ modules:
 
 
 #######################################
+#         Buildvariants               #
+#######################################
+buildvariants:
+
+# We are explicitly tracking the rhel70 variant compile options from evergreen.yml.  If we can get
+# proper artifacts directly from that project, we should do that and remove these tasks.
+- name: compile-rhel70
+  display_name: Compile on rhel70
+  batchtime: 1440 # 24 hours
+  modules:
+    - wtdevelop
+  expansions:
+    compile_flags: --ssl MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
+    gorootvars: GOROOT=/opt/go PATH="/opt/go/bin:$PATH"
+    platform: linux
+    project_dir: &project_dir dsi
+    tooltags: ""
+    use_scons_cache: true
+  run_on:
+      - "rhel70"
+  tasks:
+    - name: compile
+
+
+#######################################
 #         Linux Buildvariants         #
 #######################################
-
-buildvariants:
 - name: linux-1-node-replSet
   display_name: Linux 1-Node ReplSet
   batchtime: 10080 # 7 days
@@ -592,43 +420,49 @@ buildvariants:
     - dsi
     - workloads
   expansions:
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/bin/gcc CXX=/opt/mongodbtoolchain/bin/g++ --release
+    compile_flags: --ssl MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     setup: single-replica
     cluster: single
     platform: linux
-    project: &project dsi-v3.2
+    project_dir: *project_dir
+    storageEngine: wiredTiger
   run_on:
       - "rhel70-perf-single"
-  tasks:
-    - name: industry_benchmarks_WT
-    - name: core_workloads_WT
-    - name: industry_benchmarks_MMAPv1
-    - name: core_workloads_MMAPv1
-    - name: non_sharded_workloads_WT
-    - name: non_sharded_workloads_MMAPv1
+  depends_on:
+      - name: compile
+        variant: compile-rhel70
+  tasks: &1nodetasks
+    - name: industry_benchmarks
+    - name: crud_workloads
+    - name: mixed_workloads
+    - name: misc_workloads
+    - name: map_reduce_workloads
+    - name: smoke_test
+    - name: non_sharded_workloads
 
 - name: linux-standalone
   display_name: Linux Standalone
   batchtime: 10080 # 7 days
   modules: *modules
   expansions:
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/bin/gcc CXX=/opt/mongodbtoolchain/bin/g++ --release
     setup: standalone
     cluster: single
     platform: linux
-    project: *project
+    project_dir: *project_dir
+    storageEngine: wiredTiger
   run_on:
       - "rhel70-perf-single"
-  tasks:
-    - name: compile
-      distros:
-      - rhel70
-    - name: industry_benchmarks_WT
-    - name: core_workloads_WT
-    - name: industry_benchmarks_MMAPv1
-    - name: core_workloads_MMAPv1
-    - name: non_sharded_workloads_WT
-    - name: non_sharded_workloads_MMAPv1
+  depends_on:
+      - name: compile
+        variant: compile-rhel70
+  tasks: &standalonetasks
+    - name: industry_benchmarks
+    - name: crud_workloads
+    - name: mixed_workloads
+    - name: misc_workloads
+    - name: map_reduce_workloads
+    - name: smoke_test
+    - name: non_sharded_workloads
 
 - name: linux-3-shard
   display_name: Linux 3-Shard Cluster
@@ -639,20 +473,23 @@ buildvariants:
     setup: shard
     cluster: shard
     platform: linux
-    project: *project
+    project_dir: *project_dir
+    storageEngine: wiredTiger
   run_on:
       - "rhel70-perf-shard"
+  depends_on:
+      - name: compile
+        variant: compile-rhel70
   tasks:
-    - name: industry_benchmarks_WT
-    - name: core_workloads_WT
-    - name: industry_benchmarks_MMAPv1
-    - name: industry_benchmarks_wmajority_WT
-    - name: industry_benchmarks_wmajority_MMAPv1
-    - name: core_workloads_MMAPv1
-    - name: mongos_workloads_WT
-    - name: mongos_workloads_MMAPv1
-    - name: move_chunk_workloads_WT
-    - name: move_chunk_workloads_MMAPv1
+    - name: industry_benchmarks
+    - name: crud_workloads
+    - name: mixed_workloads
+    - name: misc_workloads
+    - name: map_reduce_workloads
+    - name: smoke_test
+    - name: industry_benchmarks_wmajority
+    - name: mongos_workloads
+    - name: move_chunk_workloads
 
 - name: linux-3-node-replSet
   display_name: Linux 3-Node ReplSet
@@ -663,18 +500,22 @@ buildvariants:
     setup: replica
     cluster: replica
     platform: linux
-    project: *project
+    project_dir: *project_dir
+    storageEngine: wiredTiger
   run_on:
       - "rhel70-perf-replset"
-  tasks:
-    - name: industry_benchmarks_WT
-    - name: core_workloads_WT
-    - name: industry_benchmarks_MMAPv1
-    - name: industry_benchmarks_wmajority_WT
-    - name: industry_benchmarks_wmajority_MMAPv1
-    - name: core_workloads_MMAPv1
-    - name: non_sharded_workloads_WT
-    - name: non_sharded_workloads_MMAPv1
+  depends_on:
+      - name: compile
+        variant: compile-rhel70
+  tasks: &3nodetasks
+    - name: industry_benchmarks
+    - name: crud_workloads
+    - name: mixed_workloads
+    - name: misc_workloads
+    - name: map_reduce_workloads
+    - name: smoke_test
+    - name: industry_benchmarks_wmajority
+    - name: non_sharded_workloads
 
 - name: linux-3-node-replSet-initialsync
   display_name: Linux 3-Node ReplSet Initial Sync
@@ -685,10 +526,132 @@ buildvariants:
     setup: replica-2node
     cluster: replica
     platform: linux
-    project: *project
+    project_dir: *project_dir
+    storageEngine: wiredTiger
   run_on:
       - "rhel70-perf-replset"
+  depends_on:
+      - name: compile
+        variant: compile-rhel70
   tasks:
-    - name: initialsync_WT
-    - name: initialsync_MMAPv1
+    - name: initialsync
 
+#######################################
+#         MMAP Buildvariants         #
+#######################################
+- name: mmap-1-node-replSet
+  display_name: MMAP 1-Node ReplSet
+  batchtime: 10080 # 7 days
+  modules: *modules
+  expansions:
+    setup: single-replica
+    cluster: single
+    platform: linux
+    storageEngine: "mmapv1"
+    project_dir: *project_dir
+  run_on:
+      - "rhel70-perf-single"
+  depends_on:
+      - name: compile
+        variant: compile-rhel70
+  tasks:
+    - name: smoke_test
+    - name: industry_benchmarks
+    - name: crud_workloads
+    - name: mixed_workloads
+    - name: misc_workloads
+    - name: map_reduce_workloads
+    - name: non_sharded_workloads
+
+- name: mmap-standalone
+  display_name: MMAP Standalone
+  batchtime: 10080 # 7 days
+  modules: *modules
+  expansions:
+    setup: standalone
+    cluster: single
+    platform: linux
+    storageEngine: "mmapv1"
+    project_dir: *project_dir
+  run_on:
+      - "rhel70-perf-single"
+  depends_on:
+      - name: compile
+        variant: compile-rhel70
+  tasks:
+    - name: smoke_test
+    - name: industry_benchmarks
+    - name: crud_workloads
+    - name: mixed_workloads
+    - name: misc_workloads
+    - name: map_reduce_workloads
+    - name: non_sharded_workloads
+
+- name: mmap-3-shard
+  display_name: MMAP 3-Shard Cluster
+  batchtime: 10080 # 7 days
+  modules: *modules
+  expansions:
+    setup: shard
+    cluster: shard
+    platform: linux
+    storageEngine: "mmapv1"
+    project_dir: *project_dir
+  run_on:
+      - "rhel70-perf-shard"
+  depends_on:
+      - name: compile
+        variant: compile-rhel70
+  tasks:
+    - name: smoke_test
+    - name: industry_benchmarks
+    - name: industry_benchmarks_wmajority
+    - name: crud_workloads
+    - name: mixed_workloads
+    - name: misc_workloads
+    - name: map_reduce_workloads
+    - name: mongos_workloads
+    - name: move_chunk_workloads
+
+- name: mmap-3-node-replSet
+  display_name: MMAP 3-Node ReplSet
+  batchtime: 10080 # 7 days
+  modules: *modules
+  expansions:
+    setup: replica
+    cluster: replica
+    platform: linux
+    storageEngine: "mmapv1"
+    project_dir: *project_dir
+  run_on:
+      - "rhel70-perf-replset"
+  depends_on:
+      - name: compile
+        variant: compile-rhel70
+  tasks:
+    - name: smoke_test
+    - name: industry_benchmarks
+    - name: industry_benchmarks_wmajority
+    - name: crud_workloads
+    - name: mixed_workloads
+    - name: misc_workloads
+    - name: map_reduce_workloads
+    - name: non_sharded_workloads
+
+- name: mmap-3-node-replSet-initialsync
+  display_name: MMAP 3-Node ReplSet Initial Sync
+  batchtime: 10080 # 7 days
+  modules: *modules
+  expansions:
+    setup: replica-2node
+    cluster: replica
+    platform: linux
+    storageEngine: "mmapv1"
+    project_dir: *project_dir
+  run_on:
+      - "rhel70-perf-replset"
+  depends_on:
+      - name: compile
+        variant: compile-rhel70
+  tasks:
+    - name: initialsync
