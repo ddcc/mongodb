@@ -1,3 +1,2 @@
 debian/tmp/usr/bin/mongo
 debian/tmp/usr/bin/mongoperf
-debian/tmp/usr/bin/mongosniff

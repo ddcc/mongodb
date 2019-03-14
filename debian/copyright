@@ -81,7 +81,7 @@ Copyright: boost library contributors
 Comment: Not used; the source is built with the Debian boost libraries.
 License: BSL-1.0
 
-Files: src/third_party/gperftools-2.2/*
+Files: src/third_party/gperftools-*
 Copyright: 2002 - 2013 Google Inc.
 Comment: Not used; the source is built with the Debian gperftools libraries.
 License: BSD-3-google
@@ -198,12 +198,12 @@ Files: src/third_party/wiredtiger/src/support/hash_city.c
 Copyright: 2011 Google, Inc.
 License: Expat
 
-Files: src/third_party/yaml-cpp-0.5.1/*
+Files: src/third_party/yaml-cpp-*
 Copyright: 2008 Jesse Beder
 Comment: Not used; the source is built with the Debian yaml-cpp libraries.
 License: Expat
 
-Files: src/third_party/zlib-1.2.8/*
+Files: src/third_party/zlib-*
 Copyright: 1995-2013 Jean-loup Gailly
            1995-2013 Mark Adler
 License: zlib

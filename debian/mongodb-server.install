@@ -1,3 +1,1 @@
 debian/mongodb.conf etc
-debian/tmp/usr/bin/mongod
-debian/tmp/usr/bin/mongos

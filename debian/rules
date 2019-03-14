@@ -26,6 +26,7 @@ COMMON_OPTIONS = --use-system-tcmalloc --use-system-pcre \
 		 --use-system-boost --use-system-snappy \
 		 --use-system-zlib --use-system-valgrind \
 		 --use-system-stemmer --use-system-yaml \
+		 --disable-warnings-as-errors \
 		 --ssl $(DEB_SCONS_OPTIONS) \
 		 CC=$(CC) CXX=$(CXX)
 
@@ -61,19 +62,18 @@ endif
 override_dh_auto_install:
 	scons $(COMMON_OPTIONS) --prefix=$(CURDIR)/debian/tmp/usr install
 
-override_dh_systemd_enable:
-	dh_systemd_enable -pmongodb-server --name=mongodb
+override_dh_installsystemd:
+	dh_installsystemd -pmongodb-server --name=mongodb
 
 override_dh_installinit:
 	dh_installinit -pmongodb-server --name=mongodb
 
-
-override_dh_install:
-	dh_install --list-missing
+override_dh_missing:
+	dh_missing --list-missing
 
 %:
-	dh $@ --parallel
+	dh $@
 
 .PHONY: override_dh_auto_clean override_dh_auto_build \
 	override_dh_auto_install override_dh_installinit \
-	override_dh_systemd_enable override_dh_install
+	override_dh_installsystemd override_dh_missing
