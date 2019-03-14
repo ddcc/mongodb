@@ -211,19 +211,7 @@ functions:
           $DSI_PATH/bin/make_artifact.sh
 
   "analyze":
-    - command: json.get_history
-      params:
-        task: ${task_name}
-        file: "work/history.json"
-        name: "perf"
-    - command: json.get_history
-      params:
-        tags: true
-        task: ${task_name}
-        file: "work/tags.json"
-        name: "perf"
     - command: shell.exec
-      # post_run_check.py and longevity_override.json for DSI tests are part of dsi repo
       type : test
       params:
         working_dir: work
@@ -232,8 +220,13 @@ functions:
           set -o verbose
           TAG="3.0.12-Baseline"
           PROJECT="mongo-longevity"
+<<<<<<< HEAD
           OVERRIDEFILE="../src/dsi/dsi/analysis/v3.2/longevity_override.json"
           python -u ../src/dsi/dsi/analysis/post_run_check.py ${script_flags} --reports-analysis reports --perf-file reports/perf.json --rev ${revision} -f history.json -t tags.json --refTag $TAG --overrideFile $OVERRIDEFILE --project_id $PROJECT --task_name ${task_name} --variant ${build_variant}
+=======
+          OVERRIDEFILE="../src/dsi/dsi/analysis/${branch_name}/longevity_override.json"
+          python -u ../src/dsi/dsi/analysis/post_run_check.py ${script_flags} --reports-analysis reports --perf-file perf.json --rev ${revision} --refTag $TAG --overrideFile $OVERRIDEFILE --project_id $PROJECT --task_name ${task_name} --variant ${build_variant}
+>>>>>>> b67afe29bc... SERVER-35207 Don't use json.get_history in system_perf.yml
 
 tasks:
 - name: compile

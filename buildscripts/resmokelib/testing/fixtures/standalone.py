@@ -6,7 +6,6 @@ from __future__ import absolute_import
 
 import os
 import os.path
-import shutil
 import socket
 import time
 
@@ -93,8 +92,9 @@ class MongoDFixture(interface.Fixture):
             raise errors.TestFailure("%s did not exit cleanly" % (self))
 
     def setup(self):
-        if not self.preserve_dbpath:
-            shutil.rmtree(self._dbpath, ignore_errors=True)
+        """Set up the mongod."""
+        if not self.preserve_dbpath and os.path.lexists(self._dbpath):
+            utils.rmtree(self._dbpath, ignore_errors=False)
 
         try:
             os.makedirs(self._dbpath)
