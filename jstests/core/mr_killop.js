@@ -1,10 +1,12 @@
 // Test killop applied to m/r operations and child ops of m/r operations.
+//
+// @tags: [requires_parallel_shell]
 
 t = db.jstests_mr_killop;
 t.drop();
 t2 = db.jstests_mr_killop_out;
 t2.drop();
-
+db.adminCommand({"configureFailPoint": 'mr_killop_test_fp', "mode": 'alwaysOn'});
 function debug(x) {
     //        printjson( x );
 }
@@ -176,3 +178,4 @@ var loop = function() {
 };
 runMRTests(loop, false);
 runFinalizeTests(loop, false);
+db.adminCommand({"configureFailPoint": 'mr_killop_test_fp', "mode": 'off'});

@@ -30,7 +30,7 @@ COMMON_OPTIONS = --use-system-tcmalloc --use-system-pcre \
 		 --ssl $(DEB_SCONS_OPTIONS) \
 		 CC=$(CC) CXX=$(CXX)
 
-gperftools_archs = amd64 i386 armhf
+gperftools_archs = amd64 ppc64el arm64
 ifneq (,$(filter $(DEB_HOST_ARCH), $(gperftools_archs)))
 COMMON_OPTIONS += --allocator=tcmalloc
 else
